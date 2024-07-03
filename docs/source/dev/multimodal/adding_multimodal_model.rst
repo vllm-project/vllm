@@ -56,11 +56,11 @@ This decorator accepts a function that maps multi-modal inputs to the keyword ar
 
 .. code-block:: diff
 
-    from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.model_executor.models.interfaces import SupportsVision
     + from vllm.multimodal import MULTIMODAL_REGISTRY
 
     + @MULTIMODAL_REGISTRY.register_image_input_mapper()
-    class YourModelForImage2Seq(nn.Module, SupportsVision):
+      class YourModelForImage2Seq(nn.Module, SupportsVision):
 
 A default mapper is available for each modality in the core vLLM library. This input mapper will be used if you do not provide your own function.
 
@@ -76,14 +76,14 @@ and register it via :meth:`INPUT_REGISTRY.register_dummy_data <vllm.inputs.regis
 
 .. code-block:: diff
 
-    from vllm.inputs import INPUT_REGISTRY
-    from vllm.model_executor.models.interfaces import SupportsVision
-    from vllm.multimodal import MULTIMODAL_REGISTRY
+      from vllm.inputs import INPUT_REGISTRY
+      from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.multimodal import MULTIMODAL_REGISTRY
 
-    @MULTIMODAL_REGISTRY.register_image_input_mapper()
+      @MULTIMODAL_REGISTRY.register_image_input_mapper()
     + @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
-    @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
-    class YourModelForImage2Seq(nn.Module, SupportsVision):
+      @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
+      class YourModelForImage2Seq(nn.Module, SupportsVision):
 
 Here are some examples:
 
@@ -102,14 +102,14 @@ In such cases, you can define your own dummy data by registering a factory metho
 
 .. code-block:: diff
 
-    from vllm.inputs import INPUT_REGISTRY
-    from vllm.model_executor.models.interfaces import SupportsVision
-    from vllm.multimodal import MULTIMODAL_REGISTRY
+      from vllm.inputs import INPUT_REGISTRY
+      from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.multimodal import MULTIMODAL_REGISTRY
 
-    @MULTIMODAL_REGISTRY.register_image_input_mapper()
-    @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
+      @MULTIMODAL_REGISTRY.register_image_input_mapper()
+      @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
     + @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
-    class YourModelForImage2Seq(nn.Module, SupportsVision):
+      class YourModelForImage2Seq(nn.Module, SupportsVision):
 
 .. note::
     The dummy data should have the maximum possible number of multi-modal tokens, as described in the previous step.
@@ -132,15 +132,15 @@ You can register input processors via :meth:`INPUT_REGISTRY.register_input_proce
 
 .. code-block:: diff
 
-    from vllm.inputs import INPUT_REGISTRY
-    from vllm.model_executor.models.interfaces import SupportsVision
-    from vllm.multimodal import MULTIMODAL_REGISTRY
+      from vllm.inputs import INPUT_REGISTRY
+      from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.multimodal import MULTIMODAL_REGISTRY
 
-    @MULTIMODAL_REGISTRY.register_image_input_mapper()
-    @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
-    @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
+      @MULTIMODAL_REGISTRY.register_image_input_mapper()
+      @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
+      @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
     + @INPUT_REGISTRY.register_input_processor(<your_input_processor>)
-    class YourModelForImage2Seq(nn.Module, SupportsVision):
+      class YourModelForImage2Seq(nn.Module, SupportsVision):
 
 A common use case of input processors is inserting placeholder tokens to leverage the vLLM framework for attention mask generation.
 Here are some examples:
