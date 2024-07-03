@@ -13,12 +13,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
-<<<<<<< HEAD
     QuantizationType, find_first_name_or_class_match)
-=======
-    find_first_name_or_class_match)
 from vllm.platforms import current_platform
->>>>>>> main
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -157,7 +153,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self.quant_format == CompressionFormat.int_quantized.value:
             if self._is_fp8(weight_quant, input_quant):
-                return CompressedTensorsFp8()
+                return CompressedTensorsFp8(input_dynamic=input_quant.dynamic)
 
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8StaticTensor(
@@ -198,12 +194,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         self.quantization_config = quantization_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-<<<<<<< HEAD
-        if hasattr(layer.scheme, "process_weights") and layer.scheme.process_weights:
+        if (hasattr(layer.scheme, "process_after_load") and 
+            layer.scheme.process_after_load):
             layer.scheme.process_weights_after_loading(layer)
-=======
-        return layer.scheme.process_weights_after_loading(layer)
->>>>>>> main
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
