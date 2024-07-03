@@ -171,7 +171,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             # TODO: properly inject these numbers from MultiModalRegistry.
             # Right now, just use an overly conservative number.
             max_num_seqs = max(
-                1, min(max_num_seqs, int(max_num_batched_tokens / 3000)))
+                1,
+                min(
+                    max_num_seqs,
+                    int(max_num_batched_tokens /
+                        MULTIMODAL_REGISTRY.get_num_input_tokens())))
 
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +

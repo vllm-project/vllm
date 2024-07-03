@@ -51,7 +51,7 @@ def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     image_assets: _ImageAssets,
-    model,
+    model: str,
     *,
     size_factors: List[float],
     dtype: str,

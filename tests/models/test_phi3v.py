@@ -133,14 +133,14 @@ def run_test(
 @pytest.mark.parametrize(
     "size_factors",
     [
-        # # No image
-        # [],
+        # No image
+        [],
         # Single-scale
         [1.0],
-        # # Single-scale, batched
-        # [1.0, 1.0, 1.0],
-        # # Multi-scale
-        # [0.25, 0.5, 1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])

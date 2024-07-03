@@ -70,7 +70,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+def test_models(hf_runner, vllm_runner, image_assets, model: str, size_factors,
                 dtype: str, max_tokens: int, num_logprobs: int) -> None:
     """Inference result should be the same between hf and vllm.
 

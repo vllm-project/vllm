@@ -8,18 +8,6 @@ vLLM provides experimental support for Vision Language Models (VLMs). This docum
 .. important::
     We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
 
-Engine Arguments
-----------------
-
-The following :ref:`engine arguments <engine_args>` are specific to VLMs:
-
-.. argparse::
-    :module: vllm.engine.arg_utils
-    :func: _vlm_engine_args_parser
-    :prog: -m vllm.entrypoints.openai.api_server
-    :nodefaultconst:
-
-.. important::
     Currently, the support for vision language models on vLLM has the following limitations:
 
     * Only single image input is supported per text prompt.
@@ -36,12 +24,14 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf")
 
 .. important::
-    Currently, you have to specify ``image_feature_size`` to support memory profiling.
-    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
-    The calculation of feature size is specific to the model. For more details, please refer to
-    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+    We have removed all vision language related cli args in the new release. This is a breaking change, so please update your code to follow
+    the above snippet. 
 
-    We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
+    Specifically, no need to specify `image_feature_size` for profiling purposes anymore. Internally we will construct data structures for
+    every model to do profiling with, to hide our users from this detail at the API layer.
+
+    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` for every model to be conservative 
+    in terms of GPU memory consumption. This hardcode value will be removed and replaced with a more accurate profiling strategy.
 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
@@ -94,18 +84,17 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
     python -m vllm.entrypoints.openai.api_server \
         --model llava-hf/llava-1.5-7b-hf \
-        --image-token-id 32000 \
-        --image-input-shape 1,3,336,336 \
-        --image-feature-size 576 \
         --chat-template template_llava.jinja
 
 .. important::
-    Currently, you have to specify ``image_feature_size`` to support memory profiling.
-    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
-    The calculation of feature size is specific to the model. For more details, please refer to
-    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+    We have removed all vision language related cli args in the new release. This is a breaking change, so please update your code to follow
+    the above snippet. 
 
-    We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
+    Specifically, no need to specify `image_feature_size` for profiling purposes anymore. Internally we will construct data structures for
+    every model to do profiling with, to hide our users from this detail at the API layer.
+
+    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` for every model to be conservative 
+    in terms of GPU memory consumption. This hardcode value will be removed and replaced with a more accurate profiling strategy.
 
 To consume the server, you can use the OpenAI client like in the example below:
 
