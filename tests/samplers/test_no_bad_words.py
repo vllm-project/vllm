@@ -1,4 +1,4 @@
-"""Make sure bad_words_ids works.
+"""Make sure bad_words works.
 
 Run `pytest tests/samplers/test_no_bad_words.py`.
 
@@ -15,11 +15,11 @@ def _generate(
     prompt: str,
     num_prompt_tokens: int,
     temperature: float = 0,
-    bad_words_ids: Optional[List[List[int]]] = None,
+    bad_words: Optional[List[str]] = None,
 ) -> List[int]:
     sampling_params = SamplingParams(
         temperature=temperature,
-        bad_words_ids=bad_words_ids,
+        bad_words=bad_words,
     )
 
     # [([output_token_ids, ], [output_text, ]), ]
@@ -52,18 +52,18 @@ class TestOneTokenBadWord:
             assert output_token_ids[0] == self.target_token_id
 
             output_token_ids = self._generate(
-                llm, bad_words_ids=[[self.target_token_id]])
+                llm, bad_words=[self.TARGET_TOKEN])
             assert self.target_token_id not in output_token_ids
 
     def _generate(
             self,
             model: LLM,
-            bad_words_ids: Optional[List[List[int]]] = None) -> List[int]:
+            bad_words: Optional[List[str]] = None) -> List[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
             num_prompt_tokens=self.num_prompt_tokens,
-            bad_words_ids=bad_words_ids,
+            bad_words=bad_words,
         )
 
 
@@ -93,17 +93,17 @@ class TestTwoTokenBadWord:
             ]
 
             output_token_ids = self._generate(
-                llm, bad_words_ids=[[self.target_token_id1]])
+                llm, bad_words=[self.TARGET_TOKEN1])
             assert self.target_token_id1 not in output_token_ids
 
             output_token_ids = self._generate(
-                llm, bad_words_ids=[[self.target_token_id2]])
+                llm, bad_words=[self.TARGET_TOKEN2])
             assert output_token_ids[0] == self.target_token_id1
             assert self.target_token_id2 not in output_token_ids
 
             output_token_ids = self._generate(
                 llm,
-                bad_words_ids=[[self.target_token_id1, self.target_token_id2]])
+                bad_words=[self.TARGET_TOKEN1, self.TARGET_TOKEN2])
             assert output_token_ids[0] == self.target_token_id1
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
@@ -117,11 +117,8 @@ class TestTwoTokenBadWord:
 
             output_token_ids = self._generate(
                 llm,
-                bad_words_ids=[[self.target_token_id1, self.target_token_id2],
-                               [
-                                   self.target_token_id1,
-                                   self.neighbour_token_id2
-                               ]])  # sorry for the format :( yapf ...
+                bad_words=[f'{self.TARGET_TOKEN1} {self.TARGET_TOKEN2}',
+                           f'{self.TARGET_TOKEN1} {self.NEIGHBOUR_TOKEN2}'])
             assert output_token_ids[0] == self.target_token_id1
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
@@ -141,12 +138,12 @@ class TestTwoTokenBadWord:
     def _generate(
             self,
             model: LLM,
-            bad_words_ids: Optional[List[List[int]]] = None) -> List[int]:
+            bad_words: Optional[List[str]] = None) -> List[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
             num_prompt_tokens=self.num_prompt_tokens,
-            bad_words_ids=bad_words_ids,
+            bad_words=bad_words,
         )
 
     @staticmethod

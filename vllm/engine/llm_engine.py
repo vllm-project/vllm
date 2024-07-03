@@ -403,6 +403,8 @@ class LLMEngine:
     MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "
                                    "skip_tokenizer_init is True")
 
+    INCORRECT_PARAMS_TYPE_MSG = "Either SamplingParams or PoolingParams must be provided."
+
     def get_tokenizer_group(
             self,
             fail_msg: str = MISSING_TOKENIZER_GROUP_MSG) -> BaseTokenizerGroup:
@@ -486,8 +488,7 @@ class LLMEngine:
                 lora_request=lora_request,
             )
         else:
-            raise ValueError(
-                "Either SamplingParams or PoolingParams must be provided.")
+            raise ValueError(self.INCORRECT_PARAMS_TYPE_MSG)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
@@ -514,6 +515,34 @@ class LLMEngine:
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=inputs.get("prompt"),
                          multi_modal_data=inputs.get("multi_modal_data"))
+
+    def process_model_params(
+        self,
+        request_id: str,
+        params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[LoRARequest] = None,
+    ) -> Union[SamplingParams, PoolingParams]:
+        if isinstance(params, PoolingParams):
+            return params
+        elif not isinstance(params, SamplingParams):
+            raise ValueError(self.INCORRECT_PARAMS_TYPE_MSG)
+
+        if params.bad_words is None:
+            return params
+
+        bad_words_ids = list()
+
+        for bad_word in params.bad_words:
+            inputs = {"prompt": bad_word}
+            tokenizer = self.get_tokenizer()
+            prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                prompt=inputs["prompt"],
+                                                lora_request=lora_request)
+            bad_words_ids.append(prompt_token_ids)
+
+        params._init_bad_words_logits_processor(bad_words_ids)
+
+        return params
 
     def add_request(
         self,
@@ -575,11 +604,14 @@ class LLMEngine:
         processed_inputs = self.process_model_inputs(request_id=request_id,
                                                      inputs=inputs,
                                                      lora_request=lora_request)
+        processed_params = self.process_model_params(request_id=request_id,
+                                                     params=params,
+                                                     lora_request=lora_request)
 
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
-            params=params,
+            params=processed_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
             trace_headers=trace_headers,
