@@ -14,13 +14,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_pack_factor, quantize_weights, sort_weights)
 from vllm.platforms import current_platform
 
-__cuda_arch = current_platform.get_device_capability()
-
 MARLIN_TILE = 16
 
 
 def is_marlin_supported():
-    return __cuda_arch[0] >= 8
+    capability = current_platform.get_device_capability()
+    return capability[0] >= 8
 
 
 def marlin_permute_weights(q_w, size_k, size_n, perm, tile=MARLIN_TILE):
