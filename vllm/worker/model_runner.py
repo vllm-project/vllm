@@ -660,7 +660,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            device=self.device)
 
         logits_soft_cap = getattr(self.model_config.hf_config,
-                                  'final_logit_softcapping', None)
+                                  'attn_logit_softcapping', None)
         if logits_soft_cap is not None and self.attn_backend.get_name(
         ) != "flashinfer":
             raise ValueError("Please use Flashinfer backend for models with"
