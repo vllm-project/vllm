@@ -8,23 +8,23 @@ from PIL import Image
 from vllm import LLM, SamplingParams
 
 sample_params = SamplingParams(temperature=0, max_tokens=1024)
-model = "deepseek-ai/deepseek-vl-7b-chat"
-prompt = "You are a helpful language and vision assistant." \
-    "You are able to understand the visual content that the user provides," \
-    "and assist the user with a variety of tasks using natural language.\n" \
+model = "/pretrained_models/deepseek-vl-7b-chat"
+prompt = (
+    "You are a helpful language and vision assistant."
+    "You are able to understand the visual content that the user provides,"
+    "and assist the user with a variety of tasks using natural language.\n"
     "User: <image_placeholder> Describe the content of this image.\nAssistant:"
+)
 
 prompt = prompt.replace("<image_placeholder>", "<image_placeholder>" * 576)
 
 
-def run_deepseek_vl(*, disable_image_processor: bool = False):
+def run_deepseek_vl():
     llm = LLM(
         model=model,
-        image_input_type="pixel_values",
         image_token_id=100015,
         image_input_shape="1,3,1024,1024",
         image_feature_size=576,
-        disable_image_processor=False,
         gpu_memory_utilization=0.9,
         max_model_len=3072,
         enforce_eager=True,

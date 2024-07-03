@@ -2164,7 +2164,7 @@ def dummy_data_for_deepseek(ctx: InputContext, seq_len: int):
                                        seq_len,
                                        image_token_id=100015,
                                        image_feature_size_override=576)
-    mm_data = Image.new("RGB", (image_size, image_size), color=0)
+    mm_data = {"image": Image.new("RGB", (image_size, image_size), color=0)}
     return seq_data, mm_data
 
 
@@ -2172,13 +2172,11 @@ def dummy_data_for_deepseek(ctx: InputContext, seq_len: int):
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_deepseek)
 class DeepSeekMultiModalityCausalLM(nn.Module, SupportsVision):
 
-    def __init__(
-        self,
-        config: DeepSeekMultiModalityConfig,
-        vision_language_config: VisionLanguageConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self,
+                 config: DeepSeekMultiModalityConfig,
+                 vlm_config: VisionLanguageConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         vision_config = config.vision_config
@@ -2284,6 +2282,7 @@ class DeepSeekMultiModalityCausalLM(nn.Module, SupportsVision):
             positions,
             kv_caches,
             attn_metadata,
+            None,
             inputs_embeds=inputs_embeds,
         )
 
@@ -2291,7 +2290,7 @@ class DeepSeekMultiModalityCausalLM(nn.Module, SupportsVision):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
