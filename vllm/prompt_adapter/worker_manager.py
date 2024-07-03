@@ -69,8 +69,11 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
                 self._prompt_adapter_model_cls.from_local_checkpoint(
                     prompt_adapter_request.prompt_adapter_local_path,
                     prompt_adapter_id=prompt_adapter_request.prompt_adapter_id,
+                    num_virtual_tokens=prompt_adapter_request.
+                    prompt_adapter_num_virtual_tokens,
+                    config=self.prompt_adapter_config,
                     device=str(self.device),
-                    dtype=self.prompt_adapter_config.prompt_adapter_dtype))
+                ))
         except Exception as e:
             raise RuntimeError(
                 f"Loading prompt_adapter "

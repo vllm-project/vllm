@@ -1295,11 +1295,10 @@ class LoRAConfig:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
-# TODO: To be replaced by MultiModalConfig.
 @dataclass
 class PromptAdapterConfig:
     max_prompt_adapters: int
-    max_prompt_adapter_token: int = 10
+    max_prompt_adapter_token: int
     max_cpu_prompt_adapters: Optional[int] = None
     prompt_adapter_dtype: Optional[torch.dtype] = None
 
@@ -1316,6 +1315,8 @@ class PromptAdapterConfig:
         if self.max_prompt_adapters < 1:
             raise ValueError(f"max_prompt_adapters "
                              f"({self.max_prompt_adapters}) must be >= 1.")
+        if self.max_prompt_adapter_token == 0:
+            raise ValueError("max_prompt_adapter_token must be set.")
         if self.max_cpu_prompt_adapters is None:
             self.max_cpu_prompt_adapters = self.max_prompt_adapters
 
@@ -1327,6 +1328,7 @@ class PromptAdapterConfig:
                                                 self.prompt_adapter_dtype)
 
 
+# TODO: To be replaced by MultiModalConfig.
 @dataclass
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for

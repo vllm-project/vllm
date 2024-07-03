@@ -81,16 +81,24 @@ class PromptAdapterModel(AdapterModel):
 
     @classmethod
     def from_local_checkpoint(
-            cls,
-            adapter_model_path: str,
-            prompt_adapter_id: int,
-            device: str = "cuda",
-            dtype: Optional[torch.dtype] = None) -> "PromptAdapterModel":
+        cls,
+        adapter_model_path: str,
+        prompt_adapter_id: int,
+        num_virtual_tokens: int,
+        config: PromptAdapterConfig,
+        device: str = "cuda",
+    ) -> "PromptAdapterModel":
         from peft.utils import load_peft_weights
 
+        if num_virtual_tokens > config.max_prompt_adapter_token:
+            raise ValueError(
+                f'num_virtual_tokens ({num_virtual_tokens}) should be <= '
+                f'max_prompt_adapter_token({config.max_prompt_adapter_token})')
+
         adapters_weights = load_peft_weights(adapter_model_path, device)
-        prompt_embedding = adapters_weights["prompt_embeddings"].to(dtype)
-        num_virtual_tokens = prompt_embedding.shape[0]
+        prompt_embedding = adapters_weights["prompt_embeddings"].to(
+            config.prompt_adapter_dtype)
+
         return cls(prompt_adapter_id, num_virtual_tokens, prompt_embedding)
 
 

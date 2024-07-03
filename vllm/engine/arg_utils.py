@@ -69,7 +69,7 @@ class EngineArgs:
     max_lora_rank: int = 16
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
-    max_prompt_adapter_token: int = 10
+    max_prompt_adapter_token: int = 0
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
