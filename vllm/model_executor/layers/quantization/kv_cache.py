@@ -52,6 +52,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self._needs_scale_merging:
+            # use max operator to "merge" k_scales and v_scales
+            # into kv_scales
             layer.kv_scale = torch.nn.Parameter(torch.max(
                 layer.v_scale, layer.k_scale),
                                                 requires_grad=False)
