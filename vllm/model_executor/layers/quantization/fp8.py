@@ -406,7 +406,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     print_warning_once(
                         "Found input_scales that are not equal for "
                         "fp8 MoE layer. Using the maximum across experts "
-                        "for each layer.")
+                        "for each layer. ")
                 layer.a13_scale = torch.nn.Parameter(layer.a13_scale.max(),
                                                      requires_grad=False)
                 layer.a2_scale = torch.nn.Parameter(layer.a2_scale.max(),
