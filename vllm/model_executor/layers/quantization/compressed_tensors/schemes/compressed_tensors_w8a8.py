@@ -13,9 +13,9 @@ from vllm.model_executor.utils import set_weight_attrs
 
 class CompressedTensorsW8A8(CompressedTensorsScheme):
 
-    def __init__(self, strategy: str, is_static_activations: bool):
+    def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
-        self.is_static_activations = is_static_activations
+        self.is_static_input_scheme = is_static_input_scheme
 
     # Cutlass kernels support only per-tensor and per-channel cases.
     # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
@@ -84,7 +84,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
         
         # INPUT SCALE
         # Static quantization:  load from disk.
-        if self.is_static_activations:
+        if self.is_static_input_scheme:
             input_scale = Parameter(torch.empty(1, dtype=torch.float32),
                                     requires_grad=False)
             layer.register_parameter("input_scale", input_scale)
