@@ -15,25 +15,8 @@ class ToolParser:
     def __init__(self):
         pass
 
-    tool_call_start: str = '<tool_call>'
-    tool_call_end: str = '</tool_call>'
-
-    # regex to match between <tool_call> and </tool_call> OR between <tool_call> and EOS (happens sometimes :))
-    tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>|<tool_call>(.*)', re.DOTALL)
-
     def extract_tool_calls(self, model_response: ChatCompletionResponse) -> List[ToolCall]:
-        """
-        Abstract method intended to be used for extracting tool calls for use in a NON-STREAMING response
-        """
-
-        # sanity check; avoid unnecessary processing
-        if self.tool_call_start not in model_response.choices[0].message.content:
-            return []
-
-        tool_call_tuples = self.tool_call_regex.findall(model_response.choices[0].message.content)
-        tool_calls = [match[0] if match[0] else match[1] for match in tool_call_tuples]
-        print('got tool calls for hermes 2 pro!', tool_calls)
-        return []
+        raise NotImplementedError('AbstractToolParser.extract_tool_calls has not been implemented!')
 
     def extract_tool_calls_streaming(self, generator):
         raise NotImplementedError('AbstractToolParser.extract_tool_calls_streaming has not been implemented!')
@@ -69,8 +52,27 @@ class MistralToolParser(ToolParser):
 
 
 class Hermes2ProToolParser(ToolParser):
-    def extract_tool_calls_streaming(self, generator):
-        raise NotImplementedError('Hermes2ProToolParser.extract_tool_calls_streaming has not been implemented!')
+
+    tool_call_start: str = '<tool_call>'
+    tool_call_end: str = '</tool_call>'
+
+    # regex to match between <tool_call> and </tool_call> OR between <tool_call> and EOS (happens sometimes :))
+    tool_call_regex = re.compile(r'<tool_call>\n(.*?)\n</tool_call>|<tool_call>\n(.*)', re.DOTALL)
 
     def extract_tool_calls(self, model_response: ChatCompletionResponse) -> List[ToolCall]:
-        raise NotImplementedError('Hermes2ProToolParser.extract_tool_calls has not been implemented!')
+        """
+        Abstract method intended to be used for extracting tool calls for use in a NON-STREAMING response
+        """
+
+        # sanity check; avoid unnecessary processing
+        if self.tool_call_start not in model_response.choices[0].message.content:
+            return []
+
+        tool_call_tuples = self.tool_call_regex.findall(model_response.choices[0].message.content)
+        function_calls = [FunctionCall.parse_obj(json.loads(match[0] if match[0] else match[1])) for match in tool_call_tuples]
+        tool_calls = [ToolCall(type='function', function=function_call) for function_call in function_calls]
+        print('got tool calls for hermes 2 pro!', tool_calls)
+        return tool_calls
+
+    def extract_tool_calls_streaming(self, generator):
+        raise NotImplementedError('Hermes2ProToolParser.extract_tool_calls_streaming has not been implemented!')
