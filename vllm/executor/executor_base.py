@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
@@ -109,6 +110,30 @@ class ExecutorBase(ABC):
 
 
 class ExecutorAsyncBase(ExecutorBase):
+
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
+    ) -> None:
+        # This locks each pipeline parallel stage so multiple virtual engines
+        # can't execute on the same stage at the same time
+        self.pp_locks = [
+            asyncio.Lock()
+            for _ in range(parallel_config.pipeline_parallel_size)
+        ]
+
+        super().__init__(model_config, cache_config, parallel_config,
+                         scheduler_config, device_config, load_config,
+                         lora_config, vision_language_config,
+                         speculative_config)
 
     @abstractmethod
     async def execute_model_async(
