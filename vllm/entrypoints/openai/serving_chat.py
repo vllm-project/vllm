@@ -135,9 +135,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # NOTE: For now we assume all model architectures use the same
         # image + text prompt format. This may change in the future.
-        full_prompt = f"{image_token_str}\n{text_prompt}"
-
-        return full_prompt
+        return f"{image_token_str}\n{text_prompt}"
 
     def _parse_chat_message_content_parts(
         self,
