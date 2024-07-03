@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -814,6 +815,27 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+def error_on_invalid_device_count_status():
+    cache_entries = 0
+    with contextlib.suppress(Exception):
+        # future pytorch will fix the issue, device_count will not be cached
+        # at that time, `.cache_info().currsize` will error out
+        cache_entries = torch.cuda.device_count.cache_info().currsize
+    if cache_entries != 0:
+        # the function is already called, and the result is cached
+        remembered = torch.cuda.device_count()
+        current = cuda_device_count_stateless()
+        if remembered > current:
+            raise RuntimeError(
+                "The number of CUDA devices has changed since the first "
+                "call to torch.cuda.device_count(). This is not allowed "
+                "and may result in undefined behavior. Please check out "
+                "https://github.com/vllm-project/vllm/issues/6056 to "
+                "find the first call to torch.cuda.device_count() "
+                "and defer it until the engine is up. Or you can set "
+                "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
 
 
 # NVML utils
