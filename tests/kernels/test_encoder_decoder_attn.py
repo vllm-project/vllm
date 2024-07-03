@@ -9,6 +9,7 @@ Tests:
 
 """
 
+import copy
 from typing import NamedTuple, Optional
 
 import pytest
@@ -19,7 +20,7 @@ from tests.kernels.utils import make_causal_mask, maybe_make_long_tensor
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
-from vllm.utils import is_hip
+from vllm.utils import LIST_ENC_DEC_SUPPORTED_BACKENDS, is_hip
 
 HEAD_SIZES = [64, 256]
 
@@ -27,7 +28,7 @@ NUM_HEADS = [1, 16]
 
 BATCH_SIZES = [1, 16]
 BLOCK_SIZES = [16]
-BACKEND_NAMES = [STR_XFORMERS_ATTN_VAL]
+BACKEND_NAMES = LIST_ENC_DEC_SUPPORTED_BACKENDS
 CUDA_DEVICE = "cuda:0"
 
 MAX_DEC_SEQ_LENS = [128]
