@@ -167,10 +167,14 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 
 
 # prepare_inputs
-def advance_step(input_tokens: torch.Tensor, input_positions: torch.Tensor,
-                 context_lens: torch.Tensor, seq_lens: torch.Tensor) -> None:
-    return torch.ops._C.advance_step(input_tokens, input_positions,
-                                     context_lens, seq_lens)
+def advance_step(num_seqs: int, block_size: int,
+                 sampled_token_ids: torch.Tensor,
+                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
+                 slot_mapping: torch.Tensor,
+                 block_tables: torch.Tensor) -> None:
+    return torch.ops._C.advance_step(num_seqs, block_size, sampled_token_ids,
+                                     input_positions, seq_lens, slot_mapping,
+                                     block_tables)
 
 
 # quantization ops

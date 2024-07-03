@@ -124,37 +124,108 @@ class TP1DraftModelRunner(ModelRunner):
 
         return self.prepare_model_input(self.cached_seq_group_metadata_list)
 
-    def advance_step(self, model_input: ModelInputForGPUWithSamplingMetadata,
-                     last_output: SamplerOutput) -> None:
+    def _advance_step(self, model_input: ModelInputForGPUWithSamplingMetadata,
+                      last_output: SamplerOutput) -> None:
         num_prefills = 0
         num_prefill_tokens = 0
+        max_prefill_seq_len = 0
         use_captured_graph = False
 
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        
-        context_lens_tensor = attn_metadata.context_lens_tensor
-        seq_lens_tensor = attn_metadata.seq_lens_tensor
-        slot_mapping_tensor = model_input.attn_metadata.slot_mapping
-        
-        ops.advance_step(context_lens=context_lens_tensor, seq_lens=seq_lens_tensor)
 
-        attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=num_prefills,
-                slot_mapping=slot_mapping_tensor,
-                num_prefill_tokens=num_prefill_tokens,
-                num_decode_tokens=num_decode_tokens,
-                seq_lens=seq_lens,
-                seq_lens_tensor=seq_lens_tensor,
-                max_query_len=max_query_len,
-                max_prefill_seq_len=max_prefill_seq_len,
-                max_decode_seq_len=max_decode_seq_len,
-                query_start_loc=query_start_loc,
-                seq_start_loc=seq_start_loc,
-                context_lens_tensor=context_lens_tensor,
-                block_tables=block_tables,
-                use_cuda_graph=use_captured_graph,
+        sampled_token_ids = last_output.sampled_token_ids
+
+        model_input.input_tokens = sampled_token_ids
+        input_positions = model_input.input_positions
+        seq_lens = model_input.seq_lens  # List
+        # model_input.
+
+        context_lens_tensor = attn_metadata.context_lens_tensor
+
+        slot_mapping_tensor = attn_metadata.slot_mapping
+
+        attn_metadata.num_decode_tokens = len(seq_lens)
+        attn_metadata.num_prefill_tokens = num_prefill_tokens
+
+        block_tables = attn_metadata.block_tables
+        seq_lens_tensor = attn_metadata.seq_lens_tensor
+
+        num_seqs = len(seq_lens)
+
+        ops.advance_step(num_seqs=num_seqs,
+                         block_size=self.block_size,
+                         sampled_token_ids=sampled_token_ids,
+                         input_positions=input_positions,
+                         seq_lens=seq_lens_tensor,
+                         slot_mapping_tensor=slot_mapping_tensor,
+                         block_tables=block_tables)
+
+        # num_decode_tokens = num_seqs
+        # max_query_len = 1
+
+        # max_decode_seq_len = max(seq_lens)
+        # attn_metadata = self.attn_backend.make_metadata(
+        #         num_prefills=num_prefills,
+        #         slot_mapping=slot_mapping_tensor,
+        #         num_prefill_tokens=num_prefill_tokens,
+        #         num_decode_tokens=num_decode_tokens,
+        #         seq_lens=seq_lens,
+        #         seq_lens_tensor=seq_lens_tensor,
+        #         max_query_len=max_query_len,
+        #         max_prefill_seq_len=max_prefill_seq_len,
+        #         max_decode_seq_len=max_decode_seq_len,
+        #         query_start_loc=query_start_loc,
+        #         seq_start_loc=seq_start_loc,
+        #         context_lens_tensor=context_lens_tensor,
+        #         block_tables=block_tables,
+        #         use_cuda_graph=use_captured_graph,
+        #     )
+
+    def _can_use_advance_step(self):
+        if not self.model_config.enforce_eager:
+            return False
+
+        if self.lora_config:
+            return False
+
+        return True
+
+    @torch.inference_mode()
+    def _execute_model_with_advance_step(
+            self, model_input: ModelInputForGPUWithSamplingMetadata,
+            kv_caches: List[torch.Tensor],
+            num_steps: int) -> Optional[List[SamplerOutput]]:
+        outputs: List[SamplerOutput] = []
+        for step in range(num_steps):
+            assert model_input.attn_metadata is not None
+            model_executable = self.model
+
+            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+            hidden_states = model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                kv_caches=kv_caches,
+                attn_metadata=model_input.attn_metadata,
+                **multi_modal_kwargs,
             )
+
+            # Compute the logits.
+            logits = self.model.compute_logits(hidden_states,
+                                               model_input.sampling_metadata)
+
+            # Sample the next token.
+            outputs.append(
+                self.model.sample(
+                    logits=logits,
+                    sampling_metadata=model_input.sampling_metadata,
+                ))
+
+            # Prepare the inputs for the next step.
+            if step != num_steps - 1:
+                self._advance_step(model_input, outputs[-1])
+
+        return outputs
 
     @torch.inference_mode()
     def execute_model(
@@ -170,6 +241,9 @@ class TP1DraftModelRunner(ModelRunner):
         # tokens to all workers.
         if not self.is_driver_worker:
             raise ValueError("TP1DraftModelRunner only supports TP=1.")
+
+        if self._can_use_advance_step():
+            return self._execute_model_with_advance_step()
 
         if self.lora_config:
             assert model_input.lora_requests is not None
