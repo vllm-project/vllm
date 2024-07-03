@@ -182,8 +182,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     strategy=weight_quant.strategy,
                     group_size=weight_quant.group_size)
 
-        if (self.quant_format == CompressionFormat.int_quantized
-                or self.quant_format == CompressionFormat.float_quantized):
+        if (self.quant_format == CompressionFormat.int_quantized.value or
+            self.quant_format == CompressionFormat.float_quantized.value):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Fp8(
                     input_dynamic=input_quant.dynamic)
