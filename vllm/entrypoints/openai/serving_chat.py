@@ -142,7 +142,6 @@ class OpenAIServingChat(OpenAIServing):
         role: str,
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
-
         texts: List[str] = []
         mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
