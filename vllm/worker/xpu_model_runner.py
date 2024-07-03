@@ -245,6 +245,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 "input_positions": input_positions,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
+                "multi_modal_kwargs": multi_modal_kwargs,
             }
             metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
