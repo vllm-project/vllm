@@ -36,11 +36,14 @@ class MistralToolParser(ToolParser):
                 raw_tool_call = (model_response.choices[0].message.content
                                  .replace(MistralToolParser.bot_token, '') # remove BOT token
                                  .replace("'", '"')) # ... hack to parse broken mistral JSON
-                tool_call_arr = json.loads(raw_tool_call)
-                print('tool call array', tool_call_arr)
-                function_calls: List[FunctionCall] = [FunctionCall.parse_obj(obj) for obj in tool_call_arr]
-                print('got mistral tool calls', function_calls)
-                tool_calls = [ToolCall(type='function', function=function_call) for function_call in function_calls]
+                function_call_arr = json.loads(raw_tool_call)
+                tool_calls: List[ToolCall] = [
+                    ToolCall(
+                        type='function',
+                        function=FunctionCall.parse_obj(raw_function_call)
+                    )
+                    for raw_function_call in function_call_arr
+                ]
                 return tool_calls
 
             except Exception as e:
@@ -57,7 +60,7 @@ class Hermes2ProToolParser(ToolParser):
     tool_call_end: str = '</tool_call>'
 
     # regex to match between <tool_call> and </tool_call> OR between <tool_call> and EOS (happens sometimes :))
-    tool_call_regex = re.compile(r'<tool_call>\n(.*?)\n</tool_call>|<tool_call>\n(.*)', re.DOTALL)
+    tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>|<tool_call>(.*)', re.DOTALL)
 
     def extract_tool_calls(self, model_response: ChatCompletionResponse) -> List[ToolCall]:
         """
@@ -66,12 +69,17 @@ class Hermes2ProToolParser(ToolParser):
 
         # sanity check; avoid unnecessary processing
         if self.tool_call_start not in model_response.choices[0].message.content:
+            print('TOOL tool_call_start is not in the response')
             return []
 
-        tool_call_tuples = self.tool_call_regex.findall(model_response.choices[0].message.content)
-        function_calls = [FunctionCall.parse_obj(json.loads(match[0] if match[0] else match[1])) for match in tool_call_tuples]
+        # there are two possible captures - between tags, or between a tag and end-of-string so the result of findall
+        #   is an array of tuples where one is a function call and the other is None
+        function_call_tuples = self.tool_call_regex.findall(model_response.choices[0].message.content)
+
+
+        # filter out & enforce the schema
+        function_calls = [FunctionCall.parse_obj(json.loads(match[0] if match[0] else match[1])) for match in function_call_tuples]
         tool_calls = [ToolCall(type='function', function=function_call) for function_call in function_calls]
-        print('got tool calls for hermes 2 pro!', tool_calls)
         return tool_calls
 
     def extract_tool_calls_streaming(self, generator):

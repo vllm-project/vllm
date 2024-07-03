@@ -150,10 +150,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
             response = generator.model_dump()
             tool_calls = openai_serving_chat.tool_parser.extract_tool_calls(generator)
             if tool_calls and len(tool_calls):
-                logger.info("Model chat completion response contains tool calls! Formatting...")
+                print('TOOL CALLS', tool_calls)
                 response['choices'][0]['message']['content'] = None
                 response['choices'][0]['message']['tool_calls'] = [tool_call.to_dict() for tool_call in tool_calls]
                 response['choices'][0]['finish_reason'] = 'tool_calls'
+            else:
+                print('TOOL: no tool calls detected')
             return JSONResponse(content=response)
 
         else:

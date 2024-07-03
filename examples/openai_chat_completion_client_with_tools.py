@@ -63,3 +63,18 @@ chat_completion = client.chat.completions.create(
 
 print("Chat completion results:")
 print(chat_completion)
+
+# Now, simulate a tool call
+def get_current_weather(city: str, state: str, unit: 'str'):
+    return "The weather in Dallas, Texas is 85 degrees fahrenheit. It is partly cloudly, with highs in the 90's."
+
+available_tools = {
+    "get_current_weather": get_current_weather
+}
+
+completion_tool_calls = chat_completion.choices[0].message.tool_calls
+for call in completion_tool_calls:
+    tool_to_call = available_tools[call.function.name]
+    args = call.function.arguments
+    print(tool_to_call, args)
+
