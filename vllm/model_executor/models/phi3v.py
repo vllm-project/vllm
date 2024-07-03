@@ -35,7 +35,7 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsVision
@@ -365,7 +365,9 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         self.model = LlamaModel(config, cache_config, quant_config)
         self.vision_embed_tokens = Phi3HDImageEmbedding(
             vlm_config, config, self.model.embed_tokens)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -381,9 +383,13 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
 
         return None
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata, **kwargs: object):
+                attn_metadata: AttentionMetadata,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                **kwargs: object):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
@@ -398,13 +404,14 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                                    positions,
                                    kv_caches,
                                    attn_metadata,
+                                   intermediate_tensors,
                                    inputs_embeds=inputs_embeds)
 
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
