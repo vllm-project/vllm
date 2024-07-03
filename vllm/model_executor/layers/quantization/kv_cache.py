@@ -1,36 +1,46 @@
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase, QuantizationConfig
 import torch
+
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.utils import print_warning_once
 
 
 class BaseKVCacheMethod(QuantizeMethodBase):
+    """
+    A quant method that adds a `_kv_scale`
+    attribute to the (attention) layer. 
+    The kv_scale will be used to:
+        - quantize kv_cache entries before 
+            saving them to the cache
+        - dequantize kv_cache entries before 
+            fetching them from the cache
+
+    :param quant_config: the appropriate QuantizationConfig 
+    :param needs_scale_merging: if True, we assume that the
+        quantization parameters for kv cache quantization
+        are loaded separately for keys and values
+        (layer.v_scale and layer.v_scale). Only after
+        loading, we recompute layer.kv_scale from them
+    """
 
     def __init__(self,
                  quant_config: QuantizationConfig,
                  needs_scale_merging: bool = False):
         self.quant_config = quant_config
-        # scale merging needs to be True if we expect to load
-        # k_scale and v_scale first and then compute
-        # kv_scale = max(k_scale, v_scale)
         self._needs_scale_merging = needs_scale_merging
 
     def create_weights(self, layer: torch.nn.Module):
         """
-        Create "weight" (aka kv_scale) for an attention layer.
-        The scales will be used to:
-         - quantize kv_cache entries before saving them to the cache
-         - dequantize kv_cache entries before fetching them from the cache
-        Args:
-            layer: The layer that is using the QuantizeMethodBase factory.
+        Create the initial "weight" (aka kv_scale) for an attention layer.
         """
         # Initialize the KV cache scale to 1.0 as the default value.
         # If the kv_scale appears in the checkpoint, it will be
         # overwritten when loading weights.
         if self._needs_scale_merging:
-            layer._k_scale = torch.nn.Parameter(torch.tensor(1.0),
-                                                requires_grad=False)
-            layer._v_scale = torch.nn.Parameter(torch.tensor(1.0),
-                                                requires_grad=False)
+            layer.k_scale = torch.nn.Parameter(torch.tensor(1.0),
+                                               requires_grad=False)
+            layer.v_scale = torch.nn.Parameter(torch.tensor(1.0),
+                                               requires_grad=False)
             return
 
         layer.kv_scale = torch.nn.Parameter(torch.tensor(1.0),
@@ -43,19 +53,18 @@ class BaseKVCacheMethod(QuantizeMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self._needs_scale_merging:
             layer.kv_scale = torch.nn.Parameter(torch.max(
-                layer._v_scale, layer._k_scale),
+                layer.v_scale, layer.k_scale),
                                                 requires_grad=False)
-            del layer._v_scale
-            del layer._k_scale
+            del layer.v_scale
+            del layer.k_scale
 
         # If the kv-cache dtype is auto, we enforce the kv-scale to be 1.0
         # regardless whether the kv-scale is available in the checkpoint.
         if layer.kv_cache_dtype != "auto":
             kv_scale = layer.kv_scale.to("cpu").tolist()
             if not isinstance(kv_scale, float):
-                raise ValueError(
-                    "Currently we only support per-tensor scaling factor (float)"
-                )
+                raise ValueError("Currently we only support "
+                                 "per-tensor scaling factor (float)")
             layer._kv_scale = kv_scale
             # TODO: We should potentially move this check elsewhere, to discuss
             if layer._kv_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
