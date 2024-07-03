@@ -4,10 +4,14 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-
+from torch.nn.utils import skip_init
 from vllm.distributed import tensor_model_parallel_gather
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-
+import intel_extension_for_pytorch as ipex
+from intel_extension_for_pytorch.cpu._auto_kernel_selection import (
+    _enable_tpp,
+    _disable_tpp,
+)
 
 class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
@@ -49,6 +53,15 @@ class LogitsProcessor(nn.Module):
                                                  sampling_metadata)
 
             # Get the logits for the next tokens.
+            if not hasattr(self, "ipex_linear"):
+                ipex_linear = skip_init(torch.nn.Linear, embedding.shape[1], embedding.shape[0], bias=True if embedding_bias is not None else False)
+                ipex_linear.weight = embedding
+                if embedding_bias is not None:
+                    ipex_linear.bias = embedding_bias
+                _disable_tpp()
+                if embedding.dtype is torch.bfloat16:
+                    _enable_tpp()
+                self.ipex_linear = ipex.llm.optimize(ipex_linear.eval(), dtype=embedding.dtype, inplace=True)
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
 
         if logits is not None:
@@ -62,9 +75,12 @@ class LogitsProcessor(nn.Module):
     def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
+        if  hasattr(self, "ipex_linear"):
+            logits = self.ipex_linear(hidden_states)
+        else:
+            logits = torch.matmul(hidden_states, embedding.t())
+            if embedding_bias is not None:
+                logits += embedding_bias
         logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
