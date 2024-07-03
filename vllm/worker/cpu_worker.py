@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
@@ -176,7 +177,14 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.cache_engine: List[CPUCacheEngine]
         self.cpu_cache: List[List[torch.Tensor]]
 
+        omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        if omp_cpuids == "all":
+            self.local_omp_cpuid = "all"
+        else:
+            self.local_omp_cpuid = omp_cpuids.split("|")[rank]
+
     def init_device(self) -> None:
+        torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
