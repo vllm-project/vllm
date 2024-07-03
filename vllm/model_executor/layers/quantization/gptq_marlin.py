@@ -296,10 +296,13 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             sort_g_idx(layer, "g_idx", "g_idx_sort_indices")
         else:
             # Reset g_idx to empty
-            layer.g_idx = Parameter(torch.empty(0, dtype=torch.int),
+            device = layer.qweight.device
+            layer.g_idx = Parameter(torch.empty(0, dtype=torch.int,
+                                                device=device),
                                     requires_grad=False)
             layer.g_idx_sort_indices = Parameter(torch.empty(0,
-                                                             dtype=torch.int),
+                                                             dtype=torch.int,
+                                                             device=device),
                                                  requires_grad=False)
 
         # Repack weights into marlin format
