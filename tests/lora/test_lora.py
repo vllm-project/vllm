@@ -55,17 +55,24 @@ def test_apply_lora(m, n, k, rank, dtype) -> None:
         lora_b_stack[i][0] = (lora.lora_b * lora.scaling).T
 
     output = torch.zeros(k, m, device="cuda", dtype=dtype)
+    ranks = torch.full((8,), lora_a_stack.shape[2], dtype=torch.int32, device='cuda')
+    repeats = torch.arange(0, len(input) + 1, dtype=torch.int32, device='cuda')
+    
     _apply_lora(
-        input, lora_a_stack, lora_b_stack,
+        input, lora_a_stack, lora_b_stack, output,
         torch.randint(0, lora_a_stack.shape[0], (len(input), ), device="cuda"),
-        output)
+        ranks, repeats, 1,
+    )
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora(input, lora_a_stack, lora_b_stack,
-                torch.full((len(input), ), -1, device="cuda"), output)
+    _apply_lora(
+        input, lora_a_stack, lora_b_stack, output,
+        torch.full((len(input), ), -1, device="cuda"),
+        ranks, repeats, 1
+    )
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -122,19 +129,21 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
         lora_b_stacks[1][i][0] = (lora_2.lora_b * lora_2.scaling).T
 
     output = torch.zeros(k, m, device="cuda", dtype=dtype)
+    ranks = torch.full((8,), lora_a_stacks[0].shape[2], dtype=torch.int32, device='cuda')
+    repeats = torch.arange(0, len(input) + 1, dtype=torch.int32, device='cuda')
     _apply_lora_packed_nslice(
-        input, lora_a_stacks, lora_b_stacks,
+        input, lora_a_stacks, lora_b_stacks, output,
         torch.randint(0,
                       lora_a_stacks[0].shape[0], (len(input), ),
-                      device="cuda"), output, (m // 2, m // 2))
+                      device="cuda"), ranks, repeats, 1)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks,
+    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks, output,
                               torch.full((len(input), ), -1, device="cuda"),
-                              output, (m // 2, m // 2))
+                              ranks, repeats, 1)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -206,19 +215,21 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
         lora_b_stacks[2][i][0] = (lora_v.lora_b * lora_v.scaling).T
 
     output = torch.zeros(k, sum(qkv), device="cuda", dtype=dtype)
+    ranks = torch.full((8,), lora_a_stacks[0].shape[2], dtype=torch.int32, device='cuda')
+    repeats = torch.arange(0, len(input) + 1, dtype=torch.int32, device='cuda')
     _apply_lora_packed_nslice(
-        input, lora_a_stacks, lora_b_stacks,
+        input, lora_a_stacks, lora_b_stacks, output,
         torch.randint(0,
                       lora_a_stacks[0].shape[0], (len(input), ),
-                      device="cuda"), output, (qkv[0], qkv[1], qkv[2]))
+                      device="cuda"), ranks, repeats, 1)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks,
+    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks, output,
                               torch.full((len(input), ), -1, device="cuda"),
-                              output, (qkv[0], qkv[1], qkv[2]))
+                              ranks, repeats, 1)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
