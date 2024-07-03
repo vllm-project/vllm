@@ -533,8 +533,8 @@ class LLMEngine:
         bad_words_ids = list()
 
         for bad_word in params.bad_words:
-            inputs = {"prompt": bad_word}
-            tokenizer = self.get_tokenizer()
+            inputs = {"prompt": " " + bad_word.lstrip()}
+            tokenizer = self.get_tokenizer_group()
             prompt_token_ids = tokenizer.encode(request_id=request_id,
                                                 prompt=inputs["prompt"],
                                                 lora_request=lora_request)
