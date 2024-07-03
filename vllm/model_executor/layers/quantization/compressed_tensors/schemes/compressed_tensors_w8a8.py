@@ -3,6 +3,7 @@ from typing import Callable, List, Tuple, Union
 import torch
 from torch.nn import Parameter
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -12,8 +13,9 @@ from vllm.model_executor.utils import set_weight_attrs
 
 class CompressedTensorsW8A8(CompressedTensorsScheme):
 
-    def __init__(self, strategy: str):
+    def __init__(self, strategy: str, input_dynamic: bool):
         self.strategy = strategy
+        self.input_dynamic = input_dynamic
 
     # Cutlass kernels support only per-tensor and per-channel cases.
     # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
@@ -75,3 +77,29 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
             "output_dim": 0,
             "weight_loader": weight_loader,
         })
+        
+        # INPUT SCALE
+        if self.input_dynamic:
+            # Dynamic quantization: set to None.
+            layer.input_scale = None
+        else:
+            # Static quantization:  load from disk.
+            input_scale = Parameter(torch.empty(1, dtype=torch.float32),
+                                requires_grad=False)
+            layer.register_parameter("input_scale", input_scale)
+            set_weight_attrs(input_scale, {
+                "weight_loader": weight_loader,
+                "ignore_warning": True,
+            })
+    
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+        # ops.scaled_fp8_quant supports both dynamic and static quant.
+        # * dynamic, layer.input_scale is None and x_scale computed from x.
+        # * static, layer.input_scale is scalar and x_scale is input_scale.
+        x_q, x_scale = ops.scaled_int8_quant(x, layer.input_scale)
+
+        return ops.cutlass_scaled_mm(x_q,
+                                     layer.weight.t(), 
+                                     scale_a=x_scale,
+                                     scale_b=layer.weight_scale,
+                                     out_dtype=x.dtype)
