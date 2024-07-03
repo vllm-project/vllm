@@ -13,6 +13,9 @@ from .utils import check_logprobs_close
 
 MODELS = [
     "nm-testing/Meta-Llama-3-8B-Instruct-W8-Channel-A8-Dynamic-Per-Token-Test",
+    "nm-testing/tinyllama-oneshot-w8-channel-a8-tensor",
+    "nm-testing/tinyllama-oneshot-w4a16-channel-v2",
+    "nm-testing/tinyllama-oneshot-w4a16-group128-v2"
 ]
 
 MAX_TOKENS = 32
