@@ -155,11 +155,11 @@ def test_reshape_and_cache(
         cloned_value_cache = value_cache.clone()
 
     # Using default kv_scale
-    kv_scale = 1.0
+    key_scale = value_scale = 1.0
 
     # Call the reshape_and_cache kernel.
     ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
-                          kv_cache_dtype, kv_scale, kv_scale)
+                          kv_cache_dtype, key_scale, value_scale)
 
     if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
