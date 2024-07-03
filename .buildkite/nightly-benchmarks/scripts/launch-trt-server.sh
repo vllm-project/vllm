@@ -65,7 +65,7 @@ if echo "$common_params" | jq -e 'has("fp8")' > /dev/null; then
         --output_dir ${trt_model_path} \
         --qformat fp8 \
         --kv_cache_dtype fp8 \
-        --calib_size 512
+        --calib_size 2
 
 else
 
