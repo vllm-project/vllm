@@ -2,20 +2,16 @@ import os
 
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
 import ray
 
 from ..utils import VLLM_PATH, RemoteOpenAIServer
 
-# downloading lora to test lora requests
-
-# any model with a chat template should work here
 MODEL_NAME = "meta-llama/Meta-Llama-3-8B"
 EAGER_MODE = bool(int(os.getenv("EAGER_MODE", 0)))
 CHUNKED_PREFILL = bool(int(os.getenv("CHUNKED_PREFILL", 0)))
 TP_SIZE = int(os.getenv("TP_SIZE", 1))
 PP_SIZE = int(os.getenv("PP_SIZE", 1))
+DIST_BACKEND = os.getenv("DIST_BACKEND", "ray")
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,13 +30,13 @@ def server(ray_ctx):
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "float16",
         "--pipeline-parallel-size",
         str(PP_SIZE),
         "--tensor-parallel-size",
         str(TP_SIZE),
         "--distributed-executor-backend",
-        "ray",
+        DIST_BACKEND,
     ]
     if CHUNKED_PREFILL:
         args += [
