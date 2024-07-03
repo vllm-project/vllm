@@ -131,17 +131,11 @@ class OpenAIServingChat(OpenAIServing):
     # (similar to chat template)
     def _get_full_image_text_prompt(self, image_token_str: str,
                                     text_prompt: str) -> str:
-        """Combine image and text prompts for vision language model depending on
-        the model architecture."""
+        """Combine image and text prompts for vision language model"""
 
-        model_type = self.model_config.hf_config.model_type
-
-        if model_type in ("llava", "llava_next", "phi3_v"):
-            full_prompt = f"{image_token_str}\n{text_prompt}"
-        else:
-            raise NotImplementedError(
-                "Image token insertion required not implemented for "
-                f"model type: '{model_type}'.")
+        # NOTE: For now we assume all model architectures use the same
+        # image + text prompt format. This may change in the future.
+        full_prompt = f"{image_token_str}\n{text_prompt}"
 
         return full_prompt
 
