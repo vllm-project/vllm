@@ -48,7 +48,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
 #@torch.compile
@@ -361,6 +361,7 @@ class CohereForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -370,12 +371,12 @@ class CohereForCausalLM(nn.Module):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         is_not_lora = hasattr(self.model.embed_tokens, 'weight')
         if is_not_lora:
-            embedding_weights = self.model.embed_tokens.weight
+            logits = self.logits_processor(self.model.embed_tokens,
+                                           hidden_states, sampling_metadata)
         else:
-            embedding_weights = self.model.embed_tokens.base_layer.weight
+            logits = self.logits_processor(self.model.embed_tokens.base_layer,
+                                           hidden_states, sampling_metadata)
 
-        logits = self.logits_processor(embedding_weights, hidden_states,
-                                       sampling_metadata)
         return logits
 
     def sample(
