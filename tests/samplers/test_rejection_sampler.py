@@ -156,6 +156,50 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                       draft_token_ids, generators)
 
 
+@pytest.mark.parametrize("k", [1, 3])
+@pytest.mark.parametrize("vocab_size", [30_000])
+@pytest.mark.parametrize("batch_size", [1, 8, 32])
+@pytest.mark.parametrize("n_rep", [2, 10])
+@pytest.mark.parametrize("frac_seeded", [0.25, 0.5, 1.0])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
+                                   frac_seeded: float, n_rep: int,
+                                   device: str):
+    torch.set_default_device(device)
+    rejection_sampler = RejectionSampler()
+    rejection_sampler.init_gpu_tensors(rank=0)
+
+    draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    bonus_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, 1),
+                                    dtype=torch.int64)
+    draft_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, k),
+                                    dtype=torch.int64)
+
+    seeded_mask = torch.rand(batch_size, dtype=torch.float32) <= frac_seeded
+
+    results = []
+    for _ in range(n_rep):
+        generators = [
+            torch.Generator(
+                device=device).manual_seed(i) if seeded_mask[i] else None
+            for i in range(batch_size)
+        ]
+        results.append(
+            rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                              draft_token_ids, generators))
+
+    for i in range(batch_size):
+        if seeded_mask[i]:
+            for j in range(1, n_rep):
+                assert torch.equal(results[j][i], results[0][i])
+
+
 @pytest.mark.parametrize("above_or_below_vocab_range", ["above", "below"])
 @pytest.mark.parametrize("which_token_ids",
                          ["bonus_token_ids", "draft_token_ids"])
