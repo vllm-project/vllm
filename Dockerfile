@@ -126,45 +126,26 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
+FROM ${WOLFI_OS_BASE_IMAGE} AS vllm-base
+ARG WOLFI_OS_BASE_IMAGE=none
 ARG CUDA_VERSION=12.4.1
-WORKDIR /vllm-workspace
 
-RUN apt-get update -y \
-    && apt-get install -y python3-pip git vim
+USER root
+
+WORKDIR /workspace
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/lib64/stubs/
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/lib64/
 
 # install vllm wheel first, so that torch etc will be installed
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
 #################### vLLM installation IMAGE ####################
-
-
-#################### TEST IMAGE ####################
-# image to run unit testing suite
-# note that this uses vllm installed by `pip`
-FROM vllm-base AS test
-
-ADD . /vllm-workspace/
-
-# install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-dev.txt
-
-# doc requires source code
-# we hide them inside `test_docs/` , so that this source code
-# will not be imported by other tests
-RUN mkdir test_docs
-RUN mv docs test_docs/
-RUN mv vllm test_docs/
-
-#################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
 # openai api server alternative
@@ -174,7 +155,11 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer 'modelscope!=1.15.0'
 
-ENV VLLM_USAGE_SOURCE production-docker-image
+ENV VLLM_USAGE_SOURCE=production-docker-image
+ENV VLLM_NCCL_SO_PATH=/usr/lib/python3.10/site-packages/nvidia/nccl/lib/libnccl.so.2
+RUN chmod -R a+rwx /workspace
+
+USER h2ogpt
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
