@@ -10,6 +10,7 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (cuda_device_count_stateless,
+                        error_on_invalid_device_count_status,
                         get_distributed_init_method, get_open_port,
                         get_vllm_instance_id, make_async,
                         update_environment_variables)
@@ -38,6 +39,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         assert world_size <= cuda_device_count_stateless(), (
             "please set tensor_parallel_size to less than max local gpu count")
+
+        error_on_invalid_device_count_status()
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -91,17 +94,17 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        async_run_remote_workers_only: bool = False,
+        async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
 
         Args:
-            async_run_remote_workers_only: If True the method will be run only
-                in the remote workers, not the driver worker. It will also be
-                run asynchronously and return a list of futures rather than
-                blocking on the results.
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
         """
 
         if max_concurrent_workers:
@@ -114,7 +117,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             for worker in self.workers
         ]
 
-        if async_run_remote_workers_only:
+        if async_run_tensor_parallel_workers_only:
             # Just return futures
             return worker_outputs
 

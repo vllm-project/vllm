@@ -5,7 +5,8 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
 
 import torch
 
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -137,6 +138,8 @@ class ModelRunnerBase(ABC, Generic[T]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution
@@ -150,7 +153,9 @@ class ModelRunnerBase(ABC, Generic[T]):
         self,
         model_input: T,
         kv_caches: Optional[List[torch.Tensor]],
-    ) -> Optional[SamplerOutput]:
+        intermediate_tensors: Optional[IntermediateTensors],
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
         """
         Execute the model on the given input.
         """

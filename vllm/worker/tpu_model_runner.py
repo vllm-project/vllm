@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional, Tuple
+from typing import List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -12,6 +12,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+                             MultiModalInputs)
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SamplerOutput, SequenceGroupMetadata,
                            SequenceOutput)
@@ -19,9 +21,12 @@ from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
 
-_PAD_SLOT_ID = 0  # FIXME(woosuk)
+_PAD_SLOT_ID = -1  # NOTE(woosuk): In PyTorch XLA, index -1 is ignored.
 # FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
 _ENABLE_TOP_P = False
+# FIXME(woosuk): A temporary hack to support `n > 1`.
+# This can significantly affect the performance if too large.
+_MAX_NUM_SAMPLES = 128
 
 
 class TPUModelRunner:
@@ -62,6 +67,10 @@ class TPUModelRunner:
             self.block_size,
             False,
         )
+
+        # Multi-modal data support
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+            .create_input_mapper(self.model_config)
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -143,8 +152,9 @@ class TPUModelRunner:
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
 
         # Dummy run.
+        num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
         self.model(token_ids, position_ids, kv_caches, attn_metadata,
-                   input_lens, t, p)
+                   input_lens, t, p, num_samples)
 
     def warmup_model(
         self,
@@ -189,12 +199,14 @@ class TPUModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ):
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor,
+               Mapping[str, BatchedTensors]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         prompt_lens: List[int] = []
         slot_mapping: List[List[int]] = []
+        multi_modal_inputs_list: List[MultiModalInputs] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -219,6 +231,11 @@ class TPUModelRunner:
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping[-1].append(slot)
+
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                multi_modal_inputs_list.append(mm_kwargs)
 
         assert len(prompt_lens) > 0
         num_prefills = len(prompt_lens)
@@ -257,25 +274,29 @@ class TPUModelRunner:
             block_tables=None,
             context_lens=None,
         )
-        return input_tokens, input_positions, attn_metadata, prompt_lens
+
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
+                                                    device=self.device)
+
+        return (input_tokens, input_positions, attn_metadata, prompt_lens,
+                multi_modal_kwargs)
 
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ):
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor,
+               Mapping[str, BatchedTensors]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
         context_lens: List[int] = []
-        num_seq_groups = len(seq_group_metadata_list)
-        batch_size = _get_padded_batch_size(num_seq_groups)
+        multi_modal_inputs_list: List[MultiModalInputs] = []
 
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+        batch_idx = 0
+        for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
-
             seq_ids = list(seq_group_metadata.seq_data.keys())
-
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
@@ -288,14 +309,21 @@ class TPUModelRunner:
 
                 assert seq_group_metadata.block_tables is not None
                 block_table = seq_group_metadata.block_tables[seq_id]
-                self.block_tables[i, :len(block_table)] = block_table
+                self.block_tables[batch_idx, :len(block_table)] = block_table
+                batch_idx += 1
 
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append([slot])
 
-        num_paddings = batch_size - num_seq_groups
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                multi_modal_inputs_list.append(mm_kwargs)
+
+        batch_size = _get_padded_batch_size(batch_idx)
+        num_paddings = batch_size - batch_idx
         input_tokens = input_tokens + [[0]] * num_paddings
         input_positions = input_positions + [[0]] * num_paddings
         slot_mapping = slot_mapping + [[_PAD_SLOT_ID]] * num_paddings
@@ -327,20 +355,24 @@ class TPUModelRunner:
             block_tables=block_tables,
             context_lens=context_lens,
         )
-        return input_tokens, input_positions, attn_metadata, input_lens
+
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
+                                                    device=self.device)
+
+        return (input_tokens, input_positions, attn_metadata, input_lens,
+                multi_modal_kwargs)
 
     def _prepare_sample(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         padded_batch_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
         assert len(seq_group_metadata_list) > 0
         t = []
         p = []
+        best_of = []
         for seq_group_metadata in seq_group_metadata_list:
-            assert seq_group_metadata.sampling_params is not None
             sampling_params = seq_group_metadata.sampling_params
-
             # NOTE(woosuk): Here we mimic argmax sampling by applying a very
             # low temperature. This is not accurate.
             t.append(sampling_params.temperature
@@ -354,10 +386,11 @@ class TPUModelRunner:
                 raise NotImplementedError(
                     "Top-k sampling is currently disabled for the TPU backend "
                     "due to performance issues.")
-            if sampling_params.best_of > 1:
+            if sampling_params.best_of > _MAX_NUM_SAMPLES:
                 raise NotImplementedError(
-                    "best_of > 1 is not currently supported by the TPU "
+                    f"Best of > {_MAX_NUM_SAMPLES} is not supported by the TPU "
                     "backend.")
+            best_of.append(sampling_params.best_of)
             if sampling_params.use_beam_search:
                 raise NotImplementedError(
                     "Beam search is not supported by the TPU backend.")
@@ -369,13 +402,19 @@ class TPUModelRunner:
                     "prompt_logprobs is not currently supported by the TPU "
                     "backend.")
 
-        num_paddings = padded_batch_size - len(seq_group_metadata_list)
+            # Repeat the sampling params if the seq group has multiple seqs.
+            num_seqs = len(seq_group_metadata.seq_data)
+            t += [t[-1]] * (num_seqs - 1)
+            p += [p[-1]] * (num_seqs - 1)
+            best_of += [best_of[-1]] * (num_seqs - 1)
+
+        num_paddings = padded_batch_size - len(t)
         t += [1.0] * num_paddings
         p += [1.0] * num_paddings
 
         t = torch.tensor(t, dtype=torch.float32, device=self.device)
         p = torch.tensor(p, dtype=torch.float32, device=self.device)
-        return t, p
+        return t, p, best_of
 
     def _execute_model(
         self,
@@ -392,28 +431,41 @@ class TPUModelRunner:
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
         padded_batch_size = inputs[0].shape[0]
-        t, p = self._prepare_sample(seq_group_metadata_list, padded_batch_size)
+        t, p, best_of = self._prepare_sample(seq_group_metadata_list,
+                                             padded_batch_size)
+        num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
 
         # Execute the model.
         next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
-                                    *inputs[2:], t, p)
+                                    *inputs[2:], t, p, num_samples)
         # Retrieve the outputs to CPU.
         next_token_ids = next_token_ids.cpu().tolist()
 
         # NOTE(woosuk): Minimal code to construct the sampler outputs.
         # The TPU backend does not reuse the sampler, since the TPU backend
         # does not support the advanced sampling parameters such as logprobs.
-        i = 0
+        zero_logprob = Logprob(0.0)
+        batch_idx = 0
         sampler_outputs = []
         for seq_group_metadata in seq_group_metadata_list:
             seq_outputs = []
             seq_ids = list(seq_group_metadata.seq_data.keys())
-            for seq_id in seq_ids:
-                next_token_id = next_token_ids[i]
-                seq_outputs.append(
-                    SequenceOutput(seq_id, next_token_id,
-                                   {next_token_id: Logprob(0.0)}))
-                i += 1
+            if is_prompt:
+                assert len(seq_ids) == 1
+                seq_id = seq_ids[0]
+                for i in range(best_of[batch_idx]):
+                    next_token_id = next_token_ids[batch_idx][i]
+                    seq_outputs.append(
+                        SequenceOutput(seq_id, next_token_id,
+                                       {next_token_id: zero_logprob}))
+                batch_idx += 1
+            else:
+                for seq_id in seq_ids:
+                    next_token_id = next_token_ids[batch_idx][0]
+                    seq_outputs.append(
+                        SequenceOutput(seq_id, next_token_id,
+                                       {next_token_id: zero_logprob}))
+                    batch_idx += 1
             sampler_outputs.append(
                 CompletionSequenceGroupOutput(seq_outputs, None))
         return sampler_outputs
@@ -422,7 +474,12 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> SamplerOutput:
+        num_steps: int = 1,
+    ) -> List[SamplerOutput]:
+        if num_steps > 1:
+            raise ValueError(
+                "TPUModelRunner does not support multi-step execution.")
+
         assert seq_group_metadata_list is not None
         assert len(seq_group_metadata_list) > 0
         if seq_group_metadata_list[0].is_prompt:
@@ -440,7 +497,7 @@ class TPUModelRunner:
         else:
             sampler_outputs = self._execute_model(seq_group_metadata_list,
                                                   kv_caches)
-        return SamplerOutput(sampler_outputs)
+        return [SamplerOutput(sampler_outputs)]
 
 
 class ModelWrapper(nn.Module):
@@ -456,8 +513,10 @@ class ModelWrapper(nn.Module):
         kv_caches: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]],
         attn_metadata: AttentionMetadata,
         input_lens: torch.Tensor,
+        multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]],
         t: torch.Tensor,
         p: torch.Tensor,
+        num_samples: int,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -468,6 +527,8 @@ class ModelWrapper(nn.Module):
                 memory profiling at initialization.
             attn_metadata: The Pallas attention metadata.
             input_lens: The actual input lengths of shape [batch_size].
+            multi_modal_kwargs: Keyword arguments from multi-modal data to
+                pass to the model.
             t: The sampling temperature of shape [batch_size].
             p: The top-p probability of shape [batch_size].
         """
@@ -512,6 +573,7 @@ class ModelWrapper(nn.Module):
             position_ids,
             kv_caches,
             attn_metadata,
+            **(multi_modal_kwargs or {}),
         )
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
@@ -520,8 +582,9 @@ class ModelWrapper(nn.Module):
         if _ENABLE_TOP_P:
             logits = _apply_top_p(logits, p.unsqueeze(dim=1))
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-        # FIXME(woosuk): best_of > 1 is not supported.
-        next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(dim=1)
+        next_token_ids = torch.multinomial(probs,
+                                           num_samples,
+                                           replacement=True)
         return next_token_ids
 
 

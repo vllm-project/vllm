@@ -45,16 +45,22 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
-) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
+        tensor_dict: Dict[str, Union[torch.Tensor, Any]],
+        prefix: str = "") -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
     2. A list of tensors.
+
+    If the Tensor is nested under `tensor_dict["key1"]["key2"]`, the key of its
+    metadata will be "key1%key2".
     """
-    metadata_list = []
+    metadata_list: List[Tuple[str, Any]] = []
     tensor_list = []
     for key, value in tensor_dict.items():
+        assert "%" not in key, (
+            "Avoid having '%' in key "
+            "as it is used as a separator for nested entries.")
         if isinstance(value, torch.Tensor):
             # Note: we cannot use `value.device` here,
             # because it contains not only the device type but also the device
@@ -62,11 +68,29 @@ def _split_tensor_dict(
             # receiving side will set the device index.
             device = value.device.type
             metadata_list.append(
-                (key, TensorMetadata(device, value.dtype, value.size())))
+                (prefix + key, TensorMetadata(device, value.dtype,
+                                              value.size())))
             tensor_list.append(value)
+        elif isinstance(value, dict):
+            if len(value) == 0:
+                metadata_list.append((prefix + key, value))
+            inner_metadata_list, inner_tensor_list = _split_tensor_dict(
+                value, prefix + key + "%")
+            metadata_list.extend(inner_metadata_list)
+            tensor_list.extend(inner_tensor_list)
         else:
-            metadata_list.append((key, value))
+            metadata_list.append((prefix + key, value))
     return metadata_list, tensor_list
+
+
+def _update_nested_dict(nested_dict, flattened_key, value):
+    key_splits = flattened_key.split("%")
+    cur_dict = nested_dict
+    for k in key_splits[:-1]:
+        if k not in cur_dict:
+            cur_dict[k] = {}
+        cur_dict = cur_dict[k]
+    cur_dict[key_splits[-1]] = value
 
 
 class GroupCoordinator:
@@ -170,7 +194,7 @@ class GroupCoordinator:
         self.shm_broadcaster: Optional[ShmRingBufferIO] = None
         if self.world_size > 1 and is_in_the_same_node(self.cpu_group):
             self.shm_broadcaster = ShmRingBufferIO.create_from_process_group(
-                self.cpu_group, 1 << 20, 6)
+                self.cpu_group, 1 << 22, 6)
 
     @property
     def first_rank(self):
@@ -392,7 +416,7 @@ class GroupCoordinator:
 
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
-        assert dst != self.rank, (
+        assert dst != self.rank_in_group, (
             "Invalid destination rank. Destination rank is the same "
             "as the current rank.")
 
@@ -422,7 +446,7 @@ class GroupCoordinator:
 
         assert src < self.world_size, f"Invalid src rank ({src})"
 
-        assert src != self.rank, (
+        assert src != self.rank_in_group, (
             "Invalid source rank. Source rank is the same as the current rank."
         )
 
@@ -430,7 +454,7 @@ class GroupCoordinator:
 
         # Receive object size
         rank_size = torch.distributed.recv(size_tensor,
-                                           src=src,
+                                           src=self.ranks[src],
                                            group=self.cpu_group)
 
         # Tensor to receive serialized objects into.
@@ -440,7 +464,7 @@ class GroupCoordinator:
             device="cpu")
 
         rank_object = torch.distributed.recv(object_tensor,
-                                             src=src,
+                                             src=self.ranks[src],
                                              group=self.cpu_group)
 
         assert rank_object == rank_size, (
@@ -452,11 +476,11 @@ class GroupCoordinator:
 
     def broadcast_tensor_dict(
         self,
-        tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
+        tensor_dict: Optional[Dict[str, Union[torch.Tensor, Any]]] = None,
         src: int = 0,
         group: Optional[ProcessGroup] = None,
         metadata_group: Optional[ProcessGroup] = None
-    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
         """Broadcast the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -467,10 +491,9 @@ class GroupCoordinator:
         group = self.device_group
         metadata_group = self.cpu_group
         assert src < self.world_size, f"Invalid src rank ({src})"
-        src = self.ranks[src]
 
-        rank = self.rank
-        if rank == src:
+        rank_in_group = self.rank_in_group
+        if rank_in_group == src:
             metadata_list: List[Tuple[Any, Any]] = []
             assert isinstance(
                 tensor_dict,
@@ -488,13 +511,13 @@ class GroupCoordinator:
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
                     handle = torch.distributed.broadcast(tensor,
-                                                         src=src,
+                                                         src=self.ranks[src],
                                                          group=metadata_group,
                                                          async_op=True)
                 else:
                     # use group for GPU tensors
                     handle = torch.distributed.broadcast(tensor,
-                                                         src=src,
+                                                         src=self.ranks[src],
                                                          group=group,
                                                          async_op=True)
                 async_handles.append(handle)
@@ -512,34 +535,35 @@ class GroupCoordinator:
                                          device=value.device)
                     if tensor.numel() == 0:
                         # Skip broadcasting empty tensors.
-                        tensor_dict[key] = tensor
+                        _update_nested_dict(tensor_dict, key, tensor)
                         continue
                     if tensor.is_cpu:
                         # use metadata_group for CPU tensors
                         handle = torch.distributed.broadcast(
                             tensor,
-                            src=src,
+                            src=self.ranks[src],
                             group=metadata_group,
                             async_op=True)
                     else:
                         # use group for GPU tensors
-                        handle = torch.distributed.broadcast(tensor,
-                                                             src=src,
-                                                             group=group,
-                                                             async_op=True)
+                        handle = torch.distributed.broadcast(
+                            tensor,
+                            src=self.ranks[src],
+                            group=group,
+                            async_op=True)
                     async_handles.append(handle)
-                    tensor_dict[key] = tensor
+                    _update_nested_dict(tensor_dict, key, tensor)
                 else:
-                    tensor_dict[key] = value
+                    _update_nested_dict(tensor_dict, key, value)
             for async_handle in async_handles:
                 async_handle.wait()
         return tensor_dict
 
     def send_tensor_dict(
         self,
-        tensor_dict: Dict[Any, Union[torch.Tensor, Any]],
+        tensor_dict: Dict[str, Union[torch.Tensor, Any]],
         dst: Optional[int] = None
-    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
         """
@@ -551,7 +575,7 @@ class GroupCoordinator:
         metadata_group = self.cpu_group
 
         if dst is None:
-            dst = self.next_rank
+            dst = (self.rank_in_group + 1) % self.world_size
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         metadata_list: List[Tuple[Any, Any]] = []
@@ -569,16 +593,20 @@ class GroupCoordinator:
                 continue
             if tensor.is_cpu:
                 # use metadata_group for CPU tensors
-                torch.distributed.send(tensor, dst=dst, group=metadata_group)
+                torch.distributed.send(tensor,
+                                       dst=self.ranks[dst],
+                                       group=metadata_group)
             else:
                 # use group for GPU tensors
-                torch.distributed.send(tensor, dst=dst, group=group)
+                torch.distributed.send(tensor,
+                                       dst=self.ranks[dst],
+                                       group=group)
         return None
 
     def recv_tensor_dict(
         self,
         src: Optional[int] = None
-    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -590,11 +618,11 @@ class GroupCoordinator:
         metadata_group = self.cpu_group
 
         if src is None:
-            src = self.prev_rank
+            src = (self.rank_in_group - 1) % self.world_size
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         recv_metadata_list = self.recv_object(src=src)
-        tensor_dict = {}
+        tensor_dict: Dict[str, Any] = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
@@ -602,19 +630,21 @@ class GroupCoordinator:
                                      device=value.device)
                 if tensor.numel() == 0:
                     # Skip broadcasting empty tensors.
-                    tensor_dict[key] = tensor
+                    _update_nested_dict(tensor_dict, key, tensor)
                     continue
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
                     torch.distributed.recv(tensor,
-                                           src=src,
+                                           src=self.ranks[src],
                                            group=metadata_group)
                 else:
                     # use group for GPU tensors
-                    torch.distributed.recv(tensor, src=src, group=group)
-                tensor_dict[key] = tensor
+                    torch.distributed.recv(tensor,
+                                           src=self.ranks[src],
+                                           group=group)
+                _update_nested_dict(tensor_dict, key, tensor)
             else:
-                tensor_dict[key] = value
+                _update_nested_dict(tensor_dict, key, value)
         return tensor_dict
 
     def barrier(self):
@@ -630,7 +660,7 @@ class GroupCoordinator:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
-            dst = self.next_rank
+            dst = (self.rank_in_group + 1) % self.world_size
 
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
@@ -645,7 +675,7 @@ class GroupCoordinator:
         """Receives a tensor from the src rank."""
         """NOTE: `src` is the local rank of the destination rank."""
         if src is None:
-            src = self.prev_rank
+            src = (self.rank_in_group - 1) % self.world_size
 
         tensor = torch.empty(size, dtype=dtype, device=self.device)
         pynccl_comm = self.pynccl_comm
@@ -666,6 +696,8 @@ class GroupCoordinator:
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.shm_broadcaster is not None:
+            self.shm_broadcaster = None
 
 
 _WORLD: Optional[GroupCoordinator] = None
