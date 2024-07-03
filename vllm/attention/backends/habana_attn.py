@@ -24,8 +24,8 @@ class HabanaAttentionBackend(AttentionBackend):
         return HabanaAttentionImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "HabanaAttentionMetadata":
-        return HabanaAttentionMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return HabanaAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(

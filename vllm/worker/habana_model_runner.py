@@ -3,6 +3,7 @@
 ###############################################################################
 
 import collections
+import dataclasses
 import gc
 import itertools
 import math
@@ -10,8 +11,8 @@ import operator
 import os
 import time
 from enum import IntEnum
-from typing import (Any, Callable, Dict, List, NamedTuple, Optional, Set,
-                    Tuple, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
+                    Optional, Set, Tuple, Type, TypeVar, Union)
 
 import habana_frameworks.torch as htorch
 import torch
@@ -20,7 +21,6 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -29,11 +29,21 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.utils import (HabanaMemoryProfiler, format_bytes,
                         is_pin_memory_available, make_tensor_with_pad)
+from vllm.worker.model_runner_base import (
+    ModelRunnerBase, ModelRunnerInputBase,
+    _add_attn_metadata_broadcastable_dict,
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
 
 from .profiler import Profiler
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -231,7 +241,97 @@ class BatchType(IntEnum):
     MIXED = 2
 
 
-class HabanaModelRunner:
+TModelInputForHPU = TypeVar('TModelInputForHPU', bound="ModelInputForHPU")
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelInputForHPU(ModelRunnerInputBase):
+    """
+    This base class contains metadata needed for the base model forward pass
+    but not metadata for possible additional steps, e.g., sampling. Model
+    runners that run additional steps should subclass this method to add
+    additional fields.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    seq_lens: Optional[List[int]] = None
+    query_lens: Optional[List[int]] = None
+    lora_mapping: Optional["LoRAMapping"] = None
+    lora_requests: Optional[Set[LoRARequest]] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+    real_batch_size: Optional[int] = None
+    batch_size_padded: Optional[int] = None
+    virtual_engine: int = 0
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+            "real_batch_size": self.real_batch_size,
+            "batch_size_padded": self.batch_size_padded,
+            "virtual_engine": self.virtual_engine
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        return tensor_dict
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls: Type[TModelInputForHPU],
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> TModelInputForHPU:
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
+    """
+    Used by the ModelRunner.
+    """
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    # Used for speculative decoding. We do not broadcast it because it is only
+    # used by the driver worker.
+    is_prompt: Optional[bool] = None
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls,
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "ModelInputForHPUWithSamplingMetadata":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
+        # FIXME(kzawora): this fails for whatever reason - why?
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
+
+
+class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
+    """
+    Helper class for shared methods between GPU model runners.
+    """
+    _model_input_cls: Type[TModelInputForHPU]
 
     def __init__(
         self,
@@ -382,7 +482,7 @@ class HabanaModelRunner:
         logger.info(msg)
         self.decode_buckets = warmup_buckets(self.decode_bs_bucket_cfg,
                                              self.decode_seq_bucket_cfg)
-        msg = ("Generated {len(self.decode_buckets)} decode buckets: "
+        msg = (f"Generated {len(self.decode_buckets)} decode buckets: "
                f"{list(sorted(self.decode_buckets))}")
         logger.info(msg)
 
@@ -698,171 +798,154 @@ class HabanaModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor]:
-        if self.is_driver_worker:
-            prefill_reqs = []
-            decode_reqs = []
-            for seq_group_meta in seq_group_metadata_list:
-                if seq_group_meta.is_prompt:
-                    prefill_reqs.append(seq_group_meta)
-                else:
-                    decode_reqs.append(seq_group_meta)
+    ) -> TModelInputForHPU:
+        if len(seq_group_metadata_list) == 0:
+            return self._model_input_cls()
 
-            # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                prefill_attn_metadata,
-                seq_lens,
-                query_lens,
+        input_tokens = None
+        input_positions = None
+        lora_mapping = None
+        lora_requests = None
+        multi_modal_input = None
+        batch_type = None
+        seq_lens = None
+        query_lens = None
+        real_batch_size = None
+        batch_size_padded = None
+
+        self.event_start = self.profiler.get_timestamp_us()
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        base_event_name = 'prompt' if is_prompt else 'decode'
+        self.profiler.start('internal', base_event_name)
+
+        real_batch_size = len(seq_group_metadata_list)
+        bucket_cfg = self.prompt_bs_bucket_cfg if is_prompt else \
+            self.decode_bs_bucket_cfg
+        batch_size_padded = find_bucket(real_batch_size, bucket_cfg)
+        batch_size_padding = batch_size_padded - real_batch_size
+        seq_group_metadata_list = seq_group_metadata_list.copy()
+        seq_group_metadata_list.extend(seq_group_metadata_list[0]
+                                       for _ in range(batch_size_padding))
+
+        prefill_reqs = []
+        decode_reqs = []
+        for seq_group_meta in seq_group_metadata_list:
+            if seq_group_meta.is_prompt:
+                prefill_reqs.append(seq_group_meta)
+            else:
+                decode_reqs.append(seq_group_meta)
+
+        # Prepare input tensors.
+        (
+            input_tokens,
+            input_positions,
+            prefill_attn_metadata,
+            seq_lens,
+            query_lens,
+            lora_index_mapping,
+            lora_prompt_mapping,
+            lora_requests,
+            multi_modal_input,
+            slot_mapping,
+        ) = self._prepare_prompt(prefill_reqs)
+        (
+            decode_input_tokens,
+            decode_input_positions,
+            decode_attn_metadata,
+            decode_lora_index_mapping,
+            decode_lora_prompt_mapping,
+            decode_lora_requests,
+            decode_slot_mapping,
+        ) = self._prepare_decode(decode_reqs)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     seq_lens, query_lens,
+                                                     self.device,
+                                                     self.pin_memory)
+
+        if not self.scheduler_config.chunked_prefill_enabled:
+            assert (len(prefill_reqs) and len(decode_reqs)) == 0
+
+        num_prefills = len(seq_lens)
+        num_prefill_tokens = len(input_tokens)
+        num_decode_tokens = len(decode_input_tokens)
+
+        # NOTE(kzawora): Here we diverge from GPU code - we don't
+        # support mixed batches, so we either use decode or prefill
+        # inputs, without coalescing.
+        assert (num_prefills == 0 and num_decode_tokens > 0) or (
+            num_prefills > 0
+            and num_decode_tokens == 0), "HPU does not support mixed batches!"
+        if num_decode_tokens > 0:
+            input_tokens = decode_input_tokens
+            input_positions = decode_input_positions
+            slot_mapping = decode_slot_mapping
+            lora_index_mapping = decode_lora_index_mapping
+            lora_prompt_mapping = decode_lora_prompt_mapping
+            lora_requests = decode_lora_requests
+
+        # FIXME: We need to adjust selected_token_indices to accommodate
+        # for padding
+        max_len = input_tokens.size(1)
+        paddings = [max_len - s for s in seq_lens]
+        paddings = [0] + paddings[:-1]
+        paddings = list(itertools.accumulate(paddings))
+        paddings = torch.tensor(
+            paddings,
+            dtype=sampling_metadata.selected_token_indices.dtype,
+            device=sampling_metadata.selected_token_indices.device)
+        sampling_metadata.selected_token_indices.add_(paddings)
+
+        if self.lora_config:
+            lora_mapping = LoRAMapping(
                 lora_index_mapping,
                 lora_prompt_mapping,
-                lora_requests,
-                multi_modal_input,
-                slot_mapping,
-            ) = self._prepare_prompt(prefill_reqs)
-            (
-                decode_input_tokens,
-                decode_input_positions,
-                decode_attn_metadata,
-                decode_lora_index_mapping,
-                decode_lora_prompt_mapping,
-                decode_lora_requests,
-                decode_slot_mapping,
-            ) = self._prepare_decode(decode_reqs)
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, seq_lens, query_lens, self.device,
-                self.pin_memory)
-
-            if not self.scheduler_config.chunked_prefill_enabled:
-                assert (len(prefill_reqs) and len(decode_reqs)) == 0
-
-            num_prefills = len(seq_lens)
-            num_prefill_tokens = len(input_tokens)
-            num_decode_tokens = len(decode_input_tokens)
-
-            # NOTE(kzawora): Here we diverge from GPU code - we don't
-            # support mixed batches, so we either use decode or prefill
-            # inputs, without coalescing.
-            assert (num_prefills == 0 and num_decode_tokens > 0) or (
-                num_prefills > 0 and num_decode_tokens
-                == 0), "HPU does not support mixed batches!"
-            if num_decode_tokens > 0:
-                input_tokens = decode_input_tokens
-                input_positions = decode_input_positions
-                slot_mapping = decode_slot_mapping
-                lora_index_mapping = decode_lora_index_mapping
-                lora_prompt_mapping = decode_lora_prompt_mapping
-                lora_requests = decode_lora_requests
-
-            # FIXME: We need to adjust selected_token_indices to accommodate
-            # for padding
-            max_len = input_tokens.size(1)
-            paddings = [max_len - s for s in seq_lens]
-            paddings = [0] + paddings[:-1]
-            paddings = list(itertools.accumulate(paddings))
-            paddings = torch.tensor(
-                paddings,
-                dtype=sampling_metadata.selected_token_indices.dtype,
-                device=sampling_metadata.selected_token_indices.device)
-            sampling_metadata.selected_token_indices.add_(paddings)
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    lora_index_mapping,
-                    lora_prompt_mapping,
-                )
-            else:
-                lora_mapping = None
-
-            if (prefill_attn_metadata is not None
-                    and decode_attn_metadata is not None):
-                batch_type = BatchType.MIXED
-                raise NotImplementedError(
-                    "Mixed batch is not supported on HPU")
-            elif prefill_attn_metadata is not None:
-                batch_type = BatchType.PREFILL
-            else:
-                batch_type = BatchType.DECODE
-
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_input": multi_modal_input,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-                "batch_type": batch_type,
-            }
-            if prefill_attn_metadata is not None:
-                metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
-            else:
-                assert decode_attn_metadata is not None
-                metadata_dict.update(decode_attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
-
-            # Broadcast decode attn metadata for mixed batch type.
-            # The additional broadcast costs 300us overhead on 4 A10 GPUs.
-            # We can potentially reduce the overhead by coelescing tensors.
-            if batch_type == BatchType.MIXED:
-                assert decode_attn_metadata is not None
-                metadata_dict = decode_attn_metadata.asdict_zerocopy()
-                broadcast_tensor_dict(metadata_dict, src=0)
-        else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_input = metadata_dict.pop("multi_modal_input")
-            batch_type = metadata_dict.pop("batch_type")
-
-            # Create an attention metadata.
-            prefill_attn_metadata = None
-            decode_attn_metadata = None
-            if batch_type == BatchType.PREFILL or batch_type == BatchType.MIXED:
-                prefill_attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-            else:
-                decode_attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                num_prompts=0,
             )
+        else:
+            lora_mapping = None
 
-            # if it is a mixed batch, decode attn_metadata is broadcasted
-            # separately.
-            if batch_type == BatchType.MIXED:
-                metadata_dict = broadcast_tensor_dict(src=0)
-                decode_attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
+        if (prefill_attn_metadata is not None
+                and decode_attn_metadata is not None):
+            batch_type = BatchType.MIXED
+            raise NotImplementedError("Mixed batch is not supported on HPU")
+        elif prefill_attn_metadata is not None:
+            batch_type = BatchType.PREFILL
+        else:
+            batch_type = BatchType.DECODE
+
+        metadata_dict = {
+            "input_tokens": input_tokens,
+            "input_positions": input_positions,
+            "selected_token_indices": sampling_metadata.selected_token_indices,
+            "lora_requests": lora_requests,
+            "lora_mapping": lora_mapping,
+            "multi_modal_input": multi_modal_input,
+            "num_prefill_tokens": num_prefill_tokens,
+            "num_decode_tokens": num_decode_tokens,
+            "slot_mapping": slot_mapping,
+            "num_prefills": num_prefills,
+            "batch_type": batch_type,
+            "seq_lens": seq_lens,
+            "query_lens": query_lens
+        }
+        if prefill_attn_metadata is not None:
+            metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
+        else:
+            assert decode_attn_metadata is not None
+            metadata_dict.update(decode_attn_metadata.asdict_zerocopy())
 
         attn_metadata = prefill_attn_metadata if \
             prefill_attn_metadata is not None else decode_attn_metadata
-        #        attn_metadata = AttentionMetadata(
-        #            num_prefills=num_prefills,
-        #            slot_mapping=slot_mapping,
-        #            num_prefill_tokens=num_prefill_tokens,
-        #            num_decode_tokens=num_decode_tokens,
-        #            prefill_metadata=prefill_attn_metadata,
-        #            decode_metadata=decode_attn_metadata,
-        #            kv_cache_dtype=self.kv_cache_dtype,
-        #        )
 
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_input)
+        return self._model_input_cls(input_tokens=input_tokens,
+                                     seq_lens=seq_lens,
+                                     query_lens=query_lens,
+                                     input_positions=input_positions,
+                                     attn_metadata=attn_metadata,
+                                     lora_requests=lora_requests,
+                                     lora_mapping=lora_mapping,
+                                     multi_modal_kwargs=multi_modal_input,
+                                     real_batch_size=real_batch_size,
+                                     batch_size_padded=batch_size_padded)
 
     def _seq_len(self, attn_metadata):
         if attn_metadata.num_prefills != 0:
@@ -896,110 +979,6 @@ class HabanaModelRunner:
             'is_prompt'
         ])
         return attention_metadata
-
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            event_start = self.profiler.get_timestamp_us()
-            is_prompt = seq_group_metadata_list[0].is_prompt
-            base_event_name = 'prompt' if is_prompt else 'decode'
-            self.profiler.start('internal', base_event_name)
-
-            real_batch_size = len(seq_group_metadata_list)
-            bucket_cfg = self.prompt_bs_bucket_cfg if is_prompt else \
-                self.decode_bs_bucket_cfg
-            batch_size_padded = find_bucket(real_batch_size, bucket_cfg)
-            batch_size_padding = batch_size_padded - real_batch_size
-            seq_group_metadata_list = seq_group_metadata_list.copy()
-            seq_group_metadata_list.extend(seq_group_metadata_list[0]
-                                           for _ in range(batch_size_padding))
-        with self.profiler.record_event('internal', 'prepare_input_tensors'):
-            assert seq_group_metadata_list is not None
-            (input_tokens, input_positions, attn_metadata, sampling_metadata,
-             lora_requests, lora_mapping, multi_modal_input
-             ) = self.prepare_input_tensors(seq_group_metadata_list)
-            is_prompt = attn_metadata.is_prompt
-
-        # NOTE(kzawora): Need to restore this after adding LoRA
-        # if self.lora_config:
-        #    self.set_active_loras(lora_requests, lora_mapping)
-
-        batch_size = input_tokens.size(0)
-        seq_len = self._seq_len(attn_metadata)
-        use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
-        execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
-            "kv_caches": kv_caches,
-            "attn_metadata": self.trim_attn_metadata(attn_metadata),
-        }
-        if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
-
-        htorch.core.mark_step()
-        if self.is_driver_worker:
-            model_event_name = ("model_"
-                                f"{'prompt' if is_prompt else 'decode'}_"
-                                f"bs{batch_size}_"
-                                f"seq{seq_len}_"
-                                f"graphs{'T' if use_graphs else 'F'}")
-        else:
-            model_event_name = 'model_executable'
-        with self.profiler.record_event('internal', model_event_name):
-            hidden_states = self.model.forward(
-                **execute_model_kwargs,
-                selected_token_indices=sampling_metadata.
-                selected_token_indices,
-                bypass_hpu_graphs=not use_graphs)
-
-        # Compute the logits.
-        with self.profiler.record_event(
-                'internal', ('compute_logits_'
-                             f'{"prompt" if is_prompt else "decode"}_bs'
-                             f'{batch_size}_'
-                             f'seq{seq_len}')):
-            sampling_metadata.selected_token_indices = None
-            logits = self.model.compute_logits(hidden_states,
-                                               sampling_metadata)
-        htorch.core.mark_step()
-
-        # Only perform sampling in the driver worker.
-        if not self.is_driver_worker:
-            return None
-
-        # Sample the next token.
-        with self.profiler.record_event(
-                'internal', ('sample_'
-                             f'{"prompt" if is_prompt else "decode"}_'
-                             f'bs{batch_size}_'
-                             f'seq{seq_len}')):
-            output = self.model.sample(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
-        output.outputs = output.outputs[:real_batch_size]
-        htorch.core.mark_step()
-
-        if self.is_driver_worker and self.profiler.enabled:
-            # Stop recording 'execute_model' event
-            self.profiler.end()
-            event_end = self.profiler.get_timestamp_us()
-            counters = self.profiler_counter_helper.get_counter_dict(
-                cache_config=self.cache_config,
-                duration=event_end - event_start,
-                seq_len=seq_len,
-                batch_size_padded=batch_size_padded,
-                real_batch_size=real_batch_size,
-                seq_group_metadata_list=seq_group_metadata_list,
-                is_prompt=is_prompt)
-            self.profiler.record_counter(event_start, counters)
-
-        return output
 
     def create_dummy_seq_group_metadata(self, group_id, seq_len, is_prompt):
         sampling_params = SamplingParams(temperature=0)
@@ -1048,7 +1027,8 @@ class HabanaModelRunner:
         ]
         torch.hpu.synchronize()
         for _ in range(times):
-            self.execute_model(seqs, kv_caches)
+            inputs = self.prepare_model_input(seqs)
+            self.execute_model(inputs, kv_caches)
             torch.hpu.synchronize()
         self.profiler.end()
         gc.collect()
@@ -1163,19 +1143,28 @@ class HabanaProfilerCounterHelper():
         self.niter = 0
         self.average_real_throughput = None
         self.logged_once = False
+        self.real_seq_lens = []
+        self.prompt_seq_lens = []
 
-    def get_counter_dict(self, cache_config, duration, seq_len,
-                         batch_size_padded, real_batch_size,
-                         seq_group_metadata_list, is_prompt):
-        throughput = batch_size_padded / (duration / 1e6)
-        throughput_effective = real_batch_size / (duration / 1e6)
-        real_seq_lens = [
+    def capture_seq_group_metadata_stats(self, seq_group_metadata_list):
+        self.real_seq_lens = [
             len(seq_data.prompt_token_ids) + len(seq_data.output_token_ids)
             for seq_group_metadata in seq_group_metadata_list
             for seq_data in seq_group_metadata.seq_data.values()
         ]
-        real_max_seq_len = max(real_seq_lens)
-        real_num_tokens = sum(real_seq_lens)
+        self.prompt_seq_lens = [
+            len(seq_data.prompt_token_ids)
+            for seq_group_metadata in seq_group_metadata_list
+            for seq_data in seq_group_metadata.seq_data.values()
+        ]
+
+    def get_counter_dict(self, cache_config, duration, seq_len,
+                         batch_size_padded, real_batch_size, is_prompt):
+        throughput = batch_size_padded / (duration / 1e6)
+        throughput_effective = real_batch_size / (duration / 1e6)
+
+        real_max_seq_len = max(self.real_seq_lens)
+        real_num_tokens = sum(self.real_seq_lens)
         padded_num_tokens = batch_size_padded * seq_len
         batch_token_utilization = real_num_tokens / padded_num_tokens
         if self.average_real_throughput is None:
@@ -1198,14 +1187,10 @@ class HabanaProfilerCounterHelper():
         }
         self.niter += 1
         if is_prompt:
-            prompt_seq_lens = [
-                len(seq_data.prompt_token_ids)
-                for seq_group_metadata in seq_group_metadata_list
-                for seq_data in seq_group_metadata.seq_data.values()
-            ]
             prompt_bucket_in_throughput = (seq_len * batch_size_padded) / (
                 duration / 1e6)
-            prompt_real_in_throughput = sum(prompt_seq_lens) / (duration / 1e6)
+            prompt_real_in_throughput = sum(
+                self.prompt_seq_lens) / (duration / 1e6)
             counters[
                 f'{phase}_bucket_in_throughput'] = prompt_bucket_in_throughput
             counters[f'{phase}_real_in_throughput'] = prompt_real_in_throughput
@@ -1214,7 +1199,8 @@ class HabanaProfilerCounterHelper():
         if cache_config.num_gpu_blocks is not None and \
             cache_config.num_gpu_blocks != 0:
             cache_num_blocks_used = [
-                math.ceil(sl / cache_config.block_size) for sl in real_seq_lens
+                math.ceil(sl / cache_config.block_size)
+                for sl in self.real_seq_lens
             ]
             cache_total_num_blocks_used = sum(cache_num_blocks_used)
             num_cache_blocks = cache_config.num_gpu_blocks
@@ -1238,3 +1224,151 @@ class HabanaProfilerCounterHelper():
             counters['const_block_size'] = cache_config.block_size
             self.logged_once = True
         return counters
+
+
+class HabanaModelRunner(
+        HabanaModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
+    """
+    GPU model runner with sampling step.
+    """
+    _model_input_cls: Type[ModelInputForHPUWithSamplingMetadata] = (
+        ModelInputForHPUWithSamplingMetadata)
+
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> ModelInputForHPUWithSamplingMetadata:
+        return (
+            ModelInputForHPUWithSamplingMetadata.from_broadcasted_tensor_dict(
+                tensor_dict,
+                attn_backend=self.attn_backend,
+            ))
+
+    def prepare_model_input(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None
+    ) -> ModelInputForHPUWithSamplingMetadata:
+        """Prepare the model input based on a given sequence group, including
+        metadata for the sampling step.
+        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+        The result tensors and data structure also batches input in prefill
+        -> decode order. For example,
+        - input_tokens[:num_prefill_tokens] contains prefill tokens.
+        - input_tokens[num_prefill_tokens:] contains decode tokens.
+        If cuda graph is required, this API automatically pads inputs.
+        """
+        with self.profiler.record_event('internal', 'prepare_input_tensors'):
+            assert seq_group_metadata_list is not None
+            self.profiler_counter_helper.capture_seq_group_metadata_stats(
+                seq_group_metadata_list=seq_group_metadata_list)
+            model_input = self.prepare_input_tensors(seq_group_metadata_list)
+            sampling_metadata = SamplingMetadata.prepare(
+                seq_group_metadata_list, model_input.seq_lens,
+                model_input.query_lens, self.device, self.pin_memory)
+            assert model_input.attn_metadata is not None
+            is_prompt = model_input.attn_metadata.is_prompt
+
+        return dataclasses.replace(model_input,
+                                   sampling_metadata=sampling_metadata,
+                                   is_prompt=is_prompt,
+                                   virtual_engine=virtual_engine)
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        model_input: ModelInputForHPUWithSamplingMetadata,
+        kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        num_steps: int = 1,
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
+        if num_steps > 1:
+            raise ValueError(
+                "num_steps > 1 is not supported in HabanaModelRunner")
+
+        # NOTE(kzawora): Need to restore this after adding LoRA
+        # if self.lora_config:
+        #    self.set_active_loras(lora_requests, lora_mapping)
+        input_tokens = model_input.input_tokens
+        input_positions = model_input.input_positions
+        attn_metadata = model_input.attn_metadata
+        sampling_metadata = model_input.sampling_metadata
+        multi_modal_input = model_input.multi_modal_kwargs
+        real_batch_size = model_input.real_batch_size
+        batch_size_padded = model_input.batch_size_padded
+        is_prompt = model_input.is_prompt
+        assert input_tokens is not None
+        assert input_positions is not None
+        assert attn_metadata is not None
+        assert is_prompt is not None
+        assert sampling_metadata is not None
+        batch_size = input_tokens.size(0)
+        seq_len = self._seq_len(attn_metadata)
+        use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
+        execute_model_kwargs = {
+            "input_ids": input_tokens,
+            "positions": input_positions,
+            "kv_caches": kv_caches,
+            "attn_metadata": self.trim_attn_metadata(attn_metadata),
+            "intermediate_tensors": intermediate_tensors
+        }
+        if self.vision_language_config:
+            execute_model_kwargs.update({"image_input": multi_modal_input})
+
+        htorch.core.mark_step()
+        if self.is_driver_worker:
+            model_event_name = ("model_"
+                                f"{'prompt' if is_prompt else 'decode'}_"
+                                f"bs{batch_size}_"
+                                f"seq{seq_len}_"
+                                f"graphs{'T' if use_graphs else 'F'}")
+        else:
+            model_event_name = 'model_executable'
+        with self.profiler.record_event('internal', model_event_name):
+            hidden_states = self.model.forward(
+                **execute_model_kwargs,
+                selected_token_indices=sampling_metadata.
+                selected_token_indices,
+                bypass_hpu_graphs=not use_graphs)
+
+        # Compute the logits.
+        with self.profiler.record_event(
+                'internal', ('compute_logits_'
+                             f'{"prompt" if is_prompt else "decode"}_bs'
+                             f'{batch_size}_'
+                             f'seq{seq_len}')):
+            sampling_metadata.selected_token_indices = None
+            logits = self.model.compute_logits(hidden_states,
+                                               sampling_metadata)
+        htorch.core.mark_step()
+        # Only perform sampling in the driver worker.
+        if not self.is_driver_worker:
+            return []
+
+        # Sample the next token.
+        with self.profiler.record_event(
+                'internal', ('sample_'
+                             f'{"prompt" if is_prompt else "decode"}_'
+                             f'bs{batch_size}_'
+                             f'seq{seq_len}')):
+            output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        output.outputs = output.outputs[:real_batch_size]
+        htorch.core.mark_step()
+
+        if self.is_driver_worker and self.profiler.enabled:
+            # Stop recording 'execute_model' event
+            self.profiler.end()
+            event_end = self.profiler.get_timestamp_us()
+            counters = self.profiler_counter_helper.get_counter_dict(
+                cache_config=self.cache_config,
+                duration=event_end - self.event_start,
+                seq_len=seq_len,
+                batch_size_padded=batch_size_padded,
+                real_batch_size=real_batch_size,
+                is_prompt=is_prompt)
+            self.profiler.record_counter(self.event_start, counters)
+        return [output]

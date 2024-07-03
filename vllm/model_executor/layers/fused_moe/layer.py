@@ -11,6 +11,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import is_hpu
+
+if is_hpu():
+    from vllm.hpu.ops import static_fused_moe
 
 logger = init_logger(__name__)
 
@@ -64,7 +68,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
               router_logits: torch.Tensor,
               top_k: int,
               renormalize: bool = True) -> torch.Tensor:
-
+        if is_hpu():
+            return static_fused_moe(x, layer.w13_weight, layer.w2_weight,
+                                    router_logits, top_k)
         return fused_moe(x,
                          layer.w13_weight,
                          layer.w2_weight,

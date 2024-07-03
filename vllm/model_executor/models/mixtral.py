@@ -45,10 +45,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import print_warning_once, is_hpu
+from vllm.utils import is_hpu, print_warning_once
 
-if is_hpu():
-    from vllm.hpu.ops import static_fused_moe
 from .interfaces import SupportsLoRA
 
 
@@ -99,7 +97,7 @@ class MixtralMoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
         if is_hpu():
-            return final_hidden_states.view(batch_size, sequence_length, 
+            return final_hidden_states.view(batch_size, sequence_length,
                                             hidden_size)
         return final_hidden_states.view(num_tokens, hidden_size)
 

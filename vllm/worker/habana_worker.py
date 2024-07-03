@@ -4,27 +4,26 @@
 
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
-import habana_frameworks.torch as htorch
+import habana_frameworks.torch as htorch  # noqa:F401
 import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.habana_model_runner import HabanaModelRunner
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 
-class HabanaWorker(WorkerBase):
+class HabanaWorker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a HPU.
 
     Each worker is associated with a single HPU. The worker is responsible for
@@ -72,20 +71,21 @@ class HabanaWorker(WorkerBase):
                 "To be tested: vision language model with LoRA settings.")
             raise AssertionError("To be tested: vision language model on HPU")
 
-        self.model_runner = HabanaModelRunner(
+        self.model_runner: HabanaModelRunner = HabanaModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
             device_config,
-            load_config=load_config,
             cache_config=cache_config,
+            load_config=load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: CacheEngine
-        self.hpu_cache: List[torch.Tensor]
+        self.cache_engine: List[CacheEngine]
+        # Initialize gpu_cache as embedding models don't initialize kv_caches
+        self.hpu_cache: Optional[List[List[torch.tensor]]] = None
 
     def init_device(self) -> None:
         if self.device_config.device.type == "hpu":
@@ -164,112 +164,78 @@ class HabanaWorker(WorkerBase):
         self._init_cache_engine()
         self._warm_up_model()
 
-    def _init_cache_engine(self) -> None:
+    def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config,
-                                        self.device_config)
-        self.hpu_cache = self.cache_engine.gpu_cache
-        # we want to materialize cache tensors before we proceed with
-        # graph capture/execution
-        htorch.hpu.synchronize()
+        self.cache_engine = [
+            CacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.hpu_cache = [
+            self.cache_engine[ve].gpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
 
     def _warm_up_model(self) -> None:
-        self.model_runner.warmup_model(self.hpu_cache)
+        # NOTE(kzawora): We should use virtual engine index here
+        # for pipeline parallelism. Using 0 for now.
+        assert self.hpu_cache is not None
+        self.model_runner.warmup_model(self.hpu_cache[0])
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def cache_swap(
-        self,
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: torch.Tensor,
-    ) -> None:
-        # Issue cache operations.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if blocks_to_swap_in:
-            self.cache_engine.swap_in(blocks_to_swap_in)
-        if blocks_to_swap_out:
-            self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy.numel() > 0:
-            self.cache_engine.copy(blocks_to_copy)
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
+
+    @property
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+        return self.hpu_cache
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
-        if execute_model_req is None:
-            seq_group_metadata_list = None
-        else:
-            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            assert execute_model_req is not None
-            num_seq_groups = len(seq_group_metadata_list)
-            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
-            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
-            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                          device=self.device,
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        virtual_engine = execute_model_req.virtual_engine
+        num_seq_groups = len(execute_model_req.seq_group_metadata_list)
+        # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
+        # they contain parameters to launch cudamemcpyasync.
+        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
+                                         device="cpu",
+                                         dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
                                           dtype=torch.int64).view(-1, 2)
-            data: Dict[str, Any] = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
-        else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_swap_in = data["blocks_to_swap_in"]
-            blocks_to_swap_out = data["blocks_to_swap_out"]
-            blocks_to_copy = data["blocks_to_copy"]
+        # `blocks_to_copy` is a gpu tensor. The src and tgt of
+        # blocks to copy are in the same device, and `blocks_to_copy`
+        # can be used directly within cuda kernels.
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1, 2)
 
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.hpu_cache)
-        return [output]
+        return WorkerInput(
+            num_seq_groups=num_seq_groups,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            virtual_engine=virtual_engine,
+        )
 
     @torch.inference_mode()
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        while self._execute_model_non_driver():
-            pass
-
-    def _execute_model_non_driver(self) -> bool:
-        """Execute model in parallel worker.
-
-        Returns True iff there are remaining sequences to process.
-        """
-        assert not self.is_driver_worker
-        data = broadcast_tensor_dict(src=0)
-        if not data:
-            return False
-
-        num_seq_groups = data.get("num_seq_groups", 0)
-        blocks_to_swap_in = data.get("blocks_to_swap_in")
-        blocks_to_swap_out = data.get("blocks_to_swap_out")
-        blocks_to_copy = data.get("blocks_to_copy")
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return False
-
-        self.model_runner.execute_model(None, self.hpu_cache)
-        return True
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        virtual_engine = worker_input.virtual_engine
+        # Issue cache operations.
+        if (worker_input.blocks_to_swap_in is not None
+                and worker_input.blocks_to_swap_in.numel() > 0):
+            self.cache_engine[virtual_engine].swap_in(
+                worker_input.blocks_to_swap_in)
+        if (worker_input.blocks_to_swap_out is not None
+                and worker_input.blocks_to_swap_out.numel() > 0):
+            self.cache_engine[virtual_engine].swap_out(
+                worker_input.blocks_to_swap_out)
+        if (worker_input.blocks_to_copy is not None
+                and worker_input.blocks_to_copy.numel() > 0):
+            self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
