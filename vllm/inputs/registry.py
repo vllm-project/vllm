@@ -140,7 +140,8 @@ class InputRegistry:
 
         The model is identified by ``model_config``.
 
-        TODO: Add guide [ref: PR #5276]
+        See also:
+            :ref:`adding_a_new_multimodal_model`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture

@@ -30,9 +30,10 @@ else:
 @pytest.mark.parametrize("tensor_parallel_size", [2])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets,
-                tensor_parallel_size: int, dtype: str,
-                max_tokens: int) -> None:
+                tensor_parallel_size: int, dtype: str, max_tokens: int,
+                num_logprobs: int) -> None:
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(
             f"Need at least {tensor_parallel_size} GPUs to run the test.")
@@ -44,8 +45,10 @@ def test_models(hf_runner, vllm_runner, image_assets,
         vllm_runner,
         image_assets,
         model_and_config=model_and_vl_config[0],
+        size_factors=[1.0],
         dtype=dtype,
         max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
     )
