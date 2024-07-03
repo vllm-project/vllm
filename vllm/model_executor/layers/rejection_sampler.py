@@ -122,16 +122,17 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
 
-        seed_indices, non_seed_indices = self._split_batch_by_seeded(generators, k=k)
+        seed_indices, non_seed_indices = self._split_batch_by_seeded(
+            generators, k=k)
 
         # NOTE: the recovered_probs are overwritten by this method.
-        recovered_token_ids = _multinomial(recovered_probs,
-                                           num_samples=1,
-                                           k=k,
-                                           generators=generators,
-                                           seed_indices=seed_indices,
-                                           non_seed_indices=non_seed_indices).reshape(
-                                               batch_size, k)
+        recovered_token_ids = _multinomial(
+            recovered_probs,
+            num_samples=1,
+            k=k,
+            generators=generators,
+            seed_indices=seed_indices,
+            non_seed_indices=non_seed_indices).reshape(batch_size, k)
 
         return accepted, recovered_token_ids
 
@@ -175,7 +176,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         selected_target_probs = target_probs[batch_indices, probs_indicies,
                                              draft_token_ids]
 
-        seed_indices, non_seed_indices = self._split_batch_by_seeded(generators)
+        seed_indices, non_seed_indices = self._split_batch_by_seeded(
+            generators)
 
         if len(seed_indices) == 0:
             uniform_rand = torch.rand_like(selected_target_probs)
@@ -189,10 +191,11 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                                                   device=target_probs.device,
                                                   generator=generators[idx])
 
-            uniform_rand[non_seed_indices,:] = torch.rand(len(non_seed_indices),
-                                                          k,
-                                                          dtype=self.probs_dtype,
-                                                          device=target_probs.device)
+            uniform_rand[non_seed_indices, :] = torch.rand(
+                len(non_seed_indices),
+                k,
+                dtype=self.probs_dtype,
+                device=target_probs.device)
 
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
@@ -266,7 +269,6 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         """
         return torch.finfo(self.probs_dtype).tiny
 
-
     # partition batch into indices for which a generator is provided
     # and indicies for which no generator is provided
     def _split_batch_by_seeded(
@@ -276,16 +278,18 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
     ) -> Tuple[List[int], List[int]]:
 
         if all(generator is None for generator in generators):
-            seed_indices, non_seed_indices = [], list(range(len(generators)*k))
+            seed_indices: List[int] = []
+            non_seed_indices: List[int] = list(range(len(generators) * k))
         else:
             seed_indices, non_seed_indices = [], []
             for i, generator in enumerate(generators):
                 if generator is None:
-                    non_seed_indices.extend(range(k*i, k*(i+1)))
+                    non_seed_indices.extend(range(k * i, k * (i + 1)))
                 else:
-                   seed_indices.extend(range(k*i, k*(i+1)))
+                    seed_indices.extend(range(k * i, k * (i + 1)))
 
         return seed_indices, non_seed_indices
+
 
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead that skips the sync.
