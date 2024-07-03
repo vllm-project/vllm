@@ -34,12 +34,16 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     content: Union[str, List[ChatCompletionContentPartParam]]
     """The contents of the message."""
 
-    name: str
+    name: Optional[str]
     """An optional name for the participant.
 
     Provides the model information to differentiate between participants of the
     same role.
     """
+    tool_call_id: Optional[str]
+    
+    tool_calls: Optional[List[dict]]
+
 
 
 ChatCompletionMessageParam = Union[
@@ -320,7 +324,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
-        print("DATA", data)
 
         if "tool_choice" in data:
 

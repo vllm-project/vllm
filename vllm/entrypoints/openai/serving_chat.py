@@ -39,6 +39,7 @@ from vllm.utils import random_uuid
 from vllm.entrypoints.openai.tool_parsers import ToolParser, MistralToolParser, Hermes2ProToolParser
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+
 env = Environment(
     loader=FileSystemLoader('./'),
     autoescape=select_autoescape()
@@ -50,7 +51,10 @@ logger = init_logger(__name__)
 @final  # So that it should be compatible with Dict[str, str]
 class ConversationMessage(TypedDict):
     role: str
-    content: str
+    content: Optional[str]  # optional IFF tool_calls is specified
+    tool_call_id: Optional[str]
+    name: str | None
+    tool_calls: Optional[List]
 
 
 @dataclass(frozen=True)
@@ -122,11 +126,15 @@ class OpenAIServingChat(OpenAIServing):
             logger.warning(
                 "No chat template provided. Chat API will not work.")
 
-    def _parse_chat_message_content_parts(
-        self,
-        role: str,
-        parts: Iterable[ChatCompletionContentPartParam],
+    def _parse_chat_message_content_parts_for_image(
+            self,
+            role: str,
+            parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
+
+        """
+        Handle parsing out the image data for image chat completions
+        """
         texts: List[str] = []
         image_futures: List[Awaitable[ImagePixelData]] = []
 
@@ -200,26 +208,46 @@ class OpenAIServingChat(OpenAIServing):
                                       image_futures=image_futures)
 
     def _parse_chat_message_content(
-        self,
-        message: ChatCompletionMessageParam,
+            self,
+            message: ChatCompletionMessageParam,
     ) -> ChatMessageParseResult:
-        role = message["role"]
+        role = message.get('role')
         content = message.get("content")
+        tool_call_id = message.get('tool_call_id')
+        tool_calls = message.get('tool_calls')
+        name = message.get('tool_calls')
 
-        if content is None:
+        # invariant
+        if content is None and tool_calls is None:
+            print('Parsing message as empty:', message)
             return ChatMessageParseResult(messages=[], image_futures=[])
-        if isinstance(content, str):
-            messages = [ConversationMessage(role=role, content=content)]
+
+        # if content is a string OR if there's tool calls
+        if isinstance(content, str) or isinstance(tool_calls, list):
+            print('parsing message as content', message)
+
+            messages: List[ConversationMessage] = []
+            if role == 'tool':
+                messages = [ConversationMessage(role=role, name=name, content=content, tool_call_id=tool_call_id)]
+            elif role == 'assistant':
+                if tool_calls:
+                    messages = [ConversationMessage(role=role, content=content, tool_calls=tool_calls)]
+                else:
+                    messages = [ConversationMessage(role=role, content=content)]
+            else: # user and system messages can be handled the same way
+                messages = [ConversationMessage(role=role, content=content)]
             return ChatMessageParseResult(messages=messages, image_futures=[])
 
-        return self._parse_chat_message_content_parts(role, content)
+        elif isinstance(content, list):
+            print('parsing message as image stuff')
+            return self._parse_chat_message_content_parts_for_image(role, content)
 
     async def create_chat_completion(
-        self,
-        request: ChatCompletionRequest,
-        raw_request: Optional[Request] = None
+            self,
+            request: ChatCompletionRequest,
+            raw_request: Optional[Request] = None
     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
-               ChatCompletionResponse]:
+    ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
@@ -229,17 +257,21 @@ class OpenAIServingChat(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
         """
+        print('checking model')
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
+            print('Error with model')
             return error_check_ret
 
         try:
+            print('trying to parse messages')
             conversation: List[ConversationMessage] = []
             image_futures: List[Awaitable[ImagePixelData]] = []
 
             for msg in request.messages:
+                print('parsing messages...')
                 chat_parsed_result = self._parse_chat_message_content(msg)
-
+                print('messages parsed...')
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
 
@@ -250,6 +282,7 @@ class OpenAIServingChat(OpenAIServing):
             print()
             print('using tools', tools)
             print('add generation prompt? ', request.add_generation_prompt)
+            print('conversation', conversation)
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
@@ -261,7 +294,6 @@ class OpenAIServingChat(OpenAIServing):
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
-
 
         # Fetch image data
         image_data: Optional[ImagePixelData] = None
@@ -285,7 +317,7 @@ class OpenAIServingChat(OpenAIServing):
             lora_request = self._maybe_get_lora(request)
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
-                or decoding_config.guided_decoding_backend
+                                      or decoding_config.guided_decoding_backend
             guided_decode_logits_processor = (
                 await get_guided_decoding_logits_processor(
                     guided_decoding_backend, request, await
@@ -387,7 +419,7 @@ class OpenAIServingChat(OpenAIServing):
                         last_msg_content = ""
                         if conversation and conversation[-1].get(
                                 "content") and conversation[-1].get(
-                                    "role") == role:
+                            "role") == role:
                             last_msg_content = conversation[-1]["content"]
 
                         if last_msg_content:
@@ -421,7 +453,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     delta_token_ids = output.token_ids[previous_num_tokens[i]:]
                     out_logprobs = output.logprobs[
-                        previous_num_tokens[i]:] if output.logprobs else None
+                                   previous_num_tokens[i]:] if output.logprobs else None
 
                     if request.logprobs and request.top_logprobs is not None:
                         assert out_logprobs is not None, (
@@ -517,12 +549,12 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-        self,
-        request: ChatCompletionRequest,
-        raw_request: Optional[Request],
-        result_generator: AsyncIterator[RequestOutput],
-        request_id: str,
-        conversation: List[ConversationMessage]
+            self,
+            request: ChatCompletionRequest,
+            raw_request: Optional[Request],
+            result_generator: AsyncIterator[RequestOutput],
+            request_id: str,
+            conversation: List[ConversationMessage]
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = self.served_model_names[0]
@@ -630,10 +662,10 @@ class OpenAIServingChat(OpenAIServing):
         ]
 
     def _create_chat_logprobs(
-        self,
-        token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
-        num_output_top_logprobs: Optional[int] = None,
+            self,
+            token_ids: GenericSequence[int],
+            top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+            num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
 
