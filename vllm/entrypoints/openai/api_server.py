@@ -148,11 +148,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
         assert isinstance(generator, ChatCompletionResponse)
         if openai_serving_chat.enable_auto_tools and openai_serving_chat.tool_parser:
             response = generator.model_dump()
-            tool_calls = openai_serving_chat.tool_parser.extract_tool_calls(generator)
-            if tool_calls and len(tool_calls):
-                print('TOOL CALLS', tool_calls)
-                response['choices'][0]['message']['content'] = None
-                response['choices'][0]['message']['tool_calls'] = [tool_call.to_dict() for tool_call in tool_calls]
+            tool_call_info = openai_serving_chat.tool_parser.extract_tool_calls(generator)
+            if tool_call_info.tools_called:
+                response['choices'][0]['message']['content'] = tool_call_info.content
+                response['choices'][0]['message']['tool_calls'] = [tool_call.to_dict() for tool_call in tool_call_info.tool_calls]
                 response['choices'][0]['finish_reason'] = 'tool_calls'
             else:
                 print('TOOL: no tool calls detected')

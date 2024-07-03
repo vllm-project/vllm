@@ -657,6 +657,18 @@ class ToolCall(OpenAIBaseModel):
         }
 
 
+class ExtractedToolCallInformation(BaseModel):
+    # indicate if tools were called
+    tools_called: bool
+
+    # extracted tool calls
+    tool_calls: List[ToolCall]
+
+    # content - per OpenAI spec, content AND tool calls can be returned ALTHOUGH THIS IS VERY RARE
+    # But some models will do this intentionally
+    content: str | None
+
+
 class ChatMessage(OpenAIBaseModel):
     role: str
     content: str
