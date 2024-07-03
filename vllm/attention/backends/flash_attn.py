@@ -256,7 +256,8 @@ class FlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        kv_scale: float = 1.0,
+        key_scale: float = 1.0,
+        value_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -270,7 +271,8 @@ class FlashAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
+        assert key_scale == 1.0 and value_scale == 1.0, (
+            "key/value_scale is not supported in FlashAttention.")
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.

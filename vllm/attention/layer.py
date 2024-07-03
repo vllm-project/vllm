@@ -91,8 +91,9 @@ class Attention(nn.Module):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        # TODO(mgoin): Add capacity for loading separate key and value scales
         return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                 self._kv_scale)
+                                 self._kv_scale, self._kv_scale)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

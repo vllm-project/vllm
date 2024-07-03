@@ -242,7 +242,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: "XFormersMetadata",
-        kv_scale: float = 1.0,
+        key_scale: float = 1.0,
+        value_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -269,7 +270,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
-                                                self.kv_cache_dtype, kv_scale)
+                                                self.kv_cache_dtype, key_scale,
+                                                value_scale)
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -331,7 +333,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                key_scale,
+                value_scale,
             )
 
         # Reshape the output tensor.

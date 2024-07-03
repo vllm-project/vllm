@@ -221,9 +221,11 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: FlashInferMetadata,
-        kv_scale: float = 1.0,
+        key_scale: float = 1.0,
+        value_scale: float = 1.0,
     ) -> torch.Tensor:
-        assert kv_scale == 1.0
+        assert key_scale == 1.0 and value_scale == 1.0, (
+            "key/value_scale is not supported in FlashInfer.")
         num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)

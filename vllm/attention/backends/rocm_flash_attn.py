@@ -265,7 +265,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        kv_scale: float = 1.0,
+        key_scale: float = 1.0,
+        value_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -298,7 +299,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                kv_scale,
+                key_scale,
+                value_scale,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -402,7 +404,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                key_scale,
+                value_scale,
             )
 
         # Reshape the output tensor.

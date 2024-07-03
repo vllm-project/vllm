@@ -194,6 +194,7 @@ def test_paged_attention(
             alibi_slopes,
             kv_cache_dtype,
             kv_scale,
+            kv_scale,
         )
     elif version == "v2":
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
@@ -224,6 +225,7 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
+            kv_scale,
             kv_scale,
         )
     else:

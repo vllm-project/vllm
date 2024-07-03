@@ -127,6 +127,7 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        kv_scale: float = 1.0,
+        key_scale: float = 1.0,
+        value_scale: float = 1.0,
     ) -> torch.Tensor:
         raise NotImplementedError
