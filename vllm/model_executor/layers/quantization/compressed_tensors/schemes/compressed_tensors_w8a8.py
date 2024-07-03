@@ -37,6 +37,10 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
 
             layer.weight_scale = Parameter(weight_scale_channel,
                                            requires_grad=False)
+            
+        # transpose weights for cutlass.
+        weight = layer.weight
+        layer.weight = Parameter(weight.t(), requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],
@@ -99,7 +103,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
         x_q, x_scale = ops.scaled_int8_quant(x, layer.input_scale)
 
         return ops.cutlass_scaled_mm(x_q,
-                                     layer.weight.t(), 
+                                     layer.weight,
                                      scale_a=x_scale,
                                      scale_b=layer.weight_scale,
                                      out_dtype=x.dtype)
