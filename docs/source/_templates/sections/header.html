@@ -1,3 +1,33 @@
-<div style="background-color: #fff3cd; width: 100vw; display: flex; justify-content: center; align-items: center; color: #856404; font-size: 16px;">
-  <p style="margin: 0;">You are viewing the latest developer preview docs. <a href="https://docs.vllm.ai/en/stable/" style="color: #d97706; font-weight: bold; text-decoration: none;">Click here</a> to view docs for the latest stable release.</p>
+<style>
+  /* Light mode styles (default) */
+  .notification-bar {
+    background-color: #fff3cd;
+    color: #856404;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 16px;
+    width: 100vw;
+    margin: 0;
+  }
+  .notification-bar a {
+    color: #d97706;
+    font-weight: bold;
+    text-decoration: none;
+  }
+
+  /* Dark mode styles */
+  @media (prefers-color-scheme: dark) {
+    .notification-bar {
+      background-color: #333;
+      color: #ddd;
+    }
+    .notification-bar a {
+      color: #ffa500; /* Brighter color for visibility */
+    }
+  }
+</style>
+
+<div class="notification-bar">
+  <p>You are viewing the latest developer preview docs. <a href="https://docs.vllm.ai/en/stable/">Click here</a> to view docs for the latest stable release.</p>
 </div>
