@@ -146,6 +146,8 @@ class GPTJMLP(nn.Module):
                 self.ipex_fusion = ipex.llm.modules.LinearNewGelu(self.fc_in.ipex_qlinear)
         if hasattr(self, "ipex_fusion"):
             hidden_states = self.ipex_fusion(hidden_states)
+            if hasattr(self.act, "scales"): #AWQ scales
+                hidden_states = hidden_states / self.act.scales
         else:
             hidden_states, _ = self.fc_in(hidden_states)
             hidden_states = self.act(hidden_states)
