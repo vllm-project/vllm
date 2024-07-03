@@ -112,6 +112,109 @@ class UnquantizedLinearMethod(LinearMethodBase):
             return F.linear(x, weight)
         return F.linear(x, weight, bias)
 
+class GemmRS(LinearMethodBase):
+    #Fused Gemm-ReduceScatter without quantization.
+
+    def __init__(self, separate_bias_add: bool = False):
+        self.separate_bias_add = separate_bias_add
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                       input_size_per_partition,
+                                       dtype=params_dtype),
+                           requires_grad=False)
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, extra_weight_attrs)
+
+        self.gemm_rs_op = flux.GemmRS(
+            get_tp_group().device_group,
+            1,  # One node
+            8192,  # Max M. TODO: Pass in correctly.
+            output_size,  # N
+            # TODO: Pass in input dtype correctly.
+            # TODO: It would be nicer to modify flux to dispatch based on dtype
+            # at run time, but I don't know what the downside would be.
+            # Similar comment for max m.
+            torch.float16,
+            # Note: transpose_weight=False means that B is transposed
+            transpose_weight=False,
+            # Note: bfloat16 requires fuse_reduction=False.
+            # When fuse_reduction=False, I encounter illegal memory accesses in
+            # the kernel, which are hard to track down.
+            fuse_reduction=True,
+        )
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert bias is None
+
+        output = self.gemm_rs_op.forward(x, layer.weight)
+        output = output.squeeze(0)
+
+        return output
+
+class AGCook(LinearMethodBase):
+    #Fused AllGather-Gemm without quantization.
+
+    def __init__(self, separate_bias_add: bool = False):
+        self.separate_bias_add = separate_bias_add
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                       input_size_per_partition,
+                                       dtype=params_dtype),
+                           requires_grad=False)
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, extra_weight_attrs)
+
+        self.ag_gemm_op = flux.AGKernel(
+            get_tp_group().device_group,
+            1,  # One node
+            8192,  # Max M. TODO: Pass in correctly.
+            weight.shape[0],  # N
+            weight.shape[1],  # K
+            # TODO: Pass in input dtype correctly.
+            # TODO: It would be nicer to modify flux to dispatch based on dtype
+            # at run time, but I don't know what the downside would be.
+            # Similar comment for max m.
+            torch.float16,
+            torch.float16,
+            # Note: transpose_weight=False means that B is transposed
+            transpose_weight=False,
+            # Note: if local_copy=True, I hit the following runtime error:
+            # /flux/src/all_gather/ths_op/all_gather_gemm_kernel.cc:648 
+            #   Check failed: 33554432((input.numel() * input.element_size())) 
+            #                 == 139836453421056((this->chunk_size))
+            local_copy=False,
+        )
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert bias is None
+
+        if False:
+            # TODO: This produces the wrong answer
+            output = self.ag_gemm_op.forward(x, layer.weight)
+        else:
+            x_gathered = tensor_model_parallel_all_gather(x, 0)
+            output = F.linear(x_gathered, layer.weight)
+
+        return output
+
 
 class LinearBase(torch.nn.Module):
     """Base linear layer.
@@ -132,6 +235,8 @@ class LinearBase(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        fuse_gemm_rs: bool = False,
+        fuse_ag_gemm: bool = False,
     ):
         super().__init__()
 
@@ -142,7 +247,14 @@ class LinearBase(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
-        if quant_config is None:
+        
+        if fuse_gemm_rs:
+            assert(quant_config is None)
+            self.quant_method = GemmRS()
+        elif fuse_ag_gemm:
+            assert(quant_config is None)
+            self.quant_method = AGCook()
+        elif quant_config is None:
             self.quant_method: Optional[
                 QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
@@ -231,9 +343,10 @@ class ColumnParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 output_sizes: Optional[List[int]] = None):
+                 output_sizes: Optional[List[int]] = None,
+                 fuse_ag_gemm: bool = False):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, fuse_ag_gemm=fuse_ag_gemm)
 
         self.gather_output = gather_output
 
@@ -343,7 +456,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                  gather_output: bool = False,
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 fuse_ag_gemm: bool = False):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
@@ -353,7 +467,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          gather_output=gather_output,
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
-                         quant_config=quant_config)
+                         quant_config=quant_config,
+                         fuse_ag_gemm=fuse_ag_gemm)
 
     def weight_loader(self,
                       param: Parameter,
@@ -506,7 +621,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                  bias: bool = True,
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 fuse_ag_gemm: bool = False):
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -538,7 +654,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                          gather_output=False,
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
-                         quant_config=quant_config)
+                         quant_config=quant_config,
+                         fuse_ag_gemm=fuse_ag_gemm)
 
     def weight_loader(self,
                       param: Parameter,
@@ -719,12 +836,15 @@ class RowParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  reduce_results: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 fuse_gemm_rs: bool = False):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, fuse_gemm_rs=fuse_gemm_rs)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
+        if fuse_gemm_rs:
+            self.reduce_results = False
 
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -802,133 +922,6 @@ class RowParallelLinear(LinearBase):
         else:
             output = output_
             output_bias = self.bias
-        return output, output_bias
-
-    def extra_repr(self) -> str:
-        s = f"input_features={self.input_size_per_partition}"
-        s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
-        s += f", tp_size={self.tp_size}"
-        s += f", reduce_results={self.reduce_results}"
-        return s
-
-
-# TODO: Just for a prototype, this is copy-pasted from RowParallelLinear
-class FluxRowParallelLinear(LinearBase):
-
-    def __init__(self,
-                 input_size: int,
-                 output_size: int,
-                 bias: bool = True,
-                 input_is_parallel: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 reduce_results: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None):
-        super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
-
-        # Flux only supports fp16 and bf16
-        assert (quant_config is None)
-
-        self.input_is_parallel = input_is_parallel
-        self.reduce_results = reduce_results
-
-        self.tp_size = get_tensor_model_parallel_world_size()
-
-        # Create flux operation
-        self.gemm_rs_op = flux.GemmRS(
-            get_tp_group().device_group,
-            1,  # One node
-            8192,  # Max M. TODO: Pass in correctly.
-            output_size,  # N
-            # TODO: Pass in input dtype correctly.
-            # TODO: It would be nicer to modify flux to dispatch based on dtype
-            # at run time, but I don't know what the downside would be.
-            # Similar comment for max m.
-            torch.float16,
-            # Note: transpose_weight=False means that B is transposed
-            transpose_weight=False,
-            # Note: bfloat16 requires fuse_reduction=False.
-            # When fuse_reduction=False, I encounter illegal memory accesses in
-            # the kernel, which are hard to track down.
-            fuse_reduction=True,
-        )
-
-        # Divide the weight matrix along the last dimension.
-        self.input_size_per_partition = divide(input_size, self.tp_size)
-        assert self.quant_method is not None
-        self.quant_method.create_weights(
-            layer=self,
-            input_size_per_partition=self.input_size_per_partition,
-            output_partition_sizes=[self.output_size],
-            input_size=self.input_size,
-            output_size=self.output_size,
-            params_dtype=self.params_dtype,
-            weight_loader=self.weight_loader)
-        if not reduce_results and (bias and not skip_bias_add):
-            raise ValueError("When not reduce the results, adding bias to the "
-                             "results can lead to incorrect results")
-
-        if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size, dtype=params_dtype))
-            set_weight_attrs(self.bias, {
-                "output_dim": 0,
-                "weight_loader": self.weight_loader,
-            })
-        else:
-            self.register_parameter("bias", None)
-
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        # Special case for Fp8 scales.
-        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
-                                           None)
-
-        tp_rank = get_tensor_model_parallel_rank()
-        input_dim = getattr(param, "input_dim", None)
-        param_data = param.data
-        if input_dim is not None:
-            shard_size = param_data.shape[input_dim]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(input_dim, start_idx,
-                                                 shard_size)
-
-        # Special case for Fp8 scales.
-        elif fp8_scales_shard_indexer is not None:
-            param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
-                                                                 loaded_weight,
-                                                                 shard_id=0)
-
-        if fp8_scales_shard_indexer is None and len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
-
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
-
-    def forward(self, input_):
-        # Set up backprop all-reduce.
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            tp_rank = get_tensor_model_parallel_rank()
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
-
-        if not self.skip_bias_add:
-            output_bias = None
-            bias = self.bias
-        else:
-            output_bias = self.bias
-            bias = None
-
-        scattered_output = self.gemm_rs_op.forward(input_parallel,
-                                                   self.weight,
-                                                   bias=bias)
-        scattered_output = torch.squeeze(scattered_output, 0)
-        output = tensor_model_parallel_all_gather(scattered_output, 0)
-
         return output, output_bias
 
     def extra_repr(self) -> str:
