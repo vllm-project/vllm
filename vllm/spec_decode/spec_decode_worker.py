@@ -131,9 +131,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 'parallel_config']
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
-
-            # if draft_tp == 1:
-            #     draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
             if cpu_draft_worker:
                 cpu_draft_worker_kwargs = copy.deepcopy(draft_worker_kwargs)
                 from vllm.executor.cpu_executor import (
@@ -154,6 +151,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 cpu_draft_worker_kwargs["device_config"].device_type = "cpu"
                 proposer_worker = CPUMultiStepWorker(**cpu_draft_worker_kwargs)
             else:
+                if draft_tp == 1:
+                    draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)

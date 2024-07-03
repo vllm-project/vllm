@@ -8,11 +8,11 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# try:
-import vllm._C
-import vllm._C_cpu
-# except ImportError as e:
-#     logger.warning("Failed to import from vllm._C with %r", e)
+try:
+    import vllm._C
+    import vllm._C_cpu
+except ImportError as e:
+    logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
     import vllm._moe_C
