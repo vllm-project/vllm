@@ -108,9 +108,6 @@ class MultiModalRegistry:
         """
         Register the maximum number of tokens, belonging to a
         specific modality, input to the language model for a model class.
-
-        See also:
-            :ref:`adding_a_new_multimodal_model`
         """
         return self._get_plugin(data_type_key) \
             .register_max_multimodal_tokens(max_mm_tokens)
@@ -124,9 +121,6 @@ class MultiModalRegistry:
         """
         Register the maximum number of image tokens
         input to the language model for a model class.
-
-        See also:
-            :ref:`adding_a_new_multimodal_model`
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
