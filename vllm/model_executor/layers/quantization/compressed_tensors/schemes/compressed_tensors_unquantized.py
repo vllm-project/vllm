@@ -18,6 +18,9 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
     in a linear transformation.
     """
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
