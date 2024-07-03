@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from gguf.constants import GGML_QUANT_SIZES
@@ -35,7 +35,8 @@ class GGUFConfig(QuantizationConfig):
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         return 60
 
     @classmethod
@@ -47,7 +48,8 @@ class GGUFConfig(QuantizationConfig):
         return cls()
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["GGUFLinearMethod"]:
+        self, layer: torch.nn.Module
+    ) -> Optional[Union["GGUFLinearMethod", "GGUFEmbeddingMethod"]]:
         if isinstance(layer, LinearBase) or isinstance(layer, ParallelLMHead):
             return GGUFLinearMethod(self)
         elif isinstance(layer, VocabParallelEmbedding):
@@ -81,7 +83,10 @@ class GGUFLinearMethod(LinearMethodBase):
 
         qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
                                  requires_grad=False)
-        set_weight_attrs(qweight_type, {"is_gguf_weight_type": True,"ignore_warning": True})
+        set_weight_attrs(qweight_type, {
+            "is_gguf_weight_type": True,
+            "ignore_warning": True
+        })
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
 

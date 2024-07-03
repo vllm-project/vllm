@@ -56,7 +56,7 @@ def get_cached_tokenizer(
 
 
 def get_tokenizer(
-    tokenizer_name: str,
+    tokenizer_name: Union[str, Path],
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
@@ -89,8 +89,8 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
-    is_gguf = Path(tokenizer_name).is_file() and tokenizer_name.endswith(
-        ".gguf")
+    is_gguf = Path(tokenizer_name).is_file() and Path(
+        tokenizer_name).suffix == ".gguf"
     try:
         if is_gguf:
             kwargs["gguf_file"] = Path(tokenizer_name).name
