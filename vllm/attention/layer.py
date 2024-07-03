@@ -47,13 +47,14 @@ class Attention(nn.Module):
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
-        # The default kv_scale is set to 1.0. This is ignored
+        # The default key/value_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
         # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
-        # expect the pre-quantized kv_scale to be loaded along
+        # expect the pre-quantized key/value_scale to be loaded along
         # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
-        self._kv_scale = 1.0
+        self._key_scale = 1.0
+        self._value_scale = 1.0
         quant_method = quant_config.get_quant_method(
             self) if quant_config else None
         if quant_method is not None:
@@ -66,8 +67,8 @@ class Attention(nn.Module):
                                      "fp8 checkpoints.")
                 # When FP8 quantization is enabled, we make a parameter
                 # "kv_scale" so that it can be loaded from FP8 checkpoint.
-                # The kv_scale will then be converted back to self._kv_scale
-                # in a native float32 value after weight loading.
+                # The key/value_scale will then be converted back to
+                # self._kv_scale in a native float32 value after weight loading
                 self.quant_method = quant_method
                 self.quant_method.create_weights(self)
 
@@ -93,7 +94,7 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         # TODO(mgoin): Add capacity for loading separate key and value scales
         return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                 self._kv_scale, self._kv_scale)
+                                 self._key_scale, self._value_scale)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

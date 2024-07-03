@@ -319,13 +319,13 @@ namespace vllm {
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
                                    Tout* __restrict__ dst_cache,
-                                   const float kv_scale,
+                                   const float scale,
                                    const int64_t block_stride) {
   const int64_t block_idx = blockIdx.x;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
     dst_cache[idx] =
-        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], kv_scale);
+        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], scale);
   }
 }
 
@@ -334,11 +334,11 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
 #define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)                                \
   vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE><<<grid, block, 0, stream>>>( \
       reinterpret_cast<Tin*>(src_cache.data_ptr()),                          \
-      reinterpret_cast<Tout*>(dst_cache.data_ptr()), kv_scale, block_stride);
+      reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, block_stride);
 
 // Only for testing.
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
-                 const double kv_scale, const std::string& kv_cache_dtype) {
+                 const double scale, const std::string& kv_cache_dtype) {
   torch::Device src_device = src_cache.device();
   torch::Device dst_device = dst_cache.device();
   TORCH_CHECK(src_device.is_cuda(), "src must be on a GPU")

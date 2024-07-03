@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -457,3 +458,57 @@ def initialize_dummy_weights(
                 param.data.copy_(tmp_param)
             else:
                 param.uniform_(low, high)
+
+
+def remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
+    """Remap the name of FP8 kv-scale parameters.
+
+    This function handles the remapping of FP8 kv-scale parameter names.
+    It checks if the given name ends with "kv_scale" and attempts to remap
+    it to the expected name format in the model. If the remapped name is not
+    found in the params_dict, a warning is printed and None is returned.
+
+    Args:
+        name (str): The original loaded checkpoint parameter name.
+        params_dict (dict): Dictionary containing the model's named parameters.
+
+    Returns:
+        str: The remapped parameter name if successful, or the original name
+             if no remapping is needed.
+        None: If the remapped name is not found in params_dict.
+    """
+    if name.endswith("kv_scale"):
+        print_warning_once(
+            f"Found kv_scale in the checkpoint (e.g. {name}). This format "
+            "is deprecated in favor of separate key_scale and value_scale "
+            "tensors and will be removed in a future release.")
+        remapped_scale_name = name.replace(".kv_scale", ".attn.kv_scale")
+        if remapped_scale_name not in params_dict:
+            print_warning_once(
+                f"Found kv_scale in the checkpoint (e.g. {name}), "
+                "but not found the expected name in the model "
+                f"(e.g. {remapped_scale_name}). kv_scale is "
+                "not loaded.")
+            return None
+        return remapped_scale_name
+    elif name.endswith("key_scale"):
+        remapped_scale_name = name.replace(".key_scale", ".attn.key_scale")
+        if remapped_scale_name not in params_dict:
+            print_warning_once(
+                f"Found key_scale in the checkpoint (e.g. {name}), "
+                "but not found the expected name in the model "
+                f"(e.g. {remapped_scale_name}). key_scale is "
+                "not loaded.")
+            return None
+        return remapped_scale_name
+    elif name.endswith("value_scale"):
+        remapped_scale_name = name.replace(".value_scale", ".attn.value_scale")
+        if remapped_scale_name not in params_dict:
+            print_warning_once(
+                f"Found value_scale in the checkpoint (e.g. {name}), "
+                "but not found the expected name in the model "
+                f"(e.g. {remapped_scale_name}). value_scale is "
+                "not loaded.")
+            return None
+        return remapped_scale_name
+    return name

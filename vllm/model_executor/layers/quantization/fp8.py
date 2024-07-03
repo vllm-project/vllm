@@ -287,6 +287,8 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
         # If the kv_scale appears in the checkpoint, it will be
         # overwritten when loading weights.
         layer.kv_scale = Parameter(torch.tensor(1.0), requires_grad=False)
+        layer.key_scale = Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.value_scale = Parameter(torch.tensor(-1.0), requires_grad=False)
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
@@ -295,17 +297,37 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
         # If the kv-cache dtype is auto, we enforce the kv-scale to be 1.0
         # regardless whether the kv-scale is available in the checkpoint.
         if layer.kv_cache_dtype != "auto":
-            kv_scale = layer.kv_scale.to("cpu").tolist()
-            if not isinstance(kv_scale, float):
-                raise ValueError("Only support per-tensor scaling factor "
-                                 "for fp8 KV cache")
-            layer._kv_scale = kv_scale
-            if layer._kv_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
-                print_warning_once(
-                    "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
-                    "cause accuracy issues. Please make sure kv-cache scaling "
-                    "factor is available in the fp8 checkpoint.")
+            # We prefer to use separate key_scale and value_scale if present
+            if layer.key_scale > 0.0 and layer.value_scale > 0.0:
+                key_scale = layer.key_scale.to("cpu").tolist()
+                value_scale = layer.value_scale.to("cpu").tolist()
+                if not isinstance(key_scale, float) or not isinstance(
+                        value_scale, float):
+                    raise ValueError("Only support per-tensor scaling factor "
+                                     "for fp8 KV cache")
+                layer._key_scale = key_scale
+                layer._value_scale = value_scale
+                if (layer._key_scale == 1.0 and layer._value_scale == 1.0
+                        and "e5m2" not in layer.kv_cache_dtype):
+                    print_warning_once(
+                        "Using KV cache scaling factor 1.0 for fp8_e4m3. This "
+                        "may cause accuracy issues. Please make sure kv-cache "
+                        "scaling factor is available in the fp8 checkpoint.")
+            else:
+                kv_scale = layer.kv_scale.to("cpu").tolist()
+                if not isinstance(kv_scale, float):
+                    raise ValueError("Only support per-tensor scaling factor "
+                                     "for fp8 KV cache")
+                layer._kv_scale = kv_scale
+                if (layer._kv_scale == 1.0
+                        and "e5m2" not in layer.kv_cache_dtype):
+                    print_warning_once(
+                        "Using KV cache scaling factor 1.0 for fp8_e4m3. This "
+                        "may cause accuracy issues. Please make sure kv-cache "
+                        "scaling factor is available in the fp8 checkpoint.")
         del layer.kv_scale
+        del layer.key_scale
+        del layer.value_scale
 
 
 def per_tensor_quantize(tensor: torch.Tensor,
