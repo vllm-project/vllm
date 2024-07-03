@@ -49,6 +49,7 @@ class TP1DraftModelRunner(ModelRunner):
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         return_hidden_states: bool = False,
+        **kwargs,
     ):
         if return_hidden_states:
             raise ValueError(
@@ -67,6 +68,7 @@ class TP1DraftModelRunner(ModelRunner):
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
             return_hidden_states=return_hidden_states,
+            **kwargs,
         )
 
         # TODO: Remove this cache when we are able to update model_input

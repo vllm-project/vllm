@@ -389,6 +389,9 @@ class ModelConfig:
     def get_num_attention_heads(self,
                                 parallel_config: "ParallelConfig",
                                 tp_rank: int = 0) -> int:
+        if getattr(self.hf_text_config, "num_attention_heads", None) is None:
+            return 0
+
         num_total_kv_heads = self.get_total_num_kv_heads()
         num_kv_heads = self.get_num_kv_heads(parallel_config, tp_rank)
         num_total_attention_heads = self.hf_text_config.num_attention_heads
