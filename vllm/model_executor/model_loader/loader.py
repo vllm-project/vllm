@@ -16,8 +16,8 @@ from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VisionLanguageConfig)
+                         LoRAConfig, ModelConfig, MultiModalConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -68,7 +68,7 @@ def _get_quantization_config(
 def _get_model_initialization_kwargs(
     model_class: Type[nn.Module],
     lora_config: Optional[LoRAConfig],
-    vlm_config: Optional[VisionLanguageConfig],
+    multimodal_config: Optional[MultiModalConfig],
 ) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
@@ -84,18 +84,18 @@ def _get_model_initialization_kwargs(
             "please open an issue on github.")
 
     if supports_vision(model_class):
-        if vlm_config is None:
+        if multimodal_config is None:
             raise ValueError("Provide vision related configurations "
                              "through LLM entrypoint or engine arguments.")
 
-        extra_kwargs["vlm_config"] = vlm_config
+        extra_kwargs["multimodal_config"] = multimodal_config
 
     return extra_kwargs
 
 
 def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
                       lora_config: Optional[LoRAConfig],
-                      vision_language_config: Optional[VisionLanguageConfig],
+                      multimodal_config: Optional[MultiModalConfig],
                       cache_config: CacheConfig) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_class = get_model_architecture(model_config)[0]
@@ -105,7 +105,7 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
                        cache_config=cache_config,
                        quant_config=quant_config,
                        **_get_model_initialization_kwargs(
-                           model_class, lora_config, vision_language_config))
+                           model_class, lora_config, multimodal_config))
 
 
 class BaseModelLoader(ABC):
@@ -118,7 +118,7 @@ class BaseModelLoader(ABC):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   vision_language_config: Optional[VisionLanguageConfig],
+                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -258,14 +258,14 @@ class DefaultModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   vision_language_config: Optional[VisionLanguageConfig],
+                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config,
+                                          lora_config, multimodal_config,
                                           cache_config)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
@@ -298,14 +298,14 @@ class DummyModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   vision_language_config: Optional[VisionLanguageConfig],
+                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config,
+                                          lora_config, multimodal_config,
                                           cache_config)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
@@ -339,7 +339,7 @@ class TensorizerLoader(BaseModelLoader):
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer to the CPU.
@@ -352,7 +352,7 @@ class TensorizerLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config,
+                                          lora_config, multimodal_config,
                                           cache_config)
 
             model.load_weights(self._get_weights_iterator())
@@ -363,7 +363,7 @@ class TensorizerLoader(BaseModelLoader):
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer.
@@ -377,7 +377,7 @@ class TensorizerLoader(BaseModelLoader):
                 quant_config = _get_quantization_config(
                     model_config, self.load_config)
                 extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, vision_language_config)
+                    model_class, lora_config, multimodal_config)
                 extra_kwargs["quant_config"] = quant_config
                 extra_kwargs["cache_config"] = cache_config
 
@@ -392,7 +392,7 @@ class TensorizerLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   vision_language_config: Optional[VisionLanguageConfig],
+                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -406,12 +406,10 @@ class TensorizerLoader(BaseModelLoader):
 
         if is_vllm_tensorized(self.tensorizer_config):
             return self._load_model_serialized(model_config, device_config,
-                                               lora_config,
-                                               vision_language_config,
+                                               lora_config, multimodal_config,
                                                cache_config)
         return self._load_model_serialized_cpu(model_config, device_config,
-                                               lora_config,
-                                               vision_language_config,
+                                               lora_config, multimodal_config,
                                                cache_config)
 
     @staticmethod
@@ -494,7 +492,7 @@ class ShardedStateLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   vision_language_config: Optional[VisionLanguageConfig],
+                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -508,7 +506,7 @@ class ShardedStateLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config,
+                                          lora_config, multimodal_config,
                                           cache_config)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
@@ -804,14 +802,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   vision_language_config: Optional[VisionLanguageConfig],
+                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config,
+                                          lora_config, multimodal_config,
                                           cache_config)
 
                 self._load_weights(model_config, model)
