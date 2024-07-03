@@ -97,13 +97,19 @@ the corresponding plugin with the same modality key is applied.
 """
 
 MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
-"""Return a dictionary to be passed as keyword arguments to
+"""
+Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
-and processors in HuggingFace Transformers."""
+and processors in HuggingFace Transformers.
+
+If the data is not supported, throw :exc:`TypeError`.
+"""
 
 MultiModalTokensCalc = Union[int, Callable[[InputContext], int]]
-"""Calculate the maximum number of multimodal tokens input to the language
-model. This does not include the tokens that correspond to the input text."""
+"""
+Calculate the maximum number of multimodal tokens input to the language
+model. This does not include the tokens that correspond to the input text.
+"""
 
 N = TypeVar("N", bound=Type[nn.Module])
 
@@ -146,7 +152,7 @@ class MultiModalPlugin(ABC):
         """
         Register an input mapper to a model class.
         When the model receives input data that matches the modality served by
-        this plugin (see :meth:`get_data_type`), the provided function is
+        this plugin (see :meth:`get_data_key`), the provided function is
         invoked to transform the data into a dictionary of model inputs.
         If `None` is provided, then the default input mapper is used instead.
 
@@ -175,9 +181,10 @@ class MultiModalPlugin(ABC):
         Apply an input mapper to a data passed
         to the model, transforming the data into a dictionary of model inputs.
 
-        If the data is not something that the mapper expects, throws TypeError.
-
         The model is identified by ``model_config``.
+
+        Raises:
+            TypeError: If the data type is not supported.
 
         See also:
             :ref:`adding_a_new_multimodal_model`
