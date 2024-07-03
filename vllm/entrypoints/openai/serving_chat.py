@@ -110,7 +110,8 @@ class OpenAIServingChat(OpenAIServing):
             # These models do not use image tokens in the prompt
             return None
         if model_type.startswith("llava"):
-            return "<image>"
+            return self.tokenizer.decode(
+                self.model_config.hf_config.image_token_index)
 
         else:
             raise TypeError("Unknown model type: {model_type}")

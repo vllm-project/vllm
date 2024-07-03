@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -244,6 +244,26 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         return data
 
+    def _validate_pixel_values(
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
+        def _validate_shape(data: torch.Tensor):
+            if list(data.shape)[2:] != [
+                    3, self.config.vision_config.image_size,
+                    self.config.vision_config.image_size
+            ]:
+                raise ValueError(
+                    "The expected pixel value tensor shape is batch dimension "
+                    "plus patch number, channel, height and width.")
+
+        if isinstance(data, torch.Tensor):
+            _validate_shape(data)
+        else:
+            [_validate_shape(d) for d in data]
+
+        return data
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaNextImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -262,7 +282,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         return LlavaNextImagePixelInputs(
             type="pixel_values",
-            data=pixel_values,
+            data=self._validate_pixel_values(pixel_values),
             image_sizes=self._validate_image_sizes(image_sizes),
         )
 

@@ -138,7 +138,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
         self.sampler = Sampler()
 
     def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape)[1:] != [3, 336, 336]:
+        if list(data.shape)[1:] != [
+                3, self.config.vision_config.image_size,
+                self.config.vision_config.image_size
+        ]:
             raise ValueError(
                 "The expected image tensor shape is batch dimension plus "
                 "channel, height and width.")

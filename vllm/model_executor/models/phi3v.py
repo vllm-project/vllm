@@ -15,7 +15,7 @@
 # limitations under the License.
 import re
 from functools import lru_cache
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -50,7 +50,9 @@ _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
 }
 
+# Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 32044
+_INPUT_RESOLUTION = 336
 
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      hidden_act="quick_gelu",
@@ -453,6 +455,33 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
+    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
+        if list(data.shape[1:]) != [2]:
+            raise ValueError(
+                f"The expected image sizes shape is batch dimension plus "
+                f"{[2]}. You supplied {data.shape}.")
+
+        return data
+
+    def _validate_pixel_values(
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
+        def _validate_shape(data: torch.Tensor):
+            if list(data.shape)[2:] != [
+                    3, _INPUT_RESOLUTION, _INPUT_RESOLUTION
+            ]:
+                raise ValueError(
+                    "The expected pixel value tensor shape is batch dimension "
+                    "plus patch number, channel, height and width.")
+
+        if isinstance(data, torch.Tensor):
+            _validate_shape(data)
+        else:
+            [_validate_shape(d) for d in data]
+
+        return data
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Phi3VImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -469,9 +498,10 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
             raise ValueError("Incorrect type of image sizes. "
                              f"Got type: {type(image_sizes)}")
 
-        return Phi3VImagePixelInputs(type="pixel_values",
-                                     data=pixel_values,
-                                     image_sizes=image_sizes)
+        return Phi3VImagePixelInputs(
+            type="pixel_values",
+            data=self._validate_pixel_values(pixel_values),
+            image_sizes=self._validate_image_sizes(image_sizes))
 
     def forward(self,
                 input_ids: torch.Tensor,

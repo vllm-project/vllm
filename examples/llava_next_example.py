@@ -7,7 +7,7 @@ from vllm import LLM, SamplingParams
 
 
 def run_llava_next():
-    llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf")
+    llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf", max_model_len=4096)
 
     prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"
     url = "https://h2o-release.s3.amazonaws.com/h2ogpt/bigben.jpg"
