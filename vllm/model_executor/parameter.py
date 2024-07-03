@@ -203,15 +203,15 @@ class PerTensorScaleParameter(BasevLLMParameter):
         return self.qkv_idxs[shard_id]
 
     def load_merged_column_weight(self, *args, **kwargs):
-        self._col_shard_splitter(*args, **kwargs)
+        self._load_into_shard_id(*args, **kwargs)
 
     def load_qkv_weight(self, *args, **kwargs):
-        self._col_shard_splitter(*args, **kwargs)
+        self._load_into_shard_id(*args, **kwargs)
 
     def load_column_parallel_weight(self, *args, **kwargs):
-        self._col_shard_splitter(*args, **kwargs)
+        self._load_into_shard_id(*args, **kwargs)
 
-    def _col_shard_splitter(self, loaded_weight: torch.Tensor,
+    def _load_into_shard_id(self, loaded_weight: torch.Tensor,
                             shard_id: Union[str, int], **kwargs):
         """
         Slice the parameter data based on the shard id for 
