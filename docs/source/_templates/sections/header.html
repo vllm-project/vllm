@@ -1,30 +1,35 @@
 <style>
-  /* Light mode styles (default) */
   .notification-bar {
-    background-color: #fff3cd;
-    color: #856404;
+    width: 100vw;
     display: flex;
     justify-content: center;
     align-items: center;
     font-size: 16px;
-    width: 100vw;
+  }
+  .notification-bar p {
     margin: 0;
   }
   .notification-bar a {
-    color: #d97706;
     font-weight: bold;
     text-decoration: none;
   }
 
+  /* Light mode styles (default) */
+  .notification-bar {
+    background-color: #fff3cd;
+    color: #856404;
+  }
+  .notification-bar a {
+    color: #d97706;
+  }
+
   /* Dark mode styles */
-  @media (prefers-color-scheme: dark) {
-    .notification-bar {
-      background-color: #333;
-      color: #ddd;
-    }
-    .notification-bar a {
-      color: #ffa500; /* Brighter color for visibility */
-    }
+  .notification-bar[data-theme=dark] {
+    background-color: #333;
+    color: #ddd;
+  }
+  .notification-bar[data-theme=dark] a {
+    color: #ffa500; /* Brighter color for visibility */
   }
 </style>
 
