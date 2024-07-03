@@ -4,7 +4,9 @@ import subprocess
 from PIL import Image
 
 from vllm import LLM, SamplingParams
-from vllm.multimodal.image import ImagePixelData
+
+# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
+# You can use `.buildkite/download-images.sh` to download them
 
 
 def run_phi3v():
@@ -17,10 +19,10 @@ def run_phi3v():
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
-        image_input_type="pixel_values",
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
-        image_feature_size=1921,
+        # Use the maximum possible value for memory profiling
+        image_feature_size=2653,
         max_num_seqs=5,
     )
 
@@ -28,14 +30,14 @@ def run_phi3v():
 
     # single-image prompt
     prompt = "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n"  # noqa: E501
-    prompt = prompt.replace("<|image_1|>", "<|image|>" * 1921 + "<s>")
-
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
 
     outputs = llm.generate(
         {
             "prompt": prompt,
-            "multi_modal_data": ImagePixelData(image),
+            "multi_modal_data": {
+                "image": image
+            },
         },
         sampling_params=sampling_params)
     for o in outputs:

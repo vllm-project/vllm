@@ -8,12 +8,13 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
-capability = torch.cuda.get_device_capability()
+capability = current_platform.get_device_capability()
 capability = capability[0] * 10 + capability[1]
 
 
