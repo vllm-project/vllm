@@ -10,6 +10,7 @@ from vllm.model_executor.models.deepseek_vl import (
 from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 
 from ..conftest import HfRunner, VllmRunner, _ImageAssets
+from .utils import check_outputs_equal
 
 pytestmark = pytest.mark.vlm
 
@@ -115,25 +116,15 @@ def get_input(tokenizer, prompt, image):
 
 def iter_deepseek_vl_configs(model_name: str):
     image_hw_to_feature_size = {
-        (1024, 1024): 576,
+        (336, 336): 576,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
-        for input_type, input_shape in [
-            (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
-            (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, f, 1024)),
-        ]:
-            yield (
-                model_name,
-                VisionLanguageConfig(
-                    image_input_type=input_type,
-                    image_feature_size=f,
-                    image_token_id=100015,
-                    image_input_shape=input_shape,
-                    image_processor=model_name,
-                    image_processor_revision=None,
-                ),
-            )
+        input_shape = (1, 3, h, w)
+        yield (model_name,
+               VisionLanguageConfig(image_feature_size=f,
+                                    image_token_id=100015,
+                                    image_input_shape=input_shape))
 
 
 model_and_vl_config = [
@@ -252,15 +243,15 @@ def run_test(
         hf_outputs.append(
             (o, tokenizer.decode(o.cpu().tolist(), skip_special_tokens=True)))
 
-    for i in range(len(HF_IMAGE_PROMPTS)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-            vllm_outputs[i], vlm_config, model_id)
-        assert (
-            hf_output_str == vllm_output_str
-        ), f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
-        assert (hf_output_ids == vllm_output_ids
-                ), f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+    check_outputs_equal(
+        hf_outputs,
+        [
+            vllm_to_hf_output(vllm_output, vlm_config, model_id)
+            for vllm_output in vllm_outputs
+        ],
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
