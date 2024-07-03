@@ -27,6 +27,8 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "mlp_speculator": MLPSpeculatorConfig,
 }
 
+_GGUF_ARCHITECTURE_REGISTRY: Dict[str, str] = {"llama": "LlamaForCausalLM"}
+
 for name, cls in _CONFIG_REGISTRY.items():
     with contextlib.suppress(ValueError):
         AutoConfig.register(name, cls)
@@ -38,6 +40,11 @@ def get_config(model: Union[str, Path],
                code_revision: Optional[str] = None,
                rope_scaling: Optional[dict] = None,
                rope_theta: Optional[float] = None) -> PretrainedConfig:
+    is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
+    gguf_file = None
+    if is_gguf:
+        gguf_file = Path(model).name
+        model = Path(model).parent
     try:
         config = AutoConfig.from_pretrained(
             model,

@@ -325,6 +325,7 @@ class LlamaModel(nn.Module):
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
+            quant_config=quant_config
         )
         self.start_layer, self.end_layer = get_pp_indices(
             config.num_hidden_layers,

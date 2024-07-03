@@ -304,6 +304,13 @@ class VocabParallelEmbedding(torch.nn.Module):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
+        # If the parameter is a gguf weight, then load it directly.
+        if getattr(param, "is_gguf_weight_type", None):
+            param.data.copy_(loaded_weight)
+            return
+        elif isinstance(param, UninitializedParameter):
+            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
+
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
@@ -342,7 +349,11 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             masked_input = input_
         # Get the embeddings.
-        output_parallel = F.embedding(masked_input.long(), self.weight)
+        if not isinstance(self.linear_method, UnquantizedLinearMethod):
+            output_parallel = self.linear_method.apply(self,
+                                                      masked_input.long())
+        else:
+            output_parallel = F.embedding(masked_input.long(), self.weight)
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)

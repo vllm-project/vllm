@@ -6,7 +6,7 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -48,7 +48,7 @@ class GGUFConfig(QuantizationConfig):
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["GGUFLinearMethod"]:
-        if isinstance(layer, LinearBase):
+        if isinstance(layer, LinearBase) or isinstance(layer, ParallelLMHead):
             return GGUFLinearMethod(self)
         elif isinstance(layer, VocabParallelEmbedding):
             return GGUFEmbeddingMethod(self)
@@ -81,7 +81,7 @@ class GGUFLinearMethod(LinearMethodBase):
 
         qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
                                  requires_grad=False)
-        set_weight_attrs(qweight_type, {"ignore_warning": True})
+        set_weight_attrs(qweight_type, {"is_gguf_weight_type": True,"ignore_warning": True})
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
 
