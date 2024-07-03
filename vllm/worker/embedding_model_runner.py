@@ -92,10 +92,9 @@ class EmbeddingModelRunner(
             "positions": model_input.input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": model_input.attn_metadata,
+            **(model_input.multi_modal_kwargs or {}),
         }
-        if self.vision_language_config:
-            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-            execute_model_kwargs.update({"image_input": multi_modal_kwargs})
+
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.

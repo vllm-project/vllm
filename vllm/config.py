@@ -5,7 +5,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
                     Union)
 
 import torch
-from transformers import PretrainedConfig, PreTrainedTokenizerBase
+from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -682,11 +682,13 @@ class ParallelConfig:
 
             from vllm.executor import ray_utils
             backend = "mp"
-            ray_found = ray_utils.ray is not None
+            ray_found = ray_utils.ray_is_available()
             if cuda_device_count_stateless() < self.world_size:
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
-                                     "required for multi-node inference")
+                                     "required for multi-node inference, "
+                                     "please install Ray with `pip install "
+                                     "ray`.") from ray_utils.ray_import_err
                 backend = "ray"
             elif ray_found:
                 if self.placement_group:
@@ -718,6 +720,9 @@ class ParallelConfig:
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
                 "are 'ray' or 'mp'.")
+        if self.distributed_executor_backend == "ray":
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -1302,16 +1307,6 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
-
-    #TODO(ywang96): make this a cached property once we refactor the
-    # VisionLanguageConfig class.
-    def get_image_token_text(
-            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
-        """Get the image token placeholder text to be inserted into the 
-        text prompt and the string representation of the image token id.
-        """
-        image_token_str = tokenizer.decode(self.image_token_id)
-        return image_token_str * self.image_feature_size, image_token_str
 
     def as_cli_args_dict(self) -> Dict[str, Any]:
         """Flatten vision language config to pure args.

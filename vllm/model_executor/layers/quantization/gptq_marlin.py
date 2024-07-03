@@ -12,7 +12,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.utils import get_device_capability_stateless
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -173,7 +173,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             return False
 
         # If the capability of the device is too low, cannot convert.
-        major, minor = get_device_capability_stateless()
+        major, minor = current_platform.get_device_capability()
         device_capability = major * 10 + minor
         if device_capability < cls.get_min_capability():
             return False

@@ -12,7 +12,8 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import get_device_capability_stateless, print_warning_once
+from vllm.platforms import current_platform
+from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -20,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def cutlass_fp8_supported() -> bool:
-    capability = get_device_capability_stateless()
+    capability = current_platform.get_device_capability()
     capability = capability[0] * 10 + capability[1]
 
     return ops.cutlass_scaled_mm_supports_fp8(capability)

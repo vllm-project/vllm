@@ -606,7 +606,7 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
     [MODEL_NAME],
 )
 async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
-    base_url = str(client.base_url)[:-3]
+    base_url = str(client.base_url)[:-3].strip("/")
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
 
     for add_special in [False, True]:
