@@ -10,6 +10,7 @@ Table of contents:
 #. :ref:`Requirements <cpu_backend_requirements>`
 #. :ref:`Quick start using Dockerfile <cpu_backend_quick_start_dockerfile>`
 #. :ref:`Build from source <build_cpu_backend_from_source>`
+#. :ref:`Related runtime environment variables <env_intro>`
 #. :ref:`Intel Extension for PyTorch <ipex_guidance>`
 #. :ref:`Performance tips <cpu_backend_performance_tips>`
 
@@ -47,7 +48,7 @@ Build from source
 .. code-block:: console
 
     $ sudo apt-get update  -y
-    $ sudo apt-get install -y gcc-12 g++-12
+    $ sudo apt-get install -y gcc-12 g++-12 libnuma-dev
     $ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
 - Second, install Python packages for vLLM CPU backend building:
@@ -71,6 +72,15 @@ Build from source
     
     - If you want to force enable AVX512_BF16 for the cross-compilation, please set environment variable VLLM_CPU_AVX512BF16=1 before the building.    
 
+.. _env_intro:
+
+Related runtime environment variables
+-------------------------------------
+
+- ``VLLM_CPU_KVCACHE_SPACE``: specify the KV Cache size (e.g, ``VLLM_CPU_KVCACHE_SPACE=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
+
+- ``VLLM_CPU_OMP_THREADS_BIND``: specify the CPU cores dedicated to the OpenMP threads. For example, ``VLLM_CPU_OMP_THREADS_BIND=0-31`` means there will be 32 OpenMP threads bound on 0-31 CPU cores.
+
 .. _ipex_guidance:
 
 Intel Extension for PyTorch
@@ -85,8 +95,6 @@ Intel Extension for PyTorch
 Performance tips
 -----------------
 
-- vLLM CPU backend uses environment variable ``VLLM_CPU_KVCACHE_SPACE`` to specify the KV Cache size (e.g, ``VLLM_CPU_KVCACHE_SPACE=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
-
 - We highly recommend to use TCMalloc for high performance memory allocation and better cache locality. For example, on Ubuntu 22.4, you can run:
 
 .. code-block:: console
@@ -96,11 +104,17 @@ Performance tips
     $ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD # prepend the library to LD_PRELOAD
     $ python examples/offline_inference.py # run vLLM
 
-- vLLM CPU backend uses OpenMP for thread-parallel computation. If you want the best performance on CPU, it will be very critical to isolate CPU cores for OpenMP threads with other thread pools (like web-service event-loop), to avoid CPU oversubscription. 
+- When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 30 and 31 for the framework and using CPU 0-29 for OpenMP:
 
-- If using vLLM CPU backend on a bare-metal machine, it is recommended to disable the hyper-threading.
+.. code-block:: console
 
-- If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores and memory nodes, to avoid the remote memory node access. ``numactl`` is an useful tool for CPU core and memory binding on NUMA platform. Besides, ``--cpuset-cpus`` and ``--cpuset-mems`` arguments of ``docker run`` are also useful.
+    $ export VLLM_CPU_KVCACHE_SPACE=40
+    $ export VLLM_CPU_OMP_THREADS_BIND=0-29 
+    $ python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m
+
+- If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU cores using ``VLLM_CPU_OMP_THREADS_BIND``.
+
+- If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using ``VLLM_CPU_OMP_THREADS_BIND`` to avoid cross NUMA node memory access.
 
 
 
