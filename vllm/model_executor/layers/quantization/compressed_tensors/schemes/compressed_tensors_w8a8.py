@@ -97,7 +97,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
             layer.input_scale = None
     
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-        # ops.scaled_fp8_quant supports both dynamic and static quant.
+        # ops.scaled_int8_quant supports both dynamic and static quant.
         # * dynamic, layer.input_scale is None and x_scale computed from x.
         # * static, layer.input_scale is scalar and x_scale is input_scale.
         x_q, x_scale = ops.scaled_int8_quant(x, layer.input_scale)
