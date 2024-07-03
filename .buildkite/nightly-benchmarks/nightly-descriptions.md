@@ -37,5 +37,3 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 
 ## Results
 
-| Test name             | GPU            |   Successful req. |   Tput (req/s) |   Mean TTFT (ms) |   Median TTFT (ms) |   P99 TTFT (ms) |   Mean ITL (ms) |   Median ITL (ms) |   P99 ITL (ms) | Engine   |
-|:----------------------|:---------------|------------------:|---------------:|-----------------:|-------------------:|----------------:|----------------:|------------------:|---------------:|:---------|
