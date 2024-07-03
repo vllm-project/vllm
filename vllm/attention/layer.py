@@ -9,7 +9,7 @@ from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.fp8 import Fp8KVCacheMethod
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 
 
 class Attention(nn.Module):
@@ -57,7 +57,7 @@ class Attention(nn.Module):
         quant_method = quant_config.get_quant_method(
             self) if quant_config else None
         if quant_method is not None:
-            assert isinstance(quant_method, Fp8KVCacheMethod)
+            assert isinstance(quant_method, BaseKVCacheMethod)
             # TODO (mgoin): kv cache dtype should be specified in the FP8
             # checkpoint config and become the "auto" behavior
             if "fp8" in self.kv_cache_dtype:
