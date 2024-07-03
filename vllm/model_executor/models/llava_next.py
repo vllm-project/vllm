@@ -59,6 +59,8 @@ LlavaNextImageInputs = LlavaNextImagePixelInputs
 
 
 # Taken from: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L91
+# NOTE: new_height and new_width are further incremented to properly invert the
+# floordiv operation: https://github.com/huggingface/transformers/blob/v4.42.2/src/transformers/models/llava_next/modeling_llava_next.py#L133
 def _get_llava_next_num_unpadded_features(
     height: int,
     width: int,
@@ -73,9 +75,13 @@ def _get_llava_next_num_unpadded_features(
     current_aspect_ratio: float = current_width / current_height
     if aspect_ratio > current_aspect_ratio:
         new_height = (height * current_width) // width
+        if new_height % 2 == 1:
+            new_height += 1
         current_height = new_height
     else:
         new_width = (width * current_height) // height
+        if new_width % 2 == 1:
+            new_width += 1
         current_width = new_width
 
     unpadded_features = current_height * current_width
@@ -128,7 +134,10 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
     # Result in the max possible feature size (2x2 grid of 336x336px tiles)
     dummy_height = dummy_width = 448
     image_feature_size = get_llava_next_image_feature_size(
-        hf_config, input_height=dummy_height, input_width=dummy_width)
+        hf_config,
+        input_height=dummy_height,
+        input_width=dummy_width,
+    )
 
     if isinstance(vision_config, CLIPVisionConfig):
         seq_data = dummy_seq_data_for_clip(
@@ -164,7 +173,10 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
         width, height = image_data.size
 
         image_feature_size = get_llava_next_image_feature_size(
-            hf_config, input_height=height, input_width=width)
+            hf_config,
+            input_height=height,
+            input_width=width,
+        )
     elif isinstance(image_data, torch.Tensor):
         raise NotImplementedError("Embeddings input is not supported yet")
     else:
@@ -277,10 +289,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             strategy=self.config.vision_feature_select_strategy,
         )
 
+    # Based on: https://github.com/haotian-liu/LLaVA/blob/main/llava/model/llava_arch.py
     def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
                                       patch_embeddings: torch.Tensor, *,
                                       strategy: str) -> torch.Tensor:
-        # Based on: https://github.com/haotian-liu/LLaVA/blob/main/llava/model/llava_arch.py
         if strategy == "flat":
             return patch_embeddings.flatten(0, 1)
 
