@@ -40,7 +40,10 @@ class MistralToolParser(ToolParser):
                 tool_calls: List[ToolCall] = [
                     ToolCall(
                         type='function',
-                        function=FunctionCall.parse_obj(raw_function_call)
+                        function=FunctionCall(
+                            name=raw_function_call['name'],
+                            arguments=json.dumps(raw_function_call['arguments'])
+                        )
                     )
                     for raw_function_call in function_call_arr
                 ]
@@ -78,8 +81,16 @@ class Hermes2ProToolParser(ToolParser):
 
 
         # filter out & enforce the schema
-        function_calls = [FunctionCall.parse_obj(json.loads(match[0] if match[0] else match[1])) for match in function_call_tuples]
-        tool_calls = [ToolCall(type='function', function=function_call) for function_call in function_calls]
+        raw_function_calls = [json.loads(match[0] if match[0] else match[1]) for match in function_call_tuples]
+        tool_calls = [
+            ToolCall(
+                type='function',
+                function=FunctionCall(
+                    name=function_call['name'],
+                    arguments=json.dumps(function_call['arguments'])
+                )
+            ) for function_call in raw_function_calls
+        ]
         return tool_calls
 
     def extract_tool_calls_streaming(self, generator):

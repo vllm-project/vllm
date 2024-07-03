@@ -1,4 +1,5 @@
 from openai import OpenAI
+import json
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
@@ -75,6 +76,10 @@ available_tools = {
 completion_tool_calls = chat_completion.choices[0].message.tool_calls
 for call in completion_tool_calls:
     tool_to_call = available_tools[call.function.name]
-    args = call.function.arguments
-    print(tool_to_call, args)
+    args = json.loads(call.function.arguments)
+    result = tool_to_call(**args)
+    print(result)
+
+
+
 

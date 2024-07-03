@@ -636,7 +636,7 @@ class EmbeddingResponse(BaseModel):
 
 class FunctionCall(OpenAIBaseModel):
     name: str
-    arguments: str | Dict
+    arguments: str
 
     def to_dict(self):
         return {
