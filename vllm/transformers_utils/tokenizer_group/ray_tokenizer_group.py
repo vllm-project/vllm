@@ -2,16 +2,24 @@ import asyncio
 import os
 from typing import List, Optional
 
+try:
+    from ray.exceptions import ActorDiedError
+except ImportError:
+    # For older versions of Ray
+    from ray.exceptions import RayActorError as ActorDiedError
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizer
 
 from vllm.config import TokenizerPoolConfig
 from vllm.executor.ray_utils import ray
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
+
+logger = init_logger(__name__)
 
 
 class RayTokenizerGroupPool(BaseTokenizerGroup):
@@ -46,23 +54,27 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                  ray_actor_options: dict, **tokenizer_config):
         # Store a local copy of the TokenizerGroup for quick access
         # to underlying HF tokenizers.
+        self._tokenizer_config = {
+            "tokenizer_id": tokenizer_id,
+            "enable_lora": enable_lora,
+            "max_num_seqs": max_num_seqs,
+            "max_input_length": max_input_length,
+            **tokenizer_config
+        }
         self._local_tokenizer_group = self._worker_cls(
-            tokenizer_id=tokenizer_id,
-            enable_lora=enable_lora,
-            max_num_seqs=max_num_seqs,
-            max_input_length=max_input_length,
-            **tokenizer_config,
-        )
+            **self._tokenizer_config, )
 
-        ray_tokenizer_group_cls = ray.remote(
+        self._ray_tokenizer_group_cls = ray.remote(
             self._worker_cls).options(**ray_actor_options)
-        self.tokenizer_actors = [
-            ray_tokenizer_group_cls.remote(tokenizer_id, enable_lora,
-                                           max_num_seqs, max_input_length,
-                                           **tokenizer_config)
-            for _ in range(num_actors)
-        ]
+        self.tokenizer_actors = [self._init_actor() for _ in range(num_actors)]
         self._idle_actors: Optional[asyncio.Queue] = None
+
+        # If set, actor is unhealthy. Will reraise on the next
+        # check_health call.
+        self._exception: Optional[ActorDiedError] = None
+
+    def _init_actor(self) -> ray.ObjectRef:
+        return self._ray_tokenizer_group_cls.remote(**self._tokenizer_config)
 
     @property
     def pool_size(self) -> int:
@@ -78,6 +90,22 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             for actor in self.tokenizer_actors:
                 self._idle_actors.put_nowait(actor)
 
+    def _finalize_encode(self, actor: ray.ObjectRef,
+                         original_actor: ray.ObjectRef, actor_is_alive: bool):
+        assert self._idle_actors is not None
+        # Cleanup the dead actor.
+        if not actor_is_alive or original_actor is not actor:
+            self.tokenizer_actors.remove(original_actor)
+        if actor_is_alive:
+            # Put the actor back in the queue.
+            # This is done in a finally block to ensure that the actor is
+            # always put back in the queue, even if an exception/cancellation
+            # is raised.
+            self._idle_actors.put_nowait(actor)
+            # Add back the new actor.
+            if original_actor is not actor:
+                self.tokenizer_actors.append(actor)
+
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
@@ -88,23 +116,41 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         The actor is then put back in the queue for future use.
         This is blocking.
         """
+        self.check_health()
         self._ensure_queue_initialized()
         assert self._idle_actors is not None
 
         if self._idle_actors.empty():
             raise RuntimeError("No idle actors available.")
         actor = self._idle_actors.get_nowait()
+        actor_is_alive = True
+        original_actor = actor
         try:
             ret = ray.get(
                 actor.encode.remote(request_id=request_id,
                                     prompt=prompt,
                                     lora_request=lora_request))
+        except ActorDiedError as e:
+            # If the actor is dead, we first try to reinitialize it.
+            logger.warning("%s died with ActorDiedError, reinitializing.",
+                           actor,
+                           exc_info=e)
+            actor = self._init_actor()
+            try:
+                ret = ray.get(
+                    actor.encode.remote(request_id=request_id,
+                                        prompt=prompt,
+                                        lora_request=lora_request))
+            except ActorDiedError as e:
+                logger.error(
+                    "%s died for second time in a row, marking "
+                    "RayTokenizerGroupPool as unhealthy.", actor)
+                actor_is_alive = False
+                if not self._exception:
+                    self._exception = e
+                self.check_health()
         finally:
-            # Put the actor back in the queue.
-            # This is done in a finally block to ensure that the actor is
-            # always put back in the queue, even if an exception/cancellation
-            # is raised.
-            self._idle_actors.put_nowait(actor)
+            self._finalize_encode(actor, original_actor, actor_is_alive)
         return ret
 
     async def encode_async(
@@ -120,20 +166,37 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         The actor is then put back in the queue for future use.
         This is non-blocking.
         """
+        self.check_health()
         self._ensure_queue_initialized()
         assert self._idle_actors is not None
 
         actor = await self._idle_actors.get()
+        actor_is_alive = True
+        original_actor = actor
         try:
             ret = await actor.encode.remote(request_id=request_id,
                                             prompt=prompt,
                                             lora_request=lora_request)
+        except ActorDiedError as e:
+            # If the actor is dead, we first try to reinitialize it.
+            logger.warning("%s died with ActorDiedError, reinitializing.",
+                           actor,
+                           exc_info=e)
+            actor = self._init_actor()
+            try:
+                ret = await actor.encode.remote(request_id=request_id,
+                                                prompt=prompt,
+                                                lora_request=lora_request)
+            except ActorDiedError as e:
+                logger.error(
+                    "%s died for second time in a row, marking "
+                    "RayTokenizerGroupPool as unhealthy.", actor)
+                actor_is_alive = False
+                if not self._exception:
+                    self._exception = e
+                self.check_health()
         finally:
-            # Put the actor back in the queue.
-            # This is done in a finally block to ensure that the actor is
-            # always put back in the queue, even if an exception/cancellation
-            # is raised.
-            self._idle_actors.put_nowait(actor)
+            self._finalize_encode(actor, original_actor, actor_is_alive)
         return ret
 
     def get_max_input_len(self,
@@ -154,6 +217,11 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     ) -> "PreTrainedTokenizer":
         return await self._local_tokenizer_group.get_lora_tokenizer_async(
             lora_request)
+
+    def check_health(self):
+        if self._exception:
+            raise RuntimeError(
+                "TokenizerGroupPool is unhealthy.") from self._exception
 
 
 def _carry_over_env_vars_to_runtime_env(runtime_env: dict) -> None:

@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 
 from vllm.distributed import tensor_model_parallel_gather
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
@@ -22,7 +24,8 @@ class LogitsProcessor(nn.Module):
                  vocab_size: int,
                  org_vocab_size: Optional[int] = None,
                  scale: float = 1.0,
-                 logits_as_input: bool = False) -> None:
+                 logits_as_input: bool = False,
+                 soft_cap: Optional[float] = None) -> None:
         """
         Args:
             scale: A scaling factor to apply to the logits.
@@ -34,10 +37,12 @@ class LogitsProcessor(nn.Module):
         self.logits_as_input = logits_as_input
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
+        # Soft cap the logits. Used in Gemma 2.
+        self.soft_cap = soft_cap
 
     def forward(
         self,
-        embedding: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
@@ -49,9 +54,13 @@ class LogitsProcessor(nn.Module):
                                                  sampling_metadata)
 
             # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, embedding, embedding_bias)
-
+            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
         if logits is not None:
+            if self.soft_cap is not None:
+                logits = logits / self.soft_cap
+                logits = torch.tanh(logits)
+                logits = logits * self.soft_cap
+
             if self.scale != 1.0:
                 logits *= self.scale
 
@@ -60,12 +69,13 @@ class LogitsProcessor(nn.Module):
 
         return logits
 
-    def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
+    def _get_logits(self, hidden_states: torch.Tensor,
+                    lm_head: VocabParallelEmbedding,
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
+        logits = lm_head.linear_method.apply(lm_head,
+                                             hidden_states,
+                                             bias=embedding_bias)
         logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:

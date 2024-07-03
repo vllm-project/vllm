@@ -44,8 +44,9 @@ class QuantizationConfig(ABC):
         """List of supported activation dtypes."""
         raise NotImplementedError
 
+    @classmethod
     @abstractmethod
-    def get_min_capability(self) -> int:
+    def get_min_capability(cls) -> int:
         """Minimum GPU capability to support the quantization method.
 
         E.g., 70 for Volta, 75 for Turing, 80 for Ampere.
@@ -85,6 +86,15 @@ class QuantizationConfig(ABC):
                 return config[key]
         raise ValueError(f"Cannot find any of {keys} in the model's "
                          "quantization config.")
+
+    @staticmethod
+    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
+                         default: Any) -> Any:
+        """Get a optional value from the model's quantization config."""
+        try:
+            return QuantizationConfig.get_from_keys(config, keys)
+        except ValueError:
+            return default
 
     @abstractmethod
     def get_quant_method(

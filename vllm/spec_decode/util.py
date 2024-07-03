@@ -10,14 +10,6 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
 SeqId = int
 
 
-def get_all_seq_ids(
-        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
-    """Given a list of SequenceGroupMetadata, create a list of all
-    sequence ids.
-    """
-    return [seq_id for sg in seq_group_metadata_list for seq_id in sg.seq_data]
-
-
 def get_all_num_logprobs(
         seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
     """Given a list of SequenceGroupMetadata, create a list of all num_logprobs.
