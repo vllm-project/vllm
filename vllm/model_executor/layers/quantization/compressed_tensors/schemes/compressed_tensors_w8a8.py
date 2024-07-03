@@ -12,15 +12,15 @@ from vllm.model_executor.utils import set_weight_attrs
 
 class CompressedTensorsW8A8(CompressedTensorsScheme):
 
-    def __init__(self, strategy: QuantizationStrategy):
+    def __init__(self, strategy: str):
         self.strategy = strategy
 
-    # If fused module, we have N scales for N fused weights, but Cutlass kernels
-    # support only per-tensor and per-channel cases. So we need to handle this
-    # by converting the the N per-tensor scales to channelwise.
+    # Cutlass kernels support only per-tensor and per-channel cases.
+    # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
+    # scales being passed to the kernel), we convert to the per-channel case.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        is_fused_module = len(self.logical_widths) > 1
-        if (self.strategy == QuantizationStrategy.TENSOR and is_fused_module):
+        if (self.strategy == QuantizationStrategy.TENSOR
+                and len(self.logical_widths) > 1):
 
             # Load the N per-tensor scales into the channelwise buffer.
             weight_scale_channel = torch.empty(
@@ -41,7 +41,6 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
-
         self.logical_widths = output_partition_sizes
 
         # WEIGHT SCALE
