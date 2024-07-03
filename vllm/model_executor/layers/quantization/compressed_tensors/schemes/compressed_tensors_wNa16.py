@@ -107,9 +107,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size = input_size
         layer.marlin_state = GPTQMarlinState.REPACK
         layer.is_k_full = True
-        if self.act_order:
-            assert self.quant_config.group_size != -1
-            layer.is_k_full = input_size_per_partition == input_size
         layer.group_size = group_size
 
         max_workspace_size = (
@@ -164,8 +161,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             # Permute scales
             scales_size_k = part_size_k
             scales_size_n = part_size_n
-            if self.act_order:
-                scales_size_k = full_size_k
 
             marlin_scales = marlin_permute_scales(
                 layer.weight_scale.squeeze().t().contiguous(), scales_size_k,
