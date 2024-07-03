@@ -238,7 +238,8 @@ class Fp8LinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        native_fp8_support = (current_platform.get_device_capability() >= (8, 9))
+        native_fp8_support = (current_platform.get_device_capability() >=
+                              (8, 9))
 
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_scale computed from x.
@@ -273,7 +274,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 scale_b=layer.weight_scale,
                 bias=bias,
             )
-        
+
         else:
             # Without hardware support for FP8 W8A8, we dequantize and multiply
             # in original precision
