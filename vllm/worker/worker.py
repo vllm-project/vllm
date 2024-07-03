@@ -50,6 +50,7 @@ class Worker(LocalOrDistributedWorkerBase):
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
@@ -79,6 +80,31 @@ class Worker(LocalOrDistributedWorkerBase):
               or (speculative_config.draft_model_config.hf_config.model_type !=
                   "mlp_speculator") else {"return_hidden_states": True}
 
+        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
+        if model_runner_cls is not None:
+            ModelRunnerClass = model_runner_cls
+        elif self.model_config.embedding_mode:
+            ModelRunnerClass = EmbeddingModelRunner
+        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            cache_config,
+            load_config=load_config,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
+            is_driver_worker=is_driver_worker,
+            vision_language_config=vision_language_config,
+            **speculative_args,
+        )
+        # Uninitialized cache engine. Will be initialized by
+        # initialize_cache.
+        self.cache_engine: List[CacheEngine]
+        # Initialize gpu_cache as embedding models don't initialize kv_caches
+        self.gpu_cache: Optional[List[List[torch.tensor]]] = None
+
+    def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -105,35 +131,6 @@ class Worker(LocalOrDistributedWorkerBase):
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
-
-        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_runner_cls is not None:
-            ModelRunnerClass = model_runner_cls
-        elif self.model_config.embedding_mode:
-            ModelRunnerClass = EmbeddingModelRunner
-        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config=load_config,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=is_driver_worker,
-            vision_language_config=vision_language_config,
-            **speculative_args,
-        )
-        # Uninitialized cache engine. Will be initialized by
-        # initialize_cache.
-        self.cache_engine: List[CacheEngine]
-        # Initialize gpu_cache as embedding models don't initialize kv_caches
-        self.gpu_cache: Optional[List[List[torch.tensor]]] = None
-
-    def init_device(self) -> None:
-        # code merged into __init__ to setup distributed environment
-        # before creating the model_runner
-        pass
 
     def load_model(self):
         self.model_runner.load_model()

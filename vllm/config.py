@@ -386,13 +386,12 @@ class ModelConfig:
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+        from vllm.distributed.utils import get_pp_indices
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
-        from vllm.distributed import get_pp_group, get_pp_indices
-        pp_group = get_pp_group()
-        start, end = get_pp_indices(total_num_hidden_layers,
-                                    pp_group.rank_in_group,
-                                    pp_group.world_size)
+        pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
+        start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
         return end - start
 
     def contains_seqlen_agnostic_layers(
@@ -715,6 +714,7 @@ class ParallelConfig:
                 {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
+        self.rank = 0
 
     def _verify_args(self) -> None:
         if (self.pipeline_parallel_size > 1
