@@ -467,7 +467,7 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt_token_ids
 
     @property
-    def multi_modal_data(self) -> Optional["MultiModalDataDict"]:
+    def multi_modal_data(self) -> "MultiModalDataDict":
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).multi_modal_data
@@ -966,6 +966,8 @@ class ExecuteModelRequest:
     previous_hidden_states: Optional[HiddenStates] = None
     # The number of forward steps to run.
     num_steps: int = 1
+    # Finished request ids since last step.
+    finished_requests_ids: List[str] = field(default_factory=list)
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -981,4 +983,4 @@ class ExecuteModelRequest:
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
             num_steps=self.num_steps,
-        )
+            finished_requests_ids=self.finished_requests_ids)

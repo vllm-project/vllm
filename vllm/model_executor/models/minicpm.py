@@ -449,6 +449,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
                 # We need bigger padding if using lora for kernel
                 # compatibility
                 if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
             )
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
@@ -472,10 +473,10 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         hidden_states = hidden_states / self.scale_width
         if self.config.tie_word_embeddings:
-            lm_head_weight = self.model.embed_tokens.weight
+            lm_head = self.model.embed_tokens
         else:
-            lm_head_weight = self.lm_head.weight
-        logits = self.logits_processor(lm_head_weight, hidden_states,
+            lm_head = self.lm_head
+        logits = self.logits_processor(lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
