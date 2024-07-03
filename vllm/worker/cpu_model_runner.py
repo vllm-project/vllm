@@ -188,9 +188,6 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
-
         num_prompt_tokens = len(input_tokens)
 
         input_tokens = torch.tensor(input_tokens,
@@ -214,6 +211,10 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
         )
+
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
+                                                    device=self.device)
+
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
 
