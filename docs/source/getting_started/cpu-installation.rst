@@ -112,7 +112,7 @@ Performance tips
     $ export VLLM_CPU_OMP_THREADS_BIND=0-29 
     $ python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m
 
-- If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU cores using ``VLLM_CPU_OMP_THREADS_BIND``.
+- If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU core using ``VLLM_CPU_OMP_THREADS_BIND``.
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using ``VLLM_CPU_OMP_THREADS_BIND`` to avoid cross NUMA node memory access.
 
