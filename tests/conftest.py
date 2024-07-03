@@ -23,6 +23,7 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
+from vllm.multimodal.utils import fetch_image
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
@@ -44,16 +45,22 @@ def _read_prompts(filename: str) -> List[str]:
 
 @dataclass(frozen=True)
 class ImageAsset:
-    name: Literal["stop_sign", "cherry_blossom"]
+    name: Literal["stop_sign", "cherry_blossom", "boardwalk"]
 
     @cached_property
     def pil_image(self) -> Image.Image:
+        if self.name == "boardwalk":
+            return fetch_image(
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+            )
+
         return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
 
 
 class _ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
+    boardwalk: str
 
 
 if sys.version_info < (3, 9):
@@ -69,9 +76,11 @@ else:
 class _ImageAssets(_ImageAssetsBase):
 
     def __init__(self) -> None:
-        super().__init__(
-            [ImageAsset("stop_sign"),
-             ImageAsset("cherry_blossom")])
+        super().__init__([
+            ImageAsset("stop_sign"),
+            ImageAsset("cherry_blossom"),
+            ImageAsset("boardwalk")
+        ])
 
     def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
         """
@@ -80,7 +89,10 @@ class _ImageAssets(_ImageAssetsBase):
         The order of the returned prompts matches the order of the
         assets when iterating through this object.
         """
-        return [prompts["stop_sign"], prompts["cherry_blossom"]]
+        return [
+            prompts["stop_sign"], prompts["cherry_blossom"],
+            prompts["boardwalk"]
+        ]
 
 
 IMAGE_ASSETS = _ImageAssets()

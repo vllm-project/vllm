@@ -23,6 +23,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     f"{_PREFACE} USER: <image>\nWhat's the content of the image? ASSISTANT:",
     "cherry_blossom":
     f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:",
+    "boardwalk":
+    f"{_PREFACE} USER: <image>\nWhat's in this image? ASSISTANT:",
 })
 
 

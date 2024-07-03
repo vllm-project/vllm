@@ -4,10 +4,56 @@ from typing import Optional, Union
 from urllib.parse import urlparse
 
 import aiohttp
+import requests
 from PIL import Image
 
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.base import MultiModalDataDict
+from vllm.version import __version__ as VLLM_VERSION
+
+
+def _validate_remote_url(url: str, *, name: str):
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in ["http", "https"]:
+        raise ValueError(f"Invalid '{name}': A valid '{name}' "
+                         "must have scheme 'http' or 'https'.")
+
+
+def _get_request_headers():
+    return {"User-Agent": f"vLLM/{VLLM_VERSION}"}
+
+
+def _load_image_from_bytes(b: bytes):
+    image = Image.open(BytesIO(b))
+    image.load()
+    return image
+
+
+def _load_image_from_data_url(image_url: str):
+    # Only split once and assume the second part is the base64 encoded image
+    _, image_base64 = image_url.split(",", 1)
+    return load_image_from_base64(image_base64)
+
+
+def fetch_image(image_url: str) -> Image.Image:
+    """Load PIL image from a url or base64 encoded openai GPT4V format"""
+    if image_url.startswith('http'):
+        _validate_remote_url(image_url, name="image_url")
+
+        headers = _get_request_headers()
+
+        with requests.get(url=image_url, headers=headers) as response:
+            response.raise_for_status()
+            image_raw = response.content
+        image = _load_image_from_bytes(image_raw)
+
+    elif image_url.startswith('data:image'):
+        image = _load_image_from_data_url(image_url)
+    else:
+        raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
+                         "with either 'data:image' or 'http'.")
+
+    return image
 
 
 class ImageFetchAiohttp:
@@ -28,31 +74,23 @@ class ImageFetchAiohttp:
         """Load PIL image from a url or base64 encoded openai GPT4V format"""
 
         if image_url.startswith('http'):
-            parsed_url = urlparse(image_url)
-            if parsed_url.scheme not in ["http", "https"]:
-                raise ValueError("Invalid 'image_url': A valid 'image_url' "
-                                 "must have scheme 'http' or 'https'.")
-            # Avoid circular import
-            from vllm import __version__ as VLLM_VERSION
+            _validate_remote_url(image_url, name="image_url")
 
             client = cls.get_aiohttp_client()
-            headers = {"User-Agent": f"vLLM/{VLLM_VERSION}"}
+            headers = _get_request_headers()
 
             async with client.get(url=image_url, headers=headers) as response:
                 response.raise_for_status()
                 image_raw = await response.read()
-            image = Image.open(BytesIO(image_raw))
+            image = _load_image_from_bytes(image_raw)
 
-        # Only split once and assume the second part is the base64 encoded image
         elif image_url.startswith('data:image'):
-            image = load_image_from_base64(image_url.split(',', 1)[1])
-
+            image = _load_image_from_data_url(image_url)
         else:
             raise ValueError(
                 "Invalid 'image_url': A valid 'image_url' must start "
                 "with either 'data:image' or 'http'.")
 
-        image.load()
         return image
 
 
@@ -73,7 +111,7 @@ def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
 
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     """Load image from base64 format."""
-    return Image.open(BytesIO(base64.b64decode(image)))
+    return _load_image_from_bytes(base64.b64decode(image))
 
 
 def rescale_image_size(image: Image.Image, size_factor: float) -> Image.Image:

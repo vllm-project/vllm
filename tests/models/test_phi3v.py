@@ -19,6 +19,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "cherry_blossom":
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
+    "boardwalk":
+    "<|user|>\n<|image_1|>\nWhat's in this image?<|end|>\n<|assistant|>\n",
 })
 
 
