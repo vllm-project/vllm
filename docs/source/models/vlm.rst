@@ -30,8 +30,10 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     Specifically, no need to specify `image_feature_size` for profiling purposes anymore. Internally we will construct data structures for
     every model to do profiling with, to hide our users from this detail at the API layer.
 
-    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` for every model to be conservative 
-    in terms of GPU memory consumption. This hardcode value will be removed and replaced with a more accurate profiling strategy.
+    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` through 
+    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
+    for every model to be conservative in terms of GPU memory consumption. 
+    This hardcoded value will be replaced with a more accurate profiling strategy.
 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
@@ -93,8 +95,10 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
     Specifically, no need to specify `image_feature_size` for profiling purposes anymore. Internally we will construct data structures for
     every model to do profiling with, to hide our users from this detail at the API layer.
 
-    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` for every model to be conservative 
-    in terms of GPU memory consumption. This hardcode value will be removed and replaced with a more accurate profiling strategy.
+    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` through 
+    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
+    for every model to be conservative in terms of GPU memory consumption. 
+    This hardcoded value will be replaced with a more accurate profiling strategy.
 
 To consume the server, you can use the OpenAI client like in the example below:
 

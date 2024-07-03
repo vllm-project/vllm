@@ -20,6 +20,9 @@ def run_phi3v():
         model=model_path,
         trust_remote_code=True,
         max_num_seqs=5,
+        # The model originally has a 128k context length.
+        # Setting to lower value here so that the example
+        # runs on lower grade GPUs.
         max_model_len=4096,
     )
 
