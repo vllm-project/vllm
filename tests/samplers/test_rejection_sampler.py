@@ -1,5 +1,7 @@
 """Tests for rejection sampling."""
 from typing import List, Tuple
+import time
+import numpy as np
 
 import pytest
 import torch
@@ -156,11 +158,11 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                       draft_token_ids, generators)
 
 
-@pytest.mark.parametrize("k", [1, 3])
-@pytest.mark.parametrize("vocab_size", [30_000])
-@pytest.mark.parametrize("batch_size", [1, 8, 32])
-@pytest.mark.parametrize("n_rep", [2, 10])
-@pytest.mark.parametrize("frac_seeded", [0.25, 0.5, 1.0])
+@pytest.mark.parametrize("frac_seeded", [0.0, 0.25, 0.5, 1.0])
+@pytest.mark.parametrize("k", [1, 3, 6])
+@pytest.mark.parametrize("vocab_size", [30_000, 50_000])
+@pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
+@pytest.mark.parametrize("n_rep", [100])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
@@ -184,15 +186,26 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
     seeded_mask = torch.rand(batch_size, dtype=torch.float32) <= frac_seeded
 
     results = []
+    times = []
     for _ in range(n_rep):
         generators = [
             torch.Generator(
                 device=device).manual_seed(i) if seeded_mask[i] else None
             for i in range(batch_size)
         ]
+        t0 = time.time_ns()
+        output = rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                              draft_token_ids, generators)
+        t_elap = time.time_ns()-t0
+        results.append(output)
+        times.append(t_elap)
+        '''
         results.append(
             rejection_sampler(target_probs, bonus_token_ids, draft_probs,
                               draft_token_ids, generators))
+        '''
+
+    print("k: %d, vocab_size: %d, batch_size: %3d, frac_seeded: %.2f, t_elap: %6.2f ms" % (k, vocab_size, batch_size, frac_seeded, np.median(times)/1000.0/1000.0))
 
     for i in range(batch_size):
         if seeded_mask[i]:

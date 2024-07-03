@@ -1,5 +1,6 @@
 from functools import cached_property
 from typing import List, Optional, Tuple
+import time
 
 import torch
 import torch.jit
@@ -122,12 +123,20 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
 
+        seed_indices, non_seed_indices = self._split_batch_by_seeded(generators, k=k)
+
         # NOTE: the recovered_probs are overwritten by this method.
+        t0 = time.time_ns()
         recovered_token_ids = _multinomial(recovered_probs,
                                            num_samples=1,
                                            k=k,
-                                           generators=generators).reshape(
+                                           generators=generators,
+                                           seed_indices=seed_indices,
+                                           non_seed_indices=non_seed_indices).reshape(
                                                batch_size, k)
+        t_elap = time.time_ns()-t0
+        #print("t_multinomial: %6.2f ms" % (t_elap/1000.0/1000.0))
+
         return accepted, recovered_token_ids
 
     def _get_accepted(
@@ -170,23 +179,25 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         selected_target_probs = target_probs[batch_indices, probs_indicies,
                                              draft_token_ids]
 
-        if any(generator is not None for generator in generators):
-            uniform_rand = torch.empty(batch_size,
-                                       k,
-                                       dtype=self.probs_dtype,
-                                       device=target_probs.device)
-            for i, generator in enumerate(generators):
-                uniform_rand[i, :] = torch.rand(1,
-                                                k,
-                                                dtype=self.probs_dtype,
-                                                device=target_probs.device,
-                                                generator=generator)
-        else:
+        seed_indices, non_seed_indices = self._split_batch_by_seeded(generators)
 
-            uniform_rand = torch.rand(batch_size,
-                                      k,
-                                      dtype=self.probs_dtype,
-                                      device=target_probs.device)
+        t0 = time.time_ns()
+
+        uniform_rand = torch.empty_like(selected_target_probs)
+
+        for idx in seed_indices:
+            uniform_rand[idx, :] = torch.rand(1,
+                                              k,
+                                              dtype=self.probs_dtype,
+                                              device=target_probs.device,
+                                              generator=generators[idx])
+
+        uniform_rand[non_seed_indices,:] = torch.rand(len(non_seed_indices),
+                                                      k,
+                                                      dtype=self.probs_dtype,
+                                                      device=target_probs.device)
+        t_elap = time.time_ns()-t0
+        #print("t_uniform:     %6.2f ms" % (t_elap/1000.0/1000.0))
 
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
@@ -261,6 +272,26 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         return torch.finfo(self.probs_dtype).tiny
 
 
+    # partition batch into indices for which a generator is provided
+    # and indicies for which no generator is provided
+    def _split_batch_by_seeded(
+        self,
+        generators: List[Optional[torch.Generator]],
+        k: int = 1,
+    ) -> Tuple[List[int], List[int]]:
+
+        t0 = time.time_ns()
+        seed_indices, non_seed_indices = [], []
+        for i, generator in enumerate(generators):
+            if generator is None:
+                non_seed_indices.extend(range(k*i, k*(i+1)))
+            else:
+                seed_indices.extend(range(k*i, k*(i+1)))
+        t_elap = time.time_ns()-t0
+        #print("t_split_batch: %6.2f ms" % (t_elap/1000.0/1000.0))
+
+        return seed_indices, non_seed_indices
+
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead that skips the sync.
 # Note that we always sample with replacement.
@@ -272,6 +303,8 @@ def _multinomial(
     num_samples: int,
     k: int,
     generators: List[Optional[torch.Generator]],
+    seed_indices: List[int],
+    non_seed_indices: List[int],
 ) -> torch.Tensor:
 
     if num_samples > 1:
@@ -282,11 +315,8 @@ def _multinomial(
                                              -1, probs.shape[1])
 
     q = torch.empty_like(probs)
-    if any(generator is not None for generator in generators):
-        for i, generator in enumerate(generators):
-            start_idx, end_idx = k * i, k * (i + 1)
-            q[start_idx:end_idx].exponential_(1.0, generator=generator)
-    else:
-        q.exponential_(1.0)
+    q[non_seed_indices].exponential_(1.0)
+    for idx in seed_indices:
+        q[idx].exponential_(1.0, generator=generators[idx // k])
 
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
