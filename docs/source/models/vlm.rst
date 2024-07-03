@@ -23,7 +23,6 @@ The following :ref:`engine arguments <engine_args>` are specific to VLMs:
     Currently, the support for vision language models on vLLM has the following limitations:
 
     * Only single image input is supported per text prompt.
-    * Dynamic ``image_input_shape`` is not supported: the input image will be resized to the static ``image_input_shape``. This means our LLaVA-NeXT output may not exactly match the huggingface implementation.
 
     We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
 
@@ -42,12 +41,17 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     )
 
 .. important::
+    Currently, you have to specify ``image_feature_size`` to support memory profiling.
+    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
+    The calculation of feature size is specific to the model. For more details, please refer to
+    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+
     We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
-* ``prompt``: The prompt should have a number of ``<image>`` tokens equal to ``image_feature_size``.
+* ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
 
 .. note::
@@ -57,8 +61,8 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 
 .. code-block:: python
 
-    prompt = "<image>" * 576 + (
-        "\nUSER: What is the content of this image?\nASSISTANT:")
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
     image = ...
@@ -74,8 +78,6 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 
 A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
 
-.. important::
-    We will remove the need to format image tokens in a future release. Afterwards, the input text will follow the same format as that for the original HuggingFace model.
 
 Online OpenAI Vision API Compatible Inference
 ----------------------------------------------
@@ -103,6 +105,11 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
         --chat-template template_llava.jinja
 
 .. important::
+    Currently, you have to specify ``image_feature_size`` to support memory profiling.
+    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
+    The calculation of feature size is specific to the model. For more details, please refer to
+    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+
     We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 To consume the server, you can use the OpenAI client like in the example below:
@@ -121,6 +128,8 @@ To consume the server, you can use the OpenAI client like in the example below:
         messages=[{
             "role": "user",
             "content": [
+                # NOTE: The prompt formatting with the image token `<image>` is not needed
+                # since the prompt will be processed automatically by the API server.
                 {"type": "text", "text": "What's in this image?"},
                 {
                     "type": "image_url",
@@ -144,5 +153,4 @@ A full code example can be found in `examples/openai_vision_api_client.py <https
         export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
-    The prompt formatting with the image token ``<image>`` is not needed when serving VLMs with the API server since the prompt will be 
-    processed automatically by the server.
+    There is no need to format the prompt in the API request since it will be handled by the server.

@@ -1,4 +1,5 @@
-from .base import MultiModalDataDict, MultiModalPlugin
+from .base import (BatchedTensors, MultiModalDataDict, MultiModalInputs,
+                   MultiModalPlugin)
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
@@ -11,8 +12,10 @@ See also:
 """
 
 __all__ = [
+    "BatchedTensors",
+    "MultiModalDataDict",
+    "MultiModalInputs",
     "MultiModalPlugin",
     "MULTIMODAL_REGISTRY",
     "MultiModalRegistry",
-    "MultiModalDataDict",
 ]

@@ -5,7 +5,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
                     Union)
 
 import torch
-from transformers import PretrainedConfig, PreTrainedTokenizerBase
+from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -1302,16 +1302,6 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
-
-    #TODO(ywang96): make this a cached property once we refactor the
-    # VisionLanguageConfig class.
-    def get_image_token_text(
-            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
-        """Get the image token placeholder text to be inserted into the 
-        text prompt and the string representation of the image token id.
-        """
-        image_token_str = tokenizer.decode(self.image_token_id)
-        return image_token_str * self.image_feature_size, image_token_str
 
     def as_cli_args_dict(self) -> Dict[str, Any]:
         """Flatten vision language config to pure args.
