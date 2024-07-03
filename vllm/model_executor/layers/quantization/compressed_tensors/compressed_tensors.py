@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     find_first_name_or_class_match)
-from vllm.utils import get_device_capability_stateless
+from vllm.platforms import current_platform
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -85,7 +85,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return []
 
     def _check_gptq_and_marlin_can_run(self):
-        capability = get_device_capability_stateless()
+        capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         if capability < 80:
             raise RuntimeError("The quantization config is not supported for ",
