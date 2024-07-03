@@ -37,7 +37,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
 
             layer.weight_scale = Parameter(weight_scale_channel,
                                            requires_grad=False)
-            
+
         # transpose weights for cutlass.
         weight = layer.weight
         layer.weight = Parameter(weight.t(), requires_grad=False)
@@ -81,7 +81,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
             "output_dim": 0,
             "weight_loader": weight_loader,
         })
-        
+
         # INPUT SCALE
         # Static quantization:  load from disk.
         if self.is_static_input_scheme:
@@ -95,7 +95,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
         # Dynamic quantization: set to None.
         else:
             layer.input_scale = None
-    
+
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         # ops.scaled_int8_quant supports both dynamic and static quant.
         # * dynamic, layer.input_scale is None and x_scale computed from x.
