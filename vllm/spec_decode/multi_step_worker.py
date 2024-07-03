@@ -295,7 +295,7 @@ class CPUMultiStepWorker(CPUWorker):
         speculative tokens per sequence is determined by max_proposal_len.
         """
 
-        return self._proposer.get_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(execute_model_req)
 
     def _append_new_tokens(
             self, model_output: SamplerOutput,
