@@ -682,11 +682,13 @@ class ParallelConfig:
 
             from vllm.executor import ray_utils
             backend = "mp"
-            ray_found = ray_utils.ray is not None
+            ray_found = ray_utils.ray_is_available()
             if cuda_device_count_stateless() < self.world_size:
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
-                                     "required for multi-node inference")
+                                     "required for multi-node inference, "
+                                     "please install Ray with `pip install "
+                                     "ray`.") from ray_utils.ray_import_err
                 backend = "ray"
             elif ray_found:
                 if self.placement_group:
@@ -718,6 +720,9 @@ class ParallelConfig:
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
                 "are 'ray' or 'mp'.")
+        if self.distributed_executor_backend == "ray":
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
