@@ -127,6 +127,25 @@ class OpenAIServingChat(OpenAIServing):
 
         return self.tokenizer.decode(image_token_id)
 
+    # TODO: Let user specify how to insert image tokens into prompt
+    # (similar to chat template)
+    def _get_full_image_text_prompt(self, image_token_str: str,
+                                    text_prompt: str) -> str:
+        """Combine image and text prompts for vision language model depending on
+        the model architecture."""
+
+        model_type = self.model_config.hf_config.model_type
+        if model_type in ("llava", "llava_next"):
+            full_prompt = f"{image_token_str}\n{text_prompt}"
+        elif model_type == 'phi3_v':
+            full_prompt = f"{image_token_str}<s>\n{text_prompt}"
+        else:
+            # The model does not require image token in the prompt
+            # e.g, "blip-2", "chatglm"
+            return text_prompt
+
+        return full_prompt
+
     def _parse_chat_message_content_parts(
         self,
         role: str,
@@ -146,15 +165,6 @@ class OpenAIServingChat(OpenAIServing):
                         "Multiple 'image_url' input is currently not supported."
                     )
 
-                image_token_str = self.image_token_str
-                if image_token_str is not None:
-                    if any(image_token_str in text for text in texts):
-                        logger.warning(
-                            "Detected image token string in the text prompt. "
-                            "Skipping prompt formatting.")
-                    else:
-                        texts.append(image_token_str)
-
                 image_url = cast(ChatCompletionContentPartImageParam,
                                  part)["image_url"]
 
@@ -169,6 +179,17 @@ class OpenAIServingChat(OpenAIServing):
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
         text_prompt = "\n".join(texts)
+
+        image_token_str = self.image_token_str
+        if image_token_str is not None:
+            if image_token_str in text_prompt:
+                logger.warning(
+                    "Detected image token string in the text prompt. "
+                    "Skipping prompt formatting.")
+            else:
+                text_prompt = self._get_full_image_text_prompt(
+                    image_token_str=image_token_str, text_prompt=text_prompt)
+
         messages = [ConversationMessage(role=role, content=text_prompt)]
 
         return ChatMessageParseResult(messages=messages, mm_futures=mm_futures)
@@ -238,7 +259,9 @@ class OpenAIServingChat(OpenAIServing):
         try:
             if len(mm_futures):
                 # since we support only single mm data currently
-                assert len(mm_futures) == 1
+                assert len(
+                    mm_futures
+                ) == 1, "Multiple 'image_url' input is currently not supported."
                 mm_data = await mm_futures[0]
         except Exception as e:
             logger.error("Error in loading multi-modal data: %s", e)
