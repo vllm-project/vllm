@@ -35,23 +35,33 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
-        image_input_type="pixel_values",
         image_token_id=32000,
         image_input_shape="1,3,336,336",
         image_feature_size=576,
     )
 
 .. important::
+    Currently, you have to specify ``image_feature_size`` to support memory profiling.
+    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
+    The calculation of feature size is specific to the model. For more details, please refer to
+    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+
     We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
-* ``prompt``: The prompt should follow the same format as that for the HuggingFace version of the model.
-* ``multi_modal_data``: This should be an instance of :class:`~vllm.multimodal.image.ImagePixelData` or :class:`~vllm.multimodal.image.ImageFeatureData`.
+* ``prompt``: The prompt should follow the format that is documented on HuggingFace.
+* ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
+
+.. note::
+
+   ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through
+    :class:`vllm.multimodal.MULTIMODAL_REGISTRY`.
 
 .. code-block:: python
 
+    # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
@@ -59,7 +69,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 
     outputs = llm.generate({
         "prompt": prompt,
-        "multi_modal_data": ImagePixelData(image),
+        "multi_modal_data": {"image": image},
     })
 
     for o in outputs:
@@ -89,13 +99,17 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
     python -m vllm.entrypoints.openai.api_server \
         --model llava-hf/llava-1.5-7b-hf \
-        --image-input-type pixel_values \
         --image-token-id 32000 \
         --image-input-shape 1,3,336,336 \
         --image-feature-size 576 \
         --chat-template template_llava.jinja
 
 .. important::
+    Currently, you have to specify ``image_feature_size`` to support memory profiling.
+    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
+    The calculation of feature size is specific to the model. For more details, please refer to
+    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+
     We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 To consume the server, you can use the OpenAI client like in the example below:
@@ -114,6 +128,8 @@ To consume the server, you can use the OpenAI client like in the example below:
         messages=[{
             "role": "user",
             "content": [
+                # NOTE: The prompt formatting with the image token `<image>` is not needed
+                # since the prompt will be processed automatically by the API server.
                 {"type": "text", "text": "What's in this image?"},
                 {
                     "type": "image_url",
@@ -137,4 +153,4 @@ A full code example can be found in `examples/openai_vision_api_client.py <https
         export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
-    There is no need to format the prompt in the API request when since it will be handled by the server.
+    There is no need to format the prompt in the API request since it will be handled by the server.

@@ -2,9 +2,8 @@ import numpy as np
 import pytest
 from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 
 
@@ -12,7 +11,6 @@ from vllm.multimodal.utils import rescale_image_size
 @pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
 def test_clip_image_processor(image_assets, dtype, size_factor):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-    IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
     hf_processor = CLIPImageProcessor.from_pretrained(MODEL_NAME)
     assert isinstance(hf_processor, CLIPImageProcessor)
@@ -25,14 +23,6 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
         seed=0,
         dtype=dtype,
         revision=None,
-        multimodal_config=VisionLanguageConfig(
-            image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-            image_token_id=32000,
-            image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-            image_feature_size=576,
-            image_processor=MODEL_NAME,
-            image_processor_revision=None,
-        ),
     )
 
     for asset in image_assets:
@@ -44,7 +34,7 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
         )
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImagePixelData(image),
+            {"image": image},
         )
 
         assert hf_result.keys() == vllm_result.keys()
@@ -60,7 +50,6 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
 @pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
 def test_llava_next_image_processor(image_assets, dtype, size_factor):
     MODEL_NAME = "llava-hf/llava-v1.6-vicuna-7b-hf"
-    IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
     hf_processor = LlavaNextImageProcessor.from_pretrained(MODEL_NAME)
     assert isinstance(hf_processor, LlavaNextImageProcessor)
@@ -73,14 +62,6 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
         seed=0,
         dtype=dtype,
         revision=None,
-        multimodal_config=VisionLanguageConfig(
-            image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-            image_token_id=64000,
-            image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-            image_feature_size=2928,
-            image_processor=MODEL_NAME,
-            image_processor_revision=None,
-        ),
     )
 
     for asset in image_assets:
@@ -92,7 +73,7 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
         )
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImagePixelData(image),
+            {"image": image},
         )
 
         assert hf_result.keys() == vllm_result.keys()
@@ -102,45 +83,3 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
 
             assert hf_arr.shape == vllm_arr.shape, f"Failed for key={key}"
             assert np.allclose(hf_arr, vllm_arr), f"Failed for key={key}"
-
-
-@pytest.mark.xfail(
-    reason="Example image pixels were not processed using HuggingFace")
-@pytest.mark.parametrize("dtype", ["float"])
-def test_image_pixel_types(image_assets, dtype):
-    MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-    IMAGE_HEIGHT = IMAGE_WIDTH = 560
-
-    model_config = ModelConfig(
-        model=MODEL_NAME,
-        tokenizer=MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype=dtype,
-        revision=None,
-        multimodal_config=VisionLanguageConfig(
-            image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-            image_token_id=32000,
-            image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-            image_feature_size=576,
-            image_processor=MODEL_NAME,
-            image_processor_revision=None,
-        ))
-
-    for asset in image_assets:
-        image_result = MULTIMODAL_REGISTRY.map_input(
-            model_config,
-            ImagePixelData(asset.pil_image),
-        )
-        tensor_result = MULTIMODAL_REGISTRY.map_input(
-            model_config,
-            ImagePixelData(asset.pixel_values),
-        )
-
-        assert image_result.keys() == tensor_result.keys()
-        for key, image_arr in image_result.items():
-            tensor_arr: np.ndarray = tensor_result[key].numpy()
-
-            assert image_arr.shape == tensor_arr.shape, f"Failed for key={key}"
-            assert np.allclose(image_arr, tensor_arr), f"Failed for key={key}"

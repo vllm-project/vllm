@@ -8,14 +8,13 @@ from PIL import Image
 from transformers import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPAttention
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal.image import (ImageFeatureData, ImagePixelData,
-                                   cached_get_tokenizer,
+from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
 from vllm.sequence import SequenceData
 
@@ -53,7 +52,7 @@ def dummy_seq_data_for_clip(
     return SequenceData(token_ids)
 
 
-def dummy_pixel_data_for_clip(
+def dummy_image_for_clip(
     hf_config: CLIPVisionConfig,
     *,
     image_width_override: Optional[int] = None,
@@ -66,27 +65,11 @@ def dummy_pixel_data_for_clip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return ImagePixelData(image)
-
-
-def dummy_feature_data_for_clip(
-    hf_config: CLIPVisionConfig,
-    *,
-    image_feature_size_override: Optional[int] = None,
-):
-    if image_feature_size_override is None:
-        image_feature_size = get_clip_image_feature_size(hf_config)
-    else:
-        image_feature_size = image_feature_size_override
-
-    values = torch.zeros((1, image_feature_size, hf_config.hidden_size),
-                         dtype=torch.float16)
-    return ImageFeatureData(values)
+    return {"image": image}
 
 
 def input_processor_for_clip(
     model_config: ModelConfig,
-    multimodal_config: VisionLanguageConfig,
     hf_config: CLIPVisionConfig,
     llm_inputs: LLMInputs,
     *,
@@ -94,8 +77,7 @@ def input_processor_for_clip(
     image_feature_size_override: Optional[int] = None,
 ):
     multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or not isinstance(
-            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+    if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)

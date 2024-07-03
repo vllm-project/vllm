@@ -4,6 +4,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
@@ -16,6 +17,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
     "cherry_blossom":
     "USER: <image>\nWhat is the season?\nASSISTANT:",
+    "boardwalk":
+    "USER: <image>\nWhat's in this image?\nASSISTANT:",
 })
 
 
@@ -25,16 +28,11 @@ def iter_llava_configs(model_name: str):
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
-        for input_type, input_shape in [
-            (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
-        ]:
-            yield (model_name,
-                   VisionLanguageConfig(image_input_type=input_type,
-                                        image_feature_size=f,
-                                        image_token_id=32000,
-                                        image_input_shape=input_shape,
-                                        image_processor=model_name,
-                                        image_processor_revision=None))
+        input_shape = (1, 3, h, w)
+        yield (model_name,
+               VisionLanguageConfig(image_feature_size=f,
+                                    image_token_id=32000,
+                                    image_input_shape=input_shape))
 
 
 model_and_vl_config = [
@@ -89,17 +87,18 @@ def run_test(
 
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalData objects and corresponding
-    vision language config as input.
+    For vllm runner, we provide MultiModalDataDict objects 
+    and corresponding vision language config as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from vllm.multimodal.image import ImagePixelData
-    from vllm.multimodal.utils import rescale_image_size
-
     model_id, vlm_config = model_and_config
+    images = [asset.pil_image for asset in image_assets]
+
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -113,33 +112,12 @@ def run_test(
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        hf_images = [asset.for_hf() for asset in image_assets]
-        # NOTE: `asset.for_vllm` will call `torch.cuda.device_count()`
-        # we must put it inside the vllm_runner context manager
-        # i.e. after creating vLLM instance.
-        vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
-
-        image_inputs_per_image = [[(
-            prompt,
-            rescale_image_size(hf_image, factor),
-            ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-        ) for factor in size_factors] for hf_image, vllm_image, prompt in zip(
-            hf_images, vllm_images, HF_IMAGE_PROMPTS)]
-        hf_inputs_per_image = [(
-            [prompt for prompt, hf_image, vllm_image in image_inputs],
-            [hf_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_image]
-        vllm_inputs_per_image = [(
-            [prompt for prompt, hf_image, vllm_image in image_inputs],
-            [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_image]
-
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=vllm_images)
-            for prompts, vllm_images in vllm_inputs_per_image
+                                                images=images)
+            for prompts, images in inputs_per_image
         ]
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
@@ -147,8 +125,8 @@ def run_test(
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images)
-            for prompts, hf_images in hf_inputs_per_image
+                                                    images=images)
+            for prompts, images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,

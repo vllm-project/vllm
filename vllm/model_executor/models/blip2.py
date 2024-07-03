@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -15,12 +15,10 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.opt import OPTModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
-from vllm.sequence import SamplerOutput, SequenceData
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
-from .blip import (BlipVisionModel, dummy_feature_data_for_blip,
-                   dummy_pixel_data_for_blip)
+from .blip import BlipVisionModel, dummy_image_for_blip
 from .interfaces import SupportsVision
 from .utils import merge_vision_embeddings
 
@@ -384,13 +382,7 @@ class Blip2ImagePixelInputs(TypedDict):
     """Shape: (batch_size, num_channels, height, width)"""
 
 
-class Blip2ImageFeatureInputs(TypedDict):
-    type: Literal["image_features"]
-    data: torch.Tensor
-    """Shape: (batch_size, image_feature_size, hidden_size)"""
-
-
-Blip2ImageInputs = Union[Blip2ImagePixelInputs, Blip2ImageFeatureInputs]
+Blip2ImageInputs = Blip2ImagePixelInputs
 
 # Used internally as placeholders
 BLIP2_IMAGE_TOKEN = "<image>"
@@ -402,7 +394,6 @@ def get_blip2_image_feature_size(hf_config: Blip2Config) -> int:
 
 
 def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
-    multimodal_config = ctx.get_multimodal_config()
     hf_config = ctx.get_hf_config(Blip2Config)
     vision_config = hf_config.vision_config
 
@@ -411,21 +402,14 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
     token_ids += [0] * (seq_len - image_feature_size)
     seq_data = SequenceData(token_ids)
 
-    image_input_type = multimodal_config.image_input_type
-    ImageInputType = VisionLanguageConfig.ImageInputType
-    mm_data: MultiModalData
-    if image_input_type == ImageInputType.PIXEL_VALUES:
-        mm_data = dummy_pixel_data_for_blip(vision_config)
-    elif image_input_type == ImageInputType.IMAGE_FEATURES:
-        mm_data = dummy_feature_data_for_blip(vision_config)
+    mm_data = dummy_image_for_blip(vision_config)
 
     return seq_data, mm_data
 
 
 def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or not isinstance(
-            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+    if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
     hf_config = ctx.get_hf_config(Blip2Config)
@@ -445,8 +429,7 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
                      multi_modal_data=multi_modal_data)
 
 
-@MULTIMODAL_REGISTRY.register_image_feature_input_mapper()
-@MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
 class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
@@ -462,11 +445,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         self.config = config
         self.vlm_config = vlm_config
 
-        if self.vlm_config.image_input_type == (
-                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_model = BlipVisionModel(config.vision_config)
-        else:
-            self.vision_model = None
+        # TODO: Optionally initializes this for supporting embeddings.
+        self.vision_model = BlipVisionModel(config.vision_config)
 
         self.query_tokens = nn.Parameter(
             torch.zeros(1, config.num_query_tokens,
@@ -491,8 +471,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size)
         self.sampler = Sampler()
 
-    def get_lm_head_weights(self):
-        return self.language_model.decoder.embed_tokens.weight
+    def get_lm_head(self):
+        return self.language_model.decoder.embed_tokens
 
     def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
         if list(data.shape[1:]) != list(self.vlm_config.image_input_shape[1:]):
@@ -509,44 +489,18 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Blip2ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        image_features = kwargs.pop("image_features", None)
 
-        expected_input_type = self.vlm_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
+        if pixel_values is None:
+            return None
 
-        if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if image_features is not None:
-                raise ValueError(
-                    "Expected pixel values but got image features")
-            if pixel_values is None:
-                return None
+        if not isinstance(pixel_values, torch.Tensor):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
 
-            if not isinstance(pixel_values, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            return Blip2ImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_image_data(pixel_values),
-            )
-
-        if expected_input_type == ImageInputType.IMAGE_FEATURES:
-            if pixel_values is not None:
-                raise ValueError(
-                    "Expected image features but got pixel values")
-            if image_features is None:
-                return None
-
-            if not isinstance(image_features, torch.Tensor):
-                raise ValueError("Incorrect type of image features. "
-                                 f"Got type: {type(image_features)}")
-
-            return Blip2ImageFeatureInputs(
-                type="image_features",
-                data=self._validate_image_data(image_features),
-            )
-
-        return None
+        return Blip2ImagePixelInputs(
+            type="pixel_values",
+            data=self._validate_image_data(pixel_values),
+        )
 
     def _image_pixels_to_features(self, vision_model: BlipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
@@ -588,6 +542,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> SamplerOutput:
         """Run forward pass for BLIP-2.
@@ -654,7 +609,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.get_lm_head_weights(),
+        logits = self.logits_processor(self.get_lm_head(),
                                        hidden_states, sampling_metadata)
         return logits
 

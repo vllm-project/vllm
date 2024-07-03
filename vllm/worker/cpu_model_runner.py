@@ -14,7 +14,8 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
                              MultiModalInputs)
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
@@ -161,7 +162,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             input_positions.extend(list(range(computed_len, seq_len)))
 
             mm_data = seq_group_metadata.multi_modal_data
-            if mm_data is not None:
+            if mm_data:
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 multi_modal_inputs_list.append(mm_kwargs)
 
@@ -187,9 +188,6 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
-
         num_prompt_tokens = len(input_tokens)
 
         input_tokens = torch.tensor(input_tokens,
@@ -213,6 +211,10 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
         )
+
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
+                                                    device=self.device)
+
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
 
@@ -310,8 +312,10 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         )
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            virtual_engine: int = 0,
+            finished_requests_ids: Optional[List[str]] = None
     ) -> CPUModelInput:
         multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
@@ -348,6 +352,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self,
         model_input: CPUModelInput,
         kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
@@ -360,10 +365,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             "positions": model_input.input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": model_input.attn_metadata,
+            **(model_input.multi_modal_kwargs or {}),
         }
-        if (self.vision_language_config
-                and model_input.multi_modal_kwargs is not None):
-            execute_model_kwargs.update(model_input.multi_modal_kwargs)
 
         hidden_states = model_executable(**execute_model_kwargs)
 

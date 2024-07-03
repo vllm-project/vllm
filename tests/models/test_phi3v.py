@@ -5,6 +5,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu
 
@@ -18,26 +19,23 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "cherry_blossom":
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
+    "boardwalk":
+    "<|user|>\n<|image_1|>\nWhat's in this image?<|end|>\n<|assistant|>\n",
 })
 
 
 def iter_phi3v_configs(model_name: str):
+    # Need to use the max possible feature size for profile_run
     image_hw_to_feature_size = {
-        (1008, 1344): 1921,
-        (2016, 2688): 1933,
+        (1008, 1344): 2653,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
-        for input_type, input_shape in [
-            (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
-        ]:
-            yield (model_name,
-                   VisionLanguageConfig(image_input_type=input_type,
-                                        image_feature_size=f,
-                                        image_token_id=32044,
-                                        image_input_shape=input_shape,
-                                        image_processor=model_name,
-                                        image_processor_revision=None))
+        input_shape = (1, 3, h, w)
+        yield (model_name,
+               VisionLanguageConfig(image_feature_size=f,
+                                    image_token_id=32044,
+                                    image_input_shape=input_shape))
 
 
 model_and_vl_config = [
@@ -92,61 +90,23 @@ def run_test(
 
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalData objects and corresponding
-    vision language config as input.
+    For vllm runner, we provide MultiModalDataDict objects 
+    and corresponding vision language config as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from vllm.multimodal.image import ImagePixelData
-    from vllm.multimodal.utils import rescale_image_size
-
     model_id, vlm_config = model_and_config
+    images = [asset.pil_image for asset in image_assets]
+
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-
-    with vllm_runner(model_id,
-                     max_model_len=2048,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     enforce_eager=True,
-                     distributed_executor_backend=distributed_executor_backend,
-                     **vlm_config.as_cli_args_dict()) as vllm_model:
-
-        hf_images = [asset.for_hf() for asset in image_assets]
-        # NOTE: `asset.for_vllm` will call `torch.cuda.device_count()`
-        # we must put it inside the vllm_runner context manager
-        # i.e. after creating vLLM instance.
-        vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
-
-        vllm_image_prompts = [
-            p.replace("<|image_1|>",
-                      "<|image|>" * vlm_config.image_feature_size + "<s>")
-            for p in HF_IMAGE_PROMPTS
-        ]
-
-        image_inputs_per_image = [[(
-            prompt,
-            rescale_image_size(hf_image, factor),
-            ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-        ) for factor in size_factors] for hf_image, vllm_image, prompt in zip(
-            hf_images, vllm_images, HF_IMAGE_PROMPTS)]
-        hf_inputs_per_image = [(
-            [prompt for prompt, hf_image, vllm_image in image_inputs],
-            [hf_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_image]
-        vllm_inputs_per_image = [(
-            [prompt for prompt, hf_image, vllm_image in image_inputs],
-            [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_image]
-
-        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                                  max_tokens,
-                                                  images=vllm_images)
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
@@ -160,8 +120,8 @@ def run_test(
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=vllm_images)
-            for prompts, vllm_images in vllm_inputs_per_image
+                                                images=images)
+            for prompts, images in inputs_per_image
         ]
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
@@ -173,9 +133,9 @@ def run_test(
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images,
+                                                    images=images,
                                                     eos_token_id=eos_token_id)
-            for prompts, hf_images in hf_inputs_per_image
+            for prompts, images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,

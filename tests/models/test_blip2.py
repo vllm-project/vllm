@@ -7,7 +7,6 @@ from transformers import AutoTokenizer
 from vllm.config import VisionLanguageConfig
 from vllm.model_executor.models.blip2 import (BLIP2_IMAGE_TOKEN,
                                               BLIP2_IMAGE_TOKEN_ID)
-from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
@@ -21,6 +20,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "Question: What's the content of the image? Answer:",
     "cherry_blossom":
     "Question: What is the season? Answer:",
+    "boardwalk":
+    "Question: What's in this image? Answer:",
 })
 
 
@@ -30,16 +31,11 @@ def iter_blip2_configs(model_name: str):
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
-        for input_type, input_shape in [
-            (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
-        ]:
-            yield (model_name,
-                   VisionLanguageConfig(image_input_type=input_type,
-                                        image_feature_size=f,
-                                        image_token_id=BLIP2_IMAGE_TOKEN_ID,
-                                        image_input_shape=input_shape,
-                                        image_processor=model_name,
-                                        image_processor_revision=None))
+        input_shape = (1, 3, h, w)
+        yield (model_name,
+               VisionLanguageConfig(image_feature_size=f,
+                                    image_token_id=BLIP2_IMAGE_TOKEN_ID,
+                                    image_input_shape=input_shape))
 
 
 model_and_vl_config = [
@@ -97,48 +93,37 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
-    hf_images = [asset.for_hf() for asset in image_assets]
-    vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
+    images = [asset.pil_image for asset in image_assets]
 
-    image_inputs_per_size_factors = [[(
-        prompt,
-        rescale_image_size(hf_image, factor),
-        ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-    ) for factor in size_factors] for hf_image, vllm_image, prompt in zip(
-        hf_images, vllm_images, HF_IMAGE_PROMPTS)]
-    hf_inputs_per_size_factors = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [hf_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_size_factors]
-    vllm_inputs_per_size_factors = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_size_factors]
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs_per_size_factors = [
+        vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=vllm_images)
-            for prompts, vllm_images in vllm_inputs_per_size_factors
+                                                images=images)
+            for prompts, images in inputs_per_image
         ]
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
-        hf_outputs_per_size_factors = [
+        hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images)
-            for prompts, hf_images in hf_inputs_per_size_factors
+                                                    images=images)
+            for prompts, images in inputs_per_image
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_size_factors,
-                                        vllm_outputs_per_size_factors):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
+                                        vllm_outputs_per_image):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
