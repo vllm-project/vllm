@@ -115,7 +115,7 @@ class ImagePlugin(MultiModalPlugin):
         if isinstance(data, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
-                raise RuntimeError("No HuggingFace processor is available"
+                raise RuntimeError("No HuggingFace processor is available "
                                    "to process the image object")
             try:
                 batch_data = image_processor \
