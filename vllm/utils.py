@@ -828,7 +828,7 @@ def error_on_invalid_device_count_status():
                 "and may result in undefined behavior. Please check out "
                 "https://github.com/vllm-project/vllm/issues/6056 to "
                 "find the first call to torch.cuda.device_count() "
-                "and defer it as late as possible. Or you can set "
+                "and defer it until the engine is up. Or you can set "
                 "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
 
 
