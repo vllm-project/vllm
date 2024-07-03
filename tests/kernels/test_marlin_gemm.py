@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.gptq_marlin import (
+from vllm.model_executor.layers.quantization.utils.marlin import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
