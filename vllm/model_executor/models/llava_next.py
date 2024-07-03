@@ -249,13 +249,34 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
 
         def _validate_shape(data: torch.Tensor):
-            if list(data.shape)[2:] != [
-                    3, self.config.vision_config.image_size,
-                    self.config.vision_config.image_size
-            ]:
+
+            dim = data.dim()
+            height = width = self.config.vision_config.image_size
+            # All 4d image tensors have the same number of patches,
+            # so data is a 5d batch of these tensors
+            if dim == 5:
+                if list(data.shape)[2:] != [
+                        3, self.config.vision_config.image_size,
+                        self.config.vision_config.image_size
+                ]:
+                    raise ValueError(
+                        "Expected pixel value tensor in shape of: (batch size, "
+                        f"patch number, 3, {height}, {width}), got {data.shape}"
+                    )
+
+            # 4d image tensors have different number of patches,
+            # so data is each individual tensor.
+            elif dim == 4:
+                if list(data.shape)[1:] != [
+                        3, self.config.vision_config.image_size,
+                        self.config.vision_config.image_size
+                ]:
+                    raise ValueError(
+                        "Expected pixel value tensor in shape of: (patch "
+                        f"number, 3, {height}, {width}), got {data.shape}")
+            else:
                 raise ValueError(
-                    "The expected pixel value tensor shape is batch dimension "
-                    "plus patch number, channel, height and width.")
+                    f"Invalid pixel value tensor of shape {data.shape}")
 
         if isinstance(data, torch.Tensor):
             _validate_shape(data)
