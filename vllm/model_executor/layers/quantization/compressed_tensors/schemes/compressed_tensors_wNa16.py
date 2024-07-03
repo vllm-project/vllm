@@ -124,7 +124,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         size_m = reshaped_x.shape[0]
         part_size_n = layer.output_size_per_partition
         part_size_k = layer.input_size_per_partition
-        full_size_k = layer.input_size
 
         out_shape = x.shape[:-1] + (part_size_n, )
 

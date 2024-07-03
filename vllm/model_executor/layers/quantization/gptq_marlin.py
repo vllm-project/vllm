@@ -11,12 +11,13 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin import (
-    check_marlin_supported, verify_marlin_supported, verify_marlin_supports_shape, 
-    marlin_permute_scales, get_max_workspace_size, sort_g_idx, replace_tensor)
+    check_marlin_supported, get_max_workspace_size, marlin_permute_scales,
+    replace_tensor, sort_g_idx, verify_marlin_supported,
+    verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-
 logger = init_logger(__name__)
+
 
 class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
@@ -29,16 +30,15 @@ class GPTQMarlinConfig(QuantizationConfig):
             desc_act = False
 
         self.weight_bits = weight_bits
-        self.pack_factor = 32 // self.weight_bits # packed into int32
+        self.pack_factor = 32 // self.weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
         self.is_sym = is_sym
         self.lm_head_quantized = lm_head_quantized
 
-        verify_marlin_supported(
-            num_bits=self.weight_bits,
-            group_size=self.group_size,
-            is_sym=self.is_sym)
+        verify_marlin_supported(num_bits=self.weight_bits,
+                                group_size=self.group_size,
+                                is_sym=self.is_sym)
 
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
@@ -117,12 +117,10 @@ class GPTQMarlinConfig(QuantizationConfig):
                 or desc_act is None):
             return False
 
-        return check_marlin_supported(
-            num_bits=num_bits,
-            group_size=group_size,
-            is_sym=sym,
-            min_capability=cls.get_min_capability()
-        )
+        return check_marlin_supported(num_bits=num_bits,
+                                      group_size=group_size,
+                                      is_sym=sym,
+                                      min_capability=cls.get_min_capability())
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
@@ -154,13 +152,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             group_size = self.quant_config.group_size
         else:
             group_size = input_size
-        
+
         verify_marlin_supports_shape(
             output_size_per_partition=sum(output_partition_sizes),
             input_size_per_partition=input_size_per_partition,
             input_size=input_size,
-            group_size=group_size
-        )
+            group_size=group_size)
 
         # Detect sharding of scales/zp
 
@@ -285,11 +282,10 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
         layer.is_k_full = is_k_full
-    
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        
-        # To be used as part of repacking        
+
+        # To be used as part of repacking
         part_size_n = layer.output_size_per_partition
         part_size_k = layer.input_size_per_partition
         full_size_k = layer.input_size
@@ -337,7 +333,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         part_size_k = layer.input_size_per_partition
 
         out_shape = x.shape[:-1] + (part_size_n, )
-            
+
         output = ops.gptq_marlin_gemm(
             reshaped_x,
             layer.qweight,
