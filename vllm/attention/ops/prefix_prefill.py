@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.utils import get_device_capability_stateless
+from vllm.platforms import current_platform
 
 if triton.__version__ >= "2.1.0":
 
@@ -685,7 +685,7 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None,
                               sliding_window=None):
 
-        cap = get_device_capability_stateless()
+        cap = current_platform.get_device_capability()
         BLOCK = 128 if cap[0] >= 8 else 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
