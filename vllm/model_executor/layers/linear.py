@@ -266,8 +266,8 @@ class ColumnParallelLinear(LinearBase):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
         assert self.quant_method is not None
-        self.output_size_per_partition = output_size // tp_size + (
-            output_size % tp_size > tp_rank)
+        self.output_size_per_partition = get_current_tp_rank_partition_size(
+            output_size, tp_rank, tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
         # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
