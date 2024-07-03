@@ -568,13 +568,12 @@ class ModelWrapper(nn.Module):
             slot_mapping = slot_mapping.flatten()
             attn_metadata.slot_mapping = slot_mapping
 
-        multi_modal_kwargs = multi_modal_kwargs or {}
         hidden_states = self.model(
             token_ids,
             position_ids,
             kv_caches,
             attn_metadata,
-            **multi_modal_kwargs,
+            **(multi_modal_kwargs or {}),
         )
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, sampling_metadata)

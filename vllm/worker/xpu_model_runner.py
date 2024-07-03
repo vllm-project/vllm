@@ -374,10 +374,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             "positions": model_input.input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": model_input.attn_metadata,
+            **(model_input.multi_modal_kwargs or {}),
         }
-        if (self.vision_language_config
-                and model_input.multi_modal_kwargs is not None):
-            execute_model_kwargs.update(model_input.multi_modal_kwargs)
 
         hidden_states = model_executable(**execute_model_kwargs)
 

@@ -239,13 +239,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-
         hidden_states = self.model(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             input_block_ids=model_input.input_block_ids,
-            **multi_modal_kwargs,
+            **(model_input.multi_modal_kwargs or {}),
         )
 
         # Compute the logits.
