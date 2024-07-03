@@ -1,12 +1,10 @@
-import re
 from typing import List, Optional, Tuple
 
 import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.model_executor.models.blip2 import (BLIP2_IMAGE_TOKEN,
-                                              BLIP2_IMAGE_TOKEN_ID)
+from vllm.model_executor.models.blip2 import BLIP2_IMAGE_TOKEN_ID
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
@@ -53,9 +51,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     """
     output_ids, output_str, out_logprobs = vllm_output
 
-    hf_output_str = output_str.replace(BLIP2_IMAGE_TOKEN, "")
-    hf_output_str = re.sub(r"Question:.* Answer:", "", hf_output_str)
-    hf_output_str += "\n"
+    hf_output_str = output_str + "\n"
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     hf_output_ids = tokenizer.encode(hf_output_str)
