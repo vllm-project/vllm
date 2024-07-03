@@ -15,8 +15,8 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import get_device_capability_stateless
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -333,7 +333,7 @@ def init_worker_distributed_environment(
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:
-        compute_capability = get_device_capability_stateless()
+        compute_capability = current_platform.get_device_capability()
         if compute_capability[0] < 8:
             gpu_name = torch.cuda.get_device_name()
             raise ValueError(
