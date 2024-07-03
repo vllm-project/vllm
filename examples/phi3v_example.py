@@ -14,16 +14,14 @@ def run_phi3v():
 
     # Note: The default setting of max_num_seqs (256) and
     # max_model_len (128k) for this model may cause OOM.
+    # You may lower either to run this example on lower-end GPUs.
+
     # In this example, we override max_num_seqs to 5 while
     # keeping the original context length of 128k.
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
         max_num_seqs=5,
-        # The model originally has a 128k context length.
-        # Setting to lower value here so that the example
-        # runs on lower grade GPUs.
-        max_model_len=4096,
     )
 
     image = Image.open("images/cherry_blossom.jpg")
