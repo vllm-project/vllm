@@ -38,4 +38,4 @@ class CompressedTensorsScheme(ABC):
         Called after weight loading is complete for any cleanup that
         needs to occur.
         """
-        pass
+        raise NotImplementedError
