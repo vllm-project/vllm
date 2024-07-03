@@ -1,6 +1,10 @@
+from typing import Optional
+
 import torch
 
 from .interface import Platform, PlatformEnum
+
+current_platform: Optional[Platform]
 
 if torch.version.cuda is not None:
     from .cuda import CudaPlatform
