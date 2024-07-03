@@ -50,6 +50,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.utils import print_warning_once
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -405,13 +406,29 @@ class Qwen2MoeForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the weight scales for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_scale"
+             if weight_name in ["gate_proj", "up_proj"] else "experts.w2_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id,
+             shard_id) for expert_id in range(self.config.num_experts)
+            for shard_id, weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+        ] + [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id, shard_id)
             ("experts.w13_weight" if weight_name in ["gate_proj", "up_proj"]
              else "experts.w2_weight",
              f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
-            for expert_id in range(self.config.num_experts) for shard_id,
-            weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+            for expert_id in range(self.config.num_experts) 
+            for shard_id, weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+        ] + [
+            # These are the weight scales for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.a13_scale"
+             if weight_name in ["gate_proj", "up_proj"] else "experts.a2_scale",
+             f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
+             shard_id) for expert_id in range(self.config.num_experts)
+            for shard_id, weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
         ]
 
         params_dict = dict(self.named_parameters())
@@ -459,8 +476,20 @@ class Qwen2MoeForCausalLM(nn.Module):
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
-                    if name not in params_dict:
-                        continue
+                    # Remapping the name of FP8 kv-scale.
+                    if name.endswith("kv_scale"):
+                        remapped_kv_scale_name = name.replace(
+                            ".kv_scale", ".attn.kv_scale")
+                        if remapped_kv_scale_name not in params_dict:
+                            print_warning_once(
+                                "Found kv scale in the checkpoint "
+                                f"(e.g. {name}), but not found the expected "
+                                f"name in the model "
+                                f"(e.g. {remapped_kv_scale_name}). "
+                                "kv-scale is not loaded.")
+                            continue
+                        else:
+                            name = remapped_kv_scale_name
 
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",

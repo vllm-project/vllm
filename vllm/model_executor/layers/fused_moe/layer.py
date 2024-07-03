@@ -140,9 +140,8 @@ class FusedMoE(torch.nn.Module):
                       shard_id: int, expert_id: int):
         param_data = param.data
 
-        # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
-        # Follow up PR to enable fp8 for other MoE models.
-        if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
+        # Input scales can be loaded directly and should be equal.
+        if "input_scale" in weight_name:
             if param_data[expert_id] != 1 and (param_data[expert_id] -
                                                loaded_weight).abs() > 1e-5:
                 raise ValueError(
@@ -150,14 +149,21 @@ class FusedMoE(torch.nn.Module):
                     f"must be equal. But got {param_data[expert_id]} "
                     f"vs. {loaded_weight}")
             param_data[expert_id] = loaded_weight
-        # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
-        # Follow up PR to enable fp8 for other MoE models.
+        # Weight scales 
         elif "weight_scale" in weight_name:
-            # We have to keep the weight scales of w1 and w3 because
-            # we need to re-quantize w1/w3 weights after weight loading.
-            assert "w1" in weight_name or "w3" in weight_name
-            shard_id = 0 if "w1" in weight_name else 1
-            param_data[expert_id][shard_id] = loaded_weight
+            # If we are in merged column case (gate_up_proj)
+            # * shard_id 0 == gate_proj / w1
+            # * shard_id 2 == up_proj / w3
+            if shard_id == 0 or shard_id == 2:
+                # We have to keep the weight scales of w1 and w3 because
+                # we need to re-quantize w1/w3 weights after weight loading.
+                idx = 0 if shard_id == 0 else 1
+                param_data[expert_id][idx] = loaded_weight
+            # If we are in the row parallel case (down_proj)
+            # * shard_id 1 == down_proj / w2
+            else:
+                param_data[expert_id] = loaded_weight
+        # Weights
         else:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = self.intermediate_size_per_partition
