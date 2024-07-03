@@ -39,7 +39,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         # Set OMP_NUM_THREADS to 1 if it is not set explicitly, avoids CPU
         # contention amongst the shards
-        if "OMP_NUM_THREADS" is not in os.environ:
+        if "OMP_NUM_THREADS" not in os.environ:
             os.environ["OMP_NUM_THREADS"] = "1"
 
         assert world_size <= cuda_device_count_stateless(), (
