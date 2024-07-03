@@ -866,13 +866,6 @@ def is_full_nvlink(device_ids: List[int]) -> bool:
     return True
 
 
-@lru_cache(maxsize=8)
-@with_nvml_context
-def get_device_capability_stateless(device_id: int = 0) -> Tuple[int, int]:
-    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-    return pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-
-
 #From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f):
 
