@@ -64,6 +64,10 @@ chat_completion = client.chat.completions.create(
 
 print("Chat completion results:")
 print(chat_completion)
+messages.append({
+    "role": "assistant",
+    "tool_calls": chat_completion.choices[0].message.tool_calls
+})
 
 # Now, simulate a tool call
 def get_current_weather(city: str, state: str, unit: 'str'):
@@ -79,7 +83,20 @@ for call in completion_tool_calls:
     args = json.loads(call.function.arguments)
     result = tool_to_call(**args)
     print(result)
+    messages.append({
+        "role": "tool",
+        "content": result,
+        "tool_call_id": call.id,
+        "name": call.function.name
+    })
 
+print("Sending new chat with messages", messages)
+chat_completion_2 = client.chat.completions.create(
+    messages=messages,
+    model=model,
+    tools=tools,
+)
 
+print(chat_completion_2)
 
 
