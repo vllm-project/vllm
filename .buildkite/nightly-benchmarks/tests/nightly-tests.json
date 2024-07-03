@@ -13,6 +13,7 @@
             "fp8": true
         },
         "lmdeploy_server_parameters": {
+            "quant_policy": 8
         },
         "lmdeploy_client_parameters": {
         },
