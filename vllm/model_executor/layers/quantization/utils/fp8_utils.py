@@ -106,4 +106,3 @@ def fp8_apply(
                                      bias=bias)
 
     return torch.narrow(output, 0, 0, input.shape[0])
-    
