@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -817,7 +818,12 @@ def cuda_device_count_stateless() -> int:
 
 
 def error_on_invalid_device_count_status():
-    if torch.cuda.device_count.cache_info().currsize != 0:
+    cache_entries = 0
+    with contextlib.suppress(Exception):
+        # future pytorch will fix the issue, device_count will not be cached
+        # at that time, `.cache_info().currsize` will error out
+        cache_entries = torch.cuda.device_count.cache_info().currsize
+    if cache_entries != 0:
         # the function is already called, and the result is cached
         remembered = torch.cuda.device_count()
         current = cuda_device_count_stateless()
