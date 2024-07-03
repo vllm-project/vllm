@@ -44,11 +44,7 @@ model_and_vl_config = [
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                          Optional[SampleLogprobs]],
                       vlm_config: VisionLanguageConfig, model_id: str):
-    """Sanitize vllm output to be comparable with hf output.
-    The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
-    x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
-    It also reduces `output_str` from "<image><image>bla" to "bla".
-    """
+    """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
     hf_output_str = output_str + "\n"
