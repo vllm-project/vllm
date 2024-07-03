@@ -194,9 +194,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         self.quantization_config = quantization_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if (hasattr(layer.scheme, "process_after_load") and 
-            layer.scheme.process_after_load):
-            layer.scheme.process_weights_after_loading(layer)
+        layer.scheme.process_weights_after_loading(layer)            
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
