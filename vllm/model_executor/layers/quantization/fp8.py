@@ -54,7 +54,7 @@ class Fp8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 70
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -238,6 +238,8 @@ class Fp8LinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
+        native_fp8_support = (current_platform.get_device_capability() >= (8, 9))
+
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_scale computed from x.
         #   If static, layer.input_scale is scalar and x_scale is input_scale.
@@ -254,7 +256,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 scale_b=layer.weight_scale,
             )
 
-        else:
+        elif native_fp8_support:
             qinput, x_scale = ops.scaled_fp8_quant(x,
                                                    layer.input_scale,
                                                    batch_dim_padding=17)
@@ -269,6 +271,16 @@ class Fp8LinearMethod(LinearMethodBase):
                 out_dtype=x.dtype,
                 scale_a=x_scale,
                 scale_b=layer.weight_scale,
+                bias=bias,
+            )
+        
+        else:
+            # Without hardware support for FP8 W8A8, we dequantize and multiply
+            # in original precision
+            qinput, x_scale = ops.scaled_fp8_quant(x, layer.input_scale)
+            output = torch.nn.functional.linear(
+                qinput.to(x.dtype) * x_scale,
+                layer.weight.t().to(x.dtype) * layer.weight_scale,
                 bias=bias,
             )
 
