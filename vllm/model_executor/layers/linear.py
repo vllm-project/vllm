@@ -748,10 +748,6 @@ class RowParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        # Special case for Fp8 scales.
-        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
-                                           None)
-
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
         if input_dim is not None:
