@@ -5,7 +5,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
                     Union)
 
 import torch
-from transformers import PretrainedConfig, PreTrainedTokenizerBase
+from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -26,6 +26,17 @@ logger = init_logger(__name__)
 
 _GB = 1 << 30
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+
+_PP_SUPPORTED_MODELS = [
+    "AquilaModel",
+    "AquilaForCausalLM",
+    "InternLMForCausalLM",
+    "LlamaForCausalLM",
+    "LLaMAForCausalLM",
+    "MistralForCausalLM",
+    "Phi3ForCausalLM",
+    "GPT2LMHeadModel",
+]
 
 
 class ModelConfig:
@@ -258,6 +269,13 @@ class ModelConfig:
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
+        architectures = getattr(self.hf_config, "architectures", [])
+        if not all(arch in _PP_SUPPORTED_MODELS
+                   for arch in architectures) and pipeline_parallel_size > 1:
+            raise NotImplementedError(
+                "Pipeline parallelism is only supported for the following "
+                f" architectures: {_PP_SUPPORTED_MODELS}.")
+
         if total_num_hidden_layers % pipeline_parallel_size != 0:
             raise ValueError(
                 f"Total number of hidden layers ({total_num_hidden_layers}) "
@@ -368,8 +386,35 @@ class ModelConfig:
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
+        total_num_hidden_layers = getattr(self.hf_text_config,
+                                          "num_hidden_layers", 0)
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+
+    def contains_seqlen_agnostic_layers(
+            self, parallel_config: "ParallelConfig") -> bool:
+        """True for Mamba/SSM models (Jamba)"""
+        return self._get_num_seqlen_agnostic_layers(parallel_config) > 0
+
+    def get_layers_block_type(self,
+                              parallel_config: "ParallelConfig") -> List[str]:
+        num_layers = self.get_num_layers(parallel_config)
+        # Transformers supports layers_block_type @property
+        return getattr(self.hf_config, "layers_block_type",
+                       ["attention"] * num_layers)
+
+    def get_num_attention_layers(self,
+                                 parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t == "attention"
+        ])
+
+    def _get_num_seqlen_agnostic_layers(
+            self, parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t != "attention"
+        ])
 
 
 class CacheConfig:
@@ -637,11 +682,13 @@ class ParallelConfig:
 
             from vllm.executor import ray_utils
             backend = "mp"
-            ray_found = ray_utils.ray is not None
+            ray_found = ray_utils.ray_is_available()
             if cuda_device_count_stateless() < self.world_size:
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
-                                     "required for multi-node inference")
+                                     "required for multi-node inference, "
+                                     "please install Ray with `pip install "
+                                     "ray`.") from ray_utils.ray_import_err
                 backend = "ray"
             elif ray_found:
                 if self.placement_group:
@@ -665,13 +712,17 @@ class ParallelConfig:
         self._verify_args()
 
     def _verify_args(self) -> None:
-        if self.pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Pipeline parallelism is not supported yet.")
+        if (self.pipeline_parallel_size > 1
+                and self.distributed_executor_backend == "mp"):
+            raise NotImplementedError("Pipeline parallelism is not supported "
+                                      "yet with multiprocessing.")
         if self.distributed_executor_backend not in ("ray", "mp", None):
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
                 "are 'ray' or 'mp'.")
+        if self.distributed_executor_backend == "ray":
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -957,12 +1008,6 @@ class SpeculativeConfig:
             )
 
             draft_hf_config = draft_model_config.hf_config
-            if (draft_hf_config.model_type == "mlp_speculator"
-                    and target_parallel_config.world_size != 1):
-                # MLPSpeculator TP support will be added very soon
-                raise ValueError(
-                    "Speculative decoding with mlp_speculator models does not "
-                    "yet support distributed inferencing (TP > 1).")
 
             if (num_speculative_tokens is not None
                     and hasattr(draft_hf_config, "num_lookahead_tokens")):
@@ -1262,16 +1307,6 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
-
-    #TODO(ywang96): make this a cached property once we refactor the
-    # VisionLanguageConfig class.
-    def get_image_token_text(
-            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
-        """Get the image token placeholder text to be inserted into the 
-        text prompt and the string representation of the image token id.
-        """
-        image_token_str = tokenizer.decode(self.image_token_id)
-        return image_token_str * self.image_feature_size, image_token_str
 
     def as_cli_args_dict(self) -> Dict[str, Any]:
         """Flatten vision language config to pure args.
