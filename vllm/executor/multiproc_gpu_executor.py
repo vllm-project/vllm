@@ -10,6 +10,7 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (cuda_device_count_stateless,
+                        error_on_invalid_device_count_status,
                         get_distributed_init_method, get_open_port,
                         get_vllm_instance_id, make_async,
                         update_environment_variables)
@@ -38,6 +39,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         assert world_size <= cuda_device_count_stateless(), (
             "please set tensor_parallel_size to less than max local gpu count")
+
+        error_on_invalid_device_count_status()
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
