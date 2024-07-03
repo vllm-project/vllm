@@ -32,8 +32,8 @@ docker exec cpu-test bash -c "cd tests;
 # online inference
 docker exec cpu-test bash -c "
   export VLLM_CPU_KVCACHE_SPACE=10 
-  export VLLM_CPU_OMP_THREADS_BIND=96-142 
-  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & server_pid=$! 
+  export VLLM_CPU_OMP_THREADS_BIND=48-92 
+  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
   wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json 
   timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
   python3 benchmarks/benchmark_serving.py \
@@ -43,5 +43,4 @@ docker exec cpu-test bash -c "
     --model facebook/opt-125m \
     --num-prompts 20 \
     --endpoint /v1/completions \
-    --tokenizer facebook/opt-125m
-  echo $server_pid && kill $server_pid"
+    --tokenizer facebook/opt-125m"
