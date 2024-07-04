@@ -35,8 +35,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     assert output_str_without_image[0] == " "
     output_str_without_image = output_str_without_image[1:]
 
-    hf_output_str = output_str_without_image.replace("<|user|>", "") \
-        .replace("<|end|>\n<|assistant|>", " ")
+    hf_output_str = output_str_without_image + "<|end|><|endoftext|>"
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     hf_output_ids = tokenizer.encode(output_str_without_image)

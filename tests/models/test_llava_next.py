@@ -1,4 +1,3 @@
-import re
 from typing import List, Optional, Tuple
 
 import pytest
@@ -36,7 +35,6 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     output_ids, output_str, out_logprobs = vllm_output
 
     tokenizer = AutoTokenizer.from_pretrained(model)
-    image_token_str = tokenizer.decode(IMAGE_TOKEN_ID)
     eos_token_id = tokenizer.eos_token_id
 
     hf_output_ids = [
@@ -44,9 +42,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
         if token_id != IMAGE_TOKEN_ID or output_ids[idx - 1] != IMAGE_TOKEN_ID
     ]
 
-    hf_output_str = re.sub(fr"({image_token_str})+", "", output_str)
-    assert hf_output_str[0] == " "
-    hf_output_str = hf_output_str[1:]
+    assert output_str[0] == " "
+    hf_output_str = output_str[1:]
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
