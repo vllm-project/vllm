@@ -33,7 +33,7 @@ Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.
 
 ## Known crashes
 
-- TGI v2.1 crashes when running mixtral model, see [TGI PR #2122](https://github.com/huggingface/text-generation-inference/issues/2122)
+- TGI v2.1 crashes when running mixtral model, see [TGI Issue #2122](https://github.com/huggingface/text-generation-inference/issues/2122)
 
 
 ## Results
