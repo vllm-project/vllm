@@ -51,7 +51,7 @@ class InputContext:
         additionally checking its type.
 
         Raises:
-            ValueError: If the model is not of the specified type.
+            TypeError: If the model is not of the specified type.
         """
 
         hf_config = self.model_config.hf_config
