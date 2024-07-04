@@ -859,23 +859,10 @@ class GGUFModelLoader(BaseModelLoader):
         state_dict = dummy_model.state_dict()
 
         gguf_to_hf_name_map = {}
-        keys_to_remove = []
         for hf_name in state_dict:
             name, suffix = hf_name.rsplit(".", 1)
             gguf_name = name_map.get_name(name)
-            if gguf_name:
-                gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
-            elif name == "lm_head":
-                keys_to_remove.append(hf_name)
-                logger.warning(
-                    f"GGUF tensor name for {hf_name} not found, "
-                    "this is normal if the model uses tie word embeddings.")
-            else:
-                logger.warning(
-                    f"GGUF tensor name for {hf_name} in hf state_dict not found."
-                )
-        for key in keys_to_remove:
-            state_dict.pop(key)
+            gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
         return gguf_to_hf_name_map
 
     def _get_weights_iterator(
@@ -891,15 +878,16 @@ class GGUFModelLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
+
+        local_model_path = self._prepare_weights(model_config.model)
+        gguf_weights_map = self._get_gguf_weights_map(model_config)
+        # we can only know if tie word embeddings after mapping weights
+        if "lm_head.weight" in get_gguf_extra_tensor_names(
+                local_model_path, gguf_weights_map):
+            model_config.hf_config.update({"tie_word_embeddings": True})
+
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                local_model_path = self._prepare_weights(model_config.model)
-                gguf_weights_map = self._get_gguf_weights_map(model_config)
-                # we can only know if the model uses tie word embeddings after mapping weights
-                if "lm_head.weight" in get_gguf_extra_tensor_names(
-                        local_model_path, gguf_weights_map):
-                    model_config.hf_config.update(
-                        {"tie_word_embeddings": True})
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, multimodal_config,
                                           cache_config)

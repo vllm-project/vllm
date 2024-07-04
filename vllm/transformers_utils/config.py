@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Dict, Optional, Type, Union
 
 from transformers import GenerationConfig, PretrainedConfig
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
