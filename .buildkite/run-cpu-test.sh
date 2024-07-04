@@ -5,8 +5,8 @@ set -ex
 docker image prune -f
 
 # Try building the docker image
-docker build -t cpu-test -f Dockerfile.cpu .
-docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-avx2 -f Dockerfile.cpu .
+numactl -C 48-95 -N 1 docker build -t cpu-test -f Dockerfile.cpu .
+numactl -C 48-95 -N 1 docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-avx2 -f Dockerfile.cpu .
 
 # Setup cleanup
 remove_docker_container() { docker rm -f cpu-test cpu-test-avx2 || true; }
