@@ -24,8 +24,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
         # Create the parallel GPU workers.
-        world_size = self.parallel_config.pipeline_parallel_size \
-            * self.parallel_config.tensor_parallel_size
+        world_size = self.parallel_config.world_size
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -133,7 +132,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                 "max_concurrent_workers is not supported yet.")
 
         if async_run_tensor_parallel_workers_only:
-            # Run only non-driver workers, and just return futures.
+            # Run only non-driver workers and just return futures.
             return [
                 worker.execute_method(method, *args, **kwargs)
                 for worker in self.non_driver_workers
