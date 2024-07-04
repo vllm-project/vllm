@@ -91,7 +91,8 @@ def main(args):
             
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric} comparison")
-    
+
+    fig.tight_layout(pad=0.1)
     fig.savefig("nightly_results.png", bbox_inches='tight')
 
 if __name__ == '__main__':
