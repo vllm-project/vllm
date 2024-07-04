@@ -21,7 +21,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
-                   input_processor_for_clip)
+                   get_max_clip_image_tokens, input_processor_for_clip)
 from .interfaces import SupportsVision
 from .utils import merge_vision_embeddings
 
@@ -60,6 +60,17 @@ class LlavaImagePixelInputs(TypedDict):
 
 
 LlavaImageInputs = LlavaImagePixelInputs
+
+
+def get_max_llava_image_tokens(ctx: InputContext):
+    hf_config = ctx.get_hf_config(LlavaConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        return get_max_clip_image_tokens(vision_config)
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
 def dummy_data_for_llava(ctx: InputContext, seq_len: int):
@@ -102,6 +113,7 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsVision):

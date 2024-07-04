@@ -35,6 +35,10 @@ def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
                                 patch_size=hf_config.patch_size)
 
 
+def get_max_clip_image_tokens(hf_config: CLIPVisionConfig) -> int:
+    return get_clip_image_feature_size(hf_config)
+
+
 def dummy_seq_data_for_clip(
     hf_config: CLIPVisionConfig,
     seq_len: int,
