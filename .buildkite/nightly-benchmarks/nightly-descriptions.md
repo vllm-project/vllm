@@ -36,12 +36,13 @@ Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.
 - TGI v2.1 crashes when running mixtral model, see [TGI Issue #2122](https://github.com/huggingface/text-generation-inference/issues/2122)
 
 
-## Results
-
-{nightly_results_benchmarking_table}
 
 ## Plots
 
-In the following plots, the error bar shows the standard error of the mean.
+In the following plots, the error bar shows the standard error of the mean. Value 0 means that the corresponding benchmark crashed.
 
 <img src="artifact://nightly_results.png" alt="Benchmarking results" height=250 >
+
+## Results
+
+{nightly_results_benchmarking_table}
