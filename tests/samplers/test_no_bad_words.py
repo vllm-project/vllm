@@ -34,7 +34,7 @@ def _generate(
 
 
 class TestOneTokenBadWord:
-    MODEL = "openai-community/gpt2"
+    MODEL = "TheBloke/Llama-2-7B-fp16"
 
     PROMPT = "Hi! How are"
     TARGET_TOKEN = "you"
@@ -43,8 +43,8 @@ class TestOneTokenBadWord:
         self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL,
                                                        add_prefix_space=True)
 
-        self.num_prompt_tokens = len(self.tokenizer(self.PROMPT).input_ids)
-        self.target_token_id = self.tokenizer(self.TARGET_TOKEN).input_ids[0]
+        self.num_prompt_tokens = len(self._encode(self.PROMPT))
+        self.target_token_id = self._encode(self.TARGET_TOKEN, add_special_tokens=False)[0]
 
     def test_one_token_bad_word(self, vllm_runner):
         with vllm_runner(self.MODEL) as llm:
@@ -66,6 +66,9 @@ class TestOneTokenBadWord:
             bad_words=bad_words,
         )
 
+    def _encode(self, prompt: str, add_special_tokens: bool = True) -> List[int]:
+        return self.tokenizer(prompt, add_special_tokens=add_special_tokens).input_ids
+
 
 class TestTwoTokenBadWord:
     MODEL = "openai-community/gpt2"
@@ -79,11 +82,10 @@ class TestTwoTokenBadWord:
         self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL,
                                                        add_prefix_space=True)
 
-        self.num_prompt_tokens = len(self.tokenizer(self.PROMPT).input_ids)
-        self.target_token_id1 = self.tokenizer(self.TARGET_TOKEN1).input_ids[0]
-        self.target_token_id2 = self.tokenizer(self.TARGET_TOKEN2).input_ids[0]
-        self.neighbour_token_id2 = self.tokenizer(
-            self.NEIGHBOUR_TOKEN2).input_ids[0]
+        self.num_prompt_tokens = len(self._encode(self.PROMPT))
+        self.target_token_id1 = self._encode(self.TARGET_TOKEN1, add_special_tokens=False)[0]
+        self.target_token_id2 = self._encode(self.TARGET_TOKEN2, add_special_tokens=False)[0]
+        self.neighbour_token_id2 = self._encode(self.NEIGHBOUR_TOKEN2, add_special_tokens=False)[0]
 
     def test_two_token_bad_word(self, vllm_runner):
         with vllm_runner(self.MODEL) as llm:
@@ -111,6 +113,7 @@ class TestTwoTokenBadWord:
             assert not self._contains(
                 output_token_ids,
                 [self.target_token_id1, self.target_token_id2])
+            # Model dependent behaviour
             assert output_token_ids[:2] == [
                 self.target_token_id1, self.neighbour_token_id2
             ]
@@ -167,3 +170,6 @@ class TestTwoTokenBadWord:
         assert searched, "All subsequences did not match in length..."
 
         return False
+
+    def _encode(self, prompt: str, add_special_tokens: bool = True) -> List[int]:
+        return self.tokenizer(prompt, add_special_tokens=add_special_tokens).input_ids
