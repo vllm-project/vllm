@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import ensure_tensor_like
+from vllm.utils import ensure_tensor
 from vllm.worker.model_runner import _BATCH_SIZES_TO_CAPTURE
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -100,7 +100,7 @@ class JambaMambaMixer(nn.Module):
                                             skip_bias_add=True)
 
         def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            loaded_weight = ensure_tensor_like(loaded_weight, param)
+            loaded_weight = ensure_tensor(loaded_weight)
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
             param.data.copy_(
@@ -108,7 +108,7 @@ class JambaMambaMixer(nn.Module):
                                          dim=0)[tp_rank])
 
         def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            loaded_weight = ensure_tensor_like(loaded_weight, param)
+            loaded_weight = ensure_tensor(loaded_weight)
             weight_loader(param, -torch.exp(loaded_weight.float()))
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -358,17 +358,17 @@ class JambaMoE(nn.Module):
         if weight_name.endswith("gate_proj.weight"):
             loaded_weight = loaded_weight.narrow(0, shard.start,
                                                  shard.stop - shard.start)
-            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor(loaded_weight)
             param_data[expert_id, 0:shard_size, :] = loaded_weight
         if weight_name.endswith("up_proj.weight"):
             loaded_weight = loaded_weight.narrow(0, shard.start,
                                                  shard.stop - shard.start)
-            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor(loaded_weight)
             param_data[expert_id, shard_size:2 * shard_size, :] = loaded_weight
         if weight_name.endswith("down_proj.weight"):
             loaded_weight = loaded_weight.narrow(1, shard.start,
                                                  shard.stop - shard.start)
-            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor(loaded_weight)
             param_data[expert_id, :, :] = loaded_weight
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

@@ -11,7 +11,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import ensure_tensor_like
+from vllm.utils import ensure_tensor
 
 
 class SiluAndMul(CustomOp):
@@ -198,7 +198,7 @@ class ScaledActivation(nn.Module):
             shard_size = param_data.shape[0]
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
-        loaded_weight = ensure_tensor_like(loaded_weight, param_data)
+        loaded_weight = ensure_tensor(loaded_weight)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

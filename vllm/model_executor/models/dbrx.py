@@ -25,7 +25,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
-from vllm.utils import ensure_tensor_like
+from vllm.utils import ensure_tensor
 
 
 class DbrxRouter(nn.Module):
@@ -120,7 +120,7 @@ class DbrxExperts(nn.Module):
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         # DBRX uses GLU for each experts.
         # GLU has 3 linear layers: w1, v1 and w2.
-        loaded_weight = ensure_tensor_like(loaded_weight, param_data)
+        loaded_weight = ensure_tensor(loaded_weight)
         if weight_name.endswith("w1"):
             loaded_weight = torch.reshape(
                 loaded_weight,
