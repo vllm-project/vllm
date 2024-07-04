@@ -1,7 +1,6 @@
 #!/bin/bash
 
 set -o pipefail
-set -ex
 
 check_gpus() {
   # check the number of GPUs and GPU type.

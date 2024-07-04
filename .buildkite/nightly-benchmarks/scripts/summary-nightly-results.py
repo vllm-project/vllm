@@ -58,7 +58,7 @@ if __name__ == "__main__":
     serving_md_table_without_header = '\n'.join(serving_md_table_lines[2:])
 
     prefix = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    prefix = prefix + os.environ.get("CURRENT_LLM_SERVING_ENGINE")
+    prefix = prefix + "_" + os.environ.get("CURRENT_LLM_SERVING_ENGINE")
 
     # document benchmarking results in markdown
     with open(results_folder / f"{prefix}_nightly_results.md", "w") as f:

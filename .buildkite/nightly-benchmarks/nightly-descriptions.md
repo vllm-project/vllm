@@ -34,7 +34,7 @@ Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.
 ## Known issues
 
 - TGI v2.1 crashes when running mixtral model, see [tgi issue #2122](https://github.com/huggingface/text-generation-inference/issues/2122)
-- pin the transformers library to 4.41.2 to avoid lmdeploy missing cache_position error, see [lmdeploy issue 1885](https://github.com/InternLM/lmdeploy/issues/1885).
+- Pin the transformers library to 4.41.2 to avoid lmdeploy missing cache_position error, see [lmdeploy issue 1885](https://github.com/InternLM/lmdeploy/issues/1885).
 
 
 
