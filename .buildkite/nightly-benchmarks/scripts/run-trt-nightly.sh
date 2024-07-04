@@ -95,13 +95,8 @@ run_serving_tests() {
     fi
 
 
-    # prepare tokenizer
+
     cd $VLLM_SOURCE_CODE_LOC/benchmarks
-    rm -rf /tokenizer_cache
-    mkdir /tokenizer_cache
-    python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
-      --model "$model" \
-      --cachedir /tokenizer_cache
 
 
     # run the server
@@ -119,8 +114,17 @@ run_serving_tests() {
       break
     fi
 
-    # go back to vllm benchmarking directory
+    # prepare tokenizer
     cd $VLLM_SOURCE_CODE_LOC/benchmarks
+    rm -rf /tokenizer_cache
+    mkdir /tokenizer_cache
+    # update transformers package, to make sure mixtral tokenizer is available
+    python -m pip install transformers -U
+    python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
+      --model "$model" \
+      --cachedir /tokenizer_cache
+    cd $VLLM_SOURCE_CODE_LOC/benchmarks
+    
 
     # iterate over different QPS
     for qps in $qps_list; do
