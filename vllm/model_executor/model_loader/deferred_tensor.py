@@ -9,7 +9,7 @@ class DeferredTensor:
         self.slice_view = slice_view
         self.shape = slice_view.get_shape()
         if slices is None:
-            slices = (slice(None, None, None) for x in self.shape)
+            slices = tuple(slice(None, None, None) for x in self.shape)
         self.slices = slices
         self.narrow_count = narrow_count
         self.materialized_tensor: Optional[torch.Tensor] = None
