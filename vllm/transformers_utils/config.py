@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, Optional, Type, Union
 
 from transformers import GenerationConfig, PretrainedConfig
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
@@ -26,8 +27,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
 }
-
-_GGUF_ARCHITECTURE_REGISTRY: Dict[str, str] = {"llama": "LlamaForCausalLM"}
 
 for name, cls in _CONFIG_REGISTRY.items():
     with contextlib.suppress(ValueError):
@@ -69,9 +68,11 @@ def get_config(model: Union[str, Path],
                                               revision=revision,
                                               code_revision=code_revision)
 
-    if config.model_type in _GGUF_ARCHITECTURE_REGISTRY and is_gguf:
-        model_type = _GGUF_ARCHITECTURE_REGISTRY[config.model_type]
+    if config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES and is_gguf:
+        model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+    elif config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES and is_gguf:
+        raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
     for key, value in [("rope_scaling", rope_scaling),
                        ("rope_theta", rope_theta)]:
         if value is not None:

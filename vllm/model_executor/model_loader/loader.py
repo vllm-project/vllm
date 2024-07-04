@@ -12,8 +12,10 @@ from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 import huggingface_hub
 import numpy as np
 import torch
+from gguf import MODEL_ARCH_NAMES, get_tensor_name_map
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
+from transformers import AutoModelForCausalLM
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, ParallelConfig,
@@ -30,8 +32,8 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_quant_config, gguf_quant_weights_iterator, initialize_dummy_weights,
-    np_cache_weights_iterator, pt_weights_iterator,
+    get_quant_config, get_gguf_extra_tensor_names, gguf_quant_weights_iterator,
+    initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
@@ -839,11 +841,50 @@ class GGUFModelLoader(BaseModelLoader):
         else:
             raise ValueError(f"{model_name_or_path} is not a file.")
 
+    def _get_gguf_weights_map(self, model_config: ModelConfig):
+        config = model_config.hf_config
+        model_type = config.model_type
+        # hack: ggufs have a different name than transformers
+        if model_type == "cohere":
+            model_type = "command-r"
+        arch = None
+        for key, value in MODEL_ARCH_NAMES.items():
+            if value == model_type:
+                arch = key
+                break
+        if arch is None:
+            raise RuntimeError(f"Unknown model_type: {model_type}")
+        num_layers = config.num_hidden_layers
+        name_map = get_tensor_name_map(arch, num_layers)
+        with torch.device("meta"):
+            dummy_model = AutoModelForCausalLM.from_config(config)
+        state_dict = dummy_model.state_dict()
+
+        gguf_to_hf_name_map = {}
+        keys_to_remove = []
+        for hf_name in state_dict:
+            name, suffix = hf_name.rsplit(".", 1)
+            gguf_name = name_map.get_name(name)
+            if gguf_name:
+                gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
+            elif name == "lm_head":
+                keys_to_remove.append(hf_name)
+                logger.warning(
+                    f"GGUF tensor name for {hf_name} not found, "
+                    "this is normal if the model uses tie word embeddings.")
+            else:
+                logger.warning(
+                    f"GGUF tensor name for {hf_name} in hf state_dict not found."
+                )
+        for key in keys_to_remove:
+            state_dict.pop(key)
+        return gguf_to_hf_name_map
+
     def _get_weights_iterator(
-        self, model_name_or_path: str
+        self, model_name_or_path: str, gguf_to_hf_name_map: Dict[str, str]
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-        local_model_path = self._prepare_weights(model_name_or_path)
-        return gguf_quant_weights_iterator(local_model_path)
+        return gguf_quant_weights_iterator(model_name_or_path,
+                                           gguf_to_hf_name_map)
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -854,10 +895,18 @@ class GGUFModelLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
+                local_model_path = self._prepare_weights(model_config.model)
+                gguf_weights_map = self._get_gguf_weights_map(model_config)
+                # we can only know if the model uses tie word embeddings after mapping weights
+                if "lm_head.weight" in get_gguf_extra_tensor_names(
+                        local_model_path, gguf_weights_map):
+                    model_config.hf_config.update(
+                        {"tie_word_embeddings": True})
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config,
                                           cache_config)
-            model.load_weights(self._get_weights_iterator(model_config.model))
+            model.load_weights(
+                self._get_weights_iterator(local_model_path, gguf_weights_map))
         return model
 
 

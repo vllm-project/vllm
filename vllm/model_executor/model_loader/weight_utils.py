@@ -6,12 +6,13 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple
+from typing import Any, Generator, Iterable, List, Optional, Tuple, Dict
 
 import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
+from gguf import GGUFReader
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
@@ -376,17 +377,27 @@ def pt_weights_iterator(
         torch.cuda.empty_cache()
 
 
+def get_gguf_extra_tensor_names(
+        gguf_file: str, gguf_to_hf_name_map: Dict[str, str]) -> List[str]:
+    reader = GGUFReader(gguf_file)
+    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
+    exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
+    extra_keys = expected_gguf_keys - exact_gguf_keys
+    return [gguf_to_hf_name_map[key] for key in extra_keys]
+
+
 def gguf_quant_weights_iterator(
-        gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the quant weights in the model gguf files."""
-    from gguf import GGUFReader
 
     reader = GGUFReader(gguf_file)
 
     for tensor in reader.tensors:
-        name = tensor.name
         weight = tensor.data
         weight_type = tensor.tensor_type
+        name = gguf_to_hf_name_map[tensor.name]
+
         if weight_type.name != "F32":
             weight_type_name = name.replace("weight", "qweight_type")
             weight_type = torch.tensor(weight_type)

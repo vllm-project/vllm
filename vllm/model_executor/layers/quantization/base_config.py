@@ -23,6 +23,14 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    def apply_embeds(self, layer: torch.nn.Module, *args,
+                     **kwargs) -> torch.Tensor:
+        """Apply the weights in quantized embeddings layer to the input tensor.
+
+        Expects create_weights to have been called before on the layer.
+        """
+        return
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 
