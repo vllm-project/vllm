@@ -23,7 +23,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
         # Create the parallel GPU workers.
-        world_size = self.parallel_config.tensor_parallel_size
+        world_size = self.parallel_config.world_size
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -43,7 +43,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             os.environ["OMP_NUM_THREADS"] = "1"
 
         assert world_size <= cuda_device_count_stateless(), (
-            "please set tensor_parallel_size to less than max local gpu count")
+            "please set tensor_parallel_size * pipeline_parallel_size "
+            "to less than max local gpu count")
 
         error_on_invalid_device_count_status()
 
@@ -79,6 +80,21 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+
+        # This is the list of workers that are rank 0 of each TP group EXCEPT
+        # global rank 0. These are the workers that will broadcast to the
+        # rest of the workers.
+        self.tp_driver_workers: List[ProcessWorkerWrapper] = []
+        # This is the list of workers that are not drivers and not the first
+        # worker in a TP group. These are the workers that will be
+        # broadcasted to.
+        self.non_driver_workers: List[ProcessWorkerWrapper] = []
+
+        for i in range(1, world_size):
+            if i % self.parallel_config.tensor_parallel_size == 0:
+                self.tp_driver_workers.append(self.workers[i - 1])
+            else:
+                self.non_driver_workers.append(self.workers[i - 1])
 
     def shutdown(self):
         if (worker_monitor := getattr(self, "worker_monitor",
@@ -117,14 +133,19 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                 "max_concurrent_workers is not supported yet.")
 
         # Start the workers first.
+
+        if async_run_tensor_parallel_workers_only:
+            non_driver_worker_outputs = [
+                worker.execute_method(method, *args, **kwargs)
+                for worker in self.non_driver_workers
+            ]
+            # Just return futures
+            return non_driver_worker_outputs
+
         worker_outputs = [
             worker.execute_method(method, *args, **kwargs)
             for worker in self.workers
         ]
-
-        if async_run_tensor_parallel_workers_only:
-            # Just return futures
-            return worker_outputs
 
         driver_worker_method = getattr(self.driver_worker, method)
         driver_worker_output = driver_worker_method(*args, **kwargs)
@@ -157,11 +178,41 @@ class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        return await self.driver_exec_model(execute_model_req)
+        if self.pp_locks is None:
+            # This locks each pipeline parallel stage so multiple virtual
+            # engines can't execute on the same stage at the same time
+            # We create the locks here to avoid creating them in the constructor
+            # which uses a different asyncio loop.
+            self.pp_locks = [
+                asyncio.Lock()
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+
+        async def _run_task_with_lock(task, lock, *args, **kwargs):
+            async with lock:
+                return await task(*args, **kwargs)
+
+        tasks = []
+        tasks.append(
+            asyncio.create_task(
+                _run_task_with_lock(self.driver_exec_model, self.pp_locks[0],
+                                    execute_model_req)))
+        for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
+                                                start=1):
+            tasks.append(
+                asyncio.create_task(
+                    _run_task_with_lock(driver_worker.execute_method_async,
+                                        self.pp_locks[pp_rank],
+                                        "execute_model", execute_model_req)))
+
+        results = await asyncio.gather(*tasks)
+
+        # Only the last PP stage has the final results.
+        return results[-1]
 
     async def _start_worker_execution_loop(self):
         coros = [
             worker.execute_method_async("start_worker_execution_loop")
-            for worker in self.workers
+            for worker in self.non_driver_workers
         ]
         return await asyncio.gather(*coros)

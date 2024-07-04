@@ -14,6 +14,7 @@ from ..utils import VLLM_PATH, RemoteOpenAIServer
 MODEL_NAME = "meta-llama/Meta-Llama-3-8B"
 EAGER_MODE = bool(int(os.getenv("EAGER_MODE", 0)))
 CHUNKED_PREFILL = bool(int(os.getenv("CHUNKED_PREFILL", 0)))
+DISTRIBUTED_EXECUTOR_BACKEND = os.getenv("DISTRIBUTED_EXECUTOR_BACKEND", 'mp')
 TP_SIZE = int(os.getenv("TP_SIZE", 1))
 PP_SIZE = int(os.getenv("PP_SIZE", 1))
 
@@ -40,7 +41,7 @@ def server(ray_ctx):
         "--tensor-parallel-size",
         str(TP_SIZE),
         "--distributed-executor-backend",
-        "ray",
+        DISTRIBUTED_EXECUTOR_BACKEND,
     ]
     if CHUNKED_PREFILL:
         args += [
