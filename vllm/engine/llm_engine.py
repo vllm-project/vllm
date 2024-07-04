@@ -545,7 +545,8 @@ class LLMEngine:
                 prompt_token_ids = tokenizer.encode(text=inputs["prompt"],
                                                     add_special_tokens=False)
 
-                # If space at the beginning produces a new word token
+                # If no space at the beginning
+                # or if prefix space produces a new word token
                 if (j == 0) or (
                         j > 0 and prompt_token_ids[0] != bad_words_ids[-1][0]
                         and len(prompt_token_ids) == len(bad_words_ids[-1])):
