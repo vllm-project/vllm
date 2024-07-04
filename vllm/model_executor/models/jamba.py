@@ -360,17 +360,18 @@ class JambaMoE(nn.Module):
             loaded_weight = loaded_weight.narrow(0, shard.start,
                                                  shard.stop - shard.start)
             loaded_weight = ensure_tensor(loaded_weight)
-            param_data[expert_id, 0:shard_size, :] = loaded_weight
+            param_data[expert_id, 0:shard_size, :].copy_(loaded_weight)
         if weight_name.endswith("up_proj.weight"):
             loaded_weight = loaded_weight.narrow(0, shard.start,
                                                  shard.stop - shard.start)
             loaded_weight = ensure_tensor(loaded_weight)
-            param_data[expert_id, shard_size:2 * shard_size, :] = loaded_weight
+            param_data[expert_id,
+                       shard_size:2 * shard_size, :].copy_(loaded_weight)
         if weight_name.endswith("down_proj.weight"):
             loaded_weight = loaded_weight.narrow(1, shard.start,
                                                  shard.stop - shard.start)
             loaded_weight = ensure_tensor(loaded_weight)
-            param_data[expert_id, :, :] = loaded_weight
+            param_data[expert_id, :, :].copy_(loaded_weight)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape

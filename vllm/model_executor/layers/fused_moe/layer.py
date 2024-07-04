@@ -144,7 +144,7 @@ class FusedMoE(torch.nn.Module):
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
         # Follow up PR to enable fp8 for other MoE models.
         if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
-            loaded_weight = ensure_tensor(loaded_weight)
+            loaded_weight = ensure_tensor(loaded_weight).to(param_data.device)
             if param_data[expert_id] != 1 and (param_data[expert_id] -
                                                loaded_weight).abs() > 1e-5:
                 raise ValueError(
@@ -160,7 +160,7 @@ class FusedMoE(torch.nn.Module):
             assert "w1" in weight_name or "w3" in weight_name
             shard_id = 0 if "w1" in weight_name else 1
             loaded_weight = ensure_tensor(loaded_weight)
-            param_data[expert_id][shard_id] = loaded_weight
+            param_data[expert_id][shard_id].copy_(loaded_weight)
         else:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = self.intermediate_size_per_partition
@@ -176,14 +176,14 @@ class FusedMoE(torch.nn.Module):
 
             # w1, gate_proj case: Load into first shard of w13.
             if shard_id == 0:
-                param_data[expert_id, 0:shard_size, :] = loaded_weight
+                param_data[expert_id, 0:shard_size, :].copy_(loaded_weight)
             # w3, up_proj case: Load into second shard of w13.
             elif shard_id == 2:
                 param_data[expert_id,
-                           shard_size:2 * shard_size, :] = loaded_weight
+                           shard_size:2 * shard_size, :].copy_(loaded_weight)
             # w2, down_proj case: Load into only shard of w2.
             elif shard_id == 1:
-                param_data[expert_id, :, :] = loaded_weight
+                param_data[expert_id, :, :].copy_(loaded_weight)
             else:
                 raise ValueError(
                     f"Shard id must be in [0,1,2] but got {shard_id}")

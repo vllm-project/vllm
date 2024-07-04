@@ -121,6 +121,9 @@ class DbrxExperts(nn.Module):
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         # DBRX uses GLU for each experts.
         # GLU has 3 linear layers: w1, v1 and w2.
+
+        # TODO: if we can figure out the shape, we can use deferred tensor
+        # to accelerate the loading.
         loaded_weight = ensure_tensor(loaded_weight)
         if weight_name.endswith("w1"):
             loaded_weight = torch.reshape(
