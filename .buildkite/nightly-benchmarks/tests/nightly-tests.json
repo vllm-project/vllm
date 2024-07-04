@@ -38,11 +38,11 @@
         }
     },
     {
-        "test_name": "mixtral8x7B_tp2",
+        "test_name": "llama70B_tp4",
         "qps_list": [2],
         "common_parameters": {
-            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
-            "tp": 2,
+            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
+            "tp": 4,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 500,
@@ -76,11 +76,11 @@
         }
     },
     {
-        "test_name": "llama70B_tp4",
+        "test_name": "mixtral8x7B_tp2",
         "qps_list": [2],
         "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
-            "tp": 4,
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "tp": 2,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 500,
