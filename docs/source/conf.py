@@ -69,6 +69,14 @@ html_theme_options = {
     'use_edit_page_button': True,
 }
 
+# see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
+READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
+if READTHEDOCS_VERSION_TYPE == "tag":
+    # remove the warning banner if the version is a tagged release
+    header_file = os.path.join(os.path.dirname(__file__),
+                               "_templates/sections/header.html")
+    os.remove(header_file)
+
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
