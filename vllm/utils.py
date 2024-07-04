@@ -398,6 +398,27 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
+def init_kmp_env():
+    if not is_cpu():
+        return
+
+    ld_prealod_str = os.getenv("LD_PRELOAD", "")
+    if "libiomp5.so" not in ld_prealod_str:
+        return
+
+    # The time(milliseconds) that a thread should wait after completing the
+    # execution of a parallel region, before sleeping.
+    os.environ['KMP_BLOCKTIME'] = "1"
+    # dump settings on start up
+    os.environ['KMP_SETTINGS'] = "1"
+    # Prevents the CPU to run into low performance state
+    os.environ['KMP_TPAUSE'] = "0"
+    # Provides fine granularity parallelism
+    os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+
+
 def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
     """Yield successive chunk_size chunks from lst."""
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
