@@ -1,0 +1,6 @@
+{
+  "server_command": "",
+  "client_command": "python3 benchmark_serving.py         --backend tensorrt-llm         --tokenizer /tokenizer_cache         --model meta-llama/Meta-Llama-3-8B         --dataset-name sharegpt         --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json         --num-prompts 200         --port 8000         --save-result         --result-dir results/         --result-filename trt_llama8B_tp1_qps_8.json         --request-rate 8         --endpoint /v2/models/ensemble/generate_stream",
+  "gpu_type": "A100-SXM4-80GB",
+  "engine": "trt"
+}

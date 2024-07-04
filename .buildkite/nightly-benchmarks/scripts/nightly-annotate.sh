@@ -8,11 +8,9 @@ main() {
 
     (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
     (which jq) || (apt-get update && apt-get -y install jq)
-    
-    df -h
 
     if [ ! -f /workspace/buildkite-agent ]; then
-        echo "buildkite-agent binary not found. Skip uploading the results."
+        echo "buildkite-agent binary not found. Skip plotting the results."
         exit 0
     fi
 
@@ -22,16 +20,19 @@ main() {
     # download results
     cd $VLLM_SOURCE_CODE_LOC/benchmarks
     mkdir -p results/
-    /workspace/buildkite-agent artifact download 'results/*nightly_results.json' results
+    /workspace/buildkite-agent artifact download 'results/*nightly_results.json' results/
+    ls
+    ls results/
 
     # generate figures
-    python3 -m pip install tabulate pandas
-    python3 $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/summary-nightly-results.py \
-        --results-folder results \
-        --description $description
-
+    python3 -m pip install tabulate pandas matplotlib
+    python3 $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/plot-nightly-results.py \
+        --description $description \
+        --results-folder results/
     
-    
+    # upload results and figures
+    /workspace/buildkite-agent annotate --style "success" --context "benchmark-results" --append < nightly_results.md
+    /workspace/buildkite-agent artifact upload "nightly_results.png"
 }
 
 main "$@"

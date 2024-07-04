@@ -23,7 +23,7 @@ def main(args):
     results = []
 
     # collect results
-    for test_file in results_folder.glob("*.json"):
+    for test_file in results_folder.glob("*_nightly_results.json"):
         with open(test_file, "r") as f:
             results = results + json.loads(f.read())
             
@@ -46,13 +46,16 @@ def main(args):
     with open("nightly_results.md", "w") as f:
         f.write(description)
         
+
+    plt.rcParams.update({'font.size': 20})
         
     # plot results
-    fig, axes = plt.subplots((3, 2), figsize=(16, 18))
-    for i, model in enumerate(["llama8b", "llama70b", "mixtral8x7b"]):
+    fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+    methods = ["vllm", "trt", "lmdeploy", "tgi"]
+    for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
             means, stds = [], []
-            for method in ["vllm", "trt", "lmdeploy", "tgi"]:
+            for method in methods:
                 target = df['Test name'].str.contains(model)
                 target = target & df['Test name'].str.contains(method)
                 filtered_df = df[target]
@@ -71,12 +74,21 @@ def main(args):
                 means, 
                 yerr=stds,
                 fmt='o', capsize=5)
+            ax.set_ylim(bottom=0)
+
+            for i, (method, mean, std) in enumerate(zip(method, means, stds)):
+                ax.text(
+                    i - 0.2, mean,  # Adjust position above the error bar
+                    f'{mean:.0f}', 
+                    ha='center', 
+                    va='bottom'
+                )
             
             ax.set_xlabel("Method")
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric} comparison")
     
-    fig.savefig("nightly_results.jpg", bbox_inches='tight')
+    fig.savefig("nightly_results.png", bbox_inches='tight')
 
 if __name__ == '__main__':
     args = parse_arguments()
