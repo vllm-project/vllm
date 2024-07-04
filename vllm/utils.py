@@ -928,7 +928,7 @@ class DeferredTensor:
 
     def __init__(self, slice_view, slices=None, narrow_count=0):
         self.slice_view = slice_view
-        self.shape = slice_view.get_shape()
+        self.shape = torch.Size(slice_view.get_shape())
         if slices is None:
             slices = tuple(slice(None, None, None) for x in self.shape)
         self.slices = slices
