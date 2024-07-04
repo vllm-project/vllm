@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
-from vllm.utils import DeferredTensor
+from vllm.utils import DeferredTensor, ensure_tensor
 
 logger = init_logger(__name__)
 
@@ -414,20 +414,12 @@ def kv_cache_scales_loader(
     return []
 
 
-def convert_and_move_to_tensor(x: DeferredTensor,
-                               target: torch.Tensor) -> torch.Tensor:
-    x = x.materialize()
-    assert isinstance(x, torch.Tensor)
-    x = x.to(device=target.device)
-    return x
-
-
 def default_weight_loader(
         param: torch.Tensor, loaded_weight: Union[torch.Tensor,
                                                   DeferredTensor]) -> None:
     """Default weight loader."""
     if isinstance(loaded_weight, DeferredTensor):
-        loaded_weight = convert_and_move_to_tensor(loaded_weight, param)
+        loaded_weight = ensure_tensor(loaded_weight)
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
 
