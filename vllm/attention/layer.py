@@ -55,8 +55,8 @@ class Attention(nn.Module):
         # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
         self._kv_scale = 1.0
-        quant_method = (quant_config.get_quant_method(self)
-                        if quant_config else None)
+        quant_method = quant_config.get_quant_method(
+            self) if quant_config else None
         if quant_method is not None:
             assert isinstance(quant_method, Fp8KVCacheMethod)
             # TODO (mgoin): kv cache dtype should be specified in the FP8
@@ -75,27 +75,14 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(
-            num_heads,
-            head_size,
-            num_kv_heads,
-            sliding_window,
-            dtype,
-            kv_cache_dtype,
-            block_size,
-            blocksparse_params is not None,
-        )
+        attn_backend = get_attn_backend(num_heads, head_size, num_kv_heads,
+                                        sliding_window, dtype, kv_cache_dtype,
+                                        block_size, blocksparse_params
+                                        is not None)
         impl_cls = attn_backend.get_impl_cls()
-        self.impl = impl_cls(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            blocksparse_params,
-        )
+        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
+                             alibi_slopes, sliding_window, kv_cache_dtype,
+                             blocksparse_params)
 
     def forward(
         self,
