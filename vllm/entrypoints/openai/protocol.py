@@ -41,7 +41,7 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     same role.
     """
     tool_call_id: Optional[str]
-    
+
     tool_calls: Optional[List[dict]]
 
 

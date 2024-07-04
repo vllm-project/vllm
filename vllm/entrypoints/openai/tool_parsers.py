@@ -86,7 +86,6 @@ class Hermes2ProToolParser(ToolParser):
 
         # sanity check; avoid unnecessary processing
         if self.tool_call_start not in model_response.choices[0].message.content:
-            print('TOOL tool_call_start is not in the response')
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
@@ -113,9 +112,7 @@ class Hermes2ProToolParser(ToolParser):
                     ) for function_call in raw_function_calls
                 ]
                 content_match = self.scratch_pad_regex.search(model_response.choices[0].message.content)
-                print("CONTENT MATCH", content_match)
                 content = content_match.group(1) if content_match else None
-                print("CONTENT", content)
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,

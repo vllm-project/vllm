@@ -219,27 +219,27 @@ class OpenAIServingChat(OpenAIServing):
 
         # invariant
         if content is None and tool_calls is None:
-            print('Parsing message as empty:', message)
             return ChatMessageParseResult(messages=[], image_futures=[])
 
         # if content is a string OR if there's tool calls
-        if isinstance(content, str) or isinstance(tool_calls, list):
-            print('parsing message as content', message)
+        if isinstance(content, str) or tool_calls:
 
-            messages: List[ConversationMessage] = []
             if role == 'tool':
                 messages = [ConversationMessage(role=role, name=name, content=content, tool_call_id=tool_call_id)]
             elif role == 'assistant':
                 if tool_calls:
-                    messages = [ConversationMessage(role=role, content=content, tool_calls=tool_calls)]
+                    # tool_calls is a ValidatorIterator and should be flattened into a list
+                    #  (although it doesn't have to be)
+                    messages = [ConversationMessage(role=role, content=content, tool_calls=list(tool_calls))]
                 else:
                     messages = [ConversationMessage(role=role, content=content)]
-            else: # user and system messages can be handled the same way
+            else:
+                # user and system messages can be handled the same way
                 messages = [ConversationMessage(role=role, content=content)]
+
             return ChatMessageParseResult(messages=messages, image_futures=[])
 
         elif isinstance(content, list):
-            print('parsing message as image stuff')
             return self._parse_chat_message_content_parts_for_image(role, content)
 
     async def create_chat_completion(
@@ -257,21 +257,17 @@ class OpenAIServingChat(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
         """
-        print('checking model')
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
-            print('Error with model')
+            print('Error with model', error_check_ret)
             return error_check_ret
 
         try:
-            print('trying to parse messages')
             conversation: List[ConversationMessage] = []
             image_futures: List[Awaitable[ImagePixelData]] = []
 
             for msg in request.messages:
-                print('parsing messages...')
                 chat_parsed_result = self._parse_chat_message_content(msg)
-                print('messages parsed...')
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
 
@@ -279,10 +275,6 @@ class OpenAIServingChat(OpenAIServing):
             if self.enable_auto_tools and request.tools:
                 tools = [tool.model_dump() for tool in request.tools]
 
-            print()
-            print('using tools', tools)
-            print('add generation prompt? ', request.add_generation_prompt)
-            print('conversation', conversation)
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
@@ -355,12 +347,20 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation)
+                request,
+                result_generator,
+                request_id,
+                conversation
+            )
         else:
             try:
                 return await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id,
-                    conversation)
+                    request,
+                    raw_request,
+                    result_generator,
+                    request_id,
+                    conversation
+                )
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))

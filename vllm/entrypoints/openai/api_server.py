@@ -158,7 +158,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
             return JSONResponse(content=response)
 
         else:
-            print('Returning regular response')
             return JSONResponse(content=generator.model_dump())
 
 
