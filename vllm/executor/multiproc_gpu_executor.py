@@ -44,7 +44,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             os.environ["OMP_NUM_THREADS"] = "1"
 
         # workaround for https://github.com/vllm-project/vllm/issues/6103
-        maybe_set_triton_cache_manager()
+        if world_size > 1:
+            maybe_set_triton_cache_manager()
 
         assert world_size <= cuda_device_count_stateless(), (
             "please set tensor_parallel_size to less than max local gpu count")
