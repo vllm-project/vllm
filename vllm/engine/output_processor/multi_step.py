@@ -3,9 +3,11 @@ from typing import Callable, List
 
 from transformers import PreTrainedTokenizer
 
+from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.single_step import SingleStepOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -33,6 +35,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def __init__(
         self,
+        scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
         scheduler: List[Scheduler],
         seq_counter: Counter,
@@ -44,6 +47,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self.seq_counter = seq_counter
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
+
+        self.single_step_processor = SingleStepOutputProcessor(
+            scheduler_config,
+            detokenizer,
+            scheduler,
+            seq_counter,
+            stop_checker
+        )
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
@@ -69,9 +80,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         including freeing finished sequences. It also handles cases where there
         are tokens emitted after the EOS token.
         """
+
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"
+
+        if len(seqs) > 1 or sequence_group.sampling_params.best_of > 1:
+            return self.single_step_processor.process_outputs(sequence_group, outputs)
+
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]

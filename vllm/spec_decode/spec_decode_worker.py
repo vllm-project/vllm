@@ -350,12 +350,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def _should_disable_all_speculation(
             self, execute_model_req: ExecuteModelRequest) -> bool:
+
         # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
-        disable_all_speculation = (execute_model_req.running_queue_size >=
-                                   self.disable_by_batch_size)
+        if execute_model_req.running_queue_size >= self.disable_by_batch_size:
+            return True
 
-        return disable_all_speculation
+        # Disable speculation if best_of > 1 for any sequence group
+        for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+            if seq_group_metadata.sampling_params.best_of > 1:
+                return True
+
+        return False
 
     def _maybe_disable_speculative_tokens(
             self, disable_all_speculation: bool,
@@ -388,14 +394,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output = sampler_output[0]
 
         # Store hidden states from target model execution.
-        hidden_states = sampler_output.hidden_states
-        if hidden_states is not None:
-            if self.previous_hidden_states is None:
-                self.previous_hidden_states = HiddenStates(
-                    execute_model_req.seq_group_metadata_list, hidden_states)
-            else:
-                self.previous_hidden_states.update(
-                    execute_model_req.seq_group_metadata_list, hidden_states)
+        if not skip_proposer:
+            hidden_states = sampler_output.hidden_states
+            if hidden_states is not None:
+                if self.previous_hidden_states is None:
+                    self.previous_hidden_states = HiddenStates(
+                        execute_model_req.seq_group_metadata_list, hidden_states)
+                else:
+                    self.previous_hidden_states.update(
+                        execute_model_req.seq_group_metadata_list, hidden_states)
 
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.

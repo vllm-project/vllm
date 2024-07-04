@@ -53,6 +53,7 @@ class SequenceGroupOutputProcessor(ABC):
             from vllm.engine.output_processor.multi_step import (
                 MultiStepOutputProcessor)
             return MultiStepOutputProcessor(
+                scheduler_config,
                 detokenizer,
                 scheduler,
                 seq_counter,

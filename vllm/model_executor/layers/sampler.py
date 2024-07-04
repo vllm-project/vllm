@@ -460,10 +460,14 @@ def _sample_with_torch(
                                     List[int]] = {t: []
                                                   for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
+    max_best_of_in_batch = 1
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params
         sampling_type = sampling_params.sampling_type
         categorized_seq_group_ids[sampling_type].append(i)
+        if seq_group.is_prompt:
+            max_best_of_in_batch = max(max_best_of_in_batch,
+                                       sampling_params.best_of)
 
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata: Dict[SamplingType,
@@ -473,7 +477,7 @@ def _sample_with_torch(
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
         sampled_token_ids_tensor = torch.empty(logprobs.shape[0],
-                                               1,
+                                               max_best_of_in_batch,
                                                dtype=torch.long,
                                                device=logprobs.device)
     else:
@@ -509,12 +513,6 @@ def _sample_with_torch(
                                              greedy_samples)
 
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            max_best_of_in_batch = 1
-            for seq_group in seq_groups:
-                if seq_group.is_prompt:
-                    sampling_params = seq_group.sampling_params
-                    max_best_of_in_batch = max(max_best_of_in_batch,
-                                               sampling_params.best_of)
             seeded_args = {} if sampling_type == SamplingType.RANDOM else {
                 "seq_groups": seq_groups,
             }
