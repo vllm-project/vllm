@@ -51,7 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import convert_like
+from vllm.utils import ensure_tensor_like
 
 from .interfaces import SupportsLoRA
 
@@ -120,17 +120,17 @@ class MiniCPMMoE(nn.Module):
         if weight_name.endswith("w1.weight"):
             loaded_weight = loaded_weight.narrow(0, shard.start,
                                                  shard.stop - shard.start)
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
             param_data[expert_id, 0:shard_size, :] = loaded_weight
         if weight_name.endswith("w3.weight"):
             loaded_weight = loaded_weight.narrow(0, shard.start,
                                                  shard.stop - shard.start)
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
             param_data[expert_id, shard_size:2 * shard_size, :] = loaded_weight
         if weight_name.endswith("w2.weight"):
             loaded_weight = loaded_weight.narrow(1, shard.start,
                                                  shard.stop - shard.start)
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
             param_data[expert_id, :, :] = loaded_weight
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

@@ -952,8 +952,8 @@ class DeferredTensor:
         return self.materialized_tensor
 
 
-def convert_like(x: Union[DeferredTensor, torch.Tensor],
-                 param: torch.Tensor) -> torch.Tensor:
+def ensure_tensor_like(x: Union[DeferredTensor, torch.Tensor],
+                       param: torch.Tensor) -> torch.Tensor:
     if isinstance(x, DeferredTensor):
         x = x.materialize()
     assert isinstance(x, torch.Tensor)

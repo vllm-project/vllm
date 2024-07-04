@@ -22,7 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import convert_like
+from vllm.utils import ensure_tensor_like
 
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
@@ -33,7 +33,7 @@ def load_column_parallel_weight(param: torch.nn.Parameter,
     s = rk * param.size(0)
     e = (rk + 1) * param.size(0)
     loaded_weight = loaded_weight.narrow(0, s, e - s)
-    loaded_weight = convert_like(loaded_weight, param)
+    loaded_weight = ensure_tensor_like(loaded_weight, param)
     assert param.shape == loaded_weight.shape
     param.data.copy_(loaded_weight)
 

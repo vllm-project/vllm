@@ -47,7 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import convert_like
+from vllm.utils import ensure_tensor_like
 
 
 @torch.compile
@@ -84,7 +84,7 @@ class LayerNorm(nn.Module):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(shard_dim, start_idx,
                                                  shard_size)
-        loaded_weight = convert_like(loaded_weight, param_data)
+        loaded_weight = ensure_tensor_like(loaded_weight, param_data)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

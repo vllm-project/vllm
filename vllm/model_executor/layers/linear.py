@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import convert_like
+from vllm.utils import ensure_tensor_like
 
 logger = init_logger(__name__)
 
@@ -301,7 +301,7 @@ class ColumnParallelLinear(LinearBase):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-        loaded_weight = convert_like(loaded_weight, param_data)
+        loaded_weight = ensure_tensor_like(loaded_weight, param_data)
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
@@ -388,7 +388,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                loaded_weight = convert_like(loaded_weight, param_data)
+                loaded_weight = ensure_tensor_like(loaded_weight, param_data)
                 if needs_scalar_to_array is not None:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
@@ -415,8 +415,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
-                loaded_weight_shard = convert_like(loaded_weight_shard,
-                                                   param_data)
+                loaded_weight_shard = ensure_tensor_like(
+                    loaded_weight_shard, param_data)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -448,22 +448,22 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
         # Special case for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
             shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
 
         else:
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
                 logger.warning(
@@ -556,7 +556,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                loaded_weight = convert_like(loaded_weight, param_data)
+                loaded_weight = ensure_tensor_like(loaded_weight, param_data)
                 if needs_scalar_to_array is not None:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
@@ -587,8 +587,8 @@ class QKVParallelLinear(ColumnParallelLinear):
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
-                loaded_weight_shard = convert_like(loaded_weight_shard,
-                                                   param_data)
+                loaded_weight_shard = ensure_tensor_like(
+                    loaded_weight_shard, param_data)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -644,7 +644,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
         # Special case for for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -652,14 +652,14 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
         else:
-            loaded_weight = convert_like(loaded_weight, param_data)
+            loaded_weight = ensure_tensor_like(loaded_weight, param_data)
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
                 logger.warning(
@@ -747,7 +747,7 @@ class RowParallelLinear(LinearBase):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
-        loaded_weight = convert_like(loaded_weight, param_data)
+        loaded_weight = ensure_tensor_like(loaded_weight, param_data)
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
