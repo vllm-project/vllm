@@ -403,7 +403,8 @@ class LLMEngine:
     MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "
                                    "skip_tokenizer_init is True")
 
-    INCORRECT_PARAMS_TYPE_MSG = "Either SamplingParams or PoolingParams must be provided."
+    INCORRECT_PARAMS_TYPE_MSG = ("Either SamplingParams "
+                                 "or PoolingParams must be provided.")
 
     def get_tokenizer_group(
             self,
@@ -530,7 +531,7 @@ class LLMEngine:
         if params.bad_words is None:
             return params
 
-        bad_words_ids = list()
+        bad_words_ids: List[List[int]] = list()
 
         # To prohibit words both at the beginning and in the middle of text
         # (related to add_prefix_space tokenizer parameter)
