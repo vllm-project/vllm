@@ -4,8 +4,8 @@ from vllm import LLM, SamplingParams
 
 
 def run_gguf_inference(model_path):
-    PROMPT_TEMPLATE = "<|system|>\n{system_message}</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n"   # noqa: E501
-    system_message = "You are a friendly chatbot who always responds in the style of a pirate." # noqa: E501
+    PROMPT_TEMPLATE = "<|system|>\n{system_message}</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n"  # noqa: E501
+    system_message = "You are a friendly chatbot who always responds in the style of a pirate."  # noqa: E501
     # Sample prompts.
     prompts = [
         "How many helicopters can a human eat in one sitting?",
