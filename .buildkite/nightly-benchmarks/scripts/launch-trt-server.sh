@@ -68,7 +68,7 @@ if echo "$common_params" | jq -e 'has("fp8")' > /dev/null; then
 
 else
 
-    echo "Key 'fp8' exists in common params. Use convert_checkpoint.py"
+    echo "Key 'fp8' does not exist in common params. Use convert_checkpoint.py"
     python3 convert_checkpoint.py \
         --model_dir ${model_path} \
         --dtype ${model_dtype} \
