@@ -116,7 +116,6 @@ class AttentionImpl(ABC, Generic[T]):
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
-        max_seq_len: Optional[int] = 4096,
     ) -> None:
         raise NotImplementedError
 

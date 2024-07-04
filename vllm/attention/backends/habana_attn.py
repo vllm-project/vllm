@@ -146,6 +146,8 @@ class HabanaAttentionImpl(AttentionImpl):
         self.position_bias = None
         self.alibi_slopes = alibi_slopes
         if alibi_slopes is not None:
+            # FIXME(kzawora): Need a general method to set max_seq_len on
+            # per-model basis.
             alibi_slopes_tensor = torch.tensor(alibi_slopes,
                                                dtype=torch.bfloat16)
             self.position_bias = _make_alibi_bias(alibi_slopes_tensor,
