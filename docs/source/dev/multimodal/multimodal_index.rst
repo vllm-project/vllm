@@ -1,3 +1,5 @@
+.. _multi_modality:
+
 Multi-Modality
 ==============
 
@@ -8,9 +10,22 @@ vLLM provides experimental support for multi-modal models through the :mod:`vllm
 :class:`vllm.inputs.PromptStrictInputs` accepts an additional attribute ``multi_modal_data``
 which allows you to pass in multi-modal input alongside text and token prompts.
 
-By default, vLLM models do not support multi-modal inputs. To enable multi-modal support for a model,
-you must decorate the model class with :meth:`MULTIMODAL_REGISTRY.register_dummy_data <MultiModalRegistry.register_dummy_data>`,
-as well as :meth:`MULTIMODAL_REGISTRY.register_input <MultiModalRegistry.register_input>` for each modality type to support.
+.. note::
+   ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through 
+    :class:`vllm.multimodal.MULTIMODAL_REGISTRY`.
+
+By default, vLLM models do not support multi-modal inputs. To enable multi-modal support for a model, please follow :ref:`the guide for adding a new multimodal model. <adding_a_new_multimodal_model>`.
+
+
+# TODO: Add more instructions on how to do that once embeddings is in.
+
+Guides
+++++++
+
+.. toctree::
+   :maxdepth: 1
+
+   adding_multimodal_model
 
 Module Contents
 +++++++++++++++
@@ -29,7 +44,11 @@ Registry
 Base Classes
 ------------
 
-.. autoclass:: vllm.multimodal.MultiModalData
+.. autoclass:: vllm.multimodal.MultiModalDataDict
+    :members:
+    :show-inheritance:
+
+.. autoclass:: vllm.multimodal.MultiModalInputs
     :members:
     :show-inheritance:
 

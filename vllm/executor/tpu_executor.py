@@ -50,7 +50,7 @@ class TPUExecutor(ExecutorBase):
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            vision_language_config=self.vision_language_config,
+            multimodal_config=self.multimodal_config,
             is_driver_worker=rank == 0,
         )
 
