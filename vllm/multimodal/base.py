@@ -229,11 +229,15 @@ class MultiModalPlugin(ABC):
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._input_mappers:
+            if model_cls in self._max_mm_tokens:
                 logger.warning(
                     "Model class %s already calculates maximum number of "
                     "tokens in %s. It is overwritten by the new one.",
                     model_cls, self)
+
+            if isinstance(max_mm_tokens, int) and max_mm_tokens < 1:
+                raise ValueError("You should set the number of tokens to a "
+                                 "positive integer")
 
             self._max_mm_tokens[model_cls] = max_mm_tokens \
                 or self._default_max_multimodal_tokens
