@@ -100,6 +100,7 @@ run_serving_tests() {
 
 
     # run the server
+    python -m pip install transformers -U
     echo "Running test case $test_name"
     bash ../.buildkite/nightly-benchmarks/scripts/launch-trt-server.sh "$server_params" "$common_params"
 
