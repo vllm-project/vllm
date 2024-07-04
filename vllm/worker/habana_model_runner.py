@@ -20,7 +20,7 @@ import torch
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         MultiModalConfig)
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -344,7 +344,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -370,7 +370,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
@@ -399,7 +399,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     device_config=self.device_config,
                     load_config=self.load_config,
                     lora_config=self.lora_config,
-                    vision_language_config=self.vision_language_config,
+                    multimodal_config=self.multimodal_config,
                     parallel_config=self.parallel_config,
                     scheduler_config=self.scheduler_config,
                     cache_config=self.cache_config)
@@ -615,7 +615,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                            device=self.device)
 
         if multi_modal_input_list:
-            assert self.vision_language_config, (
+            assert self.multimodal_config, (
                 "Multi-modal inputs are only supported by "
                 "vision language models.")
             multi_modal_input = torch.cat(multi_modal_input_list,
@@ -1313,8 +1313,8 @@ class HabanaModelRunner(
             "attn_metadata": self.trim_attn_metadata(attn_metadata),
             "intermediate_tensors": intermediate_tensors
         }
-        if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
+        if multi_modal_input is not None:
+            execute_model_kwargs.update(multi_modal_input)
 
         htorch.core.mark_step()
         if self.is_driver_worker:
