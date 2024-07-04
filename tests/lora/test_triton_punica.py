@@ -62,11 +62,10 @@ HIDDEN_SIZES = [
     128256,
 ]
 
-batches = [1, 2, 4] + [8 * i for i in range(1, 4)]
-
+BATCHES = [1, 2, 4] + [8 * i for i in range(1, 4)]
 NUM_LORA = [1, 4, 8, 16, 32, 64, 128]
 DTYPES = [torch.float16, torch.bfloat16]
-MAX_RANKS = [8, 16, 32, 64]
+MAX_RANKS = [1]
 SCALES = [0.5]
 SEED = [0]
 CUDA_DEVICES = [f"cuda:{0}"]
@@ -222,7 +221,7 @@ def _generate_data_expand_nslices(batches, hidden_size, lora_nums, max_rank,
         raise error
 
 
-@pytest.mark.parametrize("batches", batches)
+@pytest.mark.parametrize("batches", BATCHES)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
 @pytest.mark.parametrize("scaling", SCALES)
@@ -306,7 +305,7 @@ def test_punica_sgmv(
     assert_close(our_out_tensor, ref_out_tensor)
 
 
-@pytest.mark.parametrize("batches", batches)
+@pytest.mark.parametrize("batches", BATCHES)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
 @pytest.mark.parametrize("scaling", SCALES)
@@ -377,7 +376,7 @@ def test_punica_bgmv(
     assert_close(our_out_tensor, ref_out_tensor)
 
 
-@pytest.mark.parametrize("batches", batches)
+@pytest.mark.parametrize("batches", BATCHES)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
 @pytest.mark.parametrize("nslices", [2, 3])

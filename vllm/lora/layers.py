@@ -83,7 +83,7 @@ def _apply_lora(x: torch.Tensor,
         index corresponding to each token
         indices_len(List):(6,), It contains  (base_indices, sampler_indices, 
             sampler_indices_padded,embeddings_indices, long_lora_indices,
-            prefilling flag). 
+            prefill flag). 
         output (torch.Tensor):  (batch_size, output_dim)
 
     Returns:
@@ -94,7 +94,7 @@ def _apply_lora(x: torch.Tensor,
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     token_num = indices_info[0]
-    is_prefilling = bool(indices_info[5])
+    is_prefill = bool(indices_info[5])
     add_lora(output,
              x,
              lora_a_stacked,
@@ -102,7 +102,7 @@ def _apply_lora(x: torch.Tensor,
              lora_index_tensor[:token_num],
              0,
              1.0,
-             is_prefilling,
+             is_prefill,
              cache_clear=cache_clear)
     return output.view_as(org_output)
 
@@ -127,7 +127,7 @@ def _apply_lora_packed_nslice(x: torch.Tensor,
     output = output.view(-1, output.shape[-1])
 
     token_num = indices_info[0]
-    is_prefilling = bool(indices_info[5])
+    is_prefill = bool(indices_info[5])
     offset_left = 0
     # TODO fuse these kernels
     for slice_idx in range(len(output_slices)):
@@ -138,7 +138,7 @@ def _apply_lora_packed_nslice(x: torch.Tensor,
                  lora_index_tensor[:token_num],
                  0,
                  1.0,
-                 is_prefilling,
+                 is_prefill,
                  offset_left,
                  output_slices[slice_idx],
                  cache_clear=cache_clear)
@@ -153,8 +153,8 @@ class LoRAMapping:
     index_mapping: Tuple[int, ...]
     # Per sampled token:
     prompt_mapping: Tuple[int, ...]
-    # prefilling or  decoding.
-    is_prefilling: bool = False
+    # prefill stage or  decode stage.
+    is_prefill: bool = False
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
@@ -363,14 +363,14 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         #     -1, full_lora_a_embeddings.shape[-1])
         # full_output = full_output.view(-1, full_output.shape[-1])
         token_num = self.indices_len[0]
-        is_prefilling = bool(self.indices_len[5])
+        is_prefill = bool(self.indices_len[5])
         add_expand(
             full_output,
             full_lora_a_embeddings,
             self.lora_b_stacked,
             self.indices[:token_num],
             0,
-            is_prefilling,
+            is_prefill,
             add_input=True,
         )
         return full_output.view_as(full_output_org)
@@ -1297,10 +1297,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1], ] = lora_logits
 
-        # LogitsProcessorWithLoRA always using bgmv
-        # sampler_indices
         sampler_indices = self.indices_len[1]
-        is_prefilling = False
+        # LogitsProcessorWithLoRA always using bgmv
+        is_prefill = False
         add_lora(
             logits,
             hidden_states,
@@ -1309,7 +1308,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             self.indices[:sampler_indices],
             0,
             1.0,
-            is_prefilling,
+            is_prefill,
         )
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]

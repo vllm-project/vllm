@@ -78,10 +78,10 @@ def convert_mapping(
             long_lora_indices: Tensor of shape [batch_size] mapping
                 requests to RoPE offsets and rot dims for long LoRAs.
                 None if long context lora doesn't exist.
-            indices_len: List of lengths of the above tensors and prefilling 
+            indices_len: List of lengths of the above tensors and prefill
                 flag. Used to index into each tensor. It contains 
                 (base_indices, sampler_indices, sampler_indices_padded, 
-                embeddings_indices, long_lora_indices, prefilling flag). 
+                embeddings_indices, long_lora_indices, prefill flag). 
     """
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
@@ -149,9 +149,9 @@ def convert_mapping(
     else:
         #If long_lora doesn't exist,append None
         indices_len.append(None)
-    # Append a prefilling flag to help selecting the appropriate lora
+    # Append a prefill flag to help selecting the appropriate lora
     # ops (sgmv or bgmv)
-    indices_len.append(int(mapping.is_prefilling))
+    indices_len.append(int(mapping.is_prefill))
     return (
         base_indices,
         sampler_indices,
@@ -458,7 +458,7 @@ class LoRAModelManager:
         self.scaling_factor_to_offset: Dict[float, int] = {}
         # 6 is the number of indicies tensors.
         # base_indices, sampler_indices, sampler_indices_padded,
-        # embeddings_indices,long_lora_indices,prefilling or decoding
+        # embeddings_indices,long_lora_indices,prefill or decode stage
         self.indices_len: List[Optional[int]] = [None] * 6
 
         self.model = model
@@ -622,7 +622,7 @@ class LoRAModelManager:
         # Maintain the reference
         self.indices_len[:] = indices_len
         #
-        if mapping.is_prefilling:
+        if mapping.is_prefill:
             punica.reset_params_cache()
             punica._compute_params(self.base_indices[:base_indices.shape[0]])
 

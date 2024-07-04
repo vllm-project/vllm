@@ -65,7 +65,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             device=x.device,
         )
         token_num = self.indices_len[0]
-        is_prefilling = bool(self.indices_len[5])
+        is_prefill = bool(self.indices_len[5])
         add_shrink(
             buffer,
             x,
@@ -73,7 +73,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             self.indices[:token_num],
             0,
             1.0,
-            is_prefilling,
+            is_prefill,
         )
         buffer = tensor_model_parallel_all_gather(buffer)
         add_expand(
@@ -82,7 +82,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             self.lora_b_stacked,
             self.indices[:token_num],
             0,
-            is_prefilling,
+            is_prefill,
             add_input=True,
         )
         # now have column partitioned output
@@ -130,7 +130,7 @@ def _mcp_apply(x, bias, layer):
         device=x.device,
     )
     token_num = layer.indices_len[0]
-    is_prefilling = bool(layer.indices_len[5])
+    is_prefill = bool(layer.indices_len[5])
     for idx in range(n):
 
         add_shrink(
@@ -140,7 +140,7 @@ def _mcp_apply(x, bias, layer):
             layer.indices[:token_num],
             0,
             1.0,
-            is_prefilling,
+            is_prefill,
         )
 
     buffers = tensor_model_parallel_all_gather(buffers)
@@ -153,7 +153,7 @@ def _mcp_apply(x, bias, layer):
             layer.lora_b_stacked[idx],
             layer.indices[:token_num],
             0,
-            is_prefilling,
+            is_prefill,
             left_offset,
             shard_size,
             add_input=True,
@@ -239,10 +239,10 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
                              device=x.device)
 
         token_num = self.indices_len[0]
-        is_prefilling = bool(self.indices_len[5])
+        is_prefill = bool(self.indices_len[5])
 
         add_shrink(buffer, x, self.lora_a_stacked, self.indices[:token_num], 0,
-                   1.0, is_prefilling)
+                   1.0, is_prefill)
         buffer = tensor_model_parallel_all_gather(buffer)
 
         add_expand(output,
@@ -250,7 +250,7 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
                    self.lora_b_stacked,
                    self.indices[:token_num],
                    0,
-                   is_prefilling,
+                   is_prefill,
                    add_input=True)
         # now have column partitioned output
 
@@ -346,7 +346,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             device=x.device,
         )
         token_num = self.indices_len[0]
-        is_prefilling = bool(self.indices_len[5])
+        is_prefill = bool(self.indices_len[5])
         add_shrink(
             buffer,
             x,
@@ -354,7 +354,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             self.indices[:token_num],
             0,
             1.0,
-            is_prefilling,
+            is_prefill,
         )
         buffer = tensor_model_parallel_all_reduce(buffer)
 
@@ -372,7 +372,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             self.lora_b_stacked,
             self.indices[:self.indices_len[0]],
             0,
-            is_prefilling,
+            is_prefill,
             start_idx,
             shard_size,
         )

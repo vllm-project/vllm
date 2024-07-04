@@ -22,7 +22,7 @@ def _compute_params(
     1. If consecutive requests in the batch use the same LoRA, this function 
     will combine them into a single request, improving sgmv kernel inference 
     performance.
-    2. At the beginning of each prefilling stage inference, recalculations are 
+    2. At the beginning of each prefill stage inference, recalculations are 
     needed based on the input, but only once. 
     """
     pointer = token_lora_tensor.data_ptr()
@@ -45,18 +45,121 @@ def _compute_params(
 
 
 def reset_params_cache():
-    """At the beginning of the prefilling stage, we need  clear the
+    """At the beginning of the prefill stage, we need  clear the
     cache explicitly
     """
     _PARAMS_CACHE.clear()
     torch.cuda.empty_cache()
 
 
-def _get_prefilling_params(token_lora_tensor: torch.Tensor,
-                           cache_clear: bool = False):
+def _get_prefill_params(token_lora_tensor: torch.Tensor,
+                        cache_clear: bool = False):
     if cache_clear:
         reset_params_cache()
     return _compute_params(token_lora_tensor)
+
+
+def shrink_prefill(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    scale: float,
+    cache_clear: bool = False,
+):
+    (
+        b_seq_start_tensor,
+        seq_length_tensor,
+        last_lora_indices_tensor,
+        batch_size,
+        max_length,
+    ) = _get_prefill_params(lora_indices_tensor, cache_clear)
+    sgmv_shrink(
+        x,
+        w_t_all,
+        y,
+        b_seq_start_tensor,
+        seq_length_tensor,
+        last_lora_indices_tensor,
+        batch_size,
+        max_length,
+        scale,
+    )
+
+
+def shrink_decode(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    scale: float,
+):
+    bgmv_shrink(x, w_t_all, y, lora_indices_tensor, scale)
+
+
+def expand_prefill(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    add_input: bool,
+    cache_clear: bool = False,
+):
+    (
+        b_seq_start_tensor,
+        seq_length_tensor,
+        last_lora_indices_tensor,
+        batch_size,
+        max_length,
+    ) = _get_prefill_params(lora_indices_tensor, cache_clear)
+    sgmv_expand(x, w_t_all, y, b_seq_start_tensor, seq_length_tensor,
+                last_lora_indices_tensor, batch_size, max_length, add_input)
+
+
+def expand_decode(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    add_input: bool,
+):
+    bgmv_expand(x, w_t_all, y, lora_indices_tensor, add_input)
+
+
+def expand_slice_prefill(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    y_offset: Optional[int],
+    y_slice_size: Optional[int],
+    add_input: bool,
+    cache_clear: bool = False,
+):
+    (
+        b_seq_start_tensor,
+        seq_length_tensor,
+        last_lora_indices_tensor,
+        batch_size,
+        max_length,
+    ) = _get_prefill_params(lora_indices_tensor, cache_clear)
+    sgmv_expand_slice(x, w_t_all, y, b_seq_start_tensor, seq_length_tensor,
+                      last_lora_indices_tensor, batch_size, max_length,
+                      y_offset, y_slice_size, add_input)
+
+
+def expand_slice_decode(y: torch.Tensor, x: torch.Tensor,
+                        w_t_all: torch.Tensor,
+                        lora_indices_tensor: torch.Tensor, layer_idx: int,
+                        y_offset: Optional[int], y_slice_size: Optional[int],
+                        add_input: bool):
+    bgmv_expand_slice(x, w_t_all, y, lora_indices_tensor, y_offset,
+                      y_slice_size, add_input)
 
 
 def add_shrink(
@@ -66,34 +169,22 @@ def add_shrink(
     lora_indices_tensor: torch.Tensor,
     layer_idx: int,
     scale: float,
-    is_prefilling: bool,
+    is_prefill: bool,
     cache_clear: bool = False,
 ):
     """
-    y=x@w_t_all
-    When `is_prefilling` is True, will launch `sgmv_shrink`
+    Perform the ` y+=x@w_t_all` computation, which is suitable for the 
+    GEMM of lora'a.
+    When `is_prefill is` true, it indicates that it is currently the 
+    prefill stage, and the `shrink_prefill` function should be called. 
+    Otherwise, it is the decode stage, and the shrink_decode function 
+    should be called.
     """
-    if is_prefilling:
-        (
-            b_seq_start_tensor,
-            seq_length_tensor,
-            last_lora_indices_tensor,
-            batch_size,
-            max_length,
-        ) = _get_prefilling_params(lora_indices_tensor, cache_clear)
-        sgmv_shrink(
-            x,
-            w_t_all,
-            y,
-            b_seq_start_tensor,
-            seq_length_tensor,
-            last_lora_indices_tensor,
-            batch_size,
-            max_length,
-            scale,
-        )
+    if is_prefill:
+        shrink_prefill(y, x, w_t_all, lora_indices_tensor, layer_idx, scale,
+                       cache_clear)
     else:
-        bgmv_shrink(x, w_t_all, y, lora_indices_tensor, scale)
+        shrink_decode(y, x, w_t_all, lora_indices_tensor, layer_idx, scale)
 
 
 def add_expand(
@@ -102,35 +193,23 @@ def add_expand(
     w_t_all: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
     layer_idx: int,
-    is_prefilling: bool,
+    is_prefill: bool,
     add_input: bool = True,
     cache_clear: bool = False,
 ):
     """
-    y+=x@w_t_all
-    When `is_prefilling` is True, will launch `sgmv_expand`, 
+    Perform the ` y+=x@w_t_all` computation, which is suitable for the 
+    GEMM of lora'b.
+    When `is_prefill` is true, it indicates that it is currently the 
+    prefill stage, and the `expand_prefill` function should be called. 
+    Otherwise, it is the decode stage, and the expand_decode function 
+    should be called.
     """
-    if is_prefilling:
-        (
-            b_seq_start_tensor,
-            seq_length_tensor,
-            last_lora_indices_tensor,
-            batch_size,
-            max_length,
-        ) = _get_prefilling_params(lora_indices_tensor, cache_clear)
-        sgmv_expand(
-            x,
-            w_t_all,
-            y,
-            b_seq_start_tensor,
-            seq_length_tensor,
-            last_lora_indices_tensor,
-            batch_size,
-            max_length,
-            add_input,
-        )
+    if is_prefill:
+        expand_prefill(y, x, w_t_all, lora_indices_tensor, layer_idx,
+                       add_input, cache_clear)
     else:
-        bgmv_expand(x, w_t_all, y, lora_indices_tensor, add_inputs=add_input)
+        expand_decode(y, x, w_t_all, lora_indices_tensor, layer_idx, add_input)
 
 
 def add_expand_slice(
@@ -139,46 +218,21 @@ def add_expand_slice(
     w_t_all: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
     layer_idx: int,
-    is_prefilling: bool,
+    is_prefill: bool,
     y_offset: Optional[int],
     y_slice_size: Optional[int],
     add_input: bool = True,
     cache_clear: bool = False,
 ):
     """
-    y+=x@w_t_all
+    Similar to `add_expand`
     """
-    if is_prefilling:
-        (
-            b_seq_start_tensor,
-            seq_length_tensor,
-            last_lora_indices_tensor,
-            batch_size,
-            max_length,
-        ) = _get_prefilling_params(lora_indices_tensor, cache_clear)
-        sgmv_expand_slice(
-            x,
-            w_t_all,
-            y,
-            b_seq_start_tensor,
-            seq_length_tensor,
-            last_lora_indices_tensor,
-            batch_size,
-            max_length,
-            y_offset,
-            y_slice_size,
-            add_input,
-        )
+    if is_prefill:
+        expand_slice_prefill(y, x, w_t_all, lora_indices_tensor, layer_idx,
+                             y_offset, y_slice_size, add_input, cache_clear)
     else:
-        bgmv_expand_slice(
-            x,
-            w_t_all,
-            y,
-            lora_indices_tensor,
-            y_offset,
-            y_slice_size,
-            add_inputs=add_input,
-        )
+        expand_slice_decode(y, x, w_t_all, lora_indices_tensor, layer_idx,
+                            y_offset, y_slice_size, add_input)
 
 
 def add_lora(
@@ -189,7 +243,7 @@ def add_lora(
     lora_indices_tensor: torch.Tensor,
     layer_idx: int,
     scale: float,
-    is_prefilling: bool,
+    is_prefill: bool,
     y_offset: Optional[int] = None,
     y_slice_size: Optional[int] = None,
     *,
@@ -212,7 +266,7 @@ def add_lora(
         lora_indices_tensor (torch.Tensor): _description_
         layer_idx (int): Layer index of LoRA weights.
         scale (float): Scaling factor.
-        is_prefilling (bool): prefiling stage
+        is_prefill (bool): prefiling stage
         y_offset (Optional[int], optional): Offset to apply to the starting 
             column of y.
         y_slice_size (Optional[int], optional): Size of the y column slice..
@@ -235,30 +289,26 @@ def add_lora(
         lora_indices_tensor,
         0,
         scale,
-        is_prefilling,
+        is_prefill,
         cache_clear=cache_clear,
     )
     if y_offset is None and y_slice_size is None:
-        add_expand(
-            y,
-            buffer,
-            wb_t_all,
-            lora_indices_tensor,
-            0,
-            is_prefilling,
-            add_input=True,
-            cache_clear=cache_clear,
-        )
+        add_expand(y,
+                   buffer,
+                   wb_t_all,
+                   lora_indices_tensor,
+                   0,
+                   is_prefill,
+                   add_input=True,
+                   cache_clear=cache_clear)
     else:
-        add_expand_slice(
-            y,
-            buffer,
-            wb_t_all,
-            lora_indices_tensor,
-            0,
-            is_prefilling,
-            y_offset,
-            y_slice_size,
-            add_input=True,
-            cache_clear=cache_clear,
-        )
+        add_expand_slice(y,
+                         buffer,
+                         wb_t_all,
+                         lora_indices_tensor,
+                         0,
+                         is_prefill,
+                         y_offset,
+                         y_slice_size,
+                         add_input=True,
+                         cache_clear=cache_clear)
