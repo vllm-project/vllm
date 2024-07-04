@@ -54,6 +54,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
 
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
