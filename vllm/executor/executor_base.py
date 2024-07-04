@@ -123,12 +123,7 @@ class ExecutorAsyncBase(ExecutorBase):
         multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
-        # This locks each pipeline parallel stage so multiple virtual engines
-        # can't execute on the same stage at the same time
-        self.pp_locks = [
-            asyncio.Lock()
-            for _ in range(parallel_config.pipeline_parallel_size)
-        ]
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
 
         super().__init__(model_config, cache_config, parallel_config,
                          scheduler_config, device_config, load_config,

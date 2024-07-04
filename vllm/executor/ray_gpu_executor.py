@@ -349,6 +349,15 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
+        if self.pp_locks is None:
+            # This locks each pipeline parallel stage so multiple virtual
+            # engines can't execute on the same stage at the same time
+            # We create the locks here to avoid creating them in the constructor
+            # which uses a different asyncio loop.
+            self.pp_locks = [
+                asyncio.Lock()
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
 
         async def _run_task_with_lock(task, lock, *args, **kwargs):
             async with lock:
