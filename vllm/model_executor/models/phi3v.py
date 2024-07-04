@@ -321,6 +321,17 @@ def get_phi3v_image_feature_size(
         + (new_height // 336 + 1) * 12
 
 
+def get_max_phi3v_image_tokens(ctx: InputContext):
+    # Result in the max possible feature size (h:w = 16:1)
+    dummy_height, dummy_width = 8000, 50
+
+    return get_phi3v_image_feature_size(
+        ctx.get_hf_config(PretrainedConfig),
+        input_height=dummy_height,
+        input_width=dummy_width,
+    )
+
+
 def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
     # Result in the max possible feature size (h:w = 16:1)
     dummy_height, dummy_width = 8000, 50
@@ -429,6 +440,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsVision):

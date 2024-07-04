@@ -25,13 +25,8 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
 .. important::
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
-    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
-    every model to perform profiling with.
-
-    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
-    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
-    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
-    with a more accurate profiling strategy in the future.
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified as we now calculate that
+    internally for each model.
 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
@@ -104,13 +99,8 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
 .. important::
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
-    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
-    every model to perform profiling with.
-
-    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
-    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
-    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
-    with a more accurate profiling strategy in the future.
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified as we now calculate that
+    internally for each model.
 
 To consume the server, you can use the OpenAI client like in the example below:
 
