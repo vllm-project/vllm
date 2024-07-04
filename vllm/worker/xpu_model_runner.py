@@ -1,18 +1,24 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
+                    Type, Union)
 
 import torch
 import torch.nn as nn
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
+from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import supports_vision
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+                             MultiModalInputs)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
@@ -43,7 +49,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
     input_positions: Optional[torch.Tensor] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_input: Optional[Dict[str, torch.Tensor]] = None
+    multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -80,7 +86,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
@@ -92,7 +98,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.cache_config = cache_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
         self.sliding_window = model_config.get_sliding_window()
@@ -115,6 +121,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             self.block_size,
         )
 
+        # Multi-modal data support
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+            .create_input_mapper(self.model_config)
+
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
@@ -125,7 +135,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 device_config=self.device_config,
                 load_config=self.load_config,
                 lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
+                multimodal_config=self.multimodal_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,
@@ -155,12 +165,30 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
+        model_config = self.model_config
+
+        if supports_vision(self.model):
+            # TODO: properly inject these numbers from MultiModalRegistry.
+            # Right now, just use an overly conservative number.
+            max_num_seqs = max(
+                1,
+                min(
+                    max_num_seqs,
+                    int(max_num_batched_tokens /
+                        MULTIMODAL_REGISTRY.get_num_input_tokens())))
+
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
 
-            seq_data = SequenceData([0] * seq_len)
-            dummy_multi_modal_data = None
+            seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
+                .dummy_data_for_profiling(model_config, seq_len)
+
+            # Having more tokens is over-conservative but otherwise fine
+            assert len(seq_data.prompt_token_ids) >= seq_len, (
+                f"Expected at least {seq_len} dummy tokens for profiling, "
+                f"but got: {len(seq_data.prompt_token_ids)}")
+
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -188,10 +216,12 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         ))
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            virtual_engine: int = 0,
+            finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForXPU:
-        multi_modal_input = None
+        multi_modal_kwargs = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
@@ -199,7 +229,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             # Prepare input tensors.
             if is_prompt:
                 (input_tokens, input_positions, attn_metadata, seq_lens,
-                 multi_modal_input
+                 multi_modal_kwargs
                  ) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions,
@@ -220,6 +250,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 "input_positions": input_positions,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
+                "multi_modal_kwargs": multi_modal_kwargs,
             }
             metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
@@ -229,6 +260,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             input_positions = metadata_dict.pop("input_positions")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
+            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
             attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -241,7 +273,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                                 input_positions=input_positions,
                                 attn_metadata=attn_metadata,
                                 sampling_metadata=sampling_metadata,
-                                multi_modal_input=multi_modal_input)
+                                multi_modal_kwargs=multi_modal_kwargs)
 
     def _prepare_decode(
         self,
@@ -334,6 +366,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self,
         model_input: ModelInputForXPU,
         kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
@@ -346,10 +379,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             "positions": model_input.input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": model_input.attn_metadata,
+            **(model_input.multi_modal_kwargs or {}),
         }
-        if self.vision_language_config:
-            execute_model_kwargs.update(
-                {"image_input": model_input.multi_modal_input})
 
         hidden_states = model_executable(**execute_model_kwargs)
 
@@ -372,13 +403,13 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               Optional[torch.Tensor]]:
+               Mapping[str, BatchedTensors]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_modal_input_list: List[torch.Tensor] = []
+        multi_modal_inputs_list: List[MultiModalInputs] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -399,9 +430,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
-            if seq_group_metadata.multi_modal_data:
-                multi_modal_input_list.append(
-                    seq_group_metadata.multi_modal_data.data)
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                multi_modal_inputs_list.append(mm_kwargs)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -430,15 +462,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 block_offset = i % self.block_size  # type: ignore
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
-
-        if multi_modal_input_list:
-            assert self.vision_language_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
-        else:
-            multi_modal_input = None
 
         num_prompt_tokens = len(input_tokens)
 
@@ -471,5 +494,9 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             num_decode_tokens=0,
             block_tables=torch.tensor([], device=self.device, dtype=torch.int),
         )
+
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
+                                                    device=self.device)
+
         return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_input)
+                multi_modal_kwargs)
