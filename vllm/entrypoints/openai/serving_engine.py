@@ -10,9 +10,10 @@ from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
+                                              DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
                                               ModelCard, ModelList,
-                                              ModelPermission)
+                                              ModelPermission, TokenizeRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
@@ -35,6 +36,7 @@ class OpenAIServing:
         super().__init__()
 
         self.engine = engine
+        self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
         # A separate tokenizer to map token IDs to strings.
@@ -99,8 +101,9 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest,
-                             EmbeddingRequest]
+        self, request: Union[ChatCompletionRequest, CompletionRequest,
+                             DetokenizeRequest, EmbeddingRequest,
+                             TokenizeRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
@@ -126,7 +129,8 @@ class OpenAIServing:
     def _validate_prompt_and_tokenize(
             self,
             request: Union[ChatCompletionRequest, CompletionRequest,
-                           EmbeddingRequest],
+                           DetokenizeRequest, EmbeddingRequest,
+                           TokenizeRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[Annotated[int,
@@ -172,6 +176,11 @@ class OpenAIServing:
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for embedding "
                     f"generation. Please reduce the length of the input.", )
+            return input_ids, input_text
+
+        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
+        # and does not require model context length validation
+        if isinstance(request, (TokenizeRequest, DetokenizeRequest)):
             return input_ids, input_text
 
         if request.max_tokens is None:

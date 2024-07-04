@@ -5,14 +5,17 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
                     Union)
 
 import torch
-from transformers import PretrainedConfig, PreTrainedTokenizerBase
+from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
+from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu)
+                        is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
+                        print_warning_once, update_environment_variables)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -23,6 +26,17 @@ logger = init_logger(__name__)
 
 _GB = 1 << 30
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+
+_PP_SUPPORTED_MODELS = [
+    "AquilaModel",
+    "AquilaForCausalLM",
+    "InternLMForCausalLM",
+    "LlamaForCausalLM",
+    "LLaMAForCausalLM",
+    "MistralForCausalLM",
+    "Phi3ForCausalLM",
+    "GPT2LMHeadModel",
+]
 
 
 class ModelConfig:
@@ -106,6 +120,7 @@ class ModelConfig:
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
+        multimodal_config: Optional["VisionLanguageConfig"] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -138,6 +153,17 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+
+        if (not self.disable_sliding_window
+                and self.hf_text_config.model_type == "gemma2"
+                and self.hf_text_config.sliding_window is not None):
+            print_warning_once(
+                "Gemma 2 uses sliding window attention for every odd layer, "
+                "which is currently not supported by vLLM. Disabling sliding "
+                "window and capping the max length to the sliding window size "
+                f"({self.hf_text_config.sliding_window}).")
+            self.disable_sliding_window = True
+
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
@@ -145,6 +171,8 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
+        self.multimodal_config = multimodal_config
+
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()
@@ -229,7 +257,8 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = self.hf_text_config.num_attention_heads
+        total_num_attention_heads = getattr(self.hf_text_config,
+                                            "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
@@ -237,8 +266,16 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
+        total_num_hidden_layers = getattr(self.hf_text_config,
+                                          "num_hidden_layers", 0)
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
+        architectures = getattr(self.hf_config, "architectures", [])
+        if not all(arch in _PP_SUPPORTED_MODELS
+                   for arch in architectures) and pipeline_parallel_size > 1:
+            raise NotImplementedError(
+                "Pipeline parallelism is only supported for the following "
+                f" architectures: {_PP_SUPPORTED_MODELS}.")
+
         if total_num_hidden_layers % pipeline_parallel_size != 0:
             raise ValueError(
                 f"Total number of hidden layers ({total_num_hidden_layers}) "
@@ -252,8 +289,7 @@ class ModelConfig:
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
-        """Get the sliding window size, or None if disabled.
-        """
+        """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
@@ -279,6 +315,12 @@ class ModelConfig:
         return self.hf_text_config.hidden_size
 
     def get_head_size(self) -> int:
+        # TODO remove hard code
+        if hasattr(self.hf_text_config, "model_type"
+                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+            # FlashAttention supports only head_size 32, 64, 128, 256,
+            # we need to pad head_size 192 to 256
+            return 256
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
@@ -302,7 +344,11 @@ class ModelConfig:
             return 1
 
         # For DBRX and MPT
-        if self.hf_config.model_type in ["dbrx", "mpt"]:
+        if self.hf_config.model_type == "mpt":
+            if "kv_n_heads" in self.hf_config.attn_config:
+                return self.hf_config.attn_config["kv_n_heads"]
+            return self.hf_config.num_attention_heads
+        if self.hf_config.model_type == "dbrx":
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
 
@@ -336,12 +382,39 @@ class ModelConfig:
 
     def get_num_attention_heads(self,
                                 parallel_config: "ParallelConfig") -> int:
-        return self.hf_text_config.num_attention_heads // \
-            parallel_config.tensor_parallel_size
+        num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
+        return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
+        total_num_hidden_layers = getattr(self.hf_text_config,
+                                          "num_hidden_layers", 0)
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+
+    def contains_seqlen_agnostic_layers(
+            self, parallel_config: "ParallelConfig") -> bool:
+        """True for Mamba/SSM models (Jamba)"""
+        return self._get_num_seqlen_agnostic_layers(parallel_config) > 0
+
+    def get_layers_block_type(self,
+                              parallel_config: "ParallelConfig") -> List[str]:
+        num_layers = self.get_num_layers(parallel_config)
+        # Transformers supports layers_block_type @property
+        return getattr(self.hf_config, "layers_block_type",
+                       ["attention"] * num_layers)
+
+    def get_num_attention_layers(self,
+                                 parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t == "attention"
+        ])
+
+    def _get_num_seqlen_agnostic_layers(
+            self, parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t != "attention"
+        ])
 
 
 class CacheConfig:
@@ -609,11 +682,13 @@ class ParallelConfig:
 
             from vllm.executor import ray_utils
             backend = "mp"
-            ray_found = ray_utils.ray is not None
+            ray_found = ray_utils.ray_is_available()
             if cuda_device_count_stateless() < self.world_size:
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
-                                     "required for multi-node inference")
+                                     "required for multi-node inference, "
+                                     "please install Ray with `pip install "
+                                     "ray`.") from ray_utils.ray_import_err
                 backend = "ray"
             elif ray_found:
                 if self.placement_group:
@@ -627,17 +702,27 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
+        # If CUDA_VISIBLE_DEVICES is set on ROCm prior to vLLM init,
+        # propagate changes to HIP_VISIBLE_DEVICES (conversion handled by
+        # the update_environment_variables function)
+        if is_hip() and envs.CUDA_VISIBLE_DEVICES:
+            update_environment_variables(
+                {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
 
     def _verify_args(self) -> None:
-        if self.pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Pipeline parallelism is not supported yet.")
+        if (self.pipeline_parallel_size > 1
+                and self.distributed_executor_backend == "mp"):
+            raise NotImplementedError("Pipeline parallelism is not supported "
+                                      "yet with multiprocessing.")
         if self.distributed_executor_backend not in ("ray", "mp", None):
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
                 "are 'ray' or 'mp'.")
+        if self.distributed_executor_backend == "ray":
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -719,7 +804,6 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
-
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -753,10 +837,14 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_openvino():
+                self.device_type = "openvino"
             elif is_tpu():
                 self.device_type = "tpu"
             elif is_cpu():
                 self.device_type = "cpu"
+            elif is_xpu():
+                self.device_type = "xpu"
             else:
                 # We don't call torch.cuda.is_available() here to
                 # avoid initializing CUDA before workers are forked
@@ -766,7 +854,7 @@ class DeviceConfig:
             self.device_type = device
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron"]:
+        if self.device_type in ["neuron", "openvino"]:
             self.device = torch.device("cpu")
         elif self.device_type in ["tpu"]:
             self.device = None
@@ -788,6 +876,7 @@ class SpeculativeConfig:
         target_parallel_config: ParallelConfig,
         target_dtype: str,
         speculative_model: Optional[str],
+        speculative_draft_tensor_parallel_size: Optional[int],
         num_speculative_tokens: Optional[int],
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
@@ -795,6 +884,9 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        draft_token_acceptance_method: str,
+        typical_acceptance_sampler_posterior_threshold: Optional[float],
+        typical_acceptance_sampler_posterior_alpha: Optional[float],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -810,8 +902,11 @@ class SpeculativeConfig:
             target_dtype (str): The data type used for the target model.
             speculative_model (Optional[str]): The name of the speculative
                 model, if provided.
+            speculative_draft_tensor_parallel_size (Optional[int]): The degree
+                of the tensor parallelism for the draft model.
             num_speculative_tokens (Optional[int]): The number of speculative
-                tokens, if provided.
+                tokens, if provided. Will default to the number in the draft
+                model config if present, otherwise is required.
             speculative_max_model_len (Optional[int]): The maximum model len of
                 the speculative model. Used when testing the ability to skip
                 speculation for some sequences.
@@ -828,29 +923,36 @@ class SpeculativeConfig:
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
                 window, if provided.
-
+            draft_token_acceptance_method (str): The method to use for
+                accepting draft tokens. This can take two possible
+                values 'rejection_sampler' and 'typical_acceptance_sampler'
+                for RejectionSampler and TypicalAcceptanceSampler
+                respectively.
+            typical_acceptance_sampler_posterior_threshold (Optional[float]):
+                A threshold value that sets a lower bound on the posterior
+                probability of a token in the target model for it to be
+                accepted. This threshold is used only when we use the 
+                TypicalAcceptanceSampler for token acceptance.
+            typical_acceptance_sampler_posterior_alpha (Optional[float]):
+                A scaling factor for the entropy-based threshold in the
+                TypicalAcceptanceSampler.
+    
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
         """
 
-        if speculative_model is None and num_speculative_tokens is None:
+        if speculative_model is None:
+            if num_speculative_tokens is not None:
+                raise ValueError("num_speculative_tokens was provided without "
+                                 "speculative_model.")
             return None
-
-        if speculative_model is not None and num_speculative_tokens is None:
-            raise ValueError(
-                "Expected both speculative_model and "
-                "num_speculative_tokens to be provided, but found "
-                f"{speculative_model=} and {num_speculative_tokens=}.")
 
         if (speculative_disable_by_batch_size is not None
                 and speculative_disable_by_batch_size < 2):
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-
-        assert (speculative_model is not None
-                and num_speculative_tokens is not None)
 
         if enable_chunked_prefill:
             raise ValueError(
@@ -905,6 +1007,25 @@ class SpeculativeConfig:
                 max_logprobs=target_model_config.max_logprobs,
             )
 
+            draft_hf_config = draft_model_config.hf_config
+
+            if (num_speculative_tokens is not None
+                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
+                draft_hf_config.num_lookahead_tokens = num_speculative_tokens
+
+            n_predict = getattr(draft_hf_config, "n_predict", None)
+            if n_predict is not None:
+                if num_speculative_tokens is None:
+                    # Default to max value defined in draft model config.
+                    num_speculative_tokens = n_predict
+                elif num_speculative_tokens > n_predict:
+                    # Verify provided value doesn't exceed the maximum
+                    # supported by the draft model.
+                    raise ValueError(
+                        "This speculative model supports a maximum of "
+                        f"num_speculative_tokens={n_predict}, but "
+                        f"{num_speculative_tokens=} was provided.")
+
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
                     speculative_max_model_len,
@@ -914,7 +1035,19 @@ class SpeculativeConfig:
 
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
-                    target_parallel_config))
+                    target_parallel_config,
+                    speculative_draft_tensor_parallel_size))
+
+        if num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens must be provided with "
+                "speculative_model unless the draft model config contains an "
+                "n_predict parameter.")
+
+        if typical_acceptance_sampler_posterior_threshold is None:
+            typical_acceptance_sampler_posterior_threshold = 0.09
+        if typical_acceptance_sampler_posterior_alpha is None:
+            typical_acceptance_sampler_posterior_alpha = 0.3
 
         return SpeculativeConfig(
             draft_model_config,
@@ -923,6 +1056,11 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
+            draft_token_acceptance_method=draft_token_acceptance_method,
+            typical_acceptance_sampler_posterior_threshold=\
+                typical_acceptance_sampler_posterior_threshold,
+            typical_acceptance_sampler_posterior_alpha=\
+                typical_acceptance_sampler_posterior_alpha,
         )
 
     @staticmethod
@@ -962,16 +1100,26 @@ class SpeculativeConfig:
 
     @staticmethod
     def create_draft_parallel_config(
-            target_parallel_config: ParallelConfig) -> ParallelConfig:
+        target_parallel_config: ParallelConfig,
+        speculative_draft_tensor_parallel_size: Optional[int]
+    ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config. In the future the
-        draft worker can have a different parallel strategy, e.g. TP=1.
+        This is mostly a copy of the target parallel config, except the tp_size.
         """
+        if speculative_draft_tensor_parallel_size is None:
+            speculative_draft_tensor_parallel_size = \
+                  target_parallel_config.tensor_parallel_size
+        elif speculative_draft_tensor_parallel_size != 1:
+            # TODO(wooyeon): allow tp values larger than 1
+            raise ValueError(
+                f"{speculative_draft_tensor_parallel_size=} cannot be"
+                f"other value than 1")
+
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
-            tensor_parallel_size=target_parallel_config.tensor_parallel_size,
+            tensor_parallel_size=speculative_draft_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
@@ -994,6 +1142,9 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        draft_token_acceptance_method: str,
+        typical_acceptance_sampler_posterior_threshold: float,
+        typical_acceptance_sampler_posterior_alpha: float,
     ):
         """Create a SpeculativeConfig object.
 
@@ -1007,6 +1158,19 @@ class SpeculativeConfig:
                 enqueue requests is larger than this value.
             ngram_prompt_lookup_max: Max size of ngram token window.
             ngram_prompt_lookup_min: Min size of ngram token window.
+            draft_token_acceptance_method (str): The method to use for
+                accepting draft tokens. This can take two possible
+                values 'rejection_sampler' and 'typical_acceptance_sampler'
+                for RejectionSampler and TypicalAcceptanceSampler
+                respectively.
+            typical_acceptance_sampler_posterior_threshold (Optional[float]):
+                A threshold value that sets a lower bound on the posterior
+                probability of a token in the target model for it to be
+                accepted. This threshold is used only when we use the 
+                TypicalAcceptanceSampler for token acceptance.
+            typical_acceptance_sampler_posterior_alpha (Optional[float]):
+                A scaling factor for the entropy-based threshold in the
+                TypicalAcceptanceSampler.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
@@ -1015,6 +1179,11 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
+        self.draft_token_acceptance_method = draft_token_acceptance_method
+        self.typical_acceptance_sampler_posterior_threshold = \
+            typical_acceptance_sampler_posterior_threshold
+        self.typical_acceptance_sampler_posterior_alpha = \
+            typical_acceptance_sampler_posterior_alpha
 
         self._verify_args()
 
@@ -1026,6 +1195,31 @@ class SpeculativeConfig:
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config)
+            # Validate and set draft token acceptance related settings.
+
+        if (self.draft_token_acceptance_method is None):
+            raise ValueError("draft_token_acceptance_method is not set. "
+                             "Expected values are rejection_sampler or "
+                             "typical_acceptance_sampler.")
+
+        if (self.draft_token_acceptance_method != 'rejection_sampler'
+                and self.draft_token_acceptance_method !=
+                'typical_acceptance_sampler'):
+            raise ValueError(
+                "Expected draft_token_acceptance_method to be either "
+                "rejection_sampler or typical_acceptance_sampler. Instead it "
+                f"is {self.draft_token_acceptance_method}")
+
+        if (self.typical_acceptance_sampler_posterior_threshold < 0
+                or self.typical_acceptance_sampler_posterior_alpha < 0):
+            raise ValueError(
+                "Expected typical_acceptance_sampler_posterior_threshold "
+                "and typical_acceptance_sampler_posterior_alpha to be > 0. "
+                "Instead found "
+                f"typical_acceptance_sampler_posterior_threshold = "
+                f"{self.typical_acceptance_sampler_posterior_threshold} and "
+                f"typical_acceptance_sampler_posterior_alpha = "
+                f"{self.typical_acceptance_sampler_posterior_alpha}")
 
     @property
     def num_lookahead_slots(self) -> int:
@@ -1101,28 +1295,11 @@ class LoRAConfig:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
+# TODO: To be replaced by MultiModalConfig.
 @dataclass
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for
     vision language models."""
-
-    class ImageInputType(enum.Enum):
-        """Image input type into the vision language model.
-
-        An image roughly goes through the following transformation:
-        Raw image --> pixel values --> image features --> image embeddings.
-
-        The difference between different image input types is where the
-        image encoder (pixel values --> image features) is run.
-        Different image input types also correspond to different tensor shapes.
-
-        For example, for Llava, PIXEL_VALUES: (1, 3, 336, 336).
-        IMAGE_FEATURES: (1, 576, 1024).
-        """
-        PIXEL_VALUES = enum.auto()
-        IMAGE_FEATURES = enum.auto()
-
-    image_input_type: ImageInputType
     # The input id corresponding to image token.
     image_token_id: int
     # Used for running `run_prefill_max_token`.
@@ -1130,29 +1307,6 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
-    # The image processor to load from HuggingFace
-    image_processor: Optional[str]
-    image_processor_revision: Optional[str]
-
-    @classmethod
-    def get_image_input_enum_type(cls, value: str) -> ImageInputType:
-        """Get the image input type from a string."""
-        try:
-            return cls.ImageInputType[value.upper()]
-        except KeyError as e:
-            raise ValueError(f"{value} is not a valid choice. "
-                             f"Expecting to choose from "
-                             f"{[x.name for x in cls.ImageInputType]}.") from e
-
-    #TODO(ywang96): make this a cached property once we refactor the
-    # VisionLanguageConfig class.
-    def get_image_token_text(
-            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
-        """Get the image token placeholder text to be inserted into the 
-        text prompt and the string representation of the image token id.
-        """
-        image_token_str = tokenizer.decode(self.image_token_id)
-        return image_token_str * self.image_feature_size, image_token_str
 
     def as_cli_args_dict(self) -> Dict[str, Any]:
         """Flatten vision language config to pure args.
@@ -1168,8 +1322,6 @@ class VisionLanguageConfig:
                 result[f.name] = ",".join([str(item) for item in value])
             else:
                 result[f.name] = value
-
-        result["disable_image_processor"] = self.image_processor is None
 
         return result
 
@@ -1199,10 +1351,16 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                # Following the common practice, we use float16 for float32
-                # models.
-                logger.info("Casting torch.float32 to torch.float16.")
-                torch_dtype = torch.float16
+                if config.model_type == "gemma2":
+                    logger.info(
+                        "For Gemma 2, we downcast float32 to bfloat16 instead "
+                        "of float16 by default. Please specify `dtype` if you "
+                        "want to use float16.")
+                    torch_dtype = torch.bfloat16
+                else:
+                    # Following the common practice, we use float16 for float32
+                    # models.
+                    torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
         else:
@@ -1365,6 +1523,17 @@ class DecodingConfig:
                              f"must be one of {valid_guided_backends}")
 
 
+@dataclass
+class ObservabilityConfig:
+    """Configuration for observability."""
+    otlp_traces_endpoint: Optional[str] = None
+
+    def __post_init__(self):
+        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
+            raise ValueError("OpenTelemetry packages must be installed before "
+                             "configuring 'otlp_traces_endpoint'")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1381,6 +1550,7 @@ class EngineConfig:
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
+    observability_config: Optional[ObservabilityConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.

@@ -29,7 +29,7 @@ from torch.nn.parameter import Parameter
 from transformers import CohereConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -46,7 +46,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
 @torch.compile
@@ -265,10 +265,14 @@ class CohereModel(nn.Module):
         config: CohereConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.vocab_size = config.vocab_size
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.org_vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
@@ -302,18 +306,44 @@ class CohereModel(nn.Module):
 
 class CohereForCausalLM(nn.Module):
 
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens"
+    ]
+    embedding_modules = {"embed_tokens": "input_embeddings"}
+    embedding_padding_modules = []
+
     def __init__(
         self,
         config: CohereConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.quant_config = quant_config
-        self.logits_processor = LogitsProcessor(config.vocab_size,
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size,
                                                 scale=config.logit_scale)
-        self.model = CohereModel(config, cache_config, quant_config)
+        self.model = CohereModel(config,
+                                 cache_config,
+                                 quant_config,
+                                 lora_config=lora_config)
         self.sampler = Sampler()
 
     @torch.no_grad()
@@ -323,6 +353,7 @@ class CohereForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -330,8 +361,14 @@ class CohereForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.model.embed_tokens.weight,
-                                       hidden_states, sampling_metadata)
+        is_not_lora = hasattr(self.model.embed_tokens, 'weight')
+        if is_not_lora:
+            logits = self.logits_processor(self.model.embed_tokens,
+                                           hidden_states, sampling_metadata)
+        else:
+            logits = self.logits_processor(self.model.embed_tokens.base_layer,
+                                           hidden_states, sampling_metadata)
+
         return logits
 
     def sample(

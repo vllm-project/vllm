@@ -21,8 +21,10 @@ _GENERATION_MODELS = {
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
+    "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
+    "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
@@ -49,6 +51,7 @@ _GENERATION_MODELS = {
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
+    "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -59,6 +62,8 @@ _GENERATION_MODELS = {
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
+    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
+    "JambaForCausalLM": ("jamba", "JambaForCausalLM")
 }
 
 _EMBEDDING_MODELS = {
