@@ -48,10 +48,10 @@ def main(args):
         f.write(description)
         
 
-    plt.rcParams.update({'font.size': 20})
+    plt.rcParams.update({'font.size': 15})
         
     # plot results
-    fig, axes = plt.subplots(3, 2, figsize=(14, 16))
+    fig, axes = plt.subplots(3, 2, figsize=(10, 12))
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
@@ -81,13 +81,13 @@ def main(args):
                 fmt='o', capsize=5)
             ax.set_ylim(bottom=0)
 
-            for i, (method, mean, std) in enumerate(zip(method, means, stds)):
-                ax.text(
-                    i - 0.2, mean,  # Adjust position above the error bar
-                    f'{mean:.0f}', 
-                    ha='center', 
-                    va='bottom'
-                )
+            # for i, (method, mean, std) in enumerate(zip(method, means, stds)):
+            #     ax.text(
+            #         i - 0.2, mean,  # Adjust position above the error bar
+            #         f'{mean:.0f}', 
+            #         ha='center', 
+            #         va='bottom'
+            #     )
             
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric} comparison")
