@@ -18,9 +18,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
-MODELS = [
-    ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", hf_hub_download("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", filename="tinyllama-1.1b-chat-v1.0.Q4_0.gguf"))
-]
+MODELS = [("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+           hf_hub_download("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+                           filename="tinyllama-1.1b-chat-v1.0.Q4_0.gguf"))]
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gguf"),
