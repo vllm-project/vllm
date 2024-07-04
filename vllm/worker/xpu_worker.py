@@ -14,6 +14,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import is_xpu
@@ -67,8 +68,9 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.lora_config = lora_config
         self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
-        if self.is_driver_worker:
-            assert self.rank == 0, "The driver worker must have rank 0."
+        if parallel_config and is_driver_worker:
+            assert rank % parallel_config.tensor_parallel_size == 0, \
+                   "Driver worker should be rank 0 of tensor parallel group."
 
         self.multimodal_config = multimodal_config
 
@@ -192,3 +194,8 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+
+        if parallel_config.pipeline_parallel_size > 1:
+            # torch-ccl xpu need a collective API warm up
+            # before calling send/recv API
+            get_pp_group().all_reduce(torch.zeros(1).xpu())

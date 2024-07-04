@@ -50,6 +50,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
     multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
+    virtual_engine: int = 0
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -87,6 +88,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
+        return_hidden_states: bool = False,
         kv_cache_dtype: Optional[str] = "auto",
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
@@ -106,6 +108,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.sliding_window = model_config.get_sliding_window()
         self.device_config = device_config
         self.device = self.device_config.device
+        self.return_hidden_states = return_hidden_states
 
         self.kv_cache_dtype = kv_cache_dtype
         self.block_size = cache_config.block_size
@@ -167,22 +170,19 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         model_config = self.model_config
 
         if supports_vision(self.model):
-            max_mm_tokens = MULTIMODAL_REGISTRY \
-                .get_max_multimodal_tokens(model_config)
-            max_num_seqs_orig = max_num_seqs
-            max_num_seqs = min(max_num_seqs,
-                               max_num_batched_tokens // max_mm_tokens)
-            if max_num_seqs < 1:
-                expr = (f"min({max_num_seqs_orig}, "
-                        f"{max_num_batched_tokens} // {max_mm_tokens})")
-                logger.warning(
-                    "Computed max_num_seqs (%s) to be less than 1. "
-                    "Setting it to the minimum value of 1.", expr)
-                max_num_seqs = 1
-
+            # TODO: properly inject these numbers from MultiModalRegistry.
+            # Right now, just use an overly conservative number.
+            max_num_seqs = max(
+                1,
+                min(
+                    max_num_seqs,
+                    int(max_num_batched_tokens /
+                        MULTIMODAL_REGISTRY.get_num_input_tokens())))
+        batch_size = 0
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
+            batch_size += seq_len
 
             seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
                 .dummy_data_for_profiling(model_config, seq_len)
@@ -206,8 +206,16 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs)
-        self.execute_model(model_input, kv_caches)
+        finished_requests_ids = [seq.request_id for seq in seqs]
+        model_input = self.prepare_model_input(
+            seqs, finished_requests_ids=finished_requests_ids)
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=batch_size,
+                dtype=self.model_config.dtype,
+                device=self.device)
+        self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.xpu.synchronize()
         return
 
@@ -276,7 +284,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                                 input_positions=input_positions,
                                 attn_metadata=attn_metadata,
                                 sampling_metadata=sampling_metadata,
-                                multi_modal_kwargs=multi_modal_kwargs)
+                                multi_modal_kwargs=multi_modal_kwargs,
+                                virtual_engine=virtual_engine)
 
     def _prepare_decode(
         self,
@@ -379,13 +388,19 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             "positions": model_input.input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": model_input.attn_metadata,
+            "intermediate_tensors": intermediate_tensors,
             **(model_input.multi_modal_kwargs or {}),
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        hidden_or_intermediate_states = model_executable(
+            **execute_model_kwargs)
+
+        # Compute the logits in the last pipeline stage.
+        if not get_pp_group().is_last_rank:
+            return hidden_or_intermediate_states
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
+        logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
@@ -393,7 +408,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             return []
 
         # Sample the next token.
-        output = self.model.sample(
+        output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
