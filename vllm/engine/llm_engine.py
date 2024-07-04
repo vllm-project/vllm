@@ -521,7 +521,6 @@ class LLMEngine:
 
         return seq_group
 
-
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 

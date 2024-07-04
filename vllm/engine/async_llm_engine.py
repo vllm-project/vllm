@@ -317,8 +317,13 @@ class _AsyncLLMEngine(LLMEngine):
                 seq.data.logits_processors = \
                     await params.get_logits_processors_async()
 
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        # Add the sequence group to the scheduler with least unfinished seqs.
+        costs = [
+            scheduler.get_num_unfinished_seq_groups()
+            for scheduler in self.scheduler
+        ]
+        min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+        min_cost_scheduler.add_seq_group(seq_group)
 
     async def check_health_async(self) -> None:
         if self.tokenizer:
