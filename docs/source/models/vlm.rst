@@ -5,24 +5,14 @@ Using VLMs
 
 vLLM provides experimental support for Vision Language Models (VLMs). This document shows you how to run and serve these models using vLLM.
 
-Engine Arguments
-----------------
-
-The following :ref:`engine arguments <engine_args>` are specific to VLMs:
-
-.. argparse::
-    :module: vllm.engine.arg_utils
-    :func: _vlm_engine_args_parser
-    :prog: -m vllm.entrypoints.openai.api_server
-    :nodefaultconst:
-
 .. important::
+    We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
+
     Currently, the support for vision language models on vLLM has the following limitations:
 
     * Only single image input is supported per text prompt.
-    * Dynamic ``image_input_shape`` is not supported: the input image will be resized to the static ``image_input_shape``. This means model output might not exactly match the HuggingFace implementation.
 
-    We are continuously improving user & developer experience for VLMs. Please raise an issue on GitHub if you have any feedback or feature requests.
+    We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
 
 Offline Batched Inference
 -------------------------
@@ -31,37 +21,64 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
 .. code-block:: python
 
-    llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
-        image_input_type="pixel_values",
-        image_token_id=32000,
-        image_input_shape="1,3,336,336",
-        image_feature_size=576,
-    )
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+
+.. important::
+    We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
+    every model to perform profiling with.
+
+    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
+    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
+    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
+    with a more accurate profiling strategy in the future.
+
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
-* ``prompt``: The prompt should have a number of ``<image>`` tokens equal to ``image_feature_size``.
-* ``multi_modal_data``: This should be an instance of :class:`~vllm.multimodal.image.ImagePixelData` or :class:`~vllm.multimodal.image.ImageFeatureData`.
+* ``prompt``: The prompt should follow the format that is documented on HuggingFace.
+* ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
 
 .. code-block:: python
 
-    prompt = "<image>" * 576 + (
-        "\nUSER: What is the content of this image?\nASSISTANT:")
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
-    image = ...
-
+    image = PIL.Image.open(...)
+    
+    # Single prompt inference
     outputs = llm.generate({
         "prompt": prompt,
-        "multi_modal_data": ImagePixelData(image),
+        "multi_modal_data": {"image": image},
     })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    
+    # Batch inference
+    image_1 = PIL.Image.open(...)
+    image_2 = PIL.Image.open(...)
+    outputs = llm.generate(
+        [
+            {
+                "prompt": "USER: <image>\nWhat is the content of this image?\nASSISTANT:",
+                "multi_modal_data": {"image": image_1},
+            },
+            {
+                "prompt": "USER: <image>\nWhat's the color of this image?\nASSISTANT:",
+                "multi_modal_data": {"image": image_2},
+            }
+        ]
+    )
 
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
 
 A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
+
 
 Online OpenAI Vision API Compatible Inference
 ----------------------------------------------
@@ -83,11 +100,17 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
     python -m vllm.entrypoints.openai.api_server \
         --model llava-hf/llava-1.5-7b-hf \
-        --image-input-type pixel_values \
-        --image-token-id 32000 \
-        --image-input-shape 1,3,336,336 \
-        --image-feature-size 576 \
         --chat-template template_llava.jinja
+
+.. important::
+    We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
+    every model to perform profiling with.
+
+    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
+    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
+    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
+    with a more accurate profiling strategy in the future.
 
 To consume the server, you can use the OpenAI client like in the example below:
 
@@ -105,6 +128,8 @@ To consume the server, you can use the OpenAI client like in the example below:
         messages=[{
             "role": "user",
             "content": [
+                # NOTE: The prompt formatting with the image token `<image>` is not needed
+                # since the prompt will be processed automatically by the API server.
                 {"type": "text", "text": "What's in this image?"},
                 {
                     "type": "image_url",
@@ -117,6 +142,8 @@ To consume the server, you can use the OpenAI client like in the example below:
     )
     print("Chat response:", chat_response)
 
+A full code example can be found in `examples/openai_vision_api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_vision_api_client.py>`_.
+
 .. note::
 
     By default, the timeout for fetching images through http url is ``5`` seconds. You can override this by setting the environment variable:
@@ -126,5 +153,4 @@ To consume the server, you can use the OpenAI client like in the example below:
         export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
-    The prompt formatting with the image token ``<image>`` is not needed when serving VLMs with the API server since the prompt will be 
-    processed automatically by the server.
+    There is no need to format the prompt in the API request since it will be handled by the server.

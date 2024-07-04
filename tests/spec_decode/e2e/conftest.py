@@ -1,5 +1,4 @@
 import asyncio
-import time
 from itertools import cycle
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -7,18 +6,12 @@ import pytest
 import ray
 import torch
 
-from vllm.utils import is_hip
-
-if (not is_hip()):
-    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                        nvmlInit)
-
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.utils import set_random_seed
-from vllm.multimodal import MultiModalData
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob
@@ -26,6 +19,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, random_uuid
 
 from ...conftest import cleanup
+from ...utils import wait_for_gpu_memory_to_clear
 
 
 class AsyncLLM:
@@ -97,7 +91,7 @@ class AsyncLLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
+        multi_modal_data: Optional[MultiModalDataDict] = None,
     ) -> List[RequestOutput]:
 
         if prompts is None:
@@ -118,16 +112,17 @@ class AsyncLLM:
             raise ValueError("The lengths of prompts and "
                              "sampling_params must be the same.")
 
-        async def get_output(prompt, sampling_param) -> str:
+        async def get_output(prompt, sampling_param) -> RequestOutput:
             request_id = random_uuid()
             results_generator = self.llm_engine.generate(
                 prompt, sampling_param, request_id)
             final_output = None
             async for request_output in results_generator:
                 final_output = request_output
+            assert final_output is not None
             return final_output
 
-        outputs = []
+        outputs: List[RequestOutput] = []
         try:
             for i in range(num_requests):
                 prompt = prompts[i] if prompts is not None else None
@@ -208,8 +203,8 @@ def maybe_assert_ngram_worker(llm):
 def get_output_from_llm_generator(
         llm_generator, prompts,
         sampling_params) -> Tuple[List[str], List[List[int]]]:
-    tokens = []
-    token_ids = []
+    tokens: List[str] = []
+    token_ids: List[List[int]] = []
     for llm in llm_generator():
         maybe_assert_ngram_worker(llm)
 
@@ -290,38 +285,3 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         print(f'{i=} {baseline_token_ids=}')
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
-
-
-def wait_for_gpu_memory_to_clear(devices: List[int],
-                                 threshold_bytes: int,
-                                 timeout_s: float = 120) -> None:
-    # Use nvml instead of pytorch to reduce measurement error from torch cuda
-    # context.
-    nvmlInit()
-    start_time = time.time()
-    while True:
-        output = {}
-        output_raw = {}
-        for device in devices:
-            dev_handle = nvmlDeviceGetHandleByIndex(device)
-            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
-            gb_used = mem_info.used / 2**30
-            output_raw[device] = gb_used
-            output[device] = f'{gb_used:.02f}'
-
-        print('gpu memory used (GB): ', end='')
-        for k, v in output.items():
-            print(f'{k}={v}; ', end='')
-        print('')
-
-        dur_s = time.time() - start_time
-        if all(v <= (threshold_bytes / 2**30) for v in output_raw.values()):
-            print(f'Done waiting for free GPU memory on devices {devices=} '
-                  f'({threshold_bytes/2**30=}) {dur_s=:.02f}')
-            break
-
-        if dur_s >= timeout_s:
-            raise ValueError(f'Memory of devices {devices=} not free after '
-                             f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
-
-        time.sleep(5)

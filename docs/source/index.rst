@@ -63,8 +63,11 @@ Documentation
 
    getting_started/installation
    getting_started/amd-installation
-   getting_started/neuron-installation
+   getting_started/openvino-installation
    getting_started/cpu-installation
+   getting_started/neuron-installation
+   getting_started/tpu-installation
+   getting_started/xpu-installation
    getting_started/quickstart
    getting_started/debugging
    getting_started/examples/examples_index
@@ -80,6 +83,8 @@ Documentation
    serving/env_vars
    serving/usage_stats
    serving/integrations
+   serving/tensorizer
+   serving/faq
 
 .. toctree::
    :maxdepth: 1
@@ -97,6 +102,7 @@ Documentation
    :maxdepth: 1
    :caption: Quantization
 
+   quantization/supported_hardware
    quantization/auto_awq
    quantization/fp8
    quantization/fp8_e5m2_kvcache
@@ -116,6 +122,7 @@ Documentation
    dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/input_processing/model_inputs_index
    dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
 

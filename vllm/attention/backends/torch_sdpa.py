@@ -8,8 +8,16 @@ from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+from vllm.attention.ops.paged_attn import PagedAttentionMetadata
+from vllm.utils import is_cpu
+
+if is_cpu():
+    try:
+        from vllm.attention.ops.ipex_attn import PagedAttention
+    except ImportError:
+        from vllm.attention.ops.paged_attn import PagedAttention
+else:
+    from vllm.attention.ops.paged_attn import PagedAttention
 
 
 class TorchSDPABackend(AttentionBackend):
@@ -23,8 +31,8 @@ class TorchSDPABackend(AttentionBackend):
         return TorchSDPABackendImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "TorchSDPAMetadata":
-        return TorchSDPAMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return TorchSDPAMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -197,13 +205,14 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                                          attn_metadata.attn_bias):
                     end = start + seq_len
                     sub_out = scaled_dot_product_attention(
-                        query[:, start:end, :],
-                        key[:, start:end, :],
-                        value[:, start:end, :],
+                        query[None, :, start:end, :],
+                        key[None, :, start:end, :],
+                        value[None, :, start:end, :],
                         attn_mask=mask,
                         dropout_p=0.0,
                         is_causal=not self.need_mask,
-                        scale=self.scale).movedim(query.dim() - 2, 0)
+                        scale=self.scale).squeeze(0).movedim(
+                            query.dim() - 2, 0)
                     output[start:end, :, :] = sub_out
                     start = end
             else:
@@ -236,7 +245,7 @@ def _make_alibi_bias(
     dtype: torch.dtype,
     seq_lens: List[int],
 ) -> List[torch.Tensor]:
-    attn_biases = []
+    attn_biases: List[torch.Tensor] = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
@@ -248,7 +257,7 @@ def _make_alibi_bias(
 
         num_heads = alibi_slopes.shape[0]
         bias = bias[None, :].repeat((num_heads, 1, 1))
-        bias.mul_(alibi_slopes[:, None, None])
+        bias.mul_(alibi_slopes[:, None, None]).unsqueeze_(0)
         inf_mask = torch.empty(
             (1, seq_len, seq_len),
             dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
@@ -262,7 +271,7 @@ def _make_sliding_window_bias(
     window_size: Optional[int],
     dtype: torch.dtype,
 ) -> List[torch.Tensor]:
-    attn_biases = []
+    attn_biases: List[torch.Tensor] = []
     for seq_len in seq_lens:
         tensor = torch.full(
             (1, seq_len, seq_len),

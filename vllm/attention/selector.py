@@ -7,7 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_cpu, is_hip
+from vllm.utils import is_cpu, is_hip, is_openvino, is_tpu, is_xpu
 
 logger = init_logger(__name__)
 
@@ -17,7 +17,10 @@ class _Backend(enum.Enum):
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
+    OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
+    PALLAS = enum.auto()
+    IPEX = enum.auto()
 
 
 @lru_cache(maxsize=None)
@@ -57,15 +60,32 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
+        assert is_cpu(), RuntimeError(
+            "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
+    elif backend == _Backend.OPENVINO:
+        logger.info("Using OpenVINO Attention backend.")
+        from vllm.attention.backends.openvino import OpenVINOAttentionBackend
+        return OpenVINOAttentionBackend
+    elif backend == _Backend.IPEX:
+        assert is_xpu(), RuntimeError(
+            "IPEX attention backend is only used for the XPU device.")
+        logger.info("Using IPEX attention backend.")
+        from vllm.attention.backends.ipex_attn import IpexAttnBackend
+        return IpexAttnBackend
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
-        logger.warning("Eager mode is required for the Flashinfer backend. "
-                       "Please make sure --enforce-eager is set.")
+        logger.warning(("Flashinfer will be stuck on llma-2-7b,"
+                        " please avoid using Flashinfer as the"
+                        "backend when running on llma-2-7b."))
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
+    elif backend == _Backend.PALLAS:
+        logger.info("Using Pallas backend.")
+        from vllm.attention.backends.pallas import PallasAttentionBackend
+        return PallasAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
 
@@ -80,7 +100,6 @@ def which_attn_to_use(
     block_size: int,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
-
     # Default case.
     selected_backend = _Backend.FLASH_ATTN
 
@@ -99,6 +118,21 @@ def which_attn_to_use(
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
+
+    if is_openvino():
+        if selected_backend != _Backend.OPENVINO:
+            logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
+        return _Backend.OPENVINO
+
+    if is_xpu():
+        if selected_backend != _Backend.IPEX:
+            logger.info("Cannot use %s backend on XPU.", selected_backend)
+        return _Backend.IPEX
+
+    if is_tpu():
+        if selected_backend != _Backend.PALLAS:
+            logger.info("Cannot use %s backend on TPU.", selected_backend)
+        return _Backend.PALLAS
 
     if is_hip():
         # AMD GPUs.
