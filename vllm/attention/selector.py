@@ -5,7 +5,8 @@ from typing import Optional, Type
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              DualChunkAttentionBackend)
 from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip, is_openvino, is_tpu, is_xpu
 
@@ -88,6 +89,33 @@ def get_attn_backend(
         return PallasAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
+
+
+@lru_cache(maxsize=None)
+def get_dual_chunk_attn_backend(
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    sliding_window: Optional[int],
+    dtype: torch.dtype,
+    kv_cache_dtype: Optional[str],
+    block_size: int,
+    is_blocksparse: bool = False,
+) -> Type[DualChunkAttentionBackend]:
+    if is_blocksparse:
+        raise ValueError(
+            "Dual Chunk Attention does not support block-sparse attention.")
+    backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
+                                sliding_window, dtype, kv_cache_dtype,
+                                block_size)
+    if backend == _Backend.FLASH_ATTN:
+        logger.info("Using Dual Chunk Flash Attention backend.")
+        from vllm.attention.backends.dual_chunk_flash_attn import (  # noqa: F401
+            DualChunkFlashAttentionBackend)
+        return DualChunkFlashAttentionBackend
+    else:
+        raise ValueError(
+            "Dual Chunk Attention requires Flash Attention-2 backend.")
 
 
 def which_attn_to_use(

@@ -22,7 +22,8 @@ except ImportError:
     BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
-from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention import (AttentionMetadata, get_attn_backend,
+                            get_dual_chunk_attn_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          SchedulerConfig)
@@ -214,15 +215,27 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             dtype=np.int32)
         num_attn_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
-        self.attn_backend = get_attn_backend(
-            num_attn_heads,
-            self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
-            self.model_config.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-        ) if num_attn_heads else None
+        if getattr(self.model_config.hf_config, "dual_chunk_attention_config",
+                   None):
+            self.attn_backend = get_dual_chunk_attn_backend(
+                num_attn_heads,
+                self.model_config.get_head_size(),
+                self.model_config.get_num_kv_heads(self.parallel_config),
+                self.model_config.get_sliding_window(),
+                self.model_config.dtype,
+                self.kv_cache_dtype,
+                self.block_size,
+            ) if num_attn_heads else None
+        else:
+            self.attn_backend = get_attn_backend(
+                num_attn_heads,
+                self.model_config.get_head_size(),
+                self.model_config.get_num_kv_heads(self.parallel_config),
+                self.model_config.get_sliding_window(),
+                self.model_config.dtype,
+                self.kv_cache_dtype,
+                self.block_size,
+            ) if num_attn_heads else None
 
         # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
@@ -357,6 +370,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         seq_lens: List[int] = []
         prefill_seq_lens: List[int] = []
+        # The length of the whole prefill sequence. Different from
+        # prefill_seq_lens when chunked prefill is enable.
+        prefill_original_seq_lens: List[int] = []
         decode_seq_lens: List[int] = []
         context_lens: List[int] = []
         query_lens: List[int] = []
@@ -511,6 +527,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     num_prefill_tokens += len(tokens)
                     decode_only = False
                     prefill_seq_lens.append(seq_len)
+                    prefill_original_seq_lens.append(seq_data.get_len())
                 else:
                     assert query_len == 1, (
                         "seq_len: {}, context_len: {}, query_len: {}".format(
@@ -682,6 +699,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
+        prefill_original_seq_lens_tensor = torch.tensor(
+            prefill_original_seq_lens, dtype=torch.long, device=self.device)
 
         if self.attn_backend.get_name() == "flashinfer":
             if len(paged_kv_indptr) > 0:
@@ -723,6 +742,25 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 data_type=kv_cache_dtype,
                 use_cuda_graph=use_captured_graph)
 
+        elif self.attn_backend.get_name() == "dual-chunk-flash-attn":
+            attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=num_prefills,
+                slot_mapping=slot_mapping_tensor,
+                num_prefill_tokens=num_prefill_tokens,
+                num_decode_tokens=num_decode_tokens,
+                seq_lens=seq_lens,
+                seq_lens_tensor=seq_lens_tensor,
+                max_query_len=max_query_len,
+                prefill_original_seq_lens_tensor=
+                prefill_original_seq_lens_tensor,
+                max_prefill_seq_len=max_prefill_seq_len,
+                max_decode_seq_len=max_decode_seq_len,
+                query_start_loc=query_start_loc,
+                seq_start_loc=seq_start_loc,
+                context_lens_tensor=context_lens_tensor,
+                block_tables=block_tables,
+                use_cuda_graph=use_captured_graph,
+            )
         else:
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
