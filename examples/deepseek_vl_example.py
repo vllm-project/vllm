@@ -1,6 +1,7 @@
 import os
 import subprocess
 
+import torch
 from PIL import Image
 
 # The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
@@ -8,27 +9,19 @@ from PIL import Image
 from vllm import LLM, SamplingParams
 
 sample_params = SamplingParams(temperature=0, max_tokens=1024)
-model = "/pretrained_models/deepseek-vl-7b-chat"
-prompt = (
-    "You are a helpful language and vision assistant."
-    "You are able to understand the visual content that the user provides,"
-    "and assist the user with a variety of tasks using natural language.\n"
+model = "deepseek-ai/deepseek-vl-7b-chat"
+model = "deepseek-ai/deepseek-vl-1.3b-chat"
+prompt = "You are a helpful language and vision assistant." \
+    "You are able to understand the visual content that the user provides," \
+    "and assist the user with a variety of tasks using natural language.\n" \
     "User: <image_placeholder> Describe the content of this image.\nAssistant:"
-)
-
-prompt = prompt.replace("<image_placeholder>", "<image_placeholder>" * 576)
 
 
 def run_deepseek_vl():
-    llm = LLM(
-        model=model,
-        image_token_id=100015,
-        image_input_shape="1,3,1024,1024",
-        image_feature_size=576,
-        gpu_memory_utilization=0.9,
-        max_model_len=3072,
-        enforce_eager=True,
-    )
+    llm = LLM(model=model,
+              max_model_len=3072,
+              enforce_eager=True,
+              dtype=torch.bfloat16)
 
     image = Image.open("images/stop_sign.jpg")
 
@@ -39,8 +32,7 @@ def run_deepseek_vl():
                 "image": image
             },
         },
-        sampling_params=sample_params,
-    )
+        sampling_params=sample_params)
 
     for o in outputs:
         generated_text = o.outputs[0].text

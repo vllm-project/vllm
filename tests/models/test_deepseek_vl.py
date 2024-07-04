@@ -244,8 +244,8 @@ def run_test(
             (o, tokenizer.decode(o.cpu().tolist(), skip_special_tokens=True)))
 
     check_outputs_equal(
-        hf_outputs,
-        [
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=[
             vllm_to_hf_output(vllm_output, vlm_config, model_id)
             for vllm_output in vllm_outputs
         ],

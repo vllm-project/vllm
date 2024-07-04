@@ -44,8 +44,8 @@ from transformers.image_processing_utils import (BaseImageProcessor,
 from transformers.image_utils import to_numpy_array
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext
+from vllm.config import CacheConfig, MultiModalConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -55,6 +55,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import (cached_get_tokenizer,
+                                   repeat_and_pad_image_tokens)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import DeepSeekMultiModalityConfig
 
@@ -67,6 +69,8 @@ IMAGENET_STD = (0.26862954, 0.26130258, 0.27577711)
 IMAGENET_INCEPTION_MEAN = (0.5, 0.5, 0.5)
 IMAGENET_INCEPTION_STD = (0.5, 0.5, 0.5)
 LayerType = Union[str, Callable, Type[torch.nn.Module]]
+IMAGE_FEATURE_SIZE = 576
+IMAGE_TOKEN_ID = 100015
 
 
 # From PyTorch internals
@@ -213,7 +217,7 @@ def drop_path(
 # From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py # noqa
 class DropPath(nn.Module):
     """
-    Drop paths (Stochastic Depth) per sample  
+    Drop paths (Stochastic Depth) per sample
     (when applied in main path of residual blocks).
     """
 
@@ -390,7 +394,7 @@ class PatchEmbed(nn.Module):
             return self.patch_size
 
     def dynamic_feat_size(self, img_size: Tuple[int, int]) -> Tuple[int, int]:
-        """Get grid (feature) size for given image size taking account 
+        """Get grid (feature) size for given image size taking account
            of dynamic padding.
         NOTE: must be torchscript compatible so using fixed tuple indexing
         """
@@ -754,7 +758,7 @@ class MlpProjector(nn.Module):
         Args:
             x_or_tuple (Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
             if it is a tuple of torch.Tensor,
-            then it comes from the hybrid vision encoder, 
+            then it comes from the hybrid vision encoder,
             and x = high_res_x, low_res_x);
             otherwise it is the feature from the single vision encoder.
 
@@ -953,7 +957,7 @@ class SigLipBlock(nn.Module):
 class VisionTransformer(nn.Module):
     """Vision Transformer
 
-    A PyTorch impl of : `An Image is Worth 16x16 Words: 
+    A PyTorch impl of : `An Image is Worth 16x16 Words:
     Transformers for Image Recognition at Scale`
         - https://arxiv.org/abs/2010.11929
     """
@@ -1000,20 +1004,20 @@ class VisionTransformer(nn.Module):
             patch_size: Patch size.
             in_chans: Number of image input channels.
             num_classes: Number of classes for classification head.
-            global_pool: Type of global pooling for final sequence 
+            global_pool: Type of global pooling for final sequence
             (default: 'token').
             embed_dim: Transformer embedding dimension.
             depth: Depth of transformer.
             num_heads: Number of attention heads.
             mlp_ratio: Ratio of mlp hidden dim to embedding dim.
             qkv_bias: Enable bias for qkv projections if True.
-            init_values: Layer-scale init values 
+            init_values: Layer-scale init values
             (layer-scale enabled if not None).
             class_token: Use class token.
-            no_embed_class: Don't include position embeddings for class 
+            no_embed_class: Don't include position embeddings for class
             (or reg) tokens.
             reg_tokens: Number of register tokens.
-            fc_norm: Pre head norm after pool (instead of before), if None, 
+            fc_norm: Pre head norm after pool (instead of before), if None,
             enabled when global_pool == 'avg'.
             drop_rate: Head dropout rate.
             pos_drop_rate: Position embedding dropout rate.
@@ -1429,11 +1433,11 @@ class ImageEncoderViT(nn.Module):
             norm_layer (nn.Module): Normalization layer.
             act_layer (nn.Module): Activation layer.
             use_abs_pos (bool): If True, use absolute positional embeddings.
-            use_rel_pos (bool): If True, add relative positional embeddings to 
+            use_rel_pos (bool): If True, add relative positional embeddings to
             the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative 
-            positional parameters. window_size (int): Window size for window 
-            attention blocks. global_attn_indexes (list): Indexes for blocks 
+            rel_pos_zero_init (bool): If True, zero initialize relative
+            positional parameters. window_size (int): Window size for window
+            attention blocks. global_attn_indexes (list): Indexes for blocks
             using global attention.
             downsample_channels (list): Channels for downsampling layers.
         """
@@ -1553,7 +1557,7 @@ class ImageEncoderViT(nn.Module):
 
 class Block(nn.Module):
     """
-    Transformer blocks with support of window attention and 
+    Transformer blocks with support of window attention and
     residual propagation blocks
     """
 
@@ -1575,17 +1579,17 @@ class Block(nn.Module):
             dim (int): Number of input channels.
             num_heads (int): Number of attention heads in each ViT block.
             mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-            qkv_bias (bool): If True, add a learnable bias to 
+            qkv_bias (bool): If True, add a learnable bias to
             query, key, value.
             norm_layer (nn.Module): Normalization layer.
             act_layer (nn.Module): Activation layer.
-            use_rel_pos (bool): If True, add relative positional embeddings to 
+            use_rel_pos (bool): If True, add relative positional embeddings to
             the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative 
+            rel_pos_zero_init (bool): If True, zero initialize relative
             positional parameters.
-            window_size (int): Window size for window attention blocks. If 
-            it equals 0, then use global attention. input_size 
-            (tuple(int, int) or None): Input resolution for calculating 
+            window_size (int): Window size for window attention blocks. If
+            it equals 0, then use global attention. input_size
+            (tuple(int, int) or None): Input resolution for calculating
             the relative
                 positional parameter size.
         """
@@ -1643,13 +1647,13 @@ class Attention(nn.Module):
         Args:
             dim (int): Number of input channels.
             num_heads (int): Number of attention heads.
-            qkv_bias (bool):  If True, add a learnable bias to 
+            qkv_bias (bool):  If True, add a learnable bias to
             query, key, value.
-            rel_pos (bool): If True, add relative positional embeddings 
+            rel_pos (bool): If True, add relative positional embeddings
             to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative 
+            rel_pos_zero_init (bool): If True, zero initialize relative
             positional parameters.
-            input_size (tuple(int, int) or None): Input resolution for 
+            input_size (tuple(int, int) or None): Input resolution for
             calculating the relative
                 positional parameter size.
         """
@@ -1738,7 +1742,7 @@ def window_unpartition(
     """
     Window unpartition into original sequences and removing padding.
     Args:
-        windows (tensor): input tokens with 
+        windows (tensor): input tokens with
         [B * num_windows, window_size, window_size, C].
         window_size (int): window size.
         pad_hw (Tuple): padded height and width (Hp, Wp).
@@ -2160,23 +2164,48 @@ def dummy_data_for_deepseek(ctx: InputContext, seq_len: int):
     if not image_size:
         # Get image size for 7b model
         image_size = vision_config.params["high_res_cfg"]["image_size"]
-    seq_data = dummy_seq_data_for_clip(vision_config,
-                                       seq_len,
-                                       image_token_id=100015,
-                                       image_feature_size_override=576)
+    seq_data = dummy_seq_data_for_clip(
+        vision_config,
+        seq_len,
+        image_token_id=IMAGE_TOKEN_ID,
+        image_feature_size_override=IMAGE_FEATURE_SIZE,
+    )
     mm_data = {"image": Image.new("RGB", (image_size, image_size), color=0)}
     return seq_data, mm_data
 
 
+def input_processor_for_deepseek(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return llm_inputs
+    model_config = ctx.model_config
+    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+    new_prompt, new_token_ids = repeat_and_pad_image_tokens(
+        tokenizer,
+        llm_inputs.get("prompt"),
+        llm_inputs["prompt_token_ids"],
+        image_token_id=IMAGE_TOKEN_ID,
+        repeat_count=IMAGE_FEATURE_SIZE,
+    )
+    return LLMInputs(
+        prompt_token_ids=new_token_ids,
+        prompt=new_prompt,
+        multi_modal_data=multi_modal_data,
+    )
+
+
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_deepseek)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_deepseek)
 class DeepSeekMultiModalityCausalLM(nn.Module, SupportsVision):
 
-    def __init__(self,
-                 config: DeepSeekMultiModalityConfig,
-                 vlm_config: VisionLanguageConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: DeepSeekMultiModalityConfig,
+        multimodal_config: MultiModalConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.config = config
         vision_config = config.vision_config
@@ -2264,7 +2293,9 @@ class DeepSeekMultiModalityCausalLM(nn.Module, SupportsVision):
         if image_features is not None and pixel_values is None:
             pixel_values = image_features
         if pixel_values is not None:
-            image_token_id = 100015
+            target_dtype = self.lm_head.weight.dtype
+            pixel_values = pixel_values.to(target_dtype)
+            image_token_id = IMAGE_TOKEN_ID
             image_token_mask = input_ids == image_token_id
             inputs_embeds = self.prepare_inputs_embeds(
                 input_ids,
