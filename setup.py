@@ -220,7 +220,7 @@ def _is_hpu() -> bool:
             except (ValueError, FileNotFoundError, PermissionError,
                     subprocess.CalledProcessError):
                 is_hpu_available = False
-    return is_hpu_available
+    return is_hpu_available or VLLM_TARGET_DEVICE == "hpu"
 
 
 def _is_cuda() -> bool:
