@@ -171,7 +171,7 @@ RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamb
 # until fixed in Triton upstream
 RUN --mount=type=bind,source=triton_patch,target=/context \
     export TRITON_PATH=$(python3 -c "import triton; print(triton.__file__.strip(\"__init__.py\"))") \
-    && cp /context/custom_cache_manager.py ${TRITON_PATH}/runtime/custom_cache_manager.py \
+    && cp /context/custom_cache_manager.py ${TRITON_PATH}/runtime/custom_cache_manager.py
 
 #################### vLLM installation IMAGE ####################
 
