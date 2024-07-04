@@ -74,6 +74,7 @@ class TestOneTokenBadWord:
 
 
 class TestTwoTokenBadWord:
+    # Another model (with a different tokenizer behaviour)
     MODEL = "openai-community/gpt2"
 
     PROMPT = "How old are you? I am 10"
