@@ -405,8 +405,10 @@ def reshape_and_cache_vmm(
     kv_cache_dtype: str,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache_vmm(key, value, key_cache,
-                                                value_cache, cache_cow_mapping,
-                                                cache_col_mapping, kv_cache_dtype)
+                                                 value_cache,
+                                                 cache_cow_mapping,
+                                                 cache_col_mapping,
+                                                 kv_cache_dtype)
 
 
 def copy_blocks(key_caches: List[torch.Tensor],

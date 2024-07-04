@@ -15,12 +15,15 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 def nullable_str(val: str):
     if not val or val == "None":
         return None
     return val
 
+
 _MB = 1 << 20
+
 
 @dataclass
 class EngineArgs:
@@ -44,11 +47,11 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
-    
+
     # new add for vmm
-    block_bytes_size: int = 2 * _MB # 2MB
+    block_bytes_size: int = 2 * _MB  # 2MB
     use_vmm: bool = False
-    
+
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
@@ -667,7 +670,7 @@ class EngineArgs:
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend)
-        
+
         # new add for vmm, if use_vmm, block_size = 2MB / single_token_bytes_size
         if self.use_vmm:
             if self.kv_cache_dtype == "auto":
@@ -675,27 +678,28 @@ class EngineArgs:
             else:
                 dtype = STR_DTYPE_TO_TORCH_DTYPE[self.kv_cache_dtype]
             dtype_size = get_dtype_size(dtype)
-            
+
             head_size = model_config.get_head_size()
             num_heads = model_config.get_num_kv_heads(parallel_config)
-            
+
             single_token_bytes_size = head_size * num_heads * dtype_size
-            
+
             if self.block_bytes_size % single_token_bytes_size != 0:
                 raise ValueError(
                     f"Block size in bytes ({self.block_bytes_size}) must be a "
-                    f"multiple of the size of the cache single_token_bytes_size ({single_token_bytes_size} byte).")
-            
+                    f"multiple of the size of the cache single_token_bytes_size ({single_token_bytes_size} byte)."
+                )
+
             self.block_size = self.block_bytes_size // single_token_bytes_size
             logger.info(f"use vmm 2MB block size: {self.block_size}")
         else:
             logger.info(f"use normal block size: {self.block_size}")
-            
+
         cache_config = CacheConfig(
             block_size=self.block_size,
-            block_bytes_size=self.block_bytes_size, # new add for vmm
+            block_bytes_size=self.block_bytes_size,  # new add for vmm
             gpu_memory_utilization=self.gpu_memory_utilization,
-            swap_space=self.swap_space, 
+            swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),

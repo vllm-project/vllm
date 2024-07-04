@@ -267,7 +267,7 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
-        
+
         self.use_vmm = cache_config.use_vmm
 
         version = "v1"
@@ -275,7 +275,7 @@ class Scheduler:
             version = "v2"
         if self.scheduler_config.embedding_mode:
             version = "embedding"
-        
+
         if self.use_vmm:
             version = "vmm"
 
@@ -298,7 +298,7 @@ class Scheduler:
                 num_cpu_blocks=num_cpu_blocks,
                 sliding_window=self.cache_config.sliding_window,
                 enable_caching=self.cache_config.enable_prefix_caching)
-        else: # vmm block space manager.
+        else:  # vmm block space manager.
             self.block_manager = BlockSpaceManagerImpl(
                 block_size=self.cache_config.block_size,
                 num_gpu_blocks=num_gpu_blocks,
@@ -858,9 +858,8 @@ class Scheduler:
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=preempted,
-
-            allocated_block_counts={} # new add for vmm, update in schedule func
-        )
+            # new add for vmm, update in schedule func
+            allocated_block_counts={})
 
     def _schedule_chunked_prefill(self):
         """Schedule queued requests.
@@ -950,16 +949,16 @@ class Scheduler:
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
-            
-            allocated_block_counts={}  # new add for vmm, update in schedule func
-        )
+            # new add for vmm, update in schedule func
+            allocated_block_counts={})
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
         if self.scheduler_config.chunked_prefill_enabled:
             if self.use_vmm:
                 # TODO：support chunked prefill with VMM
-                raise NotImplementedError("Chunked prefill is not supported with VMM yet.")
+                raise NotImplementedError(
+                    "Chunked prefill is not supported with VMM yet.")
             return self._schedule_chunked_prefill()
         else:
             return self._schedule_default()
@@ -1006,15 +1005,17 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                
+
                 if not self.use_vmm:
-                    block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                    block_tables[seq_id] = self.block_manager.get_block_table(
+                        seq)
                     self.block_manager.access_all_blocks_in_seq(seq, now)
-                
+
                 else:
                     cache_buffer_id = seq.cache_buffer_id
                     assert cache_buffer_id >= 0  # allocated seq.cache_buffer_id should be >= 0
-                    scheduler_outputs.allocated_block_counts[cache_buffer_id] = self.block_manager.get_allocated_block_count(seq.seq_id)
+                    scheduler_outputs.allocated_block_counts[cache_buffer_id] = \
+                        self.block_manager.get_allocated_block_count(seq.seq_id)
 
             common_computed_block_nums = (
                 self.block_manager.get_common_computed_block_ids(

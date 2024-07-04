@@ -25,7 +25,9 @@ from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 import time
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
+
 
 class Worker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
@@ -226,11 +228,11 @@ class Worker(LocalOrDistributedWorkerBase):
                             self.parallel_config, self.device_config)
                 for _ in range(self.parallel_config.pipeline_parallel_size)
             ]
-        else:   # Use VMM
+        else:  # Use VMM
             self.cache_engine = [
                 CacheEngineVMM(self.cache_config, self.model_config,
-                            self.parallel_config, self.scheduler_config,
-                            self.device_config)
+                               self.parallel_config, self.scheduler_config,
+                               self.device_config)
                 for _ in range(self.parallel_config.pipeline_parallel_size)
             ]
 
@@ -238,7 +240,6 @@ class Worker(LocalOrDistributedWorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
-
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -274,7 +275,7 @@ class Worker(LocalOrDistributedWorkerBase):
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
-        
+
         if not self.use_vmm:
             allocated_block_counts = None
         else:
@@ -304,9 +305,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
-        
+
         if self.use_vmm and worker_input.allocated_block_counts is not None:
-            self.cache_engine[virtual_engine].alloc_all_seqs(worker_input.allocated_block_counts)
+            self.cache_engine[virtual_engine].alloc_all_seqs(
+                worker_input.allocated_block_counts)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -339,6 +341,7 @@ class Worker(LocalOrDistributedWorkerBase):
             return CacheEngineVMM.get_cache_block_size(self.cache_config,
                                                        self.model_config,
                                                        self.parallel_config)
+
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,

@@ -94,6 +94,7 @@ def create_kv_caches_with_random_flash(
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
 
+
 def create_kv_caches_with_random_flash_non_page(
     batch_size: int,
     seq_len: int,
@@ -125,20 +126,24 @@ def create_kv_caches_with_random_flash_non_page(
     return key_caches, value_caches
 
 
-def num_splits_heuristic(batch_nheads_mblocks:int, num_SMs:int, num_n_blocks:int, max_splits:int=128)->int:
+def num_splits_heuristic(batch_nheads_mblocks: int,
+                         num_SMs: int,
+                         num_n_blocks: int,
+                         max_splits: int = 128) -> int:
     if (batch_nheads_mblocks >= 0.8 * num_SMs):
         return 1
     max_splits = min(max_splits, num_SMs, num_n_blocks)
     max_efficiency = 0.0
     efficiency = []
-    
+
     def ceildiv(a, b):
         return (a + b - 1) // b
-    
-    def is_split_eligible(num_splits:int, num_n_blocks:int)->bool:
-        return num_splits == 1 or ceildiv(num_n_blocks, num_splits) != ceildiv(num_n_blocks, num_splits - 1)
-    
-    for num_splits in range(1, max_splits+1):
+
+    def is_split_eligible(num_splits: int, num_n_blocks: int) -> bool:
+        return num_splits == 1 or ceildiv(num_n_blocks, num_splits) != ceildiv(
+            num_n_blocks, num_splits - 1)
+
+    for num_splits in range(1, max_splits + 1):
         if not is_split_eligible(num_splits, num_n_blocks):
             # print(f"num_splits = {num_splits} not eligible, eff = 0.0\n")
             efficiency.append(0.0)
@@ -149,21 +154,23 @@ def num_splits_heuristic(batch_nheads_mblocks:int, num_SMs:int, num_n_blocks:int
             if eff > max_efficiency:
                 max_efficiency = eff
             efficiency.append(eff)
-    
-    for num_splits in range(1, max_splits+1):
+
+    for num_splits in range(1, max_splits + 1):
         if not is_split_eligible(num_splits, num_n_blocks):
             continue
         if efficiency[num_splits - 1] >= 0.85 * max_efficiency:
             print(f"num_splits chosen = {num_splits}\n")
             return num_splits
 
+
 # this function is used to determine the number of splits for the flash attention kernel
 # copy from flash-attention/csrc/flash_attn/flash_api.cpp
-def determine_num_splits(batch_size:int, num_heads:int, head_size:int, seqlen_q: int, seqlen_k: int, num_SMs: int)->int:
+def determine_num_splits(batch_size: int, num_heads: int, head_size: int,
+                         seqlen_q: int, seqlen_k: int, num_SMs: int) -> int:
     block_n = 256 if head_size <= 64 else (128 if head_size <= 128 else 64)
     num_n_blocks = (seqlen_k + block_n - 1) // block_n
     num_m_blocks = (seqlen_q + 64 - 1) // 64
-    
+
     print("batch_size: ", batch_size)
     print("num_heads: ", num_heads)
     print("head_size: ", head_size)
@@ -173,8 +180,9 @@ def determine_num_splits(batch_size:int, num_heads:int, head_size:int, seqlen_q:
     print("block_n: ", block_n)
     print("num_n_blocks: ", num_n_blocks)
     print("num_m_blocks: ", num_m_blocks)
-    
-    num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, num_SMs*2, num_n_blocks)
+
+    num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks,
+                                      num_SMs * 2, num_n_blocks)
     return num_splits
 
 
@@ -217,12 +225,15 @@ def main(
     seq_lens = [seq_len for _ in range(num_seqs)]
     max_seq_len = max(seq_lens)
     print(f"max_seq_len = {max_seq_len}")
-    
+
     cache_batch_idx = list(range(num_seqs))
-    cache_batch_idx = torch.tensor(cache_batch_idx, dtype=torch.int32, device=device)
-    
-    block_table_lens = [(seq_len + block_size - 1) // block_size for seq_len in seq_lens]
-    
+    cache_batch_idx = torch.tensor(cache_batch_idx,
+                                   dtype=torch.int32,
+                                   device=device)
+
+    block_table_lens = [(seq_len + block_size - 1) // block_size
+                        for seq_len in seq_lens]
+
     seq_lens = torch.tensor(seq_lens, dtype=torch.int, device=device)
 
     # Create the block tables.
@@ -234,54 +245,55 @@ def main(
             for _ in range(block_table_lens[i])
         ]
         block_tables.append(block_table)
-    
-    max_block_table_len = max(
-        len(block_table) for block_table in block_tables)
+
+    max_block_table_len = max(len(block_table) for block_table in block_tables)
     print(f"max_block_table_len = {max_block_table_len}")
-    
+
     block_tables = make_tensor_with_pad(
-            block_tables,
-            max_len=max_block_table_len,
-            pad=0,
-            dtype=torch.int,
-            device=device,
-        )
+        block_tables,
+        max_len=max_block_table_len,
+        pad=0,
+        dtype=torch.int,
+        device=device,
+    )
     # block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
 
     # Create the KV cache.
     num_splits = 0
     if version == "flash-page":
         # num_splits = determine_num_splits(num_seqs, num_kv_heads, head_size, 1, max_seq_len, 78)
-        key_caches, value_caches = create_kv_caches_with_random_flash(NUM_BLOCKS,
-                                                                    block_size,
-                                                                    1,
-                                                                    num_kv_heads,
-                                                                    head_size,
-                                                                    kv_cache_dtype,
-                                                                    dtype,
-                                                                    device=device)
+        key_caches, value_caches = create_kv_caches_with_random_flash(
+            NUM_BLOCKS,
+            block_size,
+            1,
+            num_kv_heads,
+            head_size,
+            kv_cache_dtype,
+            dtype,
+            device=device)
     elif version == "flash-non-page":
         cache_max_seq_len = seq_len
         # In my case, each sequence has a max length of 131072, so I set the cache_max_seq_len to 131072 to preallocate the cache
         cache_max_seq_len = 131072
-        
-        key_caches, value_caches = create_kv_caches_with_random_flash_non_page(num_seqs,
-                                                                               cache_max_seq_len,
-                                                                               1,
-                                                                               num_kv_heads,
-                                                                               head_size,
-                                                                               kv_cache_dtype,
-                                                                               dtype,
-                                                                               device=device)     
+
+        key_caches, value_caches = create_kv_caches_with_random_flash_non_page(
+            num_seqs,
+            cache_max_seq_len,
+            1,
+            num_kv_heads,
+            head_size,
+            kv_cache_dtype,
+            dtype,
+            device=device)
 
     else:
         raise ValueError(f"Invalid version: {version}")
     key_cache, value_cache = key_caches[0], value_caches[0]
     print(f"key_cache.shape = {key_cache.shape}")
     print(f"value_cache.shape = {value_cache.shape}")
-        
+
     print(f"num_splits = {num_splits}")
-    
+
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
 
@@ -311,10 +323,10 @@ def main(
             elif version == "flash-non-page":
                 # print("num_splits = ", num_splits)
                 flash_attn_with_kvcache(
-                    q=query.unsqueeze(1),                  # q: (batch_size, seqlen=1, nheads, headdim)
-                    k_cache=key_cache[:, :max_seq_len],    # k_cache: (batch_size_cache, max_seqlen_cache, nheads_k, headdim)
-                    v_cache=value_cache[:, :max_seq_len],  # v_cache: (batch_size_cache, max_seqlen_cache, nheads_v, headdim)
-                    cache_seqlens=seq_lens,                # cache_seqlens: (batch_size_cache, ) the cur length of each sequence in cache
+                    q=query.unsqueeze(1),
+                    k_cache=key_cache[:, :max_seq_len],
+                    v_cache=value_cache[:, :max_seq_len],
+                    cache_seqlens=seq_lens,
                     # cache_batch_idx=cache_batch_idx,
                     softmax_scale=scale,
                     causal=True,
@@ -363,7 +375,10 @@ if __name__ == '__main__':
                         choices=[64, 80, 96, 112, 128, 192, 256],
                         default=128)
     # In my other case, the block size is 4096, so I want to test this situation
-    parser.add_argument("--block-size", type=int, choices=[16, 32, 4096], default=4096)
+    parser.add_argument("--block-size",
+                        type=int,
+                        choices=[16, 32, 4096],
+                        default=4096)
     parser.add_argument("--use-alibi", action="store_true")
     parser.add_argument("--dtype",
                         type=str,

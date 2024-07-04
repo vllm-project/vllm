@@ -49,16 +49,13 @@ TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float16: "float16",
     torch.half: "half",
     torch.bfloat16: "bfloat16",
-    
     torch.int: "int",
     torch.int64: "int64",
     torch.int32: "int32",
     torch.int16: "int16",
     torch.int8: "int8",
-    
     torch.uint8: "uint8",
 }
-
 
 P = ParamSpec('P')
 K = TypeVar("K")
@@ -515,6 +512,7 @@ def create_kv_caches_with_random_flash(
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
+
 
 def create_kv_caches_with_random_flash_non_page(
     batch_size: int,
@@ -984,7 +982,6 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
-
 
 
 # new add for vmm

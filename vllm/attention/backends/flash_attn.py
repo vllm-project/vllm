@@ -119,14 +119,16 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
-    
-    # new add for vmm
-    use_vmm: bool = False   # whether use vmm
-    cache_batch_idx: Optional[torch.Tensor] = None # (batch_size, ) the index of batch in cache
 
-    cache_cow_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which seq cow in cache
-    cache_col_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which token col in cache
-    
+    # new add for vmm
+    use_vmm: bool = False  # whether use vmm
+    # cache_batch_idx: # (batch_size, ) the index of batch in cache
+    # cache_cow_mapping: # (num_tokens,)  record key/value write to which seq cow in cache
+    # cache_col_mapping: # (num_tokens,)  record key/value write to which token col in cache
+    cache_batch_idx: Optional[torch.Tensor] = None
+    cache_cow_mapping: Optional[torch.Tensor] = None
+    cache_col_mapping: Optional[torch.Tensor] = None
+
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
 
@@ -160,24 +162,29 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=None,
             use_cuda_graph=False,
-            use_vmm=self.use_vmm,   # new add for vmm
+            use_vmm=self.use_vmm,  # new add for vmm
             cache_batch_idx=None,
             cache_cow_mapping=None,
             cache_col_mapping=None,
         )
-        
+
         # NOTE: slot_mapping / cache_cow_mapping cache_col_mapping only used for cache write
         #       no need to add them to _prefill_metadata or _decode_metadata
         if not self.use_vmm:
             assert self.block_tables is not None
-            # self._cached_prefill_metadata.slot_mapping = self.slot_mapping[:self.num_prefill_tokens]
-            self._cached_prefill_metadata.block_tables = self.block_tables[:self.num_prefills]
-            
-        else:   # use_vmm
-            self._cached_prefill_metadata.cache_batch_idx = self.cache_batch_idx[:self.num_prefills]
-            # self._cached_prefill_metadata.cache_cow_mapping = self.cache_cow_mapping[:self.num_prefills]
-            # self._cached_prefill_metadata.cache_col_mapping = self.cache_col_mapping[:self.num_prefill_tokens]
-            
+            # self._cached_prefill_metadata.slot_mapping = \
+            #     self.slot_mapping[:self.num_prefill_tokens]
+            self._cached_prefill_metadata.block_tables = \
+                self.block_tables[:self.num_prefills]
+
+        else:  # use_vmm
+            self._cached_prefill_metadata.cache_batch_idx = \
+                self.cache_batch_idx[:self.num_prefills]
+            # self._cached_prefill_metadata.cache_cow_mapping = \
+            #     self.cache_cow_mapping[:self.num_prefills]
+            # self._cached_prefill_metadata.cache_col_mapping = \
+            #     self.cache_col_mapping[:self.num_prefill_tokens]
+
         return self._cached_prefill_metadata
 
     @property
@@ -189,7 +196,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             return self._cached_decode_metadata
 
         assert self.seq_lens_tensor is not None
-        
+
         self._cached_decode_metadata = FlashAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
@@ -213,14 +220,19 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         if not self.use_vmm:
             assert self.block_tables is not None
-            # self._cached_decode_metadata.slot_mapping = self.slot_mapping[self.num_prefill_tokens:]
-            self._cached_decode_metadata.block_tables = self.block_tables[self.num_prefills:]
-            
-        else:   # use_vmm
-            self._cached_decode_metadata.use_cuda_graph = False # cuda graph is not supported in vmm yet
-            self._cached_decode_metadata.cache_batch_idx = self.cache_batch_idx[self.num_prefills:]
-            # self._cached_decode_metadata.cache_cow_mapping = self.cache_cow_mapping[self.num_prefills:]
-            # self._cached_decode_metadata.cache_col_mapping = self.cache_col_mapping[self.num_prefill_tokens:]
+            # self._cached_decode_metadata.slot_mapping = \
+            #     self.slot_mapping[self.num_prefill_tokens:]
+            self._cached_decode_metadata.block_tables = \
+                self.block_tables[self.num_prefills:]
+
+        else:  # use_vmm
+            self._cached_decode_metadata.use_cuda_graph = False
+            self._cached_decode_metadata.cache_batch_idx = \
+                self.cache_batch_idx[self.num_prefills:]
+            # self._cached_decode_metadata.cache_cow_mapping = \
+            #     self.cache_cow_mapping[self.num_prefills:]
+            # self._cached_decode_metadata.cache_col_mapping = \
+            #     self.cache_col_mapping[self.num_prefill_tokens:]
         return self._cached_decode_metadata
 
 
@@ -317,10 +329,10 @@ class FlashAttentionImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-        
+
         # new add for vmm
         use_vmm = attn_metadata.use_vmm
-        
+
         if kv_cache is not None:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
@@ -337,21 +349,16 @@ class FlashAttentionImpl(AttentionImpl):
                     attn_metadata.slot_mapping.flatten(),
                     self.kv_cache_dtype,
                 )
-                
+
             else:
                 # fancy / advanced index cache write, a little worse than cuda kernel
                 # key_cache[attn_metadata.cache_cow_mapping, attn_metadata.cache_col_mapping] = key
                 # value_cache[attn_metadata.cache_cow_mapping, attn_metadata.cache_col_mapping] = value
-                ops.reshape_and_cache_vmm(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.cache_cow_mapping, 
-                    attn_metadata.cache_col_mapping,
-                    self.kv_cache_dtype
-                )
-            
+                ops.reshape_and_cache_vmm(key, value, key_cache, value_cache,
+                                          attn_metadata.cache_cow_mapping,
+                                          attn_metadata.cache_col_mapping,
+                                          self.kv_cache_dtype)
+
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         assert key.shape[0] == num_prefill_tokens + num_decode_tokens
@@ -421,19 +428,19 @@ class FlashAttentionImpl(AttentionImpl):
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
                 ).squeeze(1)
-            
-            else:   # use vmm
+
+            else:  # use vmm
                 cur_max_seq_len = decode_meta.max_decode_seq_len
                 output[num_prefill_tokens:] = flash_attn_with_kvcache(
-                    q=decode_query.unsqueeze(1),                    # q: (batch_size, seqlen=1, nheads, headdim)
-                    k_cache=key_cache[:, :cur_max_seq_len],       # k_cache: (batch_size_cache, max_seqlen_cache, nheads_k, headdim)
-                    v_cache=value_cache[:, :cur_max_seq_len],      # v_cache: (batch_size_cache, max_seqlen_cache, nheads_v, headdim)
-                    cache_seqlens=decode_meta.seq_lens_tensor, # cache_seqlens: (batch_size_cache, ) the cur length of each sequence in cache
+                    q=decode_query.unsqueeze(1),
+                    k_cache=key_cache[:, :cur_max_seq_len],
+                    v_cache=value_cache[:, :cur_max_seq_len],
+                    cache_seqlens=decode_meta.seq_lens_tensor,
                     cache_batch_idx=decode_meta.cache_batch_idx,
                     softmax_scale=self.scale,
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
                 ).squeeze(1)
-                
+
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

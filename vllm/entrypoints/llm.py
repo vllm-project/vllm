@@ -580,8 +580,10 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
-            
-        logger.info(f"Generate Over. total_out_toks: {total_out_toks}, Average Generation Speed: {spd:.5f} toks/s")
+
+        logger.info(
+            f"Generate Over. total_out_toks: {total_out_toks}, Average Generation Speed: {spd:.5f} toks/s"
+        )
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.

@@ -34,7 +34,7 @@ class CacheEngineVMM:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        
+
         if self.device_config.device_type != "cuda":
             raise RuntimeError("VMM only support cuda device.")
 
@@ -55,30 +55,34 @@ class CacheEngineVMM:
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_seq_len = self.scheduler_config.max_model_len
         self.block_bytes_size = self.cache_config.block_bytes_size
-        
+
         self.device_cache_allocator = vmm.CacheAllocator()
 
         self.token_size = self.num_kv_heads * self.head_size
         self.sequence_buffer_size = self.max_seq_len * self.token_size
         self.cache_space_size = self.max_batch_size * self.sequence_buffer_size
         self.cache_sapce_bytes_size = self.cache_space_size * self.dtype_size
-    
-        assert (self.cache_sapce_bytes_size) % self.block_bytes_size == 0, "cache_sapce_bytes_size must be divisible by block_bytes_size"
-        
+
+        assert (
+            self.cache_sapce_bytes_size
+        ) % self.block_bytes_size == 0, "cache_sapce_bytes_size must be divisible by block_bytes_size"
+
         self.cache_space_page_num = self.cache_sapce_bytes_size // self.block_bytes_size
 
-        logger.info("CacheEngineVMM basic info: { block_size: %d, dtype_size: %d, head_size: %d, "
-                    "num_kv_heads: %d, max_seq_len: %d, max_batch_size: %d, num_layers: %d,"
-                    "token_size: %d, sequence_buffer_size: %d, cache_space_size: %d, "
-                    "cache_sapce_bytes_size: %d, cache_space_page_num: %d }",
-                    self.block_size, self.dtype_size, self.head_size,
-                    self.num_kv_heads, self.max_seq_len, self.max_batch_size, self.num_layers, 
-                    self.token_size, self.sequence_buffer_size, self.cache_space_size,
-                    self.cache_sapce_bytes_size, self.cache_space_page_num)
+        logger.info(
+            "CacheEngineVMM basic info: { block_size: %d, dtype_size: %d, head_size: %d, "
+            "num_kv_heads: %d, max_seq_len: %d, max_batch_size: %d, num_layers: %d,"
+            "token_size: %d, sequence_buffer_size: %d, cache_space_size: %d, "
+            "cache_sapce_bytes_size: %d, cache_space_page_num: %d }",
+            self.block_size, self.dtype_size, self.head_size,
+            self.num_kv_heads, self.max_seq_len, self.max_batch_size,
+            self.num_layers, self.token_size, self.sequence_buffer_size,
+            self.cache_space_size, self.cache_sapce_bytes_size,
+            self.cache_space_page_num)
 
         # record the allocated handles for each buffer in a cache space
-        self.allocated_handles_counts = [0 for _ in range(self.max_batch_size)] 
-        
+        self.allocated_handles_counts = [0 for _ in range(self.max_batch_size)]
+
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             model_config.get_num_attention_heads(parallel_config),
@@ -93,7 +97,7 @@ class CacheEngineVMM:
         # Initialize the cache.
         self.gpu_cache_ptr = self._reserve_gpu_kv_cache()
         self.gpu_cache = self._init_gpu_kv_cache_tensor()
-        
+
         # TODO: Implement CPU cache and swap
         # self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
@@ -102,18 +106,18 @@ class CacheEngineVMM:
         for i in range(self.num_layers):
             key_ptr = vmm.CacheDevicePtr()
             value_ptr = vmm.CacheDevicePtr()
-            
+
             if (self.device_cache_allocator.reserve_cache_ptr(key_ptr, self.cache_space_page_num) == 0) \
                 and (self.device_cache_allocator.reserve_cache_ptr(value_ptr, self.cache_space_page_num)==0):
                 kv_cache_ptrs.append([key_ptr, value_ptr])
             else:
                 raise RuntimeError("Failed to reserve cache ptr.")
-            
+
         return kv_cache_ptrs
-    
-    def _init_gpu_kv_cache_tensor(self) -> List[List[torch.Tensor]]:        
-        kv_cache : List[List[torch.Tensor]] = []
-        
+
+    def _init_gpu_kv_cache_tensor(self) -> List[List[torch.Tensor]]:
+        kv_cache: List[List[torch.Tensor]] = []
+
         # self.alloc_one_seq(0, 1)
         # We have to allocate one block for each ptr, otherwise wrap to tensor will fail
         # Here we allocate one block for each sequence buffer of each ptr
@@ -121,25 +125,27 @@ class CacheEngineVMM:
         for i in range(self.max_batch_size):
             alloc_dict[i] = 1
         self.alloc_all_seqs(alloc_dict)
-        
+
         for i in range(self.num_layers):
             _key_cache_ptr = self.gpu_cache_ptr[i][0]
             _value_cache_ptr = self.gpu_cache_ptr[i][1]
 
-            shape = (self.max_batch_size, self.max_seq_len, self.num_kv_heads, self.head_size)
+            shape = (self.max_batch_size, self.max_seq_len, self.num_kv_heads,
+                     self.head_size)
             dtype = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
-            key_cache_tensor :torch.Tensor = vmm.wrap_cache_ptr_to_tensor(_key_cache_ptr, dtype, shape)
-            value_cache_tensor : torch.Tensor = vmm.wrap_cache_ptr_to_tensor(_value_cache_ptr, dtype, shape)
-            
+            key_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
+                _key_cache_ptr, dtype, shape)
+            value_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
+                _value_cache_ptr, dtype, shape)
+
             kv_cache.append([key_cache_tensor, value_cache_tensor])
-        
+
         return kv_cache
-    
 
     def _allocate_kv_cache(
         self,
         num_blocks: int,
-        device: str='cpu',
+        device: str = 'cpu',
     ) -> List[torch.Tensor]:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
@@ -190,15 +196,20 @@ class CacheEngineVMM:
             _key_cache_ptr = self.gpu_cache_ptr[i][0]
             _value_cache_ptr = self.gpu_cache_ptr[i][1]
 
-            offset = buffer_id * self.sequence_buffer_size * self.dtype_size + self.allocated_handles_counts[buffer_id] * self.block_bytes_size
-            
-            status1 = self.device_cache_allocator.alloc_cache_ptr(_key_cache_ptr, num_blocks, offset)
-            status2 = self.device_cache_allocator.alloc_cache_ptr(_value_cache_ptr, num_blocks, offset)
+            offset = buffer_id * self.sequence_buffer_size * self.dtype_size + self.allocated_handles_counts[
+                buffer_id] * self.block_bytes_size
+
+            status1 = self.device_cache_allocator.alloc_cache_ptr(
+                _key_cache_ptr, num_blocks, offset)
+            status2 = self.device_cache_allocator.alloc_cache_ptr(
+                _value_cache_ptr, num_blocks, offset)
             if status1 != 0 or status2 != 0:
-                raise RuntimeError(f"Failed to allocate cache handles. status1: {status1}, status2: {status2}")
-            
+                raise RuntimeError(
+                    f"Failed to allocate cache handles. status1: {status1}, status2: {status2}"
+                )
+
         self.allocated_handles_counts[buffer_id] += num_blocks
-           
+
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()

@@ -28,15 +28,14 @@ TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float16: "float16",
     torch.half: "half",
     torch.bfloat16: "bfloat16",
-    
     torch.int: "int",
     torch.int64: "int64",
     torch.int32: "int32",
     torch.int16: "int16",
     torch.int8: "int8",
-    
     torch.uint8: "uint8",
 }
+
 
 def make_tensor_with_pad(
     x: List[List[int]],
@@ -80,15 +79,17 @@ def get_kv_cache_torch_dtype(
         raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     return torch_dtype
 
+
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
+
 
 @torch.inference_mode()
 def main(
     version: str,
     op: str,
-    m: int, # rows
-    n: int, # 2MB num of each row
+    m: int,  # rows
+    n: int,  # 2MB num of each row
     dtype: torch.dtype,
     seed: int,
     do_profile: bool,
@@ -98,12 +99,12 @@ def main(
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-    
+
     n_bytes = n * _2MB
     n_size = n_bytes // _get_dtype_size(dtype)
     random_mat_A = torch.randn(m, n_size, dtype=dtype, device=device)
     print("random_mat_A.data_ptr():", random_mat_A.data_ptr())
-    
+
     if version == "base":
         mat_A = random_mat_A
         print("mat_A.data_ptr():", mat_A.data_ptr())
@@ -111,33 +112,33 @@ def main(
         from vllm import _vmm_ops as vmm
         allocator = vmm.CacheAllocator()
         A_ptr = vmm.CacheDevicePtr()
-        
-        status = allocator.reserve_cache_ptr(A_ptr, m*n)
+
+        status = allocator.reserve_cache_ptr(A_ptr, m * n)
         if status != 0:
             raise RuntimeError(f"Failed to reserve cache memory: {status}")
-        
+
         rows_allocated_nums = [0 for _ in range(m)]
         for _ in range(n):
             for row in range(m):
                 offset = row * n_bytes + rows_allocated_nums[row] * _2MB
                 status = allocator.alloc_cache_ptr(A_ptr, 1, offset)
                 if status != 0:
-                    raise RuntimeError(f"Failed to allocate cache memory: {status}")
+                    raise RuntimeError(
+                        f"Failed to allocate cache memory: {status}")
                 rows_allocated_nums[row] += 1
-                
+
         dtype_str = TORCH_DTYPE_TO_STR_DTYPE[dtype]
         print("dtype_str:", dtype_str)
         mat_A = vmm.wrap_cache_ptr_to_tensor(A_ptr, dtype_str, (m, n_size))
 
         mat_A.copy_(random_mat_A)
         print("mat_A.data_ptr():", mat_A.data_ptr())
-        
+
     else:
         raise ValueError(f"Invalid version: {version}")
-    
 
     vec_b = torch.randn(n_size, dtype=dtype, device=device)
-    
+
     def run_cuda_benchmark(num_iters: int, profile: bool = False) -> float:
         torch.cuda.synchronize()
         if profile:
@@ -151,7 +152,7 @@ def main(
                 torch.relu(mat_A)
             else:
                 raise ValueError(f"Invalid op: {op}")
-            
+
         torch.cuda.synchronize()
 
         end_time = time.perf_counter()
@@ -197,7 +198,7 @@ if __name__ == '__main__':
 
     main(
         version=args.version,
-        op = args.op,
+        op=args.op,
         m=args.m,
         n=args.n,
         dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],

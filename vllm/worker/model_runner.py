@@ -227,7 +227,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
-        
+
         # TODO: we will soon support these features in VMM
         self.use_vmm = cache_config.use_vmm
         if self.use_vmm:
@@ -236,9 +236,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 raise NotImplementedError("VMM is not supported with LoRA ")
             if self.sliding_window:
                 #TODO:
-                raise NotImplementedError("VMM is not supported with sliding window")
+                raise NotImplementedError(
+                    "VMM is not supported with sliding window")
             if self.attn_backend.get_name() != "flash-attn":
-                raise NotImplementedError("VMM is only supported with flash-attn")
+                raise NotImplementedError(
+                    "VMM is only supported with flash-attn")
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -397,12 +399,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         paged_kv_indptr: List[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
         paged_kv_last_page_len: List[int] = []
-        
-        # new add for vmm, if use_vmm, we don't need to prepare block_tables & slot_mapping, 
+
+        # new add for vmm, if use_vmm, we don't need to prepare block_tables & slot_mapping,
         # but need to prepare cache_batch_idx, cache_cow_mapping, cache_col_mapping
         cache_batch_idx: List[int] = []
-        cache_cow_mapping : List[int] = []
-        cache_col_mapping : List[int] = []
+        cache_cow_mapping: List[int] = []
+        cache_col_mapping: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             return self._model_input_cls()
@@ -483,7 +485,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # NOTE: This only works for oooooooxxx style attention.
                     if prefix_cache_hit:
                         assert computed_block_nums is not None
-                        context_len = len(computed_block_nums) * self.block_size
+                        context_len = len(
+                            computed_block_nums) * self.block_size
                         tokens = tokens[context_len:]
 
                         # need to think what to set it to when we have both sliding
@@ -497,14 +500,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             # include the entries for the incoming prefill tokens.
                             # TODO(woosuk): This is a temporary fix. We should
                             # provide a unified interface for different backends.
-                            block_table = seq_group_metadata.block_tables[seq_id]
+                            block_table = seq_group_metadata.block_tables[
+                                seq_id]
                         else:
                             block_table = computed_block_nums
                     elif (self.scheduler_config.chunked_prefill_enabled
-                        or not is_prompt):
+                          or not is_prompt):
                         if seq_group_metadata.block_tables is not None:
                             # chunked prefill or decode
-                            block_table = seq_group_metadata.block_tables[seq_id]
+                            block_table = seq_group_metadata.block_tables[
+                                seq_id]
                             if curr_sliding_window_blocks is not None:
                                 block_table = block_table[
                                     -curr_sliding_window_blocks:]
@@ -515,9 +520,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         # Prefill without chunked prefill or memory profiling.
                         block_table = []
                     block_tables.append(block_table)
-                
+
                 # else: # if use_vmm, we don't need to prepare block_tables & slot_mapping,
-                
+
                 seq_lens.append(sliding_seq_len)
                 context_lens.append(sliding_context_len)
                 query_len = sliding_seq_len - sliding_context_len
@@ -525,14 +530,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
-                
-                if self.use_vmm:    # new add for vmm
+
+                if self.use_vmm:  # new add for vmm
                     cache_batch_id = seq_data.cache_buffer_id
                     # NOTE: == -1 means it is profile run, all seq come from scheduler cache_buffer_id >= 0
                     if cache_batch_id != -1:
                         cache_batch_idx.append(cache_batch_id)
                         cache_cow_mapping.extend([cache_batch_id] * query_len)
-                        cache_col_mapping.extend(list(range(context_len, context_len + query_len)))
+                        cache_col_mapping.extend(
+                            list(range(context_len, context_len + query_len)))
 
                 if is_prompt:
                     assert len(seq_ids) == 1
@@ -604,7 +610,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         block_offset = i % self.block_size
                         slot = block_number * self.block_size + block_offset
                         slot_mapping.append(slot)
-                        
+
                 # else: # if use_vmm, we don't need to prepare block_tables & slot_mapping,
 
                 # Prepare input tensors for flashinfer
@@ -640,7 +646,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             decode_only and not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_decode_seq_len <= self.max_seq_len_to_capture
-            and not self.use_vmm)   # TODO: vmm doesn't support cuda graph yet.
+            and not self.use_vmm)  # TODO: vmm doesn't support cuda graph yet.
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
@@ -659,7 +665,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             batch_size = graph_batch_size
             num_decode_tokens = batch_size
-            
+
         if not self.use_vmm:
             if use_captured_graph:
                 # The shape of graph_block_tables is
@@ -668,7 +674,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 for i, block_table in enumerate(block_tables):
                     if block_table:
                         input_block_tables[i, :len(block_table)] = block_table
-                block_tables = torch.tensor(input_block_tables, device=self.device)
+                block_tables = torch.tensor(input_block_tables,
+                                            device=self.device)
             else:
                 max_block_table_len = max(
                     len(block_table) for block_table in block_tables)
@@ -679,9 +686,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     dtype=torch.int,
                     device=self.device,
                 )
-        else:   # use_vmm, block_tables is not needed
+        else:  # use_vmm, block_tables is not needed
             block_tables = None
-            
+
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         context_lens_tensor = torch.tensor(context_lens,
@@ -718,21 +725,21 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                               device=self.device)
         if not self.use_vmm:
             slot_mapping_tensor = torch.tensor(slot_mapping,
-                                            dtype=torch.long,
-                                            device=self.device)
+                                               dtype=torch.long,
+                                               device=self.device)
             cache_batch_idx_tensor = None
             cache_cow_mapping_tensor = None
             cache_col_mapping_tensor = None
-        else:   # use_vmm
+        else:  # use_vmm
             slot_mapping_tensor = None
             cache_batch_idx_tensor = torch.tensor(cache_batch_idx,
                                                   dtype=torch.int32,
                                                   device=self.device)
-            cache_cow_mapping_tensor = torch.tensor(cache_cow_mapping, 
-                                                    dtype=torch.int32, 
+            cache_cow_mapping_tensor = torch.tensor(cache_cow_mapping,
+                                                    dtype=torch.int32,
                                                     device=self.device)
-            cache_col_mapping_tensor = torch.tensor(cache_col_mapping, 
-                                                    dtype=torch.int32, 
+            cache_col_mapping_tensor = torch.tensor(cache_col_mapping,
+                                                    dtype=torch.int32,
                                                     device=self.device)
 
         if self.attn_backend.get_name() == "flashinfer":
@@ -792,12 +799,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 block_tables=block_tables,
                 use_cuda_graph=use_captured_graph,
             )
-            if self.use_vmm:    # flash-attn attn_metadata
+            if self.use_vmm:  # flash-attn attn_metadata
                 attn_metadata.use_vmm = True
                 attn_metadata.cache_batch_idx = cache_batch_idx_tensor
                 attn_metadata.cache_cow_mapping = cache_cow_mapping_tensor
                 attn_metadata.cache_col_mapping = cache_col_mapping_tensor
-                
+
         if self.lora_config:
             lora_mapping = LoRAMapping(
                 lora_index_mapping,
