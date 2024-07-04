@@ -93,7 +93,7 @@ class GGUFLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = layer.qweight
-        qweight_type = layer.qweight_type.data.item()
+        qweight_type = layer.qweight_type.item()
         # use dequantize mulmat for IQmatrix, mmq for k-quants
         if qweight_type >= 16:
             block_size, type_size = GGML_QUANT_SIZES[qweight_type]
@@ -112,7 +112,7 @@ class GGUFLinearMethod(LinearMethodBase):
     def apply_embeds(self, layer: torch.nn.Module,
                      x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
-        qweight_type = layer.qweight_type.data.item()
+        qweight_type = layer.qweight_type.item()
 
         block_size, type_size = GGML_QUANT_SIZES[qweight_type]
         hidden_size = qweight.shape[1] // type_size * block_size
