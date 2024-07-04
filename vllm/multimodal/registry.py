@@ -103,7 +103,7 @@ class MultiModalRegistry:
     def register_max_multimodal_tokens(
         self,
         data_type_key: str,
-        max_mm_tokens: MultiModalTokensCalc,
+        max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
         Register the maximum number of tokens, belonging to a
@@ -112,11 +112,9 @@ class MultiModalRegistry:
         return self._get_plugin(data_type_key) \
             .register_max_multimodal_tokens(max_mm_tokens)
 
-    DEFAULT_MAX_IMAGE_TOKENS = 3000
-
     def register_max_image_tokens(
         self,
-        max_mm_tokens: MultiModalTokensCalc = DEFAULT_MAX_IMAGE_TOKENS,
+        max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
         Register the maximum number of image tokens
@@ -124,7 +122,7 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
-    def get_max_multimodal_tokens(self, model_config: ModelConfig):
+    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
@@ -132,5 +130,5 @@ class MultiModalRegistry:
         See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
         """
         return sum(
-            plugin.get_max_multimodal_tokens(model_config, 0)
+            plugin.get_max_multimodal_tokens(model_config)
             for plugin in self._plugins.values())

@@ -108,7 +108,7 @@ If the data is not supported, throw :exc:`TypeError`.
 MultiModalTokensCalc = Union[int, Callable[[InputContext], int]]
 """
 Calculate the maximum number of multimodal tokens input to the language
-model. This does not include the tokens that correspond to the input text.
+model. This does not include tokens that correspond to the input text.
 """
 
 N = TypeVar("N", bound=Type[nn.Module])
@@ -139,9 +139,12 @@ class MultiModalPlugin(ABC):
     @abstractmethod
     def _default_input_mapper(self, ctx: InputContext,
                               data: object) -> MultiModalInputs:
-        """Return a dictionary to be passed as keyword arguments to
+        """
+        Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
         tokenizers and processors in HuggingFace Transformers.
+
+        If the data is not supported, throw :exc:`TypeError`.
         """
         raise NotImplementedError
 
@@ -151,9 +154,11 @@ class MultiModalPlugin(ABC):
     ):
         """
         Register an input mapper to a model class.
+
         When the model receives input data that matches the modality served by
         this plugin (see :meth:`get_data_key`), the provided function is
         invoked to transform the data into a dictionary of model inputs.
+
         If `None` is provided, then the default input mapper is used instead.
 
         See also:
@@ -201,13 +206,23 @@ class MultiModalPlugin(ABC):
 
         return mapper(InputContext(model_config), data)
 
+    @abstractmethod
+    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
+        """
+        Calculate the maximum number of multimodal tokens input to the language
+        model. This does not include tokens that correspond to the input text.
+        """
+        raise NotImplementedError
+
     def register_max_multimodal_tokens(
         self,
-        max_mm_tokens: MultiModalTokensCalc,
+        max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
         Register the maximum number of multi-modal tokens input to the
         language model for a model class.
+
+        If `None` is provided, then the default calculation is used instead.
 
         See also:
             :ref:`adding_a_new_multimodal_model`
@@ -220,23 +235,19 @@ class MultiModalPlugin(ABC):
                     "tokens in %s. It is overwritten by the new one.",
                     model_cls, self)
 
-            self._max_mm_tokens[model_cls] = max_mm_tokens
+            self._max_mm_tokens[model_cls] = max_mm_tokens \
+                or self._default_max_multimodal_tokens
 
             return model_cls
 
         return wrapper
 
-    def get_max_multimodal_tokens(
-        self,
-        model_config: ModelConfig,
-        default: int,
-    ):
+    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
 
-        If this registry is not applicable to the model,
-        instead return the ``default`` value.
+        If this registry is not applicable to the model, `0` is returned.
 
         The model is identified by ``model_config``.
 
@@ -249,7 +260,7 @@ class MultiModalPlugin(ABC):
         model_cls, _ = get_model_architecture(model_config)
 
         if model_cls not in self._input_mappers:
-            return default
+            return 0
 
         max_mm_tokens = self._max_mm_tokens.get(model_cls)
         if max_mm_tokens is None:
