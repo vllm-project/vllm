@@ -13,14 +13,6 @@ RUN pip install intel-openmp
 
 ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so:$LD_PRELOAD"
 
-# The time(milliseconds) that a thread should wait after completing the execution of a parallel region, before sleeping.
-ENV KMP_BLOCKTIME=1 
-# Prevents the CPU to run into low performance state
-ENV KMP_TPAUSE=0
-# Provides fine granularity parallelism
-ENV KMP_FORKJOIN_BARRIER_PATTERN=dist,dist
-ENV KMP_PLAIN_BARRIER_PATTERN=dist,dist
-ENV KMP_REDUCTION_BARRIER_PATTERN=dist,dist
 
 RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.3.100%2Bgit0eb3473-cp310-cp310-linux_x86_64.whl
 
