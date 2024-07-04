@@ -22,6 +22,7 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.model_loader.deferred_tensor import DeferredTensor
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -719,6 +720,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                        for target_module in self.target_modules):
                     weight_name = weight_name.replace(".weight", ".qweight")
                     #  bitsandbytes requires data in GPU
+                    if isinstance(weight_tensor, DeferredTensor):
+                        weight_tensor = weight_tensor.materialize()
+                    assert isinstance(weight_tensor, torch.Tensor)
                     loaded_weight = weight_tensor.cuda().data
                     with set_default_torch_dtype(torch.float32):
                         processed_weight, quant_state = quantize_4bit(

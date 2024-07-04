@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.model_executor.model_loader.deferred_tensor import DeferredTensor
 
 logger = init_logger(__name__)
 
@@ -352,13 +353,13 @@ def np_cache_weights_iterator(
 
 def safetensors_weights_iterator(
     hf_weights_files: List[str]
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[Tuple[str, DeferredTensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
-                yield name, param
+                param = f.get_slice(name)
+                yield name, DeferredTensor(param)
 
 
 def pt_weights_iterator(
