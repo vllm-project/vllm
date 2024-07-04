@@ -49,12 +49,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self.stop_checker = stop_checker
 
         self.single_step_processor = SingleStepOutputProcessor(
-            scheduler_config,
-            detokenizer,
-            scheduler,
-            seq_counter,
-            stop_checker
-        )
+            scheduler_config, detokenizer, scheduler, seq_counter,
+            stop_checker)
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
@@ -80,13 +76,13 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         including freeing finished sequences. It also handles cases where there
         are tokens emitted after the EOS token.
         """
-
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"
 
         if len(seqs) > 1 or sequence_group.sampling_params.best_of > 1:
-            return self.single_step_processor.process_outputs(sequence_group, outputs)
+            return self.single_step_processor.process_outputs(
+                sequence_group, outputs)
 
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")

@@ -350,7 +350,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def _should_disable_all_speculation(
             self, execute_model_req: ExecuteModelRequest) -> bool:
-
         # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
         if execute_model_req.running_queue_size >= self.disable_by_batch_size:
@@ -399,10 +398,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             if hidden_states is not None:
                 if self.previous_hidden_states is None:
                     self.previous_hidden_states = HiddenStates(
-                        execute_model_req.seq_group_metadata_list, hidden_states)
+                        execute_model_req.seq_group_metadata_list,
+                        hidden_states)
                 else:
                     self.previous_hidden_states.update(
-                        execute_model_req.seq_group_metadata_list, hidden_states)
+                        execute_model_req.seq_group_metadata_list,
+                        hidden_states)
 
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
