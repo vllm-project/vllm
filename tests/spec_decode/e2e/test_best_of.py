@@ -1,5 +1,5 @@
-from typing import Tuple, List
 from itertools import cycle
+from typing import List, Tuple
 
 import pytest
 
@@ -24,7 +24,7 @@ from vllm.sampling_params import SamplingParams
     "num_speculative_tokens": 3,
 }])
 @pytest.mark.parametrize("batch_size", [8])
-@pytest.mark.parametrize("n_best_of", [(1,2),(2,2),(1,3),(2,3),(3,3)])
+@pytest.mark.parametrize("n_best_of", [(1, 2), (2, 2), (1, 3), (2, 3), (3, 3)])
 @pytest.mark.parametrize("use_beam_search", [False, True])
 @pytest.mark.parametrize(
     "output_len",
@@ -34,10 +34,11 @@ from vllm.sampling_params import SamplingParams
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_best_of_equality(baseline_llm_generator, test_llm_generator,
-                           batch_size: int, output_len: int, n_best_of: Tuple[int,int], use_beam_search: bool):
+                          batch_size: int, output_len: int,
+                          n_best_of: Tuple[int, int], use_beam_search: bool):
     """Validate that server with speculative model still produces correct output
-    when n>1, best_of>1 or use_beam_search=True. Note, server will not
-    speculate on these batches currently, but we should still get correct output.
+    when n>1, best_of>1 or use_beam_search=True. The server will not speculate
+    on these batches currently, but we should still get correct output.
     """
     run_best_of_correctness_test(baseline_llm_generator,
                                  test_llm_generator,
@@ -48,7 +49,6 @@ def test_best_of_equality(baseline_llm_generator, test_llm_generator,
                                  use_beam_search=use_beam_search)
 
 
-
 def get_outputs_from_llm_generator(
         llm_generator, prompts,
         sampling_params) -> Tuple[List[List[str]], List[List[List[int]]]]:
@@ -56,11 +56,13 @@ def get_outputs_from_llm_generator(
     token_ids: List[List[List[int]]] = []
     for llm in llm_generator():
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        token_ids = [ [ seq.token_ids for seq in output.outputs ] for output in outputs ]
-        tokens = [ [ seq.text for seq in output.outputs ] for output in outputs ]
+        token_ids = [[seq.token_ids for seq in output.outputs]
+                     for output in outputs]
+        tokens = [[seq.text for seq in output.outputs] for output in outputs]
         del llm
 
     return tokens, token_ids
+
 
 def run_best_of_correctness_test(baseline_llm_generator,
                                  test_llm_generator,
@@ -94,7 +96,7 @@ def run_best_of_correctness_test(baseline_llm_generator,
         n=n,
         best_of=best_of,
         use_beam_search=use_beam_search,
-        seed=42, # seed should be respected since spec will be disabled
+        seed=42,  # seed should be respected since spec will be disabled
     )
 
     spec_batch_tokens, spec_batch_token_ids = get_outputs_from_llm_generator(
@@ -113,8 +115,8 @@ def run_best_of_correctness_test(baseline_llm_generator,
     for spec_group_token_ids in spec_batch_token_ids:
         assert len(spec_group_token_ids) == n
 
-    for i, (baseline_group_token_ids, baseline_group_tokens, spec_group_token_ids,
-            spec_group_tokens) in enumerate(
+    for i, (baseline_group_token_ids, baseline_group_tokens,
+            spec_group_token_ids, spec_group_tokens) in enumerate(
                 zip(baseline_batch_token_ids, baseline_batch_tokens,
                     spec_batch_token_ids, spec_batch_tokens)):
 
