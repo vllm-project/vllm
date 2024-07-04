@@ -887,7 +887,7 @@ class GGUFModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   vision_language_config: Optional[VisionLanguageConfig],
+                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -901,7 +901,7 @@ class GGUFModelLoader(BaseModelLoader):
                     model_config.hf_config.update(
                         {"tie_word_embeddings": True})
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config,
+                                          lora_config, multimodal_config,
                                           cache_config)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
