@@ -935,9 +935,6 @@ class DeferredTensor:
         self.narrow_count = narrow_count
         self.materialized_tensor: Optional[torch.Tensor] = None
 
-    def __hash__(self):
-        return id(self)
-
     def narrow(self, dim, start_idx, length) -> 'DeferredTensor':
         if self.narrow_count > 0:
             raise ValueError(
