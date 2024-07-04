@@ -153,8 +153,9 @@ class SamplingParams:
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
         bad_words: List of words that are not allowed to be generated.
-            More precisely, only the last token of a corresponding token sequence
-            is not allowed when the next generated token can complete the sequence.
+            More precisely, only the last token of a corresponding
+            token sequence is not allowed when the next generated token
+            can complete the sequence.
         include_stop_str_in_output: Whether to include the stop strings in
             output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
