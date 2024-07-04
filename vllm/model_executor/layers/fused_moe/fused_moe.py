@@ -271,10 +271,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         **config,
     )
 
+
 def maybe_set_triton_cache_manager(module: str) -> None:
     cache_manger = os.environ.get("TRITON_CACHE_MANAGER", None)
     if cache_manger != module:
         os.environ["TRITON_CACHE_MANAGER"] = module
+
 
 def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
     device_name = torch.cuda.get_device_name().replace(" ", "_")
@@ -433,7 +435,8 @@ def fused_experts(hidden_states: torch.Tensor,
     M = min(num_tokens, CHUNK_SIZE)
 
     # workaround for https://github.com/vllm-project/vllm/issues/6103
-    maybe_set_triton_cache_manager("vllm.triton_utils.custom_cache_manager:CustomCacheManager")
+    maybe_set_triton_cache_manager(
+        "vllm.triton_utils.custom_cache_manager:CustomCacheManager")
 
     if override_config:
         config = override_config
