@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
-from vllm.model_executor.model_loader.deferred_tensor import DeferredTensor
+from vllm.utils import DeferredTensor
 
 logger = init_logger(__name__)
 

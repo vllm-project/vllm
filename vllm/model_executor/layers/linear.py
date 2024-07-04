@@ -13,8 +13,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.model_loader.deferred_tensor import convert_like
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import convert_like
 
 logger = init_logger(__name__)
 

@@ -22,7 +22,6 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.model_loader.deferred_tensor import DeferredTensor
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -37,7 +36,7 @@ from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_tpu
+from vllm.utils import DeferredTensor, is_tpu
 
 logger = init_logger(__name__)
 
