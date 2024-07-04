@@ -32,8 +32,15 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 ## Known crashes
 
 - TGI v2.1 crashes when running mixtral model [TGI PR #2122](https://github.com/huggingface/text-generation-inference/issues/2122)
-- 
 
 
 ## Results
 
+
+
+
+ITL:
+
+
+Comparison table:
+{nightly_results_benchmarking_table}

@@ -14,17 +14,10 @@ serving_column_mapping = {
     "gpu_type": "GPU",
     "completed": "Successful req.",
     "request_throughput": "Tput (req/s)",
-    # "input_throughput": "Input Tput (tok/s)",
-    # "output_throughput": "Output Tput (tok/s)",
     "mean_ttft_ms": "Mean TTFT (ms)",
-    "median_ttft_ms": "Median TTFT (ms)",
-    "p99_ttft_ms": "P99 TTFT (ms)",
-    # "mean_tpot_ms": "Mean TPOT (ms)",
-    # "median_tpot_ms": "Median",
-    # "p99_tpot_ms": "P99",
+    "std_ttft_ms": "Std TTFT (ms)",
     "mean_itl_ms": "Mean ITL (ms)",
-    "median_itl_ms": "Median ITL (ms)",
-    "p99_itl_ms": "P99 ITL (ms)",
+    "std_itl_ms": "Std ITL (ms)",
     "engine": "Engine",
 }
 
@@ -67,7 +60,9 @@ if __name__ == "__main__":
 
     # document benchmarking results in markdown
     with open(results_folder / f"{prefix}_nightly_results.md", "w") as f:
-        f.write(serving_md_table_without_header)
+        # document results with header.
+        # for those who wants to reproduce our benchmark.
+        f.write(serving_md_table_with_headers)
         f.write('\n')
 
     # document benchmarking results in json
