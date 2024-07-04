@@ -13,6 +13,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.model_loader.deferred_tensor import convert_like
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -300,7 +301,7 @@ class ColumnParallelLinear(LinearBase):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-
+        loaded_weight = convert_like(loaded_weight, param_data)
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
@@ -387,6 +388,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                loaded_weight = convert_like(loaded_weight, param_data)
                 if needs_scalar_to_array is not None:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
@@ -413,6 +415,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
+                loaded_weight_shard = convert_like(loaded_weight_shard,
+                                                   param_data)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -549,6 +553,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                loaded_weight = convert_like(loaded_weight, param_data)
                 if needs_scalar_to_array is not None:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
@@ -579,6 +584,8 @@ class QKVParallelLinear(ColumnParallelLinear):
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
+                loaded_weight_shard = convert_like(loaded_weight_shard,
+                                                   param_data)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -733,7 +740,7 @@ class RowParallelLinear(LinearBase):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
-
+        loaded_weight = convert_like(loaded_weight, param_data)
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:

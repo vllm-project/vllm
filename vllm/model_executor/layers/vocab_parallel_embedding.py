@@ -11,6 +11,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.model_loader.deferred_tensor import convert_like
 from vllm.model_executor.utils import set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
@@ -327,6 +328,7 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # Copy the data.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+        loaded_weight = convert_like(loaded_weight, param)
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0]:].data.fill_(0)
 

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.deferred_tensor import convert_like
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
@@ -119,6 +120,7 @@ class DbrxExperts(nn.Module):
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         # DBRX uses GLU for each experts.
         # GLU has 3 linear layers: w1, v1 and w2.
+        loaded_weight = convert_like(loaded_weight, param_data)
         if weight_name.endswith("w1"):
             loaded_weight = torch.reshape(
                 loaded_weight,

@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.model_loader.deferred_tensor import convert_like
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -143,6 +144,7 @@ class FusedMoE(torch.nn.Module):
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
         # Follow up PR to enable fp8 for other MoE models.
         if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
+            loaded_weight = convert_like(loaded_weight, param_data)
             if param_data[expert_id] != 1 and (param_data[expert_id] -
                                                loaded_weight).abs() > 1e-5:
                 raise ValueError(
@@ -157,23 +159,31 @@ class FusedMoE(torch.nn.Module):
             # we need to re-quantize w1/w3 weights after weight loading.
             assert "w1" in weight_name or "w3" in weight_name
             shard_id = 0 if "w1" in weight_name else 1
+            loaded_weight = convert_like(loaded_weight, param_data)
             param_data[expert_id][shard_id] = loaded_weight
         else:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = self.intermediate_size_per_partition
             shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
 
+            if shard_id == 0:
+                loaded_weight = loaded_weight.narrow(0, shard.start,
+                                                     shard.stop - shard.start)
+            else:
+                loaded_weight = loaded_weight.narrow(1, shard.start,
+                                                     shard.stop - shard.start)
+            loaded_weight = convert_like(loaded_weight, param_data)
+
             # w1, gate_proj case: Load into first shard of w13.
             if shard_id == 0:
-                param_data[expert_id,
-                           0:shard_size, :] = loaded_weight[shard, :]
+                param_data[expert_id, 0:shard_size, :] = loaded_weight
             # w3, up_proj case: Load into second shard of w13.
             elif shard_id == 2:
-                param_data[expert_id, shard_size:2 *
-                           shard_size, :] = loaded_weight[shard, :]
+                param_data[expert_id,
+                           shard_size:2 * shard_size, :] = loaded_weight
             # w2, down_proj case: Load into only shard of w2.
             elif shard_id == 1:
-                param_data[expert_id, :, :] = loaded_weight[:, shard]
+                param_data[expert_id, :, :] = loaded_weight
             else:
                 raise ValueError(
                     f"Shard id must be in [0,1,2] but got {shard_id}")

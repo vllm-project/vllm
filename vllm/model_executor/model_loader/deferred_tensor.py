@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -29,3 +29,11 @@ class DeferredTensor:
         if self.materialized_tensor is None:
             self.materialized_tensor = self.slice_view[self.slices]
         return self.materialized_tensor
+
+
+def convert_like(x: Union[DeferredTensor, torch.Tensor],
+                 param: torch.Tensor) -> torch.Tensor:
+    if isinstance(x, DeferredTensor):
+        x = x.materialize()
+    assert isinstance(x, torch.Tensor)
+    return x.to(device=param.device)

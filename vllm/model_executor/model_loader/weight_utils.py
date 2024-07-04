@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple
+from typing import Generator, Iterable, List, Optional, Tuple, Union
 
 import filelock
 import huggingface_hub.constants
@@ -414,24 +414,20 @@ def kv_cache_scales_loader(
     return []
 
 
-def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
-    """convert PySafeSlice object from safetensors to torch.Tensor
-
-    PySafeSlice object supports indexing, which is done before loading the
-    actual tensor and can reduce the amount of memory being read into the
-    memory. However, it does not support more advanced functionalities
-    like `.view()` or `.t()`. Therefore, if we need to modify the loaded
-    tensor with these more complicated operators, we need to convert to
-    tensor first.
-    """
-    if not isinstance(x, torch.Tensor):
-        x = x[:]
+def convert_and_move_to_tensor(x: DeferredTensor,
+                               target: torch.Tensor) -> torch.Tensor:
+    x = x.materialize()
+    assert isinstance(x, torch.Tensor)
+    x = x.to(device=target.device)
     return x
 
 
-def default_weight_loader(param: torch.Tensor,
-                          loaded_weight: torch.Tensor) -> None:
+def default_weight_loader(
+        param: torch.Tensor, loaded_weight: Union[torch.Tensor,
+                                                  DeferredTensor]) -> None:
     """Default weight loader."""
+    if isinstance(loaded_weight, DeferredTensor):
+        loaded_weight = convert_and_move_to_tensor(loaded_weight, param)
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
 
