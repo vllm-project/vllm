@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -22,11 +22,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import ensure_tensor
+from vllm.utils import DeferredTensor, ensure_tensor
 
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
-                                loaded_weight: torch.Tensor):
+                                loaded_weight: Union[torch.Tensor,
+                                                     DeferredTensor]):
     tp = get_tensor_model_parallel_world_size()
     rk = get_tensor_model_parallel_rank()
     assert param.size(0) * tp == loaded_weight.shape[0]
@@ -41,14 +42,14 @@ def load_column_parallel_weight(param: torch.nn.Parameter,
 class HeadMajorQKVParallelLinear(QKVParallelLinear):
 
     def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor):
+                      loaded_weight: Union[torch.Tensor, DeferredTensor]):
         return load_column_parallel_weight(param, loaded_weight)
 
 
 class HeadMajorColumnParallelLinear(MergedColumnParallelLinear):
 
     def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor):
+                      loaded_weight: Union[torch.Tensor, DeferredTensor]):
         return load_column_parallel_weight(param, loaded_weight)
 
 

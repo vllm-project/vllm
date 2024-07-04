@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import ensure_tensor
+from vllm.utils import DeferredTensor, ensure_tensor
 
 logger = init_logger(__name__)
 
@@ -137,8 +137,8 @@ class FusedMoE(torch.nn.Module):
             weight_loader=self.weight_loader)
 
     def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor, weight_name: str,
-                      shard_id: int, expert_id: int):
+                      loaded_weight: Union[torch.Tensor, DeferredTensor],
+                      weight_name: str, shard_id: int, expert_id: int):
         param_data = param.data
 
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.

@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only MiniCPM model compatible with HuggingFace weights."""
 import math
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -51,7 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import ensure_tensor
+from vllm.utils import DeferredTensor, ensure_tensor
 
 from .interfaces import SupportsLoRA
 
@@ -111,7 +111,8 @@ class MiniCPMMoE(nn.Module):
             "weight_loader": self.weight_loader,
         })
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+    def weight_loader(self, param: nn.Parameter,
+                      loaded_weight: Union[torch.Tensor, DeferredTensor],
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data

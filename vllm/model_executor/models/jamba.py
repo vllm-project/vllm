@@ -1,7 +1,7 @@
 # coding=utf-8
 """Inference-only Jurassic model."""
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import ensure_tensor
+from vllm.utils import DeferredTensor, ensure_tensor
 from vllm.worker.model_runner import _BATCH_SIZES_TO_CAPTURE
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -99,7 +99,8 @@ class JambaMambaMixer(nn.Module):
                                             bias=True,
                                             skip_bias_add=True)
 
-        def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
+        def weight_loader(param: Parameter,
+                          loaded_weight: Union[torch.Tensor, DeferredTensor]):
             loaded_weight = ensure_tensor(loaded_weight)
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
@@ -347,7 +348,7 @@ class JambaMoE(nn.Module):
     def weight_loader(
         self,
         param: nn.Parameter,
-        loaded_weight: torch.Tensor,
+        loaded_weight: Union[torch.Tensor, DeferredTensor],
         weight_name: str,
         expert_id: int,
     ):

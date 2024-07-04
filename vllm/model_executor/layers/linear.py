@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import ensure_tensor
+from vllm.utils import DeferredTensor, ensure_tensor
 
 logger = init_logger(__name__)
 
@@ -292,7 +292,8 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter,
+                      loaded_weight: Union[torch.Tensor, DeferredTensor]):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
         param_data = param.data
@@ -375,7 +376,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
     def weight_loader(self,
                       param: Parameter,
-                      loaded_weight: torch.Tensor,
+                      loaded_weight: Union[torch.Tensor, DeferredTensor],
                       loaded_shard_id: Optional[int] = None):
 
         param_data = param.data
@@ -542,7 +543,7 @@ class QKVParallelLinear(ColumnParallelLinear):
 
     def weight_loader(self,
                       param: Parameter,
-                      loaded_weight: torch.Tensor,
+                      loaded_weight: Union[torch.Tensor, DeferredTensor],
                       loaded_shard_id: Optional[str] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -736,7 +737,8 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter,
+                      loaded_weight: Union[torch.Tensor, DeferredTensor]):
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data

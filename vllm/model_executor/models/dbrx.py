@@ -1,5 +1,5 @@
 # coding=utf-8
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
-from vllm.utils import ensure_tensor
+from vllm.utils import DeferredTensor, ensure_tensor
 
 
 class DbrxRouter(nn.Module):
@@ -112,8 +112,9 @@ class DbrxExperts(nn.Module):
             },
         )
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      weight_name: str):
+    def weight_loader(self, param: nn.Parameter,
+                      loaded_weight: Union[torch.Tensor,
+                                           DeferredTensor], weight_name: str):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size

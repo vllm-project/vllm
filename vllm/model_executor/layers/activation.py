@@ -1,6 +1,6 @@
 """Custom activation functions."""
 import math
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import ensure_tensor
+from vllm.utils import DeferredTensor, ensure_tensor
 
 
 class SiluAndMul(CustomOp):
@@ -191,7 +191,8 @@ class ScaledActivation(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(x) / self.scales
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: nn.Parameter,
+                      loaded_weight: Union[torch.Tensor, DeferredTensor]):
         param_data = param.data
         if self.input_is_parallel:
             tp_rank = get_tensor_model_parallel_rank()
