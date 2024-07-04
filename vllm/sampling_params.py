@@ -356,8 +356,10 @@ class SamplingParams:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
 
-    def _init_bad_words_logits_processor(self, bad_words_ids: List[List[int]]) -> None:
-        no_bad_words_processor = NoBadWordsLogitsProcessor(bad_words_ids=bad_words_ids)
+    def _init_bad_words_logits_processor(
+            self, bad_words_ids: List[List[int]]) -> None:
+        no_bad_words_processor = NoBadWordsLogitsProcessor(
+            bad_words_ids=bad_words_ids)
 
         if self.logits_processors is not None:
             self.logits_processors.append(no_bad_words_processor)
