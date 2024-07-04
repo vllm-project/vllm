@@ -603,7 +603,7 @@ class EngineArgs:
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
-        # gguf file needs a specific model loader and dosn't use hf_repo
+        # gguf file needs a specific model loader and doesn't use hf_repo
         if self.model.endswith('.gguf'):
             self.quantization = self.load_format = "gguf"
         # bitsandbytes quantization needs a specific model loader
