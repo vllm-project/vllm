@@ -38,7 +38,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
 
@@ -137,12 +136,6 @@ class Gemma2Attention(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        if self.config.attn_logit_softcapping is not None:
-            print_warning_once(
-                "Gemma 2 normally uses attention logit soft-capping; "
-                "soft-capping is currently incompatible with the flash "
-                "attention kernels, so vLLM removes it to enable speed and "
-                "efficiency gains of flash attention.")
         # FIXME(woosuk): While Gemma 2 uses sliding window attention for every
         # odd layer, vLLM currently ignores it and uses global attention for
         # all layers.
