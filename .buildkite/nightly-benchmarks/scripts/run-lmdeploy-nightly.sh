@@ -205,6 +205,8 @@ main() {
   mkdir -p $RESULTS_FOLDER
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
+  python -m pip install transformers==4.41.2
+
   export CURRENT_LLM_SERVING_ENGINE=lmdeploy
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
   python -m pip install tabulate pandas
