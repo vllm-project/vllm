@@ -166,6 +166,13 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamba \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
+
+# workaround for https://github.com/vllm-project/vllm/issues/6103
+# until fixed in Triton upstream
+RUN --mount=type=bind,source=triton_patch,target=/context \
+    export TRITON_PATH=$(python3 -c "import triton; print(triton.__file__.strip(\"__init__.py\"))") \
+    && cp /context/custom_cache_manager.py ${TRITON_PATH}/runtime/custom_cache_manager.py \
+
 #################### vLLM installation IMAGE ####################
 
 
@@ -197,7 +204,8 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer 'modelscope!=1.15.0'
 
-ENV VLLM_USAGE_SOURCE production-docker-image
+ENV VLLM_USAGE_SOURCE production-docker-image \
+    TRITON_CACHE_MANAGER "triton.runtime.custom_cache_manager:CustomCacheManager"
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
