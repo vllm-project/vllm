@@ -463,6 +463,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param_data, loaded_weight, loaded_shard_id)
 
         else:
+            loaded_weight = convert_like(loaded_weight, param_data)
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
                 logger.warning(
@@ -643,6 +644,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
+            loaded_weight = convert_like(loaded_weight, param_data)
         # Special case for for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -650,11 +652,14 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
+            loaded_weight = convert_like(loaded_weight, param_data)
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
+            loaded_weight = convert_like(loaded_weight, param_data)
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
         else:
+            loaded_weight = convert_like(loaded_weight, param_data)
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
                 logger.warning(
