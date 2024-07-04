@@ -532,13 +532,23 @@ class LLMEngine:
 
         bad_words_ids = list()
 
+        # To prohibit words both at the beginning and in the middle of text
+        # (related to add_prefix_space tokenizer parameter)
+        prefixes = ["", " "]
+
+        tokenizer = self.get_tokenizer_group().get_lora_tokenizer(lora_request)
+
         for bad_word in params.bad_words:
-            inputs = {"prompt": " " + bad_word.lstrip()}
-            tokenizer = self.get_tokenizer_group()
-            prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                                prompt=inputs["prompt"],
-                                                lora_request=lora_request)
-            bad_words_ids.append(prompt_token_ids)
+            for j, prefix in enumerate(prefixes):
+                inputs = {"prompt": prefix + bad_word.lstrip()}
+                prompt_token_ids = tokenizer.encode(text=inputs["prompt"],
+                                                    add_special_tokens=False)
+
+                # If space at the beginning produces a new word token
+                if (j == 0) or (j > 0
+                                and prompt_token_ids[0] != bad_words_ids[-1][0]
+                                and len(prompt_token_ids) == len(bad_words_ids[-1])):
+                    bad_words_ids.append(prompt_token_ids)
 
         params._init_bad_words_logits_processor(bad_words_ids)
 
