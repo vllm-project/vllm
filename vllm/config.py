@@ -605,6 +605,7 @@ class SchedulerConfig:
         num_lookahead_slots: int = 0,
         delay_factor: float = 0.0,
         enable_chunked_prefill: bool = False,
+        enable_delayed_sampling: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -626,6 +627,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.enable_delayed_sampling = enable_delayed_sampling
 
         self._verify_args()
 
@@ -652,6 +654,15 @@ class SchedulerConfig:
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
 
+        if self.enable_delayed_sampling and self.num_lookahead_slots != 1:
+            raise ValueError(
+                "num_lookahead_slots "
+                f"({self.num_lookahead_slots}) must be 1 for delayed sampling.")
+
+        if self.enable_delayed_sampling and not self.use_v2_block_manager:
+            raise ValueError(
+                "use_v2_block_manager "
+                f"({self.use_v2_block_manager}) must be True for delayed sampling.")
 
 class DeviceConfig:
 

@@ -78,6 +78,7 @@ class EngineArgs:
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
+    enable_delayed_sampling: bool = False
 
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
@@ -451,6 +452,13 @@ class EngineArgs:
             action='store_true',
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
+        parser.add_argument(
+            '--enable-delayed-sampling',
+            action='store_true',
+            help='If set, the sampling will be delayed by 1 step. First '
+            'model request execution (prefill) will return an invalid token '
+            'id that will be discarded. Actual sampling of valid token ids '
+            'starts from second model execution.')
 
         parser.add_argument(
             '--speculative-model',
@@ -571,6 +579,7 @@ class EngineArgs:
                                  speculative_config.num_lookahead_slots),
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            enable_delayed_sampling=self.enable_delayed_sampling,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
