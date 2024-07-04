@@ -11,7 +11,8 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+from vllm.utils import (error_on_invalid_device_count_status,
+                        get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
 if ray is not None:
@@ -174,6 +175,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
             driver_ip = "127.0.0.1"
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
+
+        error_on_invalid_device_count_status()
 
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [
@@ -346,6 +349,15 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
+        if self.pp_locks is None:
+            # This locks each pipeline parallel stage so multiple virtual
+            # engines can't execute on the same stage at the same time
+            # We create the locks here to avoid creating them in the constructor
+            # which uses a different asyncio loop.
+            self.pp_locks = [
+                asyncio.Lock()
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
 
         async def _run_task_with_lock(task, lock, *args, **kwargs):
             async with lock:
