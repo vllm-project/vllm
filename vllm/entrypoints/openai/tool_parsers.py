@@ -70,7 +70,8 @@ class MistralToolParser(ToolParser):
                 )
 
     def extract_tool_calls_streaming(self, generator):
-        raise NotImplementedError('MistralToolParser.extract_tool_calls_streaming has not been implemented!')
+        for chunk in generator:
+            print('CHUNK', chunk)
 
 
 class Hermes2ProToolParser(ToolParser):

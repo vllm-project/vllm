@@ -140,25 +140,21 @@ async def create_chat_completion(request: ChatCompletionRequest,
     # if streaming is requested, handle streaming
     # TODO implement for streaming later
     if request.stream:
-        return StreamingResponse(content=generator,
+
+        if openai_serving_chat.enable_auto_tools and openai_serving_chat.tool_parser:
+            print('handling streaming response')
+
+            return StreamingResponse(content=generator,
+                                     media_type="text/event-stream")
+
+        else:
+            return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
 
     # handle non-streaming requests
     else:
         assert isinstance(generator, ChatCompletionResponse)
-        if openai_serving_chat.enable_auto_tools and openai_serving_chat.tool_parser:
-            response = generator.model_dump()
-            tool_call_info = openai_serving_chat.tool_parser.extract_tool_calls(generator)
-            if tool_call_info.tools_called:
-                response['choices'][0]['message']['content'] = tool_call_info.content
-                response['choices'][0]['message']['tool_calls'] = [tool_call.to_dict() for tool_call in tool_call_info.tool_calls]
-                response['choices'][0]['finish_reason'] = 'tool_calls'
-            else:
-                print('TOOL: no tool calls detected')
-            return JSONResponse(content=response)
-
-        else:
-            return JSONResponse(content=generator.model_dump())
+        return JSONResponse(content=generator.model_dump())
 
 
 @app.post("/v1/completions")

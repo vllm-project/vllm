@@ -354,13 +354,28 @@ class OpenAIServingChat(OpenAIServing):
             )
         else:
             try:
-                return await self.chat_completion_full_generator(
+                generator = await self.chat_completion_full_generator(
                     request,
                     raw_request,
                     result_generator,
                     request_id,
                     conversation
                 )
+
+                assert isinstance(generator, ChatCompletionResponse)
+                print('generator', generator)
+
+                # handle tool extraction
+                if self.enable_auto_tools and self.tool_parser:
+                    tool_call_info = self.tool_parser.extract_tool_calls(generator)
+                    if tool_call_info.tools_called:
+                        generator.choices[0].message.content = tool_call_info.content
+                        generator.choices[0].message.tool_calls = [tool_call.to_dict() for tool_call in
+                                                                           tool_call_info.tool_calls]
+                        generator.choices[0].finish_reason = 'tool_calls'
+                    else:
+                        print('no tool calls detected')
+                return generator
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
