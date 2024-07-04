@@ -99,8 +99,6 @@ run_serving_tests() {
     cd $VLLM_SOURCE_CODE_LOC/benchmarks
 
 
-    # run the server
-    python -m pip install transformers -U
     echo "Running test case $test_name"
     bash ../.buildkite/nightly-benchmarks/scripts/launch-trt-server.sh "$server_params" "$common_params"
 
@@ -119,8 +117,6 @@ run_serving_tests() {
     cd $VLLM_SOURCE_CODE_LOC/benchmarks
     rm -rf /tokenizer_cache
     mkdir /tokenizer_cache
-    # update transformers package, to make sure mixtral tokenizer is available
-    python -m pip install transformers -U
     python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
       --model "$model" \
       --cachedir /tokenizer_cache
@@ -204,6 +200,9 @@ main() {
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
+
+  # update transformers package, to make sure mixtral tokenizer is available
+  python -m pip install transformers -U
 
   export CURRENT_LLM_SERVING_ENGINE=trt
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
