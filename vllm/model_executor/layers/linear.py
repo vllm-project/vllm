@@ -448,15 +448,17 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
+            loaded_weight = convert_like(loaded_weight, param_data)
         # Special case for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
             shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
-
+            loaded_weight = convert_like(loaded_weight, param_data)
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
+            loaded_weight = convert_like(loaded_weight, param_data)
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
 
