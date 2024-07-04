@@ -25,13 +25,13 @@ MODELS = [
 DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
 
 
-@pytest.mark.skipif(cuda_device_count_stateless() < 2,
-                    reason="Need at least 2 GPUs to run the test.")
+@pytest.mark.skipif(cuda_device_count_stateless() < 3,
+                    reason="Need at least 3 GPUs to run the test.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("chunked_prefill_token_size", [16])
-def test_models(
+def test_models_uneven_tensor_parallel(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -56,7 +56,7 @@ def test_models(
     with vllm_runner(
             model,
             dtype=dtype,
-            tensor_parallel_size=2,
+            tensor_parallel_size=3,
             max_num_seqs=max_num_seqs,
             enable_chunked_prefill=enable_chunked_prefill,
             max_num_batched_tokens=max_num_batched_tokens,
