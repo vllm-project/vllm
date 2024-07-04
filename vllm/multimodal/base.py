@@ -214,6 +214,11 @@ class MultiModalPlugin(ABC):
         """
         raise NotImplementedError
 
+    def _validate_max_multimodal_tokens(self, max_mm_tokens: int):
+        if max_mm_tokens < 1:
+            raise ValueError("You should set the number of tokens to a "
+                             f"positive integer. Found: {max_mm_tokens}")
+
     def register_max_multimodal_tokens(
         self,
         max_mm_tokens: Optional[MultiModalTokensCalc] = None,
@@ -235,9 +240,8 @@ class MultiModalPlugin(ABC):
                     "tokens in %s. It is overwritten by the new one.",
                     model_cls, self)
 
-            if isinstance(max_mm_tokens, int) and max_mm_tokens < 1:
-                raise ValueError("You should set the number of tokens to a "
-                                 "positive integer")
+            if isinstance(max_mm_tokens, int):
+                self._validate_max_multimodal_tokens(max_mm_tokens)
 
             self._max_mm_tokens[model_cls] = max_mm_tokens \
                 or self._default_max_multimodal_tokens
@@ -271,7 +275,9 @@ class MultiModalPlugin(ABC):
             raise KeyError(f"No maximum number of multi-modal tokens is given "
                            f"for model class {model_cls.__name__} in {self}.")
 
-        if isinstance(max_mm_tokens, int):
-            return max_mm_tokens
+        if callable(max_mm_tokens):
+            max_mm_tokens = max_mm_tokens(InputContext(model_config))
 
-        return max_mm_tokens(InputContext(model_config))
+        self._validate_max_multimodal_tokens(max_mm_tokens)
+
+        return max_mm_tokens
