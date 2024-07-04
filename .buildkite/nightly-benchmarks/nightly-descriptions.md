@@ -14,7 +14,7 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following docker ima
 - openmmlab/lmdeploy:v0.5.0
 - ghcr.io/huggingface/text-generation-inference:2.1
 
-Check [nightly-pipeline.yaml](artifact://nightly-pipeline.yaml) artifact for more details.
+Check <a href="artifact://nightly-pipeline.yaml">nightly-pipeline.yaml</a> artifact for more details.
 
 
 ## Workload description
@@ -28,7 +28,7 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 - Models: llama-3 8B, llama-3 70B, mixtral 8x7B.
 - Evaluation metrics: Throughput, TTFT (time to the first token, with mean and std), ITL (inter-token latency, with mean and std).
 
-Check [nightly-tests.json](artifact://nightly-tests.json) artifact for more details.
+Check <a href="artifact://nightly-tests.json">nightly-tests.json</a> artifact for more details.
 
 
 ## Known crashes
