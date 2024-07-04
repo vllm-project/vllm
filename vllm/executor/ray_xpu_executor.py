@@ -1,3 +1,6 @@
+import asyncio
+from typing import List, Optional
+
 import vllm.envs as envs
 from vllm.executor.ray_gpu_executor import RayGPUExecutor, RayGPUExecutorAsync
 from vllm.executor.xpu_executor import XPUExecutor
@@ -31,3 +34,4 @@ class RayXPUExecutorAsync(RayXPUExecutor, RayGPUExecutorAsync):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.driver_exec_method = make_async(self.driver_worker.execute_method)
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
