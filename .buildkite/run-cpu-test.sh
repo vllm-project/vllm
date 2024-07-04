@@ -20,13 +20,11 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
  --cpuset-mems=1 --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --name cpu-test-avx2 cpu-test-avx2
 
 # offline inference
-docker exec cpu-test bash -c "python3 examples/offline_inference.py"
 docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
 
 # Run basic model test
-docker exec cpu-test bash -c "cd tests;
+docker exec cpu-test bash -c "
   pip install pytest Pillow protobuf
-  cd ../
   pytest -v -s tests/models -m \"not vlm\" --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py --ignore=tests/models/test_jamba.py" # Mamba on CPU is not supported
 
 # online inference

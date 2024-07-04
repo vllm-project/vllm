@@ -96,9 +96,7 @@ class CPUExecutor(ExecutorBase):
             self.worker_monitor.start()
 
         self._run_workers("init_device")
-        self._run_workers("load_model",
-                          max_concurrent_workers=self.parallel_config.
-                          max_parallel_loading_workers)
+        self._run_workers("load_model")
 
     def _create_worker(
         self,
