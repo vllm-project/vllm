@@ -19,7 +19,7 @@
 # limitations under the License.
 """Inference-only BaiChuan model compatible with HuggingFace weights."""
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -44,6 +44,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.utils import DeferredTensor, ensure_tensor
 
 from .interfaces import SupportsLoRA
 
@@ -360,7 +361,9 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   Union[torch.Tensor,
+                                                         DeferredTensor]]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -379,6 +382,7 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA):
                 # https://github.com/vllm-project/vllm/pull/1022#discussion_r1325652704
                 is_baichuan2 = self.config.vocab_size == 125696
                 if is_baichuan2:
+                    loaded_weight = ensure_tensor(loaded_weight)
                     loaded_weight = torch.nn.functional.normalize(
                         loaded_weight)
 

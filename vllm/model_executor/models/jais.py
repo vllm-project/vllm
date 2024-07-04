@@ -20,7 +20,7 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -42,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import JAISConfig
+from vllm.utils import DeferredTensor, ensure_tensor
 
 
 class SwiGLUActivation(nn.Module):
@@ -309,7 +310,9 @@ class JAISLMHeadModel(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   Union[torch.Tensor,
+                                                         DeferredTensor]]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
@@ -333,6 +336,7 @@ class JAISLMHeadModel(nn.Module):
                     continue
                 if not name.endswith(".weight"):
                     continue
+                loaded_weight = ensure_tensor(loaded_weight)
                 loaded_weight = loaded_weight.t()
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)

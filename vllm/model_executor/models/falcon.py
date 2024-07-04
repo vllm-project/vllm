@@ -46,6 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
+from vllm.utils import DeferredTensor, ensure_tensor
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
@@ -434,7 +435,9 @@ class FalconForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   Union[torch.Tensor,
+                                                         DeferredTensor]]]):
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -453,6 +456,7 @@ class FalconForCausalLM(nn.Module):
                 continue
             param = params_dict[name]
             if "query_key_value" in name:
+                loaded_weight = ensure_tensor(loaded_weight)
                 output_dim = getattr(param, "output_dim", None)
                 loaded_weight_shape = loaded_weight.shape
                 if output_dim is not None:

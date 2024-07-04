@@ -17,7 +17,7 @@
 # limitations under the License.
 """Inference-only BLOOM model compatible with HuggingFace weights."""
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -40,6 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.utils import DeferredTensor, ensure_tensor
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -306,7 +307,9 @@ class BloomForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   Union[torch.Tensor,
+                                                         DeferredTensor]]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
             if name == "lm_head.weight":
@@ -323,6 +326,7 @@ class BloomForCausalLM(nn.Module):
                 output_dim = getattr(param, "output_dim", None)
                 num_heads = self.config.num_attention_heads
                 if output_dim is not None:
+                    loaded_weight = ensure_tensor(loaded_weight)
                     loaded_weight_shape = loaded_weight.shape
                     loaded_weight = loaded_weight.view(
                         loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
