@@ -65,7 +65,7 @@ run_serving_tests() {
     # if TEST_SELECTOR is set, only run the test cases that match the selector
     if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
       echo "Skip test case $test_name."
-      exit 0
+      continue
     fi
 
     # append tgi to the test name
