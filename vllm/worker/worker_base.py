@@ -126,6 +126,8 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
+    
+    allocated_block_counts : Optional[dict[int, int]] = None    # new add for vmm
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -142,6 +144,7 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
+            allocated_block_counts=tensor_dict.pop("allocated_block_counts"),   # new add for vmm
         )
 
     def as_broadcastable_tensor_dict(
@@ -155,6 +158,7 @@ class WorkerInput:
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
+            "allocated_block_counts": self.allocated_block_counts,      # new add for vmm
         }
 
         return tensor_dict

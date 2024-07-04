@@ -165,6 +165,9 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        
+        # new add for vmm
+        use_vmm: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -211,6 +214,9 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
+        
+        # new add for vmm
+        self.use_vmm = use_vmm
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -416,6 +422,9 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
+            
+            # new add for vmm
+            use_vmm=engine_args.use_vmm,
         )
         return engine
 
@@ -858,8 +867,13 @@ class LLMEngine:
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
+
+            if self.use_vmm:
+                execute_model_req.allocated_block_counts = scheduler_outputs.allocated_block_counts
+                
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
+
         else:
             output = []
 

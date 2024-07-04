@@ -40,6 +40,37 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
 }
 
+# new add for vmm (use in wrap ptr to tensor)
+TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.double: "double",
+    torch.float: "float",
+    torch.float64: "float64",
+    torch.float32: "float32",
+    torch.float16: "float16",
+    torch.half: "half",
+    torch.bfloat16: "bfloat16",
+    
+    torch.int: "int",
+    torch.int64: "int64",
+    torch.int32: "int32",
+    torch.int16: "int16",
+    torch.int8: "int8",
+    
+    torch.uint8: "uint8",
+}
+
+
+P = ParamSpec('P')
+K = TypeVar("K")
+T = TypeVar("T")
+
+
+class _Sentinel:
+    ...
+
+
+ALL_PINNED_SENTINEL = _Sentinel()
+
 P = ParamSpec('P')
 K = TypeVar("K")
 T = TypeVar("T")
@@ -206,6 +237,7 @@ def is_tpu() -> bool:
 
 @lru_cache(maxsize=None)
 def is_xpu() -> bool:
+    return False
     from importlib.metadata import version
     is_xpu_flag = "xpu" in version("vllm")
     # vllm is not build with xpu
@@ -482,6 +514,36 @@ def create_kv_caches_with_random_flash(
         key_value_cache.uniform_(-scale, scale)
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
+    return key_caches, value_caches
+
+def create_kv_caches_with_random_flash_non_page(
+    batch_size: int,
+    seq_len: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: int = 0,
+    device: Optional[str] = "cuda",
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+
+    assert cache_dtype != "fp8"
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    key_value_cache_shape = (2, batch_size, seq_len, num_heads, head_size)
+    scale = head_size**-0.5
+    key_caches, value_caches = [], []
+    for _ in range(num_layers):
+        key_value_cache = torch.empty(size=key_value_cache_shape,
+                                      dtype=torch_dtype,
+                                      device=device)
+        key_value_cache.uniform_(-scale, scale)
+        key_caches.append(key_value_cache[0])
+        value_caches.append(key_value_cache[1])
     return key_caches, value_caches
 
 
@@ -922,3 +984,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
+
+
+
+# new add for vmm
+def get_dtype_size(dtype: torch.dtype) -> int:
+    return torch.tensor([], dtype=dtype).element_size()

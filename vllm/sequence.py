@@ -125,6 +125,10 @@ class SequenceData:
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
+        
+        # new add for vmm
+        self.cache_buffer_id = -1
+
 
         self._update_cached_all_tokens()
 
@@ -266,6 +270,9 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+        
+        # new add for vmm
+        self.cache_buffer_id = -1
 
     @property
     def n_blocks(self) -> int:
@@ -679,7 +686,21 @@ class SequenceGroupMetadata:
         """Return the number of tokens to be processed (chunk size)."""
         assert self._token_chunk_size is not None
         return self._token_chunk_size
-
+    
+    def __repr__(self) -> str:
+        return (f"SequenceGroupMetadata(\n"
+                f"-- request_id={self.request_id}, \n"
+                f"-- is_prompt={self.is_prompt}, \n"
+                f"-- seq_data={self.seq_data}, \n"
+                f"-- sampling_params={self.sampling_params}, \n"
+                f"-- block_tables={self.block_tables}, \n"
+                f"-- do_sample={self.do_sample}, \n"
+                f"-- token_chunk_size={self.token_chunk_size}, \n"
+                f"-- lora_request={self.lora_request}, \n"
+                f"-- computed_block_nums={self.computed_block_nums}, \n"
+                f"-- multi_modal_data={self.multi_modal_data}, \n"
+                f"-- encoder_seq_data={self.encoder_seq_data}, \n"
+                f"-- cross_block_table={self.cross_block_table})")
 
 class SequenceOutput:
     """The model output associated with a sequence.
@@ -936,6 +957,9 @@ class ExecuteModelRequest:
     num_steps: int = 1
     # Finished request ids since last step.
     finished_requests_ids: List[str] = field(default_factory=list)
+    
+    # new add for vmm
+    allocated_block_counts: Dict[int, int]= field(default_factory=dict),
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]

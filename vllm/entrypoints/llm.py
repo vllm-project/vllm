@@ -18,6 +18,9 @@ from vllm.transformers_utils.tokenizer import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
+import torch
+import time
+
 logger = init_logger(__name__)
 
 
@@ -557,6 +560,8 @@ class LLM:
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        spd = 0.0
+
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
@@ -575,6 +580,8 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
+            
+        logger.info(f"Generate Over. total_out_toks: {total_out_toks}, Average Generation Speed: {spd:.5f} toks/s")
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.

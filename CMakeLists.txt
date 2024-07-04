@@ -202,6 +202,26 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+
+#
+# _vmm extension (VMM)
+#
+set(VLLM_VMM_EXT_SRC
+  "csrc/vmm/torch_bindings.cpp"
+  "csrc/vmm/vmm.cu"
+  )
+
+define_gpu_extension_target(
+  _vmm_C
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_VMM_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  USE_SABI 3
+  WITH_SOABI)
+
+
 #
 # _moe_C extension
 #
@@ -297,6 +317,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
+
+  message(STATUS "Enabling VMM extension.")
+  add_dependencies(default _vmm_C)
 
   # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
   # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and

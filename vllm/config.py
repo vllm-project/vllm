@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _GB = 1 << 30
+_MB = 1 << 20
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 _PP_SUPPORTED_MODELS = [
@@ -428,12 +429,15 @@ class CacheConfig:
     def __init__(
         self,
         block_size: int,
+        block_bytes_size: int,  # new add for vmm
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        use_vmm: bool = False,  # new add for vmm
+        
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -449,6 +453,10 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+        
+        # new add for vmm
+        self.block_bytes_size = block_bytes_size
+        self.use_vmm = use_vmm
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

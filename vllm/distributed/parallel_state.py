@@ -72,12 +72,16 @@ def _split_tensor_dict(
                                               value.size())))
             tensor_list.append(value)
         elif isinstance(value, dict):
-            if len(value) == 0:
+            if key == "allocated_block_counts":
+                # if allocated_block_counts, no need to split_tensor_dict its values
                 metadata_list.append((prefix + key, value))
-            inner_metadata_list, inner_tensor_list = _split_tensor_dict(
-                value, prefix + key + "%")
-            metadata_list.extend(inner_metadata_list)
-            tensor_list.extend(inner_tensor_list)
+            else:
+                if len(value) == 0:
+                    metadata_list.append((prefix + key, value))
+                inner_metadata_list, inner_tensor_list = _split_tensor_dict(
+                    value, prefix + key + "%")
+                metadata_list.extend(inner_metadata_list)
+                tensor_list.extend(inner_tensor_list)
         else:
             metadata_list.append((prefix + key, value))
     return metadata_list, tensor_list

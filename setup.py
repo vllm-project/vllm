@@ -414,6 +414,9 @@ ext_modules = []
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
+if _is_cuda():
+    ext_modules.append(CMakeExtension(name="vllm._vmm_C"))
+
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
