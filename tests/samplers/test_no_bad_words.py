@@ -44,21 +44,21 @@ class TestOneTokenBadWord:
                                                        add_prefix_space=True)
 
         self.num_prompt_tokens = len(self._encode(self.PROMPT))
-        self.target_token_id = self._encode(self.TARGET_TOKEN, add_special_tokens=False)[0]
+        self.target_token_id = self._encode(self.TARGET_TOKEN,
+                                            add_special_tokens=False)[0]
 
     def test_one_token_bad_word(self, vllm_runner):
         with vllm_runner(self.MODEL) as llm:
             output_token_ids = self._generate(llm)
             assert output_token_ids[0] == self.target_token_id
 
-            output_token_ids = self._generate(
-                llm, bad_words=[self.TARGET_TOKEN])
+            output_token_ids = self._generate(llm,
+                                              bad_words=[self.TARGET_TOKEN])
             assert self.target_token_id not in output_token_ids
 
-    def _generate(
-            self,
-            model: LLM,
-            bad_words: Optional[List[str]] = None) -> List[int]:
+    def _generate(self,
+                  model: LLM,
+                  bad_words: Optional[List[str]] = None) -> List[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
@@ -66,8 +66,11 @@ class TestOneTokenBadWord:
             bad_words=bad_words,
         )
 
-    def _encode(self, prompt: str, add_special_tokens: bool = True) -> List[int]:
-        return self.tokenizer(prompt, add_special_tokens=add_special_tokens).input_ids
+    def _encode(self,
+                prompt: str,
+                add_special_tokens: bool = True) -> List[int]:
+        return self.tokenizer(prompt,
+                              add_special_tokens=add_special_tokens).input_ids
 
 
 class TestTwoTokenBadWord:
@@ -83,9 +86,12 @@ class TestTwoTokenBadWord:
                                                        add_prefix_space=True)
 
         self.num_prompt_tokens = len(self._encode(self.PROMPT))
-        self.target_token_id1 = self._encode(self.TARGET_TOKEN1, add_special_tokens=False)[0]
-        self.target_token_id2 = self._encode(self.TARGET_TOKEN2, add_special_tokens=False)[0]
-        self.neighbour_token_id2 = self._encode(self.NEIGHBOUR_TOKEN2, add_special_tokens=False)[0]
+        self.target_token_id1 = self._encode(self.TARGET_TOKEN1,
+                                             add_special_tokens=False)[0]
+        self.target_token_id2 = self._encode(self.TARGET_TOKEN2,
+                                             add_special_tokens=False)[0]
+        self.neighbour_token_id2 = self._encode(self.NEIGHBOUR_TOKEN2,
+                                                add_special_tokens=False)[0]
 
     def test_two_token_bad_word(self, vllm_runner):
         with vllm_runner(self.MODEL) as llm:
@@ -94,18 +100,17 @@ class TestTwoTokenBadWord:
                 self.target_token_id1, self.target_token_id2
             ]
 
-            output_token_ids = self._generate(
-                llm, bad_words=[self.TARGET_TOKEN1])
+            output_token_ids = self._generate(llm,
+                                              bad_words=[self.TARGET_TOKEN1])
             assert self.target_token_id1 not in output_token_ids
 
-            output_token_ids = self._generate(
-                llm, bad_words=[self.TARGET_TOKEN2])
+            output_token_ids = self._generate(llm,
+                                              bad_words=[self.TARGET_TOKEN2])
             assert output_token_ids[0] == self.target_token_id1
             assert self.target_token_id2 not in output_token_ids
 
             output_token_ids = self._generate(
-                llm,
-                bad_words=[f'{self.TARGET_TOKEN1} {self.TARGET_TOKEN2}'])
+                llm, bad_words=[f'{self.TARGET_TOKEN1} {self.TARGET_TOKEN2}'])
             assert output_token_ids[0] == self.target_token_id1
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
@@ -120,8 +125,10 @@ class TestTwoTokenBadWord:
 
             output_token_ids = self._generate(
                 llm,
-                bad_words=[f'{self.TARGET_TOKEN1} {self.TARGET_TOKEN2}',
-                           f'{self.TARGET_TOKEN1} {self.NEIGHBOUR_TOKEN2}'])
+                bad_words=[
+                    f'{self.TARGET_TOKEN1} {self.TARGET_TOKEN2}',
+                    f'{self.TARGET_TOKEN1} {self.NEIGHBOUR_TOKEN2}'
+                ])
             assert output_token_ids[0] == self.target_token_id1
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
@@ -138,10 +145,9 @@ class TestTwoTokenBadWord:
             assert ((self.target_token_id2 in output_token_ids)
                     or (self.neighbour_token_id2 in output_token_ids))
 
-    def _generate(
-            self,
-            model: LLM,
-            bad_words: Optional[List[str]] = None) -> List[int]:
+    def _generate(self,
+                  model: LLM,
+                  bad_words: Optional[List[str]] = None) -> List[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
@@ -171,5 +177,8 @@ class TestTwoTokenBadWord:
 
         return False
 
-    def _encode(self, prompt: str, add_special_tokens: bool = True) -> List[int]:
-        return self.tokenizer(prompt, add_special_tokens=add_special_tokens).input_ids
+    def _encode(self,
+                prompt: str,
+                add_special_tokens: bool = True) -> List[int]:
+        return self.tokenizer(prompt,
+                              add_special_tokens=add_special_tokens).input_ids

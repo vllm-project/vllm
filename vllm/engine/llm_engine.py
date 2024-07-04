@@ -545,9 +545,9 @@ class LLMEngine:
                                                     add_special_tokens=False)
 
                 # If space at the beginning produces a new word token
-                if (j == 0) or (j > 0
-                                and prompt_token_ids[0] != bad_words_ids[-1][0]
-                                and len(prompt_token_ids) == len(bad_words_ids[-1])):
+                if (j == 0) or (
+                        j > 0 and prompt_token_ids[0] != bad_words_ids[-1][0]
+                        and len(prompt_token_ids) == len(bad_words_ids[-1])):
                     bad_words_ids.append(prompt_token_ids)
 
         params._init_bad_words_logits_processor(bad_words_ids)
