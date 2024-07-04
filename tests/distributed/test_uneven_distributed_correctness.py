@@ -1,11 +1,29 @@
+"""Compare the outputs of HF and distributed vLLM when using greedy sampling.
+vLLM will allocate all the available memory, so we need to run the tests one
+by one. The solution is to pass arguments (model name) by environment
+variables.
+Run:
+```sh
+cd $VLLM_PATH/tests
+
+TEST_DIST_MODEL=facebook/opt-125m pytest \
+    distributed/test_basic_distributed_correctness.py
+TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
+    distributed/test_basic_distributed_correctness.py
+```
+"""
 import os
 
 import pytest
 
-from tests.basic_correctness.test_basic_correctness import MODELS
-from tests.distributed.test_basic_distributed_correctness import DISTRIBUTED_EXECUTOR_BACKEND
-from tests.models.utils import check_outputs_equal
 from vllm.utils import cuda_device_count_stateless
+
+from ..models.utils import check_outputs_equal
+
+MODELS = [
+    os.environ["TEST_DIST_MODEL"],
+]
+DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
 
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 3,
