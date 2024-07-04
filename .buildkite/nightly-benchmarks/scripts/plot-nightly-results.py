@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import argparse
 import matplotlib.pyplot as plt
+import math
 
 import pandas as pd
 from tabulate import tabulate
@@ -65,7 +66,9 @@ def main(args):
                     stds.append(0.)
                 else:
                     means.append(filtered_df[f"Mean {metric} (ms)"].values[0])
-                    stds.append(filtered_df[f"Std {metric} (ms)"].values[0])
+                    std = filtered_df[f"Std {metric} (ms)"].values[0]
+                    success = filtered_df["Successful req."].values[0]
+                    stds.append(std / math.sqrt(success))
                     
             ax = axes[i, j]
             
@@ -88,7 +91,7 @@ def main(args):
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric} comparison")
     
-    fig.savefig("nightly_results.png", bbox_inches='tight')
+    fig.savefig("nightly_results.png")
 
 if __name__ == '__main__':
     args = parse_arguments()

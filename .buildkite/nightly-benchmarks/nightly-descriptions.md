@@ -36,8 +36,10 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 
 ## Results
 
-![[Overall benchmarking results]([artifacts](artifact://nightly_results.png))](artifact://indy.png)
-
-
-
 {nightly_results_benchmarking_table}
+
+## Plots
+
+In the following plots, the error bar shows the standard error of the mean.
+
+<img src="artifact://nightly_results.png" alt="Benchmarking results" height=250 >
