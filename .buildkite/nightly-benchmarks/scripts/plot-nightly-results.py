@@ -51,14 +51,14 @@ def main(args):
     plt.rcParams.update({'font.size': 20})
         
     # plot results
-    fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 16))
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
             means, stds = [], []
             for method in methods:
                 target = df['Test name'].str.contains(model)
-                target = target & df['Test name'].str.contains(method)
+                target = target & df['Engine'].str.contains(method)
                 filtered_df = df[target]
                 
                 if filtered_df.empty:
@@ -69,6 +69,8 @@ def main(args):
                     std = filtered_df[f"Std {metric} (ms)"].values[0]
                     success = filtered_df["Successful req."].values[0]
                     stds.append(std / math.sqrt(success))
+                    
+            print(means, stds)
                     
             ax = axes[i, j]
             
@@ -87,11 +89,10 @@ def main(args):
                     va='bottom'
                 )
             
-            ax.set_xlabel("Method")
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric} comparison")
     
-    fig.savefig("nightly_results.png")
+    fig.savefig("nightly_results.png", bbox_inches='tight')
 
 if __name__ == '__main__':
     args = parse_arguments()

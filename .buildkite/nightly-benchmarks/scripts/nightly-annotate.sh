@@ -31,8 +31,10 @@ main() {
         --results-folder results/
     
     # upload results and figures
-    /workspace/buildkite-agent annotate --style "success" --context "benchmark-results" --append < nightly_results.md
     /workspace/buildkite-agent artifact upload "nightly_results.png"
+    /workspace/buildkite-agent artifact upload $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/nightly-pipeline.yaml
+    /workspace/buildkite-agent artifact upload $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/tests/nightly-tests.json
+    /workspace/buildkite-agent annotate --style "success" --context "benchmark-results" --append < nightly_results.md
 }
 
 main "$@"
