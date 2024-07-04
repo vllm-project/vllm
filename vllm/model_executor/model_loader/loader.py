@@ -32,7 +32,7 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_quant_config, get_gguf_extra_tensor_names, gguf_quant_weights_iterator,
+    get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
 from vllm.model_executor.models.interfaces import (supports_lora,

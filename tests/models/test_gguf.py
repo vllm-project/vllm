@@ -6,7 +6,6 @@ Note: To pass the test, quantization higher than Q4 should be used
 import os
 
 import pytest
-
 from huggingface_hub import hf_hub_download
 
 from tests.quantization.utils import is_quant_method_supported

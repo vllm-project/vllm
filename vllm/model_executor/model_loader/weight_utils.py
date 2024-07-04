@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple, Dict
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
