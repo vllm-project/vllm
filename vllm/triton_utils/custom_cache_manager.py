@@ -3,6 +3,18 @@ import os
 from triton.runtime.cache import (FileCacheManager, default_cache_dir,
                                   default_dump_dir, default_override_dir)
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+def maybe_set_triton_cache_manager() -> None:
+    cache_manger = os.environ.get("TRITON_CACHE_MANAGER", None)
+    if cache_manger is None:
+        manager = "vllm.triton_utils.custom_cache_manager:CustomCacheManager"
+        logger.info("Setting Triton cache manager to: %s", manager)
+        os.environ["TRITON_CACHE_MANAGER"] = manager
+
 
 class CustomCacheManager(FileCacheManager):
 
