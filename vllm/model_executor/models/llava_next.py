@@ -259,14 +259,14 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
 
-        def _validate_shape(data: torch.Tensor):
-            actual_dims = tuple(data.shape[1:])
+        def _validate_shape(d: torch.Tensor):
+            expected_expr = ("num_patches", *map(str, expected_dims))
+            actual_dims = tuple(d.shape[1:])
 
             if actual_dims != expected_dims:
                 raise ValueError(
                     "The expected shape of pixel values in each batch element "
-                    f"is number of patches plus {actual_dims}. You supplied "
-                    f"{tuple(data.shape)}.")
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
         for d in data:
             _validate_shape(d)
