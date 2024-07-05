@@ -580,7 +580,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         `[50265, ..., 50265, 2, 45641, 35, ..., 31652, 35]`.
 
         We insert 32 tokens since it corresponds to the number of query
-        embeddings outputted by the Q-Former.
+        embeddings outputted by the Q-Former and inputted to the language model.
 
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
