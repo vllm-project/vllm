@@ -6,7 +6,7 @@ The main goal of this benchmarking is two-fold:
 - Reproducible: one can run the exact same set of benchmarking commands inside the exact same docker by following reproducing instructions in [reproduce.md]().
 
 
-## Versions
+## Docker images
 
 We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following docker images:
 - vllm/vllm-openai:v0.5.0.post1
@@ -14,33 +14,29 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following docker ima
 - openmmlab/lmdeploy:v0.5.0
 - ghcr.io/huggingface/text-generation-inference:2.1
 
-Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.buildkite/nightly-benchmarks/nightly-pipeline.yaml">nightly-pipeline.yaml</a> artifact for more details.
+<!-- Please check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.buildkite/nightly-benchmarks/nightly-pipeline.yaml">nightly-pipeline.yaml</a> artifact for more details on how we deploy the docker images. -->
+
+
+## Hardware
+
+One AWS node with 8x NVIDIA A100 GPUs.
 
 
 ## Workload description
 
 We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 
-- Input length: randomly sample 1000 prompts from ShareGPT dataset (with fixed random seed).
-- Output length: the corresponding output length of these 1000 prompts.
-- Batch size: dynamically determined by vllm and the arrival pattern of the requests.
-- Average QPS (query per second): 4 for 8B model and 2 for larger models. For each QPS, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
+- Input length: randomly sample 500 prompts from ShareGPT dataset (with fixed random seed).
+- Output length: the corresponding output length of these 500 prompts.
 - Models: llama-3 8B, llama-3 70B, mixtral 8x7B.
-- Evaluation metrics: Throughput, TTFT (time to the first token, with mean and std), ITL (inter-token latency, with mean and std).
+- Average QPS (query per second): 4 for the small model (llama-3 8B) and 2 for other two models. For each QPS, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
+- Evaluation metrics: Throughput, TTFT (time to the first token), ITL (inter-token latency).
 
-Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.buildkite/nightly-benchmarks/tests/nightly-tests.json">nightly-tests.json</a> artifact for more details.
-
-
-## Known issues
-
-- TGI v2.1 crashes when running mixtral model, see [tgi issue #2122](https://github.com/huggingface/text-generation-inference/issues/2122)
-- Pin the transformers library to 4.41.2 to avoid lmdeploy missing cache_position error, see [lmdeploy issue 1885](https://github.com/InternLM/lmdeploy/issues/1885).
-
-
+<!-- Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.buildkite/nightly-benchmarks/tests/nightly-tests.json">nightly-tests.json</a> artifact for more details. -->
 
 ## Plots
 
-In the following plots, the error bar shows the standard error of the mean. Value 0 means that the corresponding benchmark crashed.
+In the following plots, the dot shows the mean and the error bar shows the standard error of the mean. Value 0 means that the corresponding benchmark crashed.
 
 <img src="artifact://nightly_results.png" alt="Benchmarking results" height=250 >
 

@@ -92,6 +92,7 @@ def main(args):
 
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric} comparison")
+            ax.grid()
 
     fig.tight_layout(pad=0.6)
     fig.savefig("nightly_results.png", bbox_inches='tight')
