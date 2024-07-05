@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -12,7 +12,6 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import DeferredTensor, ensure_tensor
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -301,15 +300,13 @@ class VocabParallelEmbedding(torch.nn.Module):
         assert len(ret) == self.num_embeddings_padded
         return ret
 
-    def weight_loader(self, param: Parameter,
-                      loaded_weight: Union[torch.Tensor, DeferredTensor]):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
-            loaded_weight = ensure_tensor(loaded_weight)
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return
@@ -330,7 +327,6 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # Copy the data.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-        loaded_weight = ensure_tensor(loaded_weight)
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0]:].data.fill_(0)
 
