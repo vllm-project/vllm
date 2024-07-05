@@ -113,6 +113,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 def get_input(tokenizer, prompt, image):
 
     image_id = 100015
+    prompt = prompt[0]
+    image = image[0]
     vl_image = VLMImageProcessor(1024)
     prompt.replace('<image_placeholder>', '<image_placeholder>' * 576)
     input_ids = tokenizer.encode(prompt)
