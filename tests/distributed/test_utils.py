@@ -71,3 +71,4 @@ def test_deferred_tensor():
                 dt.to(dtype=torch.float64))  # test we can change dtype
 
             assert torch.allclose(real_tensor + 1, dt + 1)
+            assert torch.allclose(real_tensor.view(-1), dt.view(-1)) # test we can use `view`
