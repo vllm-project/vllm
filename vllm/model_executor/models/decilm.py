@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only DeciLM model compatible with HuggingFace weights."""
 
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable, Optional, Tuple
 
 import torch
 from transformers import LlamaConfig
@@ -33,7 +33,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.utils import DeferredTensor, ensure_tensor
 
 
 class DeciLMForCausalLM(LlamaForCausalLM):
@@ -68,9 +67,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                          quant_config=quant_config,
                          lora_config=lora_config)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   Union[torch.Tensor,
-                                                         DeferredTensor]]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -85,7 +82,6 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 continue
 
             if "k_proj" in name or "v_proj" in name:
-                loaded_weight = ensure_tensor(loaded_weight)
                 loaded_weight = self._degroup_weight(loaded_weight)
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:

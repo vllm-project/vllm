@@ -73,3 +73,5 @@ def test_deferred_tensor():
             assert torch.allclose(real_tensor + 1, dt + 1)
             assert torch.allclose(real_tensor.view(-1), dt.view(-1)) # test we can use `view`
             assert torch.allclose(torch.reshape(real_tensor, (-1,)), torch.reshape(dt, (-1,))) # test we can use `reshape`
+            if k != "tensor":
+                assert torch.allclose(real_tensor.t(), dt.t()) # test we can use `t()`

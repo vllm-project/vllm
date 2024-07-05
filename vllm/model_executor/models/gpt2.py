@@ -41,7 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import DeferredTensor, ensure_tensor
 
 
 class GPT2Attention(nn.Module):
@@ -279,9 +278,7 @@ class GPT2LMHeadModel(nn.Module):
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   Union[torch.Tensor,
-                                                         DeferredTensor]]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
@@ -304,7 +301,6 @@ class GPT2LMHeadModel(nn.Module):
                         continue
                     if not name.endswith(".weight"):
                         continue
-                    loaded_weight = ensure_tensor(loaded_weight)
                     loaded_weight = loaded_weight.t()
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
