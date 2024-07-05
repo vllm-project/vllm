@@ -44,8 +44,6 @@ class CPUExecutor(ExecutorBase):
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
             os.environ['KMP_BLOCKTIME'] = "1"
-            # dump settings on start up
-            os.environ['KMP_SETTINGS'] = "1"
             # Prevents the CPU to run into low performance state
             os.environ['KMP_TPAUSE'] = "0"
             # Provides fine granularity parallelism
