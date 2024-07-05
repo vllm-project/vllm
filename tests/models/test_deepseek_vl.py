@@ -4,14 +4,14 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
 
-from vllm.multimodal.utils import rescale_image_size
-from vllm.sequence import SampleLogprobs
+from vllm import SamplingParams
 from vllm.model_executor.models.deepseek_vl import (
     MultiModalityPreTrainedModel, VLMImageProcessor, model_name_to_cls)
+from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 
-from tests.conftest import HfRunner, VllmRunner, _ImageAssets
-from tests.models.utils import check_logprobs_close
+from ..conftest import HfRunner, VllmRunner, _ImageAssets
+from .utils import check_outputs_equal
 
 models = ["deepseek-ai/deepseek-vl-7b-chat"]
 IMAGE_TOKEN_ID = 100015
@@ -116,7 +116,7 @@ def get_input(tokenizer, prompt, image):
     prompt = prompt[0]
     image = image[0]
     vl_image = VLMImageProcessor(1024)
-    prompt.replace('<image_placeholder>', '<image_placeholder>' * 576)
+    prompt = prompt.replace('<image_placeholder>', '<image_placeholder>' * 576)
     input_ids = tokenizer.encode(prompt)
     input_ids = torch.LongTensor(input_ids)
     image_token_mask = input_ids == image_id
@@ -148,7 +148,6 @@ def run_test(
     image_assets: _ImageAssets,
     model: str,
     *,
-    size_factors: List[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -166,10 +165,8 @@ def run_test(
     """
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    inputs_per_image = [([prompt], [image])
+                        for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -177,6 +174,7 @@ def run_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
+    sample_params = SamplingParams(temperature=0)
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
@@ -186,7 +184,8 @@ def run_test(
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=images)
+                                                images=images,
+                                                sampling_params=sample_params)
             for prompts, images in inputs_per_image
         ]
 
@@ -229,15 +228,10 @@ def run_test(
         hf_outputs.append(
             (o, tokenizer.decode(o.cpu().tolist(), skip_special_tokens=True)))
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs, vllm_outputs_per_image):
-        # TODO: Check whether using original CLIPVisionModel can improve
-        # consistency against HF
-        check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=[
-                vllm_to_hf_output(vllm_output, model)
-                for vllm_output in vllm_outputs
-            ],
+    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs_per_image):
+        check_outputs_equal(
+            outputs_0_lst=hf_output,
+            outputs_1_lst=vllm_output[:2],
             name_0="hf",
             name_1="vllm",
         )
@@ -268,7 +262,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         vllm_runner,
         image_assets,
         model,
-        size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
