@@ -63,7 +63,8 @@ def test_deferred_tensor():
             if k in ["matrix", "tensor"]:
                 real_norm = torch.nn.functional.normalize(real_tensor)
                 dt_norm = torch.nn.functional.normalize(dt)
-                assert torch.allclose(real_norm, dt_norm) # test we can use `normalize`
+                assert torch.allclose(real_norm,
+                                      dt_norm)  # test we can use `normalize`
             assert torch.allclose(real_tensor.cpu(),
                                   dt.cpu())  # test we can move to device
             assert torch.allclose(
@@ -71,9 +72,15 @@ def test_deferred_tensor():
                 dt.to(dtype=torch.float64))  # test we can change dtype
 
             assert torch.allclose(real_tensor + 1, dt + 1)
-            assert torch.allclose(real_tensor.float(), dt.float()) # test we can use `.float()`
-            assert torch.allclose(real_tensor.data, dt.data) # test we can use `.data`
-            assert torch.allclose(real_tensor.view(-1), dt.view(-1)) # test we can use `view`
-            assert torch.allclose(torch.reshape(real_tensor, (-1,)), torch.reshape(dt, (-1,))) # test we can use `reshape`
+            assert torch.allclose(real_tensor.float(),
+                                  dt.float())  # test we can use `.float()`
+            assert torch.allclose(real_tensor.data,
+                                  dt.data)  # test we can use `.data`
+            assert torch.allclose(real_tensor.view(-1),
+                                  dt.view(-1))  # test we can use `view`
+            assert torch.allclose(torch.reshape(real_tensor, (-1, )),
+                                  torch.reshape(
+                                      dt, (-1, )))  # test we can use `reshape`
             if k != "tensor":
-                assert torch.allclose(real_tensor.t(), dt.t()) # test we can use `t()`
+                assert torch.allclose(real_tensor.t(),
+                                      dt.t())  # test we can use `t()`

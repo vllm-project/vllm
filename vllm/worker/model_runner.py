@@ -239,6 +239,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.flashinfer_prefill_wrapper = None
 
     def load_model(self) -> None:
+        logger.info("Start loading model")
         start_time = time.perf_counter()
         with CudaMemoryProfiler() as m:
             self.model = get_model(
