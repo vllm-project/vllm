@@ -50,6 +50,7 @@ class OpenAIServing:
         max_log_len: Optional[int],
     ):
         self.engine = engine
+        self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
         # A separate tokenizer to map token IDs to strings.

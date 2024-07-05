@@ -9,12 +9,11 @@ from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor,
-    CompressedTensorsWNA16)
+    CompressedTensorsW8A8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     find_first_name_or_class_match)
-from vllm.utils import get_device_capability_stateless
+from vllm.platforms import current_platform
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -85,7 +84,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return []
 
     def _check_gptq_and_marlin_can_run(self):
-        capability = get_device_capability_stateless()
+        capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         if capability < 80:
             raise RuntimeError("The quantization config is not supported for ",
@@ -150,12 +149,12 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self.quant_format == CompressionFormat.int_quantized.value:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8StaticTensor(
-                    strategy=weight_quant.strategy)
+                return CompressedTensorsW8A8(strategy=weight_quant.strategy,
+                                             is_static_input_scheme=True)
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8DynamicToken(
-                    strategy=weight_quant.strategy)
+                return CompressedTensorsW8A8(strategy=weight_quant.strategy,
+                                             is_static_input_scheme=False)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
