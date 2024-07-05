@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple
+from typing import Generator, Iterable, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.utils import DeferredTensor
 
 logger = init_logger(__name__)
 
@@ -357,8 +358,13 @@ def safetensors_weights_iterator(
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
-                yield name, param
+                param = f.get_slice(name)
+                # we actually return the DeferredTensor here
+                # but use `torch.Tensor` as the type hint to avoid
+                # changing too many user-side code
+                # users can use this value just like a torch.Tensor,
+                # except that slicing and `narrow` are optimized for I/O
+                yield name, DeferredTensor(param)  # type: ignore
 
 
 def pt_weights_iterator(
@@ -411,21 +417,6 @@ def kv_cache_scales_loader(
         "Defaulting to KV cache scaling factors = 1.0 for all "
         "layers in TP rank %d as an error occurred during loading.", tp_rank)
     return []
-
-
-def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
-    """convert PySafeSlice object from safetensors to torch.Tensor
-
-    PySafeSlice object supports indexing, which is done before loading the
-    actual tensor and can reduce the amount of memory being read into the
-    memory. However, it does not support more advanced functionalities
-    like `.view()` or `.t()`. Therefore, if we need to modify the loaded
-    tensor with these more complicated operators, we need to convert to
-    tensor first.
-    """
-    if not isinstance(x, torch.Tensor):
-        x = x[:]
-    return x
 
 
 def default_weight_loader(param: torch.Tensor,
