@@ -15,7 +15,7 @@ class ToolParser:
     def __init__(self):
         pass
 
-    def extract_tool_calls(self, model_response: ChatCompletionResponse) -> ExtractedToolCallInformation:
+    def extract_tool_calls(self, model_output: str) -> ExtractedToolCallInformation:
         raise NotImplementedError('AbstractToolParser.extract_tool_calls has not been implemented!')
 
     def extract_tool_calls_streaming(self, generator):
@@ -25,19 +25,19 @@ class ToolParser:
 class MistralToolParser(ToolParser):
     bot_token: str = '[TOOL_CALLS]'
 
-    def extract_tool_calls(self, model_response: ChatCompletionResponse) -> ExtractedToolCallInformation:
+    def extract_tool_calls(self, model_output: str) -> ExtractedToolCallInformation:
 
         # Get the tool call token from the tokenizer
-        if self.bot_token not in model_response.choices[0].message.content:
+        if self.bot_token not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
-                content=model_response.choices[0].message.content
+                content=model_output
             )
         else:
             try:
                 # extract the token so we hopefully have a JSON string
-                raw_tool_call = (model_response.choices[0].message.content
+                raw_tool_call = (model_output
                                  .replace(MistralToolParser.bot_token, '') # remove BOT token
                                  .replace("'", '"')) # ... hack to parse broken mistral JSON
                 # load the JSON, and then use it to build the Function and Tool Call
@@ -53,7 +53,7 @@ class MistralToolParser(ToolParser):
                     )
                     for raw_function_call in function_call_arr
                 ]
-                content = model_response.choices[0].message.content.split(self.bot_token)[0]
+                content = model_output.split(self.bot_token)[0]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -63,10 +63,11 @@ class MistralToolParser(ToolParser):
             except Exception as e:
                 # TODO discussion on how to best handle invalidly-generated tool calls
                 logger.error("Error in extracting tool call from response: %s", e)
+                print('ERROR', e)
                 return ExtractedToolCallInformation(
                     tools_called=False,
                     tool_calls=[],
-                    content=model_response.choices[0].message.content
+                    content=model_output
                 )
 
     def extract_tool_calls_streaming(self, generator):
@@ -83,14 +84,14 @@ class Hermes2ProToolParser(ToolParser):
     tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>|<tool_call>(.*)', re.DOTALL)
     scratch_pad_regex = re.compile(r'<scratch_pad>(.*?)</scratch_pad>', re.DOTALL)
 
-    def extract_tool_calls(self, model_response: ChatCompletionResponse) -> ExtractedToolCallInformation:
+    def extract_tool_calls(self, model_output: str) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
-        if self.tool_call_start not in model_response.choices[0].message.content:
+        if self.tool_call_start not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
-                content=model_response.choices[0].message.content
+                content=model_output
             )
 
         else:
@@ -98,7 +99,7 @@ class Hermes2ProToolParser(ToolParser):
             try:
                 # there are two possible captures - between tags, or between a tag and end-of-string so the result of findall
                 #   is an array of tuples where one is a function call and the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_response.choices[0].message.content)
+                function_call_tuples = self.tool_call_regex.findall(model_output)
 
                 # load the JSON, and then use it to build the Function and Tool Call
                 raw_function_calls = [json.loads(match[0] if match[0] else match[1]) for match in function_call_tuples]
@@ -112,7 +113,7 @@ class Hermes2ProToolParser(ToolParser):
                         )
                     ) for function_call in raw_function_calls
                 ]
-                content_match = self.scratch_pad_regex.search(model_response.choices[0].message.content)
+                content_match = self.scratch_pad_regex.search(model_output)
                 content = content_match.group(1) if content_match else None
                 return ExtractedToolCallInformation(
                     tools_called=True,
@@ -126,7 +127,7 @@ class Hermes2ProToolParser(ToolParser):
                 return ExtractedToolCallInformation(
                     tools_called=False,
                     tool_calls=[],
-                    content=model_response.choices[0].message.content
+                    content=model_output
                 )
 
     def extract_tool_calls_streaming(self, generator):

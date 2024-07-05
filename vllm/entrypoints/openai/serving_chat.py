@@ -282,7 +282,6 @@ class OpenAIServingChat(OpenAIServing):
                 tools=tools
             )
 
-            print('fully tokenized prompt:', prompt)
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
@@ -363,18 +362,6 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 assert isinstance(generator, ChatCompletionResponse)
-                print('generator', generator)
-
-                # handle tool extraction
-                if self.enable_auto_tools and self.tool_parser:
-                    tool_call_info = self.tool_parser.extract_tool_calls(generator)
-                    if tool_call_info.tools_called:
-                        generator.choices[0].message.content = tool_call_info.content
-                        generator.choices[0].message.tool_calls = [tool_call.to_dict() for tool_call in
-                                                                           tool_call_info.tool_calls]
-                        generator.choices[0].finish_reason = 'tool_calls'
-                    else:
-                        print('no tool calls detected')
                 return generator
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
@@ -601,6 +588,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
+            tools_called = False
             # if the reqeust uses tools and specified a tool choice
             if request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
@@ -613,6 +601,7 @@ class OpenAIServingChat(OpenAIServing):
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
+                tools_called = True
 
             # if the request doesn't use tool choice OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
@@ -620,17 +609,24 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(role=role, content=output.text)
 
             # handle when there are tools and tool choice is auto
-            elif request.tools and (request.tool_choice == "auto" or request.tool_choice is None):
+            elif request.tools and (request.tool_choice == "auto" or request.tool_choice is None) and self.enable_auto_tools and self.tool_parser:
 
+                tool_call_info = self.tool_parser.extract_tool_calls(output.text)
+                tools_called = tool_call_info.tools_called
+                if tool_call_info.tools_called:
+                    message = ChatMessage(role=role, content=tool_call_info.content, tool_calls=tool_call_info.tool_calls)
+
+                else:
                 # FOR NOW make it a chat message; we will have to detect the type to make it later.
-                message = ChatMessage(role=role, content=output.text)
+                    message = ChatMessage(role=role, content=output.text)
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason=output.finish_reason,
-                stop_reason=output.stop_reason)
+                finish_reason='tool_calls' if tools_called else output.stop_reason,
+                stop_reason=output.stop_reason
+            )
             choices.append(choice_data)
 
         if request.echo:
