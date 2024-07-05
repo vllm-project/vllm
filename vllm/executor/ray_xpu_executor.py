@@ -7,9 +7,8 @@ from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Set,
                     Tuple, Union)
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, PromptAdapterConfig,
-                         SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig, PromptAdapterConfig)
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
@@ -44,7 +43,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
@@ -59,7 +58,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.prompt_adapter_config = prompt_adapter_config
 
         placement_group = self.parallel_config.placement_group
@@ -202,7 +201,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
                     rank=rank,
                     distributed_init_method=distributed_init_method,
                     lora_config=self.lora_config,
-                    vision_language_config=self.vision_language_config,
+                    multimodal_config=self.multimodal_config,
                     is_driver_worker=rank == 0,
                 ))
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)

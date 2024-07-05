@@ -7,12 +7,13 @@ import torch.nn as nn
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, PromptAdapterConfig,
-                         SchedulerConfig, VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig, PromptAdapterConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import supports_vision
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
@@ -85,7 +86,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
@@ -98,8 +99,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.cache_config = cache_config
-        self.vision_language_config = vision_language_config
         self.prompt_adapter_config = prompt_adapter_config
+        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
         self.sliding_window = model_config.get_sliding_window()
@@ -136,7 +137,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 device_config=self.device_config,
                 load_config=self.load_config,
                 lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
+                multimodal_config=self.multimodal_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,
@@ -167,12 +168,20 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
         model_config = self.model_config
-        vlm_config = self.vision_language_config
 
-        if vlm_config:
-            max_num_seqs = min(
-                max_num_seqs,
-                int(max_num_batched_tokens / vlm_config.image_feature_size))
+        if supports_vision(self.model):
+            max_mm_tokens = MULTIMODAL_REGISTRY \
+                .get_max_multimodal_tokens(model_config)
+            max_num_seqs_orig = max_num_seqs
+            max_num_seqs = min(max_num_seqs,
+                               max_num_batched_tokens // max_mm_tokens)
+            if max_num_seqs < 1:
+                expr = (f"min({max_num_seqs_orig}, "
+                        f"{max_num_batched_tokens} // {max_mm_tokens})")
+                logger.warning(
+                    "Computed max_num_seqs (%s) to be less than 1. "
+                    "Setting it to the minimum value of 1.", expr)
+                max_num_seqs = 1
 
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +

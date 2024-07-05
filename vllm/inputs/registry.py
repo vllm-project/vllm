@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from .data import LLMInputs
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VisionLanguageConfig
+    from vllm.config import ModelConfig, MultiModalConfig
     from vllm.multimodal import MultiModalDataDict
     from vllm.sequence import SequenceData
 
@@ -30,7 +30,7 @@ class InputContext:
     model_config: "ModelConfig"
     """The configuration of the model."""
 
-    def get_multimodal_config(self) -> "VisionLanguageConfig":
+    def get_multimodal_config(self) -> "MultiModalConfig":
         """
         Get the multimodal configuration of the model.
 
@@ -51,7 +51,7 @@ class InputContext:
         additionally checking its type.
 
         Raises:
-            ValueError: If the model is not of the specified type.
+            TypeError: If the model is not of the specified type.
         """
 
         hf_config = self.model_config.hf_config
