@@ -4,14 +4,17 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
 
-from vllm.config import VisionLanguageConfig
+from vllm.multimodal.utils import rescale_image_size
+from vllm.sequence import SampleLogprobs
 from vllm.model_executor.models.deepseek_vl import (
     MultiModalityPreTrainedModel, VLMImageProcessor, model_name_to_cls)
 from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 
-from ..conftest import HfRunner, VllmRunner, _ImageAssets
-from .utils import check_outputs_equal
+from tests.conftest import HfRunner, VllmRunner, _ImageAssets
+from tests.models.utils import check_logprobs_close
 
+models = ["deepseek-ai/deepseek-vl-7b-chat"]
+IMAGE_TOKEN_ID = 100015
 pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
@@ -85,10 +88,33 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         return inputs_embeds
 
 
+def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+                                         Optional[SampleLogprobs]],
+                      model: str):
+    """Sanitize vllm output to be comparable with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+
+    hf_output_ids = [
+        token_id for idx, token_id in enumerate(output_ids)
+        if token_id != IMAGE_TOKEN_ID or output_ids[idx - 1] != IMAGE_TOKEN_ID
+    ]
+
+    assert output_str[0] == " "
+    hf_output_str = output_str[1:]
+    if hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+
+    return hf_output_ids, hf_output_str, out_logprobs
+
+
 def get_input(tokenizer, prompt, image):
 
     image_id = 100015
     vl_image = VLMImageProcessor(1024)
+    prompt.replace('<image_placeholder>', '<image_placeholder>' * 576)
     input_ids = tokenizer.encode(prompt)
     input_ids = torch.LongTensor(input_ids)
     image_token_mask = input_ids == image_id
@@ -114,63 +140,16 @@ def get_input(tokenizer, prompt, image):
     return prepare
 
 
-def iter_deepseek_vl_configs(model_name: str):
-    image_hw_to_feature_size = {
-        (336, 336): 576,
-    }
-
-    for (h, w), f in image_hw_to_feature_size.items():
-        input_shape = (1, 3, h, w)
-        yield (model_name,
-               VisionLanguageConfig(image_feature_size=f,
-                                    image_token_id=100015,
-                                    image_input_shape=input_shape))
-
-
-model_and_vl_config = [
-    *iter_deepseek_vl_configs("deepseek-ai/deepseek-vl-7b-chat"),
-]
-
-
-def vllm_to_hf_output(
-    vllm_output: Tuple[List[int], str],
-    vlm_config: VisionLanguageConfig,
-    model_id: str,
-):
-    """Sanitize vllm output to be comparable with hf output.
-    The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
-    x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
-    It also reduces `output_str` from 
-    "<image_placeholder><image_placeholder>bla" to "bla".
-    """
-    input_ids, output_str = vllm_output
-    image_token_id = vlm_config.image_token_id
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    image_token_str = tokenizer.decode(image_token_id)
-
-    hf_input_ids = [
-        input_id for idx, input_id in enumerate(input_ids)
-        if input_id != image_token_id or input_ids[idx - 1] != image_token_id
-    ]
-    hf_output_str = output_str.replace(
-        image_token_str * vlm_config.image_feature_size, "")
-
-    return hf_input_ids, hf_output_str
-
-
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     image_assets: _ImageAssets,
-    model_and_config: Tuple[str, VisionLanguageConfig],
+    model: str,
     *,
+    size_factors: List[float],
     dtype: str,
     max_tokens: int,
+    num_logprobs: int,
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ) -> None:
@@ -183,53 +162,57 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    model_id, vlm_config = model_and_config
-    hf_images = [asset.for_hf() for asset in image_assets]
+    images = [asset.pil_image for asset in image_assets]
 
-    vllm_image_prompts = [
-        p.replace(
-            "<image_placeholder>",
-            "<image_placeholder>" * vlm_config.image_feature_size,
-        ) for p in HF_IMAGE_PROMPTS
-    ]
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
-    with vllm_runner(
-            model_id,
-            dtype=dtype,
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend=distributed_executor_backend,
-            enforce_eager=True,
-            **vlm_config.as_cli_args_dict(),
-    ) as vllm_model:
-        vllm_images = [asset.for_vllm() for asset in image_assets]
-        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                                  max_tokens,
-                                                  images=vllm_images)
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
+
+    # max_model_len should be greater than image_feature_size
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
+        vllm_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs_per_image
+        ]
+
     AutoModelForCausalLM.register(DeepSeekMultiModalityConfig,
                                   MultiModalityCausalLM)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_id,
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    hf_model = AutoModelForCausalLM.from_pretrained(model,
                                                     trust_remote_code=True)
     hf_model = hf_model.to("cuda").eval()
-    prepare_input_one = get_input(
-        tokenizer,
-        vllm_image_prompts[0],
-        hf_images,
-    )
-    prepare_input_two = get_input(
-        tokenizer,
-        vllm_image_prompts[1],
-        hf_images,
-    )
-    prepare_input_one = hf_model.prepare_inputs_embeds(**prepare_input_one)
-    prepare_input_two = hf_model.prepare_inputs_embeds(**prepare_input_two)
-    prepare_input = torch.concat(prepare_input_one, prepare_input_two)
+    prepare_input_list = []
+    inputs_embeds_list = []
+    for prompts, images in inputs_per_image:
+        print(f'prompt: {prompts}')
+        print(f'images: {images}')
+        prepare_input = get_input(
+            tokenizer,
+            prompts,
+            images,
+        )
+        prepare_input_list.append(prepare_input)
+        inputs_embeds_list.append(
+            hf_model.prepare_inputs_embeds(**prepare_input))
+
+    inputs_embeds = torch.concat(inputs_embeds_list)
     attention_mask = torch.concat(
-        prepare_input_one["attention_mask"],
-        prepare_input_two["attention_mask"],
-    )
+        [x['attention_mask'] for x in prepare_input_list])
     outputs = hf_model.generate(
-        inputs_embeds=prepare_input,
+        inputs_embeds=inputs_embeds,
         attention_mask=attention_mask,
         max_new_tokens=max_tokens,
         pad_token_id=tokenizer.eos_token_id,
@@ -239,38 +222,53 @@ def run_test(
         use_cache=True,
     )
     hf_outputs: List = []
+
     for o in outputs:
         hf_outputs.append(
             (o, tokenizer.decode(o.cpu().tolist(), skip_special_tokens=True)))
 
-    check_outputs_equal(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=[
-            vllm_to_hf_output(vllm_output, vlm_config, model_id)
-            for vllm_output in vllm_outputs
-        ],
-        name_0="hf",
-        name_1="vllm",
-    )
+    for hf_outputs, vllm_outputs in zip(hf_outputs, vllm_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=[
+                vllm_to_hf_output(vllm_output, model)
+                for vllm_output in vllm_outputs
+            ],
+            name_0="hf",
+            name_1="vllm",
+        )
+    print('END---->')
 
 
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # No image
+        [],
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ],
+)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model_and_config,
-    dtype: str,
-    max_tokens: int,
-) -> None:
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+                dtype: str, max_tokens: int, num_logprobs: int) -> None:
     run_test(
         hf_runner,
         vllm_runner,
         image_assets,
-        model_and_config,
+        model,
+        size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )
