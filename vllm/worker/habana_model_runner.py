@@ -1130,7 +1130,9 @@ class HabanaModelRunner:
         return self.model_config.get_vocab_size()
 
 def _maybe_wrap_in_hpu_graph(model):
-    return htorch.hpu.wrap_in_hpu_graph(HpuModelAdapter(model)) if htorch.utils.internal.is_lazy() else HpuModelAdapter(model)
+    return htorch.hpu.wrap_in_hpu_graph(
+        HpuModelAdapter(model), disable_tensor_cache=True
+    ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(model)
 
 
 class HabanaProfilerCounterHelper():
