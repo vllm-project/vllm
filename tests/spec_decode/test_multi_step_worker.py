@@ -12,7 +12,7 @@ from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 
-from .utils import (assert_logprobs_dict_allclose, create_batch,
+from .utils import (assert_logprobs_dict_allclose, create_batch, create_sampler_output_list,
                     create_seq_group_metadata_from_prompts, create_worker,
                     patch_execute_model_with_seeds, zero_kv_cache)
 
@@ -543,53 +543,45 @@ def test_expand_execute_model_request_for_bonus_tokens():
 
 
 @torch.inference_mode()
-def test_filter_model_output():
+@pytest.mark.parametrize('num_steps', [1, 2, 6])
+@pytest.mark.parametrize('batch_size', [1, 32, 64])
+def test_filter_model_output(num_steps: int, batch_size: int):
     """
     Test the _filter_model_output function of the MultiStepWorker class.
 
     This test ensures that the _filter_model_output method correctly filters the
     model's output, retaining only the specified sequences.
     """
+    vocab_size = 32_000
 
-    seed = 100
-    model_name = 'JackFram/llama-68m'
-    block_size = 16
-    num_gpu_blocks = 2048 // block_size
-    # generate the prompts and continuations and construct a
-    # ExecuteModelRequest using them.
-    prompts = [[
-        random.randint(0, 1000) for _ in range(random.randint(10, 20))
-    ] for _ in range(10)]
-    continuations = [[random.randint(0, 1000) for _ in range(random.randint(1, 10))] for _ in prompts]
-    execute_model_request = ExecuteModelRequest(
-        seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts,
-            num_gpu_blocks,
-            block_size,
-            continuations=continuations,
-            final_prompt_lens=[len(prompt) + 100 for prompt in prompts]))
-    # Generate a list of output indices to retain.
-    num_outputs_to_retain = len(prompts) // 2 
-    output_indices_to_retain= random.sample(
-        range(len(prompts)), num_outputs_to_retain)
-    # Initialize a worker and use it to make a forward pass of the model
-    # and generate output corresponding to execute_model_request.
-    worker = create_worker(
-        Worker,
-        model_name,
-        block_size,
-        num_gpu_blocks,
-        seed,
-    )
-    step_output = worker.execute_model(
-        execute_model_req=execute_model_request)
-    # Filter the model output using _filter_model_output and validate
-    # the results.
-    filtered_output = MultiStepWorker._filter_model_output(
-        step_output[0], output_indices_to_retain)
-    for index, output in enumerate(filtered_output[0].outputs):
-        assert output == \
-            step_output[0].outputs[output_indices_to_retain[index]]
+    target_token_ids = torch.randint(low=0,
+                                     high=vocab_size,
+                                     size=(batch_size , (num_steps)),
+                                     dtype=torch.int64,
+                                     device='cuda')
+    target_token_probs = torch.rand(batch_size,
+                                    num_steps,
+                                    vocab_size,
+                                    dtype=torch.float32,
+                                    device='cuda')
+    target_token_logprobs = torch.rand(batch_size,
+                                       num_steps,
+                                       vocab_size,
+                                       dtype=torch.float32,
+                                       device='cuda')
+    sampler_output_list = create_sampler_output_list(target_token_ids,
+                                               target_token_probs,
+                                               target_token_logprobs)
+    output_indices_to_retain = random.sample(
+        range(num_steps), max(1, num_steps // 2))
+    filtered_sampler_output_list = MultiStepWorker._filter_model_output(
+        sampler_output_list, output_indices_to_retain)
+    for outer_index, sampler_output in enumerate(sampler_output_list):
+        filtered_sampler_output = filtered_sampler_output_list[outer_index]
+        for inner_index, index_to_retain in enumerate(output_indices_to_retain):
+            assert sampler_output.outputs[index_to_retain] == \
+                filtered_sampler_output.outputs[inner_index]
+
 
 
 
