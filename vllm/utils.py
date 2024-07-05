@@ -965,9 +965,9 @@ class DeferredTensor:
         if shape:
             self._meta_tensor = torch.zeros(*shape, dtype=dtype, device="meta")
         else:
-            self._meta_tensor = torch.tensor(tuple(),
-                                             dtype=dtype,
-                                             device="meta")
+            self._meta_tensor = torch.zeros(tuple(),
+                                            dtype=dtype,
+                                            device="meta")
 
     def __getattr__(self, name):
         if name in ["shape", "dtype", "size", "stride"]:
