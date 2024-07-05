@@ -1,7 +1,7 @@
 # coding=utf-8
 """Inference-only Jurassic model."""
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -35,7 +35,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import DeferredTensor, ensure_tensor
 from vllm.worker.model_runner import _BATCH_SIZES_TO_CAPTURE
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -99,9 +98,7 @@ class JambaMambaMixer(nn.Module):
                                             bias=True,
                                             skip_bias_add=True)
 
-        def weight_loader(param: Parameter,
-                          loaded_weight: Union[torch.Tensor, DeferredTensor]):
-            loaded_weight = ensure_tensor(loaded_weight)
+        def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
             param.data.copy_(
@@ -109,7 +106,6 @@ class JambaMambaMixer(nn.Module):
                                          dim=0)[tp_rank])
 
         def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            loaded_weight = ensure_tensor(loaded_weight)
             weight_loader(param, -torch.exp(loaded_weight.float()))
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -348,7 +344,7 @@ class JambaMoE(nn.Module):
     def weight_loader(
         self,
         param: nn.Parameter,
-        loaded_weight: Union[torch.Tensor, DeferredTensor],
+        loaded_weight: torch.Tensor,
         weight_name: str,
         expert_id: int,
     ):
@@ -357,21 +353,12 @@ class JambaMoE(nn.Module):
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("gate_proj.weight"):
-            loaded_weight = loaded_weight.narrow(0, shard.start,
-                                                 shard.stop - shard.start)
-            loaded_weight = ensure_tensor(loaded_weight)
-            param_data[expert_id, 0:shard_size, :].copy_(loaded_weight)
+            param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("up_proj.weight"):
-            loaded_weight = loaded_weight.narrow(0, shard.start,
-                                                 shard.stop - shard.start)
-            loaded_weight = ensure_tensor(loaded_weight)
             param_data[expert_id,
-                       shard_size:2 * shard_size, :].copy_(loaded_weight)
+                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("down_proj.weight"):
-            loaded_weight = loaded_weight.narrow(1, shard.start,
-                                                 shard.stop - shard.start)
-            loaded_weight = ensure_tensor(loaded_weight)
-            param_data[expert_id, :, :].copy_(loaded_weight)
+            param_data[expert_id, :, :] = loaded_weight[:, shard]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
