@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalData
+    from vllm.multimodal import MultiModalDataDict
 
 
 class ParsedText(TypedDict):
@@ -72,7 +72,7 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -85,7 +85,7 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: List[int]
     """A list of token IDs to pass to the model."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -101,10 +101,9 @@ class TextTokensPrompt(TypedDict):
     """The prompt text."""
 
     prompt_token_ids: List[int]
-    """The token IDs of the prompt. If None, we use the
-    tokenizer to convert the prompts to token IDs."""
+    """The token IDs of the prompt."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -125,6 +124,20 @@ PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
 
 
 class LLMInputs(TypedDict):
+    """
+    The inputs in :class:`~vllm.LLMEngine` before they are
+    passed to the model executor.
+    """
     prompt_token_ids: List[int]
+    """The token IDs of the prompt."""
+
     prompt: NotRequired[Optional[str]]
-    multi_modal_data: NotRequired[Optional["MultiModalData"]]
+    """
+    The original prompt text corresponding to the token IDs, if available.
+    """
+
+    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """

@@ -16,7 +16,7 @@ from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ..utils import RemoteOpenAIServer
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -71,17 +71,15 @@ TEST_CHOICE = [
     "Swift", "Kotlin"
 ]
 
-pytestmark = pytest.mark.openai
 
-
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init()
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
     yield
     ray.shutdown()
 
@@ -114,18 +112,6 @@ def server(zephyr_lora_files, ray_ctx):
 @pytest.fixture(scope="module")
 def client(server):
     return server.get_async_client()
-
-
-@pytest.mark.asyncio
-async def test_check_models(client: openai.AsyncOpenAI):
-    models = await client.models.list()
-    models = models.data
-    served_model = models[0]
-    lora_models = models[1:]
-    assert served_model.id == MODEL_NAME
-    assert all(model.root == MODEL_NAME for model in models)
-    assert lora_models[0].id == "zephyr-lora"
-    assert lora_models[1].id == "zephyr-lora2"
 
 
 @pytest.mark.asyncio
@@ -620,7 +606,7 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
     [MODEL_NAME],
 )
 async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
-    base_url = str(client.base_url)[:-3]
+    base_url = str(client.base_url)[:-3].strip("/")
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
 
     for add_special in [False, True]:
@@ -660,7 +646,3 @@ async def test_detokenize(client: openai.AsyncOpenAI, model_name: str):
                              })
     response.raise_for_status()
     assert response.json() == {"prompt": prompt}
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

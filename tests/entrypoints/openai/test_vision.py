@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Dict, List
 
 import openai
@@ -8,12 +7,12 @@ import ray
 
 from vllm.multimodal.utils import ImageFetchAiohttp, encode_image_base64
 
-from ..utils import RemoteOpenAIServer
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-LLAVA_CHAT_TEMPLATE = (Path(__file__).parent.parent.parent /
-                       "examples/template_llava.jinja")
+LLAVA_CHAT_TEMPLATE = VLLM_PATH / "examples/template_llava.jinja"
 assert LLAVA_CHAT_TEMPLATE.exists()
+
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
@@ -22,18 +21,16 @@ TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
-pytestmark = pytest.mark.openai
-
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init()
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
     yield
     ray.shutdown()
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(ray_ctx):
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
@@ -42,14 +39,6 @@ def server():
         "--max-model-len",
         "4096",
         "--enforce-eager",
-        "--image-input-type",
-        "pixel_values",
-        "--image-token-id",
-        "32000",
-        "--image-input-shape",
-        "1,3,336,336",
-        "--image-feature-size",
-        "576",
         "--chat-template",
         str(LLAVA_CHAT_TEMPLATE),
     ])
@@ -279,7 +268,3 @@ async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
     )
     completion = completion.choices[0].text
     assert completion is not None and len(completion) >= 0
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

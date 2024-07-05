@@ -4,7 +4,8 @@ import sys
 import time
 import warnings
 from contextlib import contextmanager
-from typing import Dict, List
+from pathlib import Path
+from typing import Any, Dict, List
 
 import openai
 import ray
@@ -40,15 +41,14 @@ else:
             nvmlShutdown()
 
 
-# Path to root of repository so that utilities can be imported by ray workers
-VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
+VLLM_PATH = Path(__file__).parent.parent
+"""Path to root of the vLLM repository."""
 
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    @ray.remote(num_gpus=1)
     class _RemoteRunner:
 
         def __init__(self, cli_args: List[str], *, wait_url: str,
@@ -91,7 +91,11 @@ class RemoteOpenAIServer:
             if hasattr(self, "proc"):
                 self.proc.terminate()
 
-    def __init__(self, cli_args: List[str], *, auto_port: bool = True) -> None:
+    def __init__(self,
+                 cli_args: List[str],
+                 *,
+                 auto_port: bool = True,
+                 num_gpus: int = 1) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -104,10 +108,11 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        self._runner = self._RemoteRunner.remote(  # type: ignore
-            cli_args,
-            wait_url=self.url_for("health"),
-            wait_timeout=self.MAX_SERVER_START_WAIT_S)
+        self._runner = ray.remote(num_gpus=num_gpus)(
+            self._RemoteRunner).remote(
+                cli_args,
+                wait_url=self.url_for("health"),
+                wait_timeout=self.MAX_SERVER_START_WAIT_S)
 
         self._wait_until_ready()
 
@@ -153,10 +158,12 @@ def init_test_distributed_environment(
 def multi_process_parallel(
     tp_size: int,
     pp_size: int,
-    test_target,
+    test_target: Any,
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
+    # NOTE: We need to set working_dir for distributed tests,
+    # otherwise we may get import errors on ray workers
     ray.init(runtime_env={"working_dir": VLLM_PATH})
 
     distributed_init_port = get_open_port()
