@@ -674,7 +674,7 @@ class ExtractedToolCallInformation(BaseModel):
 
 class ChatMessage(OpenAIBaseModel):
     role: str
-    content: str
+    content: Optional[str | None]
     tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
