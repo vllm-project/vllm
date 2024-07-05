@@ -498,9 +498,10 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         actual_dims = tuple(data.shape[1:])
 
         if actual_dims != expected_dims:
+            expected_expr = ("batch_size", *map(str, expected_dims))
             raise ValueError(
-                "The expected shape of pixel values is batch dimension plus "
-                f"{actual_dims}. You supplied {tuple(data.shape)}.")
+                f"The expected shape of pixel values is {expected_expr}. "
+                f"You supplied {tuple(data.shape)}.")
 
         return data
 
