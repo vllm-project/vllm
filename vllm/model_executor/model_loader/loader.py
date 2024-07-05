@@ -36,7 +36,7 @@ from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import DeferredTensor, is_tpu
+from vllm.utils import is_tpu
 
 logger = init_logger(__name__)
 
@@ -719,9 +719,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                        for target_module in self.target_modules):
                     weight_name = weight_name.replace(".weight", ".qweight")
                     #  bitsandbytes requires data in GPU
-                    if isinstance(weight_tensor, DeferredTensor):
-                        weight_tensor = weight_tensor.materialize()
-                    assert isinstance(weight_tensor, torch.Tensor)
                     loaded_weight = weight_tensor.cuda().data
                     with set_default_torch_dtype(torch.float32):
                         processed_weight, quant_state = quantize_4bit(

@@ -60,4 +60,6 @@ def test_deferred_tensor():
             stacked[0] = dt # test we can use `__setitem__` to assign
             if k != "scalar":
                 real_tensor[1:] = dt[1:] # test we can assign slices
+            assert torch.allclose(real_tensor.cpu(), dt.cpu()) # test we can move to device
+            assert torch.allclose(real_tensor.to(dtype=torch.float64), dt.to(dtype=torch.float64)) # test we can change dtype
             assert torch.allclose(real_tensor + 1, dt + 1)
