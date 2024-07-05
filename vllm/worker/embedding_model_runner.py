@@ -5,7 +5,7 @@ import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
@@ -52,7 +52,7 @@ class EmbeddingModelRunner(
                          lora_config=lora_config,
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
-                         prompt_adapter_config=prompt_adapter_config)
+                         prompt_adapter_config=prompt_adapter_config,
                          multimodal_config=multimodal_config)
 
     @torch.inference_mode()
