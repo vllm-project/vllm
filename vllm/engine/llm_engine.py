@@ -1,19 +1,20 @@
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
-from transformers import GenerationConfig, PreTrainedTokenizer
+from transformers import PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         LoRAConfig, ModelConfig, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import StatLogger, Stats
+from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
+                                 StatLoggerBase, Stats)
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -33,6 +34,7 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
+from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -45,15 +47,17 @@ logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 
-def _load_generation_config_dict(model_config: ModelConfig):
-    try:
-        return GenerationConfig.from_pretrained(
-            model_config.model,
-            revision=model_config.revision,
-        ).to_diff_dict()
-    except OSError:
-        # Not found.
+def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
+    config = try_get_generation_config(
+        model_config.model,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=model_config.revision,
+    )
+
+    if config is None:
         return {}
+
+    return config.to_diff_dict()
 
 
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
@@ -83,8 +87,8 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        vision_language_config (Optional): The configuration related to vision
-            language models.
+        multimodal_config (Optional): The configuration related to multimodal 
+            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
@@ -153,13 +157,14 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -168,11 +173,13 @@ class LLMEngine:
             "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+            "pipeline_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s)",
+            "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
+            "enable_prefix_caching=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -189,6 +196,7 @@ class LLMEngine:
             load_config.download_dir,
             load_config.load_format,
             parallel_config.tensor_parallel_size,
+            parallel_config.pipeline_parallel_size,
             parallel_config.disable_custom_all_reduce,
             model_config.quantization,
             model_config.enforce_eager,
@@ -199,13 +207,15 @@ class LLMEngine:
             observability_config,
             model_config.seed,
             model_config.served_model_name,
+            scheduler_config.use_v2_block_manager,
+            cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -237,7 +247,7 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            vision_language_config=vision_language_config,
+            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
         )
@@ -288,15 +298,29 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        self.scheduler = [
+            Scheduler(scheduler_config, cache_config, lora_config,
+                      parallel_config.pipeline_parallel_size)
+            for _ in range(parallel_config.pipeline_parallel_size)
+        ]
 
         # Metric Logging.
         if self.log_stats:
-            self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.served_model_name),
-                max_model_len=self.model_config.max_model_len)
-            self.stat_logger.info("cache_config", self.cache_config)
+            if stat_loggers is not None:
+                self.stat_loggers = stat_loggers
+            else:
+                self.stat_loggers = {
+                    "logging":
+                    LoggingStatLogger(
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
+                    "prometheus":
+                    PrometheusStatLogger(
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                        labels=dict(model_name=model_config.served_model_name),
+                        max_model_len=self.model_config.max_model_len),
+                }
+                self.stat_loggers["prometheus"].info("cache_config",
+                                                     self.cache_config)
 
         self.tracer = None
         if self.observability_config.otlp_traces_endpoint:
@@ -495,8 +519,16 @@ class LLMEngine:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
 
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        # Add the sequence group to the scheduler with least unfinished seqs.
+        costs = [
+            scheduler.get_num_unfinished_seq_groups()
+            for scheduler in self.scheduler
+        ]
+        min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+        min_cost_scheduler.add_seq_group(seq_group)
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        self.model_executor.stop_remote_worker_execution_loop()
 
     def process_model_inputs(
         self,
@@ -666,7 +698,8 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
-        self.scheduler.abort_seq_group(request_id)
+        for scheduler in self.scheduler:
+            scheduler.abort_seq_group(request_id)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -678,11 +711,20 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
-        return self.scheduler.get_num_unfinished_seq_groups()
+        return sum(scheduler.get_num_unfinished_seq_groups()
+                   for scheduler in self.scheduler)
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        return self.scheduler.has_unfinished_seqs()
+        return any(scheduler.has_unfinished_seqs()
+                   for scheduler in self.scheduler)
+
+    def has_unfinished_requests_for_virtual_engine(
+            self, virtual_engine: int) -> bool:
+        """
+        Returns True if there are unfinished requests for the virtual engine.
+        """
+        return self.scheduler[virtual_engine].has_unfinished_seqs()
 
     def _process_sequence_group_outputs(
         self,
@@ -731,7 +773,8 @@ class LLMEngine:
                 self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
-        self.scheduler.free_finished_seq_groups()
+        for scheduler in self.scheduler:
+            scheduler.free_finished_seq_groups()
 
         # Create the outputs.
         request_outputs: List[Union[RequestOutput,
@@ -797,7 +840,14 @@ class LLMEngine:
             >>>     if not (engine.has_unfinished_requests() or example_inputs):
             >>>         break
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise NotImplementedError(
+                "Pipeline parallelism is only supported through AsyncLLMEngine "
+                "as performance will be severely degraded otherwise.")
+        seq_group_metadata_list, scheduler_outputs = self.scheduler[
+            0].schedule()
+        finished_requests_ids = self.scheduler[
+            0].get_and_reset_finished_requests_ids()
 
         if not scheduler_outputs.is_empty():
             execute_model_req = ExecuteModelRequest(
@@ -807,7 +857,7 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-            )
+                finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:
@@ -823,7 +873,7 @@ class LLMEngine:
         # Tracing
         self.do_tracing(scheduler_outputs)
 
-        if not request_outputs:
+        if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
             # torch.distributed ops which may otherwise timeout, and unblocks
@@ -833,14 +883,24 @@ class LLMEngine:
 
         return request_outputs
 
+    def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
+        if logger_name in self.stat_loggers:
+            raise KeyError(f"Logger with name {logger_name} already exists.")
+        self.stat_loggers[logger_name] = logger
+
+    def remove_logger(self, logger_name: str) -> None:
+        if logger_name not in self.stat_loggers:
+            raise KeyError(f"Logger with name {logger_name} does not exist.")
+        del self.stat_loggers[logger_name]
+
     def do_log_stats(
             self,
             scheduler_outputs: Optional[SchedulerOutputs] = None,
             model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            self.stat_logger.log(
-                self._get_stats(scheduler_outputs, model_output))
+            for logger in self.stat_loggers.values():
+                logger.log(self._get_stats(scheduler_outputs, model_output))
 
     def _get_stats(
             self,
@@ -858,23 +918,28 @@ class LLMEngine:
 
         # System State
         #   Scheduler State
-        num_running_sys = len(self.scheduler.running)
-        num_swapped_sys = len(self.scheduler.swapped)
-        num_waiting_sys = len(self.scheduler.waiting)
+        num_running_sys = sum(
+            len(scheduler.running) for scheduler in self.scheduler)
+        num_swapped_sys = sum(
+            len(scheduler.swapped) for scheduler in self.scheduler)
+        num_waiting_sys = sum(
+            len(scheduler.waiting) for scheduler in self.scheduler)
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
         gpu_cache_usage_sys = 0.
         if num_total_gpu is not None:
-            num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks(
-            )
+            num_free_gpu = sum(
+                scheduler.block_manager.get_num_free_gpu_blocks()
+                for scheduler in self.scheduler)
             gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage_sys = 0.
         if num_total_cpu is not None and num_total_cpu > 0:
-            num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
-            )
+            num_free_cpu = sum(
+                scheduler.block_manager.get_num_free_cpu_blocks()
+                for scheduler in self.scheduler)
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Iteration stats
