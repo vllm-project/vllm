@@ -2195,6 +2195,7 @@ def input_processor_for_deepseek(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(IMAGE_FEATURE_SIZE)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_deepseek)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_deepseek)
 class DeepSeekMultiModalityCausalLM(nn.Module, SupportsVision):
