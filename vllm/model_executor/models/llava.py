@@ -5,7 +5,7 @@ import torch.nn as nn
 from transformers import CLIPVisionConfig, LlavaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -21,7 +21,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
-                   input_processor_for_clip)
+                   get_max_clip_image_tokens, input_processor_for_clip)
 from .interfaces import SupportsVision
 from .utils import merge_vision_embeddings
 
@@ -60,6 +60,17 @@ class LlavaImagePixelInputs(TypedDict):
 
 
 LlavaImageInputs = LlavaImagePixelInputs
+
+
+def get_max_llava_image_tokens(ctx: InputContext):
+    hf_config = ctx.get_hf_config(LlavaConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        return get_max_clip_image_tokens(vision_config)
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
 def dummy_data_for_llava(ctx: InputContext, seq_len: int):
@@ -102,19 +113,20 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: LlavaConfig,
-                 vlm_config: VisionLanguageConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.vlm_config = vlm_config
+        self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = CLIPVisionModel(config.vision_config)
@@ -138,14 +150,13 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
         self.sampler = Sampler()
 
     def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != list(self.vlm_config.image_input_shape[1:]):
+        if list(data.shape)[1:] != [
+                3, self.config.vision_config.image_size,
+                self.config.vision_config.image_size
+        ]:
             raise ValueError(
-                f"The expected image tensor shape is batch dimension plus "
-                f"{self.vlm_config.image_input_shape[1:]}. "
-                f"You supplied {data.shape}. "
-                f"If you are using vLLM's entrypoint, make sure your "
-                f"supplied image input is consistent with "
-                f"image_input_shape in engine args.")
+                "The expected image tensor shape is batch dimension plus "
+                "channel, height and width.")
 
         return data
 
@@ -244,7 +255,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
             inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
-                self.vlm_config.image_token_id)
+                self.config.image_token_index)
 
             input_ids = None
         else:

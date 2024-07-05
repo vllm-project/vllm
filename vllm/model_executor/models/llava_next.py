@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ from transformers.models.llava_next.modeling_llava_next import (
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -36,6 +36,9 @@ _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
 }
+
+# Result in the max possible feature size (2x2 grid of 336x336px tiles)
+MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
 
 
 class LlavaNextImagePixelInputs(TypedDict):
@@ -127,17 +130,20 @@ def get_llava_next_image_feature_size(
     raise NotImplementedError(msg)
 
 
+def get_max_llava_next_image_tokens(ctx: InputContext):
+
+    return get_llava_next_image_feature_size(
+        ctx.get_hf_config(LlavaNextConfig),
+        input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+    )
+
+
 def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(LlavaNextConfig)
     vision_config = hf_config.vision_config
 
-    # Result in the max possible feature size (2x2 grid of 336x336px tiles)
-    dummy_height = dummy_width = 448
-    image_feature_size = get_llava_next_image_feature_size(
-        hf_config,
-        input_height=dummy_height,
-        input_width=dummy_width,
-    )
+    image_feature_size = get_max_llava_next_image_tokens(ctx)
 
     if isinstance(vision_config, CLIPVisionConfig):
         seq_data = dummy_seq_data_for_clip(
@@ -149,8 +155,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
 
         mm_data = dummy_image_for_clip(
             vision_config,
-            image_width_override=dummy_width,
-            image_height_override=dummy_height,
+            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         )
 
         return seq_data, mm_data
@@ -198,19 +204,20 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: LlavaNextConfig,
-                 vlm_config: VisionLanguageConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.vlm_config = vlm_config
+        self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = CLIPVisionModel(config=config.vision_config)
@@ -244,6 +251,47 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         return data
 
+    def _validate_pixel_values(
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
+        def _validate_shape(data: torch.Tensor):
+
+            dim = data.dim()
+            height = width = self.config.vision_config.image_size
+            # All 4d image tensors have the same number of patches,
+            # so data is a 5d batch of these tensors
+            if dim == 5:
+                if list(data.shape)[2:] != [
+                        3, self.config.vision_config.image_size,
+                        self.config.vision_config.image_size
+                ]:
+                    raise ValueError(
+                        "Expected pixel value tensor in shape of: (batch size, "
+                        f"patch number, 3, {height}, {width}), got {data.shape}"
+                    )
+
+            # 4d image tensors have different number of patches,
+            # so data is each individual tensor.
+            elif dim == 4:
+                if list(data.shape)[1:] != [
+                        3, self.config.vision_config.image_size,
+                        self.config.vision_config.image_size
+                ]:
+                    raise ValueError(
+                        "Expected pixel value tensor in shape of: (patch "
+                        f"number, 3, {height}, {width}), got {data.shape}")
+            else:
+                raise ValueError(
+                    f"Invalid pixel value tensor of shape {data.shape}")
+
+        if isinstance(data, torch.Tensor):
+            _validate_shape(data)
+        else:
+            [_validate_shape(d) for d in data]
+
+        return data
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaNextImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -262,7 +310,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         return LlavaNextImagePixelInputs(
             type="pixel_values",
-            data=pixel_values,
+            data=self._validate_pixel_values(pixel_values),
             image_sizes=self._validate_image_sizes(image_sizes),
         )
 
@@ -454,7 +502,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
             inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
-                self.vlm_config.image_token_id)
+                self.config.image_token_index)
 
             input_ids = None
         else:
