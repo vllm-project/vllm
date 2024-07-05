@@ -124,18 +124,18 @@ def get_input(tokenizer, prompt, image):
         "sft_format":
         prompt,
         "input_ids":
-        input_ids.to("cuda"),
+        input_ids,
         "pixel_values":
-        images_outputs.pixel_values.to(torch.bfloat16).to("cuda").reshape(
+        images_outputs.pixel_values.to(torch.bfloat16).reshape(
             1, -1, 3, 1024, 1024),
         "num_image_tokens":
         576,
         "images_seq_mask":
-        image_token_mask.to("cuda").reshape(1, -1),
+        image_token_mask.reshape(1, -1),
         "images_emb_mask":
-        images_emb_mask.to("cuda"),
+        images_emb_mask,
         "attention_mask":
-        torch.ones(1, len(input_ids)).to("cuda"),
+        torch.ones(1, len(input_ids)),
     }
     return prepare
 
@@ -193,7 +193,7 @@ def run_test(
     tokenizer = AutoTokenizer.from_pretrained(model)
     hf_model = AutoModelForCausalLM.from_pretrained(model,
                                                     trust_remote_code=True)
-    hf_model = hf_model.to("cuda").eval()
+    hf_model = hf_model
     prepare_input_list = []
     inputs_embeds_list = []
     for prompts, images in inputs_per_image:
