@@ -9,6 +9,8 @@ logger = init_logger(__name__)
 
 
 def maybe_set_triton_cache_manager() -> None:
+    """Set environment variable to tell Triton to use a
+    custom cache manager"""
     cache_manger = os.environ.get("TRITON_CACHE_MANAGER", None)
     if cache_manger is None:
         manager = "vllm.triton_utils.custom_cache_manager:CustomCacheManager"
@@ -17,6 +19,11 @@ def maybe_set_triton_cache_manager() -> None:
 
 
 class CustomCacheManager(FileCacheManager):
+    """Re-implements Triton's cache manager, ensuring that a
+    unique cache directory is created for each process. This is
+    needed to avoid collisions when running with tp>1 and
+    using multi-processing as the distributed backend.
+    """
 
     def __init__(self, key, override=False, dump=False):
         self.key = key
