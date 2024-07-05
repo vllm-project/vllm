@@ -43,10 +43,10 @@ def test_deferred_tensor():
     from safetensors import safe_open
     from safetensors.torch import save_file
     tensors = {
-        "scalar": torch.zeros(tuple()),
-        "vector": torch.zeros(2),
-        "matrix": torch.zeros((2, 3)),
-        "tensor": torch.zeros((2, 3, 4)),
+        "scalar": torch.ones(tuple()),
+        "vector": torch.ones(2),
+        "matrix": torch.ones((2, 3)),
+        "tensor": torch.ones((2, 3, 4)),
     }
     save_file(tensors, "model.safetensors")
 
@@ -60,9 +60,14 @@ def test_deferred_tensor():
             stacked[0] = dt  # test we can use `__setitem__` to assign
             if k != "scalar":
                 real_tensor[1:] = dt[1:]  # test we can assign slices
+            if k in ["matrix", "tensor"]:
+                real_norm = torch.nn.functional.normalize(real_tensor)
+                dt_norm = torch.nn.functional.normalize(dt)
+                assert torch.allclose(real_norm, dt_norm) # test we can use `normalize`
             assert torch.allclose(real_tensor.cpu(),
                                   dt.cpu())  # test we can move to device
             assert torch.allclose(
                 real_tensor.to(dtype=torch.float64),
                 dt.to(dtype=torch.float64))  # test we can change dtype
+
             assert torch.allclose(real_tensor + 1, dt + 1)
