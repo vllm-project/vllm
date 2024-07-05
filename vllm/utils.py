@@ -925,28 +925,208 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
 
 class DeferredTensor:
+    """This class is a placeholder for a tensor that is not materialized yet.
+    It is initialized by safetensors `get_slice` method.
+    When we pass the object around, it will not materialize the tensor until
+    torch functions are called on it.
+    Notable exceptions are `shape`, `dtype`, `size`, `stride` which will be
+    returned directly without materializing the tensor.
+    Notable optimization is `narrow` method which will only materialize the
+    tensor slice that is narrowed, reducing the disk reads. Either `torch.narrow`
+    or `tensor.narrow` will materialize the tensor.
 
-    def __init__(self, slice_view, slices=None, narrow_count=0):
-        self.slice_view = slice_view
-        self.shape = torch.Size(slice_view.get_shape())
-        if slices is None:
-            slices = tuple(slice(None, None, None) for x in self.shape)
-        self.slices = slices
-        self.narrow_count = narrow_count
-        self.materialized_tensor: Optional[torch.Tensor] = None
+    Basically, you can use instances of this class when you need values of the
+    tensor, but don't need in-place update of the tensor.
+    """ # noqa
 
-    def narrow(self, dim, start_idx, length) -> 'DeferredTensor':
-        if self.narrow_count > 0:
-            raise ValueError(
-                "Cannot narrow a tensor that has already been narrowed")
-        slices = list(self.slices)
-        slices[dim] = slice(start_idx, start_idx + length)
-        return DeferredTensor(self.slice_view, tuple(slices), 1)
+    def __init__(self, slice_view):
+        self._slice_view = slice_view
+
+        # code from https://github.com/huggingface/safetensors/blob/079781fd0dc455ba0fe851e2b4507c33d0c0d407/bindings/python/src/lib.rs#L40 # noqa
+        type_mapping = {
+            "BOOL": torch.bool,
+            "I8": torch.int8,
+            "U8": torch.uint8,
+            "I16": torch.int16,
+            "U16": torch.uint16,
+            "I32": torch.int32,
+            "U32": torch.uint32,
+            "I64": torch.int64,
+            "U64": torch.uint64,
+            "F16": torch.float16,
+            "F32": torch.float32,
+            "F64": torch.float64,
+            "BF16": torch.bfloat16,
+            "F8_E4M3": torch.float8_e4m3fn,
+            "F8_E5M2": torch.float8_e5m2
+        }
+        dtype = type_mapping[slice_view.get_dtype()]
+        shape = tuple(slice_view.get_shape())
+        if shape:
+            self._meta_tensor = torch.zeros(*shape, dtype=dtype, device="meta")
+        else:
+            self._meta_tensor = torch.tensor(tuple(),
+                                             dtype=dtype,
+                                             device="meta")
+
+    def __getattr__(self, name):
+        if name in ["shape", "dtype", "size", "stride"]:
+            # redirect metadata information queries to the meta tensor
+            return getattr(self._meta_tensor, name)
+        if hasattr(torch.Tensor, name):
+            # the rest functions will materialize the tensor and call the
+            # function on the materialized tensor
+            tensor = self.materialize()
+            return getattr(tensor, name)
+        raise AttributeError(f"Attribute {name} not found")
+
+    def __getitem__(self, key) -> torch.Tensor:
+        return self._slice_view[key]
 
     def materialize(self) -> torch.Tensor:
-        if self.materialized_tensor is None:
-            self.materialized_tensor = self.slice_view[self.slices]
-        return self.materialized_tensor
+        return self._slice_view[tuple()]
+
+    def narrow(input, dim, start, length) -> torch.Tensor:
+        # `input` is a `DeferredTensor` object
+        # it does not use `self`, but `input` instead
+        # to better match https://pytorch.org/docs/stable/generated/torch.narrow.html signature # noqa
+
+        # `DeferredTensor` will only respond to `narrow` method
+        # which reads the corresponding data from disk and returns
+        # a materialized tensor
+        slices = [slice(None, None, None) for x in input._meta_tensor.shape]
+        slices[dim] = slice(start, start + length)
+        return input._slice_view[tuple(slices)]
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        if func == torch.narrow:
+            if len(args) >= 2:
+                kwargs["dim"] = args[1]
+            if len(args) >= 3:
+                kwargs["start"] = args[2]
+            if len(args) >= 4:
+                kwargs["length"] = args[3]
+            return args[0].narrow(**kwargs)
+        new_args = []
+        for arg in args:
+            if isinstance(arg, DeferredTensor):
+                new_args.append(arg.materialize())
+            else:
+                new_args.append(arg)
+        return func(*new_args, **kwargs)
+
+    # implement common tensor operations, except for in-place operations
+
+    def __add__(self, other):
+        return self.materialize() + other
+
+    def __radd__(self, other):
+        return other + self.materialize()
+
+    def __sub__(self, other):
+        return self.materialize() - other
+
+    def __rsub__(self, other):
+        return other - self.materialize()
+
+    def __mul__(self, other):
+        return self.materialize() * other
+
+    def __rmul__(self, other):
+        return other * self.materialize()
+
+    def __truediv__(self, other):
+        return self.materialize() / other
+
+    def __rtruediv__(self, other):
+        return other / self.materialize()
+
+    def __floordiv__(self, other):
+        return self.materialize() // other
+
+    def __rfloordiv__(self, other):
+        return other // self.materialize()
+
+    def __mod__(self, other):
+        return self.materialize() % other
+
+    def __rmod__(self, other):
+        return other % self.materialize()
+
+    def __pow__(self, other):
+        return self.materialize()**other
+
+    def __rpow__(self, other):
+        return other**self.materialize()
+
+    def __matmul__(self, other):
+        return self.materialize() @ other
+
+    def __rmatmul__(self, other):
+        return other @ self.materialize()
+
+    def __and__(self, other):
+        return self.materialize() & other
+
+    def __rand__(self, other):
+        return other & self.materialize()
+
+    def __or__(self, other):
+        return self.materialize() | other
+
+    def __ror__(self, other):
+        return other | self.materialize()
+
+    def __xor__(self, other):
+        return self.materialize() ^ other
+
+    def __rxor__(self, other):
+        return other ^ self.materialize()
+
+    def __lshift__(self, other):
+        return self.materialize() << other
+
+    def __rlshift__(self, other):
+        return other << self.materialize()
+
+    def __rshift__(self, other):
+        return self.materialize() >> other
+
+    def __rrshift__(self, other):
+        return other >> self.materialize()
+
+    def __eq__(self, other):
+        return self.materialize() == other
+
+    def __ne__(self, other):
+        return self.materialize() != other
+
+    def __lt__(self, other):
+        return self.materialize() < other
+
+    def __le__(self, other):
+        return self.materialize() <= other
+
+    def __gt__(self, other):
+        return self.materialize() > other
+
+    def __ge__(self, other):
+        return self.materialize() >= other
+
+    def __neg__(self):
+        return -self.materialize()
+
+    def __pos__(self):
+        return +self.materialize()
+
+    def __abs__(self):
+        return abs(self.materialize())
+
+    def __invert__(self):
+        return ~self.materialize()
 
 
 def ensure_tensor(x: Union[DeferredTensor, torch.Tensor]) -> torch.Tensor:
