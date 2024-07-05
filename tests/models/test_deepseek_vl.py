@@ -4,7 +4,6 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
 
-from vllm import SamplingParams
 from vllm.model_executor.models.deepseek_vl import (
     MultiModalityPreTrainedModel, VLMImageProcessor, model_name_to_cls)
 from vllm.sequence import SampleLogprobs
@@ -174,7 +173,6 @@ def run_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    sample_params = SamplingParams(temperature=0)
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
@@ -184,8 +182,7 @@ def run_test(
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=images,
-                                                sampling_params=sample_params)
+                                                images=images)
             for prompts, images in inputs_per_image
         ]
 
