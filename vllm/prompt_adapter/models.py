@@ -128,7 +128,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         self.adapter_type = 'PromptAdapter'
 
         self.base_indices = torch.tensor([-1])
-        self.base_embedding_indices = torch.tensor([-1])
+        self.base_embedding_indices = torch.tensor([])
 
         self.modules: Dict[str, nn.Module] = {}
         self._create_prompt_adapter_modules()

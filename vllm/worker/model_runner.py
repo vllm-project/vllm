@@ -555,7 +555,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     mm_kwargs = self.multi_modal_input_mapper(mm_data)
                     multi_modal_inputs_list.append(mm_kwargs)
 
-                if prompt_adapter_id > 0:
+                if prompt_adapter_id > 0 and is_prompt:
                     prompt_adapter_requests.add(
                         seq_group_metadata.prompt_adapter_request)
 

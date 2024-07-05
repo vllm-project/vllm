@@ -51,7 +51,7 @@ def test_lora_prompt_adapter():
                              enable_prompt_adapter=True,
                              enable_lora=True,
                              max_num_seqs=60,
-                             max_prompt_adapter_token= 8)
+                             max_prompt_adapter_token=8)
     engine = LLMEngine.from_engine_args(engine_args)
     result = do_sample(engine)
 
