@@ -51,9 +51,13 @@ def test_deferred_tensor():
     save_file(tensors, "model.safetensors")
 
     with safe_open("model.safetensors", framework="pt") as f:  # type: ignore
-        for k in f.get_keys():
+        for k in f.keys():
             tensor_slice = f.get_slice(k)
             dt = DeferredTensor(tensor_slice)
             real_tensor = dt.materialize()
             real_tensor.copy_(dt)  # test we can use `copy_`
+            stacked = torch.stack([real_tensor, real_tensor])
+            stacked[0] = dt # test we can use `__setitem__` to assign
+            if k != "scalar":
+                real_tensor[1:] = dt[1:] # test we can assign slices
             assert torch.allclose(real_tensor + 1, dt + 1)
