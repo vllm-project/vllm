@@ -1,11 +1,11 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import BlipVisionConfig
+from transformers import Blip2VisionConfig, BlipVisionConfig
 from transformers.models.blip.modeling_blip import BlipAttention
 
 from vllm.config import ModelConfig
@@ -30,13 +30,19 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
     return grid_length * grid_length
 
 
-def get_blip_image_feature_size(hf_config: BlipVisionConfig) -> int:
+def get_blip_image_feature_size(
+    hf_config: Union[BlipVisionConfig, Blip2VisionConfig], ) -> int:
     return get_blip_num_patches(image_size=hf_config.image_size,
                                 patch_size=hf_config.patch_size)
 
 
+def get_max_blip_image_tokens(
+    hf_config: Union[BlipVisionConfig, Blip2VisionConfig], ) -> int:
+    return get_blip_image_feature_size(hf_config)
+
+
 def dummy_seq_data_for_blip(
-    hf_config: BlipVisionConfig,
+    hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
     seq_len: int,
     *,
     image_token_id: int,
@@ -53,7 +59,7 @@ def dummy_seq_data_for_blip(
 
 
 def dummy_image_for_blip(
-    hf_config: BlipVisionConfig,
+    hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -70,7 +76,7 @@ def dummy_image_for_blip(
 
 def input_processor_for_blip(
     model_config: ModelConfig,
-    hf_config: BlipVisionConfig,
+    hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
     llm_inputs: LLMInputs,
     *,
     image_token_id: int,

@@ -3,8 +3,6 @@ from typing import List, Optional, Tuple
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.config import VisionLanguageConfig
-from vllm.model_executor.models.blip2 import BLIP2_IMAGE_TOKEN_ID
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
@@ -23,39 +21,21 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 
-def iter_blip2_configs(model_name: str):
-    image_hw_to_feature_size = {
-        (224, 224): 32,
-    }
-
-    for (h, w), f in image_hw_to_feature_size.items():
-        input_shape = (1, 3, h, w)
-        yield (model_name,
-               VisionLanguageConfig(image_feature_size=f,
-                                    image_token_id=BLIP2_IMAGE_TOKEN_ID,
-                                    image_input_shape=input_shape))
-
-
-model_and_vl_config = [
-    *iter_blip2_configs("Salesforce/blip2-opt-2.7b"),
-]
-
-
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                          Optional[SampleLogprobs]],
-                      vlm_config: VisionLanguageConfig, model_id: str):
+                      model: str):
     """Sanitize vllm output to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
+    _, output_str, out_logprobs = vllm_output
 
     hf_output_str = output_str + "\n"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model)
     hf_output_ids = tokenizer.encode(hf_output_str)
 
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("model", ["Salesforce/blip2-opt-2.7b"])
 @pytest.mark.parametrize(
     "size_factors",
     [
@@ -72,9 +52,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                size_factors, dtype: str, max_tokens: int,
-                num_logprobs: int) -> None:
+def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+                dtype: str, max_tokens: int, num_logprobs: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -84,7 +63,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    model_id, vlm_config = model_and_config
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -93,10 +71,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model_id,
-                     dtype=dtype,
-                     enforce_eager=True,
-                     **vlm_config.as_cli_args_dict()) as vllm_model:
+    with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -105,7 +80,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
+    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -119,7 +94,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
-                vllm_to_hf_output(vllm_output, vlm_config, model_id)
+                vllm_to_hf_output(vllm_output, model)
                 for vllm_output in vllm_outputs
             ],
             name_0="hf",

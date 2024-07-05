@@ -2,11 +2,11 @@ from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
-from transformers import (Blip2Config, Blip2QFormerConfig,
+from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionConfig,
                           apply_chunking_to_forward)
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -18,7 +18,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
-from .blip import BlipVisionModel, dummy_image_for_blip
+from .blip import (BlipVisionModel, dummy_image_for_blip,
+                   get_max_blip_image_tokens)
 from .interfaces import SupportsVision
 from .utils import merge_vision_embeddings
 
@@ -384,13 +385,25 @@ class Blip2ImagePixelInputs(TypedDict):
 
 Blip2ImageInputs = Blip2ImagePixelInputs
 
-# Used internally as placeholders
+# We use this internally as placeholders since there is no image token
+# defined on the HuggingFace repo
 BLIP2_IMAGE_TOKEN = "<image>"
 BLIP2_IMAGE_TOKEN_ID = 50265
 
 
 def get_blip2_image_feature_size(hf_config: Blip2Config) -> int:
     return hf_config.num_query_tokens
+
+
+def get_max_blip2_image_tokens(ctx: InputContext):
+    hf_config = ctx.get_hf_config(Blip2Config)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, Blip2VisionConfig):
+        return get_max_blip_image_tokens(vision_config)
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
 def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
@@ -402,9 +415,13 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
     token_ids += [0] * (seq_len - image_feature_size)
     seq_data = SequenceData(token_ids)
 
-    mm_data = dummy_image_for_blip(vision_config)
+    if isinstance(vision_config, Blip2VisionConfig):
+        mm_data = dummy_image_for_blip(vision_config)
 
-    return seq_data, mm_data
+        return seq_data, mm_data
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
 def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
@@ -430,20 +447,21 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_blip2_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
 class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: Blip2Config,
-                 vlm_config: VisionLanguageConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
 
         super().__init__()
 
         self.config = config
-        self.vlm_config = vlm_config
+        self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_model = BlipVisionModel(config.vision_config)
@@ -474,15 +492,15 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
     def get_lm_head(self):
         return self.language_model.decoder.embed_tokens
 
-    def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != list(self.vlm_config.image_input_shape[1:]):
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+        h = w = self.config.vision_config.image_size
+        expected_dims = (3, h, w)
+        actual_dims = tuple(data.shape[1:])
+
+        if actual_dims != expected_dims:
             raise ValueError(
-                f"The expected image tensor shape is batch dimension plus "
-                f"{self.vlm_config.image_input_shape[1:]}. "
-                f"You supplied {data.shape}. "
-                f"If you are using vLLM's entrypoint, make sure your "
-                f"supplied image input is consistent with "
-                f"image_input_shape in engine args.")
+                "The expected shape of pixel values is batch dimension plus "
+                f"{actual_dims}. You supplied {tuple(data.shape)}.")
 
         return data
 
@@ -499,7 +517,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
         return Blip2ImagePixelInputs(
             type="pixel_values",
-            data=self._validate_image_data(pixel_values),
+            data=self._validate_pixel_values(pixel_values),
         )
 
     def _image_pixels_to_features(self, vision_model: BlipVisionModel,
@@ -549,41 +567,31 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
+
         Concretely, consider a text prompt:
-        "<image>Question: What's the content of the image? Answer:".
+        `"Question: What's the content of the image? Answer:"`.
+
         Tokenizer outputs:
-        [1, 32000, 29871, 13, 11889, 29901, 1724, 29915, 29879, 278,
-        2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566, 29901].
-        The to-be-inserted image has a size of 32 (query tokens) along the
-        context length dimension.
-        `input_ids` is thus [1, 32000, ..., 32000, 29871, 13, 11889, 29901,
-        1724, 29915, 29879, 278, 2793, 310, 278, 1967, 29973, 13, 22933,
-        9047, 13566, 29901].
-        There will be 32 `32000` in the `input_ids`.
-        (32000 is the token id for `<image>`.)
+        `[2, 45641, 35, 653, 18, 5, 1383, 9, 5, 2274, 116, 31652, 35]`.
+
+        To reserve space in KV cache, we have to insert placeholder tokens
+        before they are inputted to the model, so the input processor prepends 
+        dummy tokens (denoted as `50265`), resulting in:
+        `[50265, ..., 50265, 2, 45641, 35, ..., 31652, 35]`.
+
+        We insert 32 tokens since it corresponds to the number of query
+        embeddings outputted by the Q-Former.
 
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
-
-        This model has two modes of image inputs:
-        `PIXEL_VALUES` and `IMAGE_FEATURES`.
 
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values: The pixels in each input image.
-                Expects a batch with shape `[1, 3, 224, 224]`.
-                (Only applicable to `PIXEL_VALUES` mode)
-            image_features: The image features for each input image outputted by
-                the vision tower before passing to the Q-Former.
-                Expects a batch with shape `[1, 32, 2560]`.
-                (Only applicable to `IMAGE_FEATURES` mode)
-
+        
         See also:
-            Each input maps to huggingface implementation, as follows:
-
-            - `pixel_values`: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/blip_2/modeling_blip_2.py#L1445
-            - `image_features`: https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/blip_2/modeling_blip_2.py#L1492
+            :class:`Blip2ImageInputs`
         """
         image_input = self._parse_and_validate_image_input(**kwargs)
 
@@ -591,9 +599,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                self.vlm_config.image_token_id)
+            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
+                                                    vision_embeddings,
+                                                    BLIP2_IMAGE_TOKEN_ID)
 
             input_ids = None
         else:
