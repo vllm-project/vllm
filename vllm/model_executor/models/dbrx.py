@@ -1,5 +1,5 @@
 # coding=utf-8
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
-from vllm.utils import DeferredTensor, ensure_tensor
 
 
 class DbrxRouter(nn.Module):
@@ -112,19 +111,14 @@ class DbrxExperts(nn.Module):
             },
         )
 
-    def weight_loader(self, param: nn.Parameter,
-                      loaded_weight: Union[torch.Tensor,
-                                           DeferredTensor], weight_name: str):
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+                      weight_name: str):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         # DBRX uses GLU for each experts.
         # GLU has 3 linear layers: w1, v1 and w2.
-
-        # TODO: if we can figure out the shape, we can use deferred tensor
-        # to accelerate the loading.
-        loaded_weight = ensure_tensor(loaded_weight)
         if weight_name.endswith("w1"):
             loaded_weight = torch.reshape(
                 loaded_weight,

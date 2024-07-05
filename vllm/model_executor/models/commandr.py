@@ -20,7 +20,7 @@
 
 # This file is based on the LLama model definition file in transformers
 """PyTorch Cohere model."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 import torch.utils.checkpoint
@@ -47,7 +47,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import DeferredTensor, ensure_tensor
 
 
 @torch.compile
@@ -75,8 +74,7 @@ class LayerNorm(nn.Module):
                                         self.variance_epsilon)
         return hidden_states, residuals
 
-    def weight_loader(self, param: Parameter,
-                      loaded_weight: Union[torch.Tensor, DeferredTensor]):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         shard_dim = 0 if param.dim() != 1 else None
         param_data = param.data
@@ -85,7 +83,6 @@ class LayerNorm(nn.Module):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(shard_dim, start_idx,
                                                  shard_size)
-        loaded_weight = ensure_tensor(loaded_weight)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
