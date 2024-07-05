@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -23,7 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import DeferredTensor, ensure_tensor
 
 
 class InternLM2MLP(nn.Module):
@@ -286,9 +285,7 @@ class InternLM2ForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   Union[torch.Tensor,
-                                                         DeferredTensor]]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w1", 0),
@@ -315,7 +312,6 @@ class InternLM2ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 if "wqkv" in name:
-                    loaded_weight = ensure_tensor(loaded_weight)
                     config = self.config
                     kv_groups = (config.num_attention_heads //
                                  config.num_key_value_heads)
