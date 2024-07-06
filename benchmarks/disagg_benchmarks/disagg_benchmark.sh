@@ -49,7 +49,7 @@ main() {
 
   cd "$(dirname "$0")"
 
-  mkdir results
+  mkdir -p results
   results_folder="./results"
   model="neuralmagic/Meta-Llama-3-70B-Instruct-FP8"
   dataset_name="sonnet"
