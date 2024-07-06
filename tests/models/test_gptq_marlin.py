@@ -97,8 +97,6 @@ def run_test(
 
 
 @pytest.mark.flaky(reruns=3)
-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
-                    reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -111,6 +109,9 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    if not is_quant_method_supported("gptq_marlin"):
+        pytest.skip(
+            "gptq_marlin is not supported on this GPU type.")
     run_test(
         vllm_runner,
         example_prompts,
