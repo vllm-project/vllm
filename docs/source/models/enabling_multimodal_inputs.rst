@@ -1,4 +1,4 @@
-.. _adding_a_new_multimodal_model:
+.. _enabling_multimodal_inputs:
 
 Enabling Multimodal Inputs
 ==========================

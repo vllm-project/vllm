@@ -12,7 +12,7 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
 
 .. note::
     By default, vLLM models do not support multi-modal inputs. To enable multi-modal support,
-    please follow :ref:`this guide <adding_a_new_multimodal_model>` after implementing the model.
+    please follow :ref:`this guide <enabling_multimodal_inputs>` after implementing the model here.
 
 .. tip::
     If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.

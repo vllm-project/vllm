@@ -92,7 +92,7 @@ Documentation
 
    models/supported_models
    models/adding_model
-   models/adding_multimodal_model
+   models/enabling_multimodal_inputs
    models/engine_args
    models/lora
    models/vlm
