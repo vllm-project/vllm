@@ -99,6 +99,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
         && export SCCACHE_BUCKET=vllm-build-sccache \
         && export SCCACHE_REGION=us-west-2 \
+        && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist \
         && sccache --show-stats; \
