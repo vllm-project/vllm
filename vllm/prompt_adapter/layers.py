@@ -69,7 +69,7 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden_states = self.base_layer(x)
-        if self.embedding_indices_gpu.numel():
+        if self.embedding_indices_gpu.ndim>1:
             valid_mask = self.indices_gpu != -1
             gathered_embeddings = self.embeddings_tensors[
                 self.embedding_indices_gpu[:, 0],
