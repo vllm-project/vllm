@@ -2,7 +2,7 @@
 import random
 import numpy
 import torch
-from typing import Optional
+from typing import List, Optional
 
 from vllm.model_executor.layers.quantization.utils.format_24 import (
     mask_creator, sparse_semi_structured_from_dense_cutlass)
@@ -46,14 +46,16 @@ def apply_fp8_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n, )
 
-    output = ops.fp8_marlin_gemm(a=reshaped_x,
-                                 b_q_weight=weight,
-                                 b_scales=weight_scale,
-                                 workspace=workspace,
-                                 num_bits=8,
-                                 size_m=reshaped_x.shape[0],
-                                 size_n=size_n,
-                                 size_k=size_k,)
+    output = ops.fp8_marlin_gemm(
+        a=reshaped_x,
+        b_q_weight=weight,
+        b_scales=weight_scale,
+        workspace=workspace,
+        num_bits=8,
+        size_m=reshaped_x.shape[0],
+        size_n=size_n,
+        size_k=size_k,
+    )
 
     if bias is not None:
         output.add_(bias)  # In-place add
@@ -148,8 +150,21 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm):
     return q_packed
 
 
-def marlin_permute_scales(s, size_k, size_n, group_size, scale_perm,
-                          scale_perm_single):
+# Permutations for Marlin scale shuffling
+def get_scale_perms(num_bits: int):
+    scale_perm: List[int] = []
+    for i in range(8):
+        scale_perm.extend([i + 8 * j for j in range(8)])
+    scale_perm_single: List[int] = []
+    for i in range(4):
+        scale_perm_single.extend(
+            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+    return scale_perm, scale_perm_single
+
+
+def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
+                          group_size: int, num_bits: int):
+    scale_perm, scale_perm_single = get_scale_perms(num_bits)
     if group_size < size_k and group_size != -1:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
     else:

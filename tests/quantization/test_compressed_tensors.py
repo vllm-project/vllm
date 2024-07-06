@@ -9,7 +9,7 @@ import torch
 from vllm import SamplingParams
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8, CompressedTensorsWNA16)
+    CompressedTensorsW8A8Int8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationType)
 
@@ -37,7 +37,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
                           CompressedTensorsLinearMethod)
         assert isinstance(down_proj.quant_method,
                           CompressedTensorsLinearMethod)
-        assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8)
+        assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
 
         assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.scheme.is_static_input_scheme
@@ -79,7 +79,7 @@ def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner, model_args):
         qkv_proj = layer.self_attn.qkv_proj
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8)
+        assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
         assert not qkv_proj.scheme.is_static_input_scheme
         assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.weight.dtype is torch.int8

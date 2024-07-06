@@ -13,10 +13,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, create_per_tensor_scale_param, cutlass_fp8_supported,
-    apply_fp8_linear, per_tensor_dequantize, per_tensor_quantize,
-    requantize_with_max_scale)
+    apply_fp8_linear, per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    prepare_fp8_layer_for_marlin, apply_fp8_marlin_linear,
+    prepare_fp8_layer_for_marlin,
+    apply_fp8_marlin_linear,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -189,7 +189,7 @@ class Fp8LinearMethod(LinearMethodBase):
                                               requires_grad=False)
             else:
                 layer.input_scale = None
-        
+
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
             # Activations not quantized for marlin.
@@ -199,7 +199,7 @@ class Fp8LinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        
+
         if self.use_marlin:
             return apply_fp8_marlin_linear(
                 input=x,
@@ -366,7 +366,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                     shard_size, :],
                         layer.w13_scale[expert_id][shard_id])
                     layer.w13_weight[expert_id][
-                        start:start + shard_size, :] = per_tensor_quantize(
+                        start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 

@@ -9,7 +9,8 @@ from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8, CompressedTensorsW8A8Fp8, CompressedTensorsWNA16)
+    CompressedTensorsW8A8Int8, CompressedTensorsW8A8Fp8,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_first_name_or_class_match)
@@ -188,12 +189,14 @@ class CompressedTensorsConfig(QuantizationConfig):
                     input_dynamic=input_quant.dynamic)
 
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8(strategy=weight_quant.strategy,
-                                             is_static_input_scheme=True)
+                return CompressedTensorsW8A8Int8(
+                    strategy=weight_quant.strategy,
+                    is_static_input_scheme=True)
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8(strategy=weight_quant.strategy,
-                                             is_static_input_scheme=False)
+                return CompressedTensorsW8A8Int8(
+                    strategy=weight_quant.strategy,
+                    is_static_input_scheme=False)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")

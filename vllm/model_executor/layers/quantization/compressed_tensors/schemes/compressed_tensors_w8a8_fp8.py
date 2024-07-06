@@ -5,8 +5,8 @@ import torch
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    create_per_tensor_scale_param, cutlass_fp8_supported, 
-    apply_fp8_linear, requantize_with_max_scale)
+    create_per_tensor_scale_param, cutlass_fp8_supported, apply_fp8_linear,
+    requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
@@ -78,9 +78,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return apply_fp8_linear(input=x,
-                                weight=layer.weight,
-                                weight_scale=layer.weight_scale,
-                                input_scale=layer.input_scale,
-                                bias=bias,
-                                cutlass_fp8_supported=self.cutlass_fp8_supported)
+        return apply_fp8_linear(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            input_scale=layer.input_scale,
+            bias=bias,
+            cutlass_fp8_supported=self.cutlass_fp8_supported)
