@@ -35,7 +35,7 @@ wait_for_server() {
   # return 1 if vllm server crashes
   local port=$1
   timeout 1200 bash -c "
-    until curl localhost:${port}/v1/completions; do
+    until curl -s localhost:${port}/v1/completions > /dev/null; do
       sleep 1
     done" && return 0 || return 1
 }
@@ -66,6 +66,8 @@ main() {
           --model $model \
           --port 8000 \
           -tp 8 \
+          --disable-log-stats \
+          --disable-log-requests \
           --enable-chunked-prefill &
   wait_for_server 8000
 
@@ -91,6 +93,8 @@ main() {
     --model $model \
     --port 8100 \
     -tp 4 \
+    --disable-log-stats \
+    --disable-log-requests \
     --enable-chunked-prefill &
 
   CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
@@ -98,6 +102,8 @@ main() {
     --model $model \
     --port 8200 \
     -tp 4 \
+    --disable-log-stats \
+    --disable-log-requests \
     --enable-chunked-prefill &
 
   wait_for_server 8100
