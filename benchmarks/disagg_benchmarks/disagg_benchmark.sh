@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Requirement: 8x H100 GPUs.
+
+
 # Model: neuralmagic/Meta-Llama-3-70B-Instruct-FP8-KV 
 # Query: 2048 input tokens, 128 output tokens, QPS 8, 1000 requests
 # Resource: 8x H100
@@ -123,7 +126,7 @@ main() {
 
   # disaggregated prefill
 
-
-
-
 }
+
+
+main "$@"
