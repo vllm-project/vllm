@@ -110,8 +110,7 @@ def test_models(
     num_logprobs: int,
 ) -> None:
     if not is_quant_method_supported("gptq_marlin"):
-        pytest.skip(
-            "gptq_marlin is not supported on this GPU type.")
+        pytest.skip("gptq_marlin is not supported on this GPU type.")
     run_test(
         vllm_runner,
         example_prompts,

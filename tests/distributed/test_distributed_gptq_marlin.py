@@ -31,11 +31,9 @@ def test_models(vllm_runner, example_prompts, model, dtype: str,
         pytest.skip(
             f"Need at least {tensor_parallel_size} GPUs to run the test.")
 
-        
     if not is_quant_method_supported("gptq_marlin"):
-        pytest.skip(
-            "gptq_marlin is not supported on this GPU type.")
-        
+        pytest.skip("gptq_marlin is not supported on this GPU type.")
+
     distributed_executor_backend = os.getenv("DISTRIBUTED_EXECUTOR_BACKEND")
     run_test(vllm_runner,
              example_prompts,
