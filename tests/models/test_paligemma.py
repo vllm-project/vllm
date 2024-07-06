@@ -17,7 +17,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "boardwalk": "What is in the picture?",
 })
 
-IMAGE_TOKEN_ID = 32000
+IMAGE_TOKEN_ID = 257152
 
 models = ["google/paligemma-3b-mix-224"]
 
