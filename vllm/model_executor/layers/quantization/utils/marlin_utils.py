@@ -2,7 +2,7 @@
 import random
 import numpy
 import torch
-from typing import List, Optional
+from typing import Optional
 
 from vllm.model_executor.layers.quantization.utils.format_24 import (
     mask_creator, sparse_semi_structured_from_dense_cutlass)
