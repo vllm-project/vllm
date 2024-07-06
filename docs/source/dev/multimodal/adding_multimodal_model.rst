@@ -3,7 +3,7 @@
 Adding a New Multimodal Model
 =============================
 
-This document provides a high-level guide on integrating a :ref:`multi-modal model <multi_modality>` into vLLM.
+This document provides a high-level guide on integrating a :ref:`multi-modal <multi_modality>` model into vLLM.
 
 .. note::
     The complexity of adding a new model depends heavily on the model's architecture.
