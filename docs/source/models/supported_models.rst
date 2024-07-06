@@ -162,6 +162,8 @@ Decoder-only Language Models
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
     -
 
+.. note::
+    Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
 .. _supported_vlms:
 
@@ -192,9 +194,6 @@ Vision Language Models
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
 Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
-
-.. note::
-    Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
 .. tip::
     The easiest way to check if your model is supported is to run the program below:
