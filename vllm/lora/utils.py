@@ -1,5 +1,8 @@
+import os
 from typing import List, Optional, Set, Tuple, Type
 
+from huggingface_hub import snapshot_download
+from huggingface_hub.utils import RepositoryNotFoundError, EntryNotFoundError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -105,3 +108,42 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
             return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
 
     raise ValueError(f"{name} is unsupported LoRA weight")
+
+def get_lora_absolute_path(lora_path: str) -> str:
+    """
+    Resolves the given lora_path to an absolute local path.
+
+    If the lora_path is identified as a Hugging Face model identifier, it will download
+    the model and return the local snapshot path. Otherwise, it treats the lora_path
+    as a local file path and converts it to an absolute path.
+
+    Parameters:
+    lora_path (str): The path to the lora model, which can be an absolute path,
+                     a relative path, or a Hugging Face model identifier.
+
+    Returns:
+    str: The resolved absolute local path to the lora model.
+    """
+
+     # Check if the path is an absolute path. Return it no matter existing or not.
+    if os.path.isabs(lora_path):
+        return lora_path
+
+    # If the path starts with ~, expand the user home directory and return the path.
+    if lora_path.startswith('~'):
+        return os.path.expanduser(lora_path)
+
+    # Check if the expanded relative path exists locally.
+    if os.path.exists(lora_path):
+        return os.path.abspath(lora_path)
+
+    # If the path does not exist locally, assume it's a Hugging Face model identifier.
+    try:
+        local_snapshot_path = snapshot_download(repo_id=lora_path)
+    except (RepositoryNotFoundError, EntryNotFoundError, HFValidationError) as e:
+        # Handle errors that may occur during the download
+        # Return original path instead instead of throwing error here
+        print(f"Error downloading the Hugging Face model: {e}")
+        return lora_path
+
+    return local_snapshot_path
