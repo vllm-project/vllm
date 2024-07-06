@@ -8,6 +8,7 @@ from transformers import PaliGemmaConfig, SiglipVisionConfig, SiglipVisionModel
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -22,6 +23,8 @@ from vllm.sequence import SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
 from .utils import merge_vision_embeddings
+
+logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.model": "language_model",
@@ -109,8 +112,10 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     orig_prompt_ids = llm_inputs.get("prompt_token_ids")
 
     if image_token_str in orig_prompt:
-        # This is only applicable when the model is served via the API server
-        # since we pad one image token string at the beginning.
+        logger.warning(
+            "The image token '%s' was detected in the prompt and "
+            "will be removed. Please follow the proper prompt format"
+            " documented on HuggingFace.", image_token_str)
         orig_prompt = orig_prompt.replace(image_token_str, "")
         orig_prompt_ids.remove(hf_config.image_token_index)
 
@@ -241,8 +246,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         if parsed_image_input is not None:
             vision_embeddings = self._process_image_input(parsed_image_input)
             # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
-            vision_embeddings = vision_embeddings / (self.config.hidden_size**
-                                                     0.5)
+            vision_embeddings = vision_embeddings * (self.config.hidden_size**
+                                                     -0.5)
 
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
