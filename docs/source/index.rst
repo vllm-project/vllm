@@ -92,6 +92,7 @@ Documentation
 
    models/supported_models
    models/adding_model
+   models/adding_multimodal_model
    models/engine_args
    models/lora
    models/vlm

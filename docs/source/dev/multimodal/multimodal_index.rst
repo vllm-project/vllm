@@ -16,16 +16,8 @@ which allows you to pass in multi-modal input alongside text and token prompts.
 
 By default, vLLM models do not support multi-modal inputs. To enable multi-modal support for a model, please follow :ref:`the guide for adding a new multimodal model. <adding_a_new_multimodal_model>`.
 
-
-# TODO: Add more instructions on how to do that once embeddings is in.
-
-Guides
-++++++
-
-.. toctree::
-   :maxdepth: 1
-
-   adding_multimodal_model
+..
+  TODO: Add more instructions on how to do that once embeddings is in.
 
 Module Contents
 +++++++++++++++
