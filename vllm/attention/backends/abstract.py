@@ -37,6 +37,16 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
+        raise NotImplementedError
+
+    @classmethod
+    def make_metadata_builder(cls, *args,
+                              **kwargs) -> "AttentionMetadataBuilder":
+        return cls.get_builder_cls()(*args, **kwargs)
+
+    @staticmethod
+    @abstractmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
@@ -108,6 +118,23 @@ class AttentionMetadata:
 
 
 T = TypeVar("T", bound=AttentionMetadata)
+
+
+class AttentionMetadataBuilder(ABC, Generic[T]):
+    """Abstract class for attention metadata builders."""
+
+    @abstractmethod
+    def __init__(self, input_builder) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_seq_group(self, *args, **kwargs) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def build(self, runner, seq_lens, query_lens, use_captured_graph: bool,
+              cuda_graph_pad_size: int, batch_size: int) -> T:
+        raise NotImplementedError
 
 
 class AttentionImpl(ABC, Generic[T]):
