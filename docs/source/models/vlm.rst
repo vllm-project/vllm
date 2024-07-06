@@ -3,7 +3,8 @@
 Using VLMs
 ==========
 
-vLLM provides experimental support for Vision Language Models (VLMs). This document shows you how to run and serve these models using vLLM.
+vLLM provides experimental support for Vision Language Models (VLMs). See the :ref:`list of supported VLMs here <supported_vlms>`.
+This document shows you how to run and serve these models using vLLM.
 
 .. important::
     We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
