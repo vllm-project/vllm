@@ -8,7 +8,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
-    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
+    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
+    marlin_permute_scales)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_perms import (
     marlin_perm)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MarlinWorkspace, compute_max_diff, is_marlin_supported, marlin_24_quantize,
-    marlin_quantize, marlin_weights)
+    marlin_quantize, marlin_weights, pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
 
@@ -38,9 +39,11 @@ MNK_FACTORS = [
     (67, 13, 11),
 ]
 
+DTYPES = [torch.float16, torch.bfloat16]
 
-def rand_data(shape):
-    return torch.randn(shape, dtype=torch.half, device="cuda")
+
+def rand_data(shape, dtype=torch.float16):
+    return torch.randn(shape, dtype=dtype, device="cuda")
 
 
 @pytest.mark.skipif(not is_marlin_supported(),
@@ -210,6 +213,83 @@ def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):
         b_weight.shape[1],
         a_input.shape[1],
     )
+
+    torch.cuda.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
+    print("max_diff = {}".format(max_diff))
+
+    assert max_diff < 0.04
+
+
+@pytest.mark.skipif(not is_marlin_supported(),
+                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
+@pytest.mark.parametrize("num_bits", [8])
+@pytest.mark.parametrize("group_size", [-1])
+@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_fp8_marlin_gemm(
+    k_chunk,
+    n_chunk,
+    num_bits,
+    group_size,
+    mnk_factors,
+    dtype,
+):
+    m_factor, n_factor, k_factor = mnk_factors
+
+    size_m = m_factor
+    size_k = k_chunk * k_factor
+    size_n = n_chunk * n_factor
+
+    print(f"MNK = {size_m} {size_n} {size_k}")
+    print(f"groupsize = {group_size}")
+
+    a_input = rand_data((size_m, size_k), dtype=dtype)
+    b_weight = rand_data((size_k, size_n), dtype=dtype)
+
+    # WEIGHTS
+    fp8_weight, weight_scale = ops.scaled_fp8_quant(b_weight, scale=None)
+    # Repack weights to gptq format (packed int32 elements)
+    packed_gptq_qweight = pack_fp8_to_int32(fp8_weight)
+    # Repack weights to marlin format
+    marlin_qweight = ops.gptq_marlin_repack(
+        b_q_weight=packed_gptq_qweight,
+        perm=torch.empty(0, dtype=torch.int, device="cuda"),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=8,
+    )
+
+    # WEIGHT SCALES
+    # Currently Marlin doesn't support per-tensor scales, so we
+    # expand it to channelwise
+    scales = weight_scale.repeat(1, size_n).to(a_input.dtype).to("cuda")
+    # Permute scales
+    marlin_scales = marlin_permute_scales(
+        s=scales,
+        size_k=size_k,
+        size_n=size_n,
+        group_size=-1,
+        num_bits=8,
+    )
+
+    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                                GPTQ_MARLIN_MAX_PARALLEL)
+
+    output = ops.fp8_marlin_gemm(
+        a=a_input,
+        b_q_weight=marlin_qweight,
+        b_scales=marlin_scales,
+        workspace=workspace.scratch,
+        num_bits=num_bits,
+        size_m=a_input.shape[0],
+        size_n=b_weight.shape[1],
+        size_k=a_input.shape[1],
+    )
+    output_ref = torch.matmul(a_input, b_weight)
 
     torch.cuda.synchronize()
 

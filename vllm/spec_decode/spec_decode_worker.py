@@ -110,8 +110,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
-            draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
-        
+            draft_worker_kwargs.pop("ngram_prompt_lookup_min"))        
         disable_bonus_tokens = False
         if ngram_prompt_lookup_max > 0:
             proposer_worker = NGramWorker(**draft_worker_kwargs)
@@ -126,9 +125,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-            if draft_tp == 1:
-                draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
-            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+            if draft_worker_kwargs[
+                    "model_config"].hf_config.model_type == "mlp_speculator":
+                disable_bonus_tokens = False
+                proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
+            else:
+                if draft_tp == 1:
+                    draft_worker_kwargs[
+                        "model_runner_cls"] = TP1DraftModelRunner
+                proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
 
