@@ -65,7 +65,7 @@ main() {
   python3 -m vllm.entrypoints.openai.api_server \
           --model $model \
           --port 8000 \
-          --tp 8 \
+          -tp 8 \
           --enable-chunked-prefill &
   wait_for_server 8000
 
@@ -90,14 +90,14 @@ main() {
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8100 \
-    --tp 4 \
+    -tp 4 \
     --enable-chunked-prefill &
 
   CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8200 \
-    --tp 4 \
+    -tp 4 \
     --enable-chunked-prefill &
 
   wait_for_server 8100
