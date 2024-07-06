@@ -162,8 +162,8 @@ class MultiModalPlugin(ABC):
         If `None` is provided, then the default input mapper is used instead.
 
         See also:
-            :ref:`input_processing_pipeline`
-            :ref:`enabling_multimodal_inputs`
+            - :ref:`input_processing_pipeline`
+            - :ref:`enabling_multimodal_inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -192,7 +192,8 @@ class MultiModalPlugin(ABC):
             TypeError: If the data type is not supported.
 
         See also:
-            :ref:`enabling_multimodal_inputs`
+            - :ref:`input_processing_pipeline`
+            - :ref:`enabling_multimodal_inputs`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
