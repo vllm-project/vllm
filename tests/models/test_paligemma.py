@@ -1,7 +1,6 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -19,7 +18,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 IMAGE_TOKEN_ID = 257152
 
-models = ["google/paligemma-3b-mix-224"]
+models = ["google/paligemma-3b-mix-224", "google/paligemma-3b-mix-448"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -28,18 +27,12 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
-    eos_token_id = tokenizer.eos_token_id
-
     hf_output_ids = [
         token_id for idx, token_id in enumerate(output_ids)
         if token_id != IMAGE_TOKEN_ID or output_ids[idx - 1] != IMAGE_TOKEN_ID
     ]
 
-    assert output_str[0] == " "
-    hf_output_str = output_str[1:]
-    if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+    hf_output_str = output_str
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -103,8 +96,7 @@ def run_test(
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-        # TODO: Check whether using original CLIPVisionModel can improve
-        # consistency against HF
+
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
@@ -130,7 +122,7 @@ def run_test(
         [0.25, 0.5, 1.0],
     ],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,

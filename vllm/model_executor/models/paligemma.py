@@ -6,7 +6,7 @@ from torch import nn
 from transformers import PaliGemmaConfig, SiglipVisionConfig, SiglipVisionModel
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -21,16 +21,19 @@ from vllm.multimodal.image import cached_get_tokenizer
 from vllm.sequence import SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
+from .utils import merge_vision_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.model": "language_model",
 }
 
+
 def get_max_paligemma_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     text_config = hf_config.text_config
-    
+
     return text_config.num_image_tokens
+
 
 def dummy_seq_data_for_paligemma(
     hf_config: PaliGemmaConfig,
@@ -48,6 +51,7 @@ def dummy_seq_data_for_paligemma(
     token_ids += [0] * (seq_len - image_feature_size)
     return SequenceData(token_ids)
 
+
 def dummy_image_for_paligemma(
     hf_config: SiglipVisionConfig,
     *,
@@ -63,6 +67,7 @@ def dummy_image_for_paligemma(
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image}
 
+
 def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
@@ -76,31 +81,41 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
     mm_data = dummy_image_for_paligemma(vision_config)
     return seq_data, mm_data
 
-def input_processor_for_paligemma(
-    model_config: ModelConfig,
-    hf_config: PaliGemmaConfig,
-    llm_inputs: LLMInputs,
-    *,
-    image_feature_size_override: Optional[int] = None,
-):
+
+def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
+
+    """
+    The correct prompt format needs to be:
+    '<image>' * image_feature_size + '<bos>' + prompt + '\n'
+
+    See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
+    """ # noqa
+
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+    model_config = ctx.model_config
+    hf_config = ctx.get_hf_config(PaliGemmaConfig)
 
-    if image_feature_size_override is None:
-        image_feature_size = hf_config.text_config.num_image_tokens
-    else:
-        image_feature_size = image_feature_size_override
-    
-    image_token = tokenizer.decode(hf_config.image_token_index)
+    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+    image_feature_size = hf_config.text_config.num_image_tokens
+    image_token_str = tokenizer.decode(hf_config.image_token_index)
     bos_token = tokenizer.decode(hf_config.bos_token_id)
-    image_token_str_pad = image_token * image_feature_size
+    image_token_str_pad = image_token_str * image_feature_size
     image_token_ids_pad = [hf_config.image_token_index] * image_feature_size
 
-    new_prompt = f"{image_token_str_pad}{bos_token}{llm_inputs.get("prompt")}\n"
-    new_token_ids = image_token_ids_pad + llm_inputs.get("prompt_token_ids")
+    orig_prompt = llm_inputs.get("prompt")
+    orig_prompt_ids = llm_inputs.get("prompt_token_ids")
+
+    if image_token_str in orig_prompt:
+        # This is only applicable when the model is served via the API server
+        # since we pad one image token string at the beginning.
+        orig_prompt = orig_prompt.replace(image_token_str, "")
+        orig_prompt_ids.remove(hf_config.image_token_index)
+
+    new_prompt = f"{image_token_str_pad}{bos_token}{orig_prompt}\n"
+    new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
 
     # NOTE: Create a defensive copy of the original inputs
     return LLMInputs(prompt_token_ids=new_token_ids,
@@ -145,6 +160,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         super().__init__()
 
         self.config = config
+        self.multimodal_config = multimodal_config
 
         # TODO(ywang96): Port over SiglipVisionModel & TP
         self.vision_tower = SiglipVisionModel(config.vision_config)
@@ -209,51 +225,28 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
 
     def _process_image_input(
             self, image_input: PaliGemmaImageInputs) -> torch.Tensor:
-        
+
         assert self.vision_tower is not None
         image_features = self._process_image_pixels(image_input)
 
         return self.multi_modal_projector(image_features)
 
-    def _merge_vision_embeddings(self, input_ids: torch.Tensor,
-                                 inputs_embeds: torch.Tensor,
-                                 vision_embeddings: torch.Tensor,
-                                 image_token_id: int) -> torch.Tensor:
-        """In place merges in vision_embeddings with inputs_embeds."""
-
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
-        vision_embeddings = vision_embeddings / (self.config.hidden_size**0.5)
-        mask = (input_ids == image_token_id)
-
-        image_feature_size = vision_embeddings.shape[
-            0] * vision_embeddings.shape[1]
-        if mask.sum() != image_feature_size:
-            raise ValueError(
-                f"image_feature_size should be {image_feature_size}, "
-                f"but found: {mask.sum()}")
-
-        inputs_embeds[mask] = vision_embeddings.view(
-            image_feature_size, vision_embeddings.shape[-1])
-
-        return inputs_embeds
-
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 **kwargs: object) -> SamplerOutput:
-        """
-        The correct prompt format needs to be:
-        '<image>' * image_feature_size + '<bos>' + prompt + '\n'
 
-        See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
-        """ # noqa
         parsed_image_input = self._parse_and_validate_image_input(**kwargs)
 
         if parsed_image_input is not None:
             vision_embeddings = self._process_image_input(parsed_image_input)
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
+            vision_embeddings = vision_embeddings / (self.config.hidden_size**
+                                                     0.5)
+
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = self._merge_vision_embeddings(
+            inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.config.image_token_index)
 
@@ -272,7 +265,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     # Copied from vllm/model_executor/models/gemma.py
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.language_model.embed_tokens.weight,
+        logits = self.logits_processor(self.language_model.embed_tokens,
                                        hidden_states, sampling_metadata)
         return logits
 
@@ -329,11 +322,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
-                    # GemmaRMSNorm is different from Llama's in that it
-                    # multiplies (1 + weight) to the output, instead of just
-                    # weight.
-                    if "norm.weight" in name:
-                        loaded_weight += 1.0
                     use_default_weight_loading = True
 
             if use_default_weight_loading:
