@@ -69,7 +69,7 @@ main() {
           --enable-chunked-prefill &
   wait_for_server 8000
 
-  python3 benchmark_serving.py \
+  python3 ../benchmark_serving.py \
           --backend vllm \
           --model $model \
           --dataset-name $dataset_name \
@@ -105,7 +105,7 @@ main() {
   # launch round robin proxy
   bash ./round_robin_proxy.sh &
 
-  python3 benchmark_serving.py \
+  python3 ../benchmark_serving.py \
           --backend vllm \
           --model $model \
           --dataset-name $dataset_name \
