@@ -131,6 +131,10 @@ Alongside each architecture, we include some popular models that use it.
     - Orion
     - :code:`OrionStarAI/Orion-14B-Base`, :code:`OrionStarAI/Orion-14B-Chat`, etc.
     -
+  * - :code: `PaliGemmaForConditionalGeneration`
+    - PaliGemma
+    - :code:`google/paligemma-3b-mix-224`, :code:`google/paligemma-3b-mix-448`, etc.
+    - 
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
