@@ -188,7 +188,7 @@ Vision Language Models
     -
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
-    - :code:`google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, etc.
+    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
     - 
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision
