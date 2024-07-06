@@ -16,7 +16,7 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,8 @@ from PIL import Image
 from transformers import FuyuConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, MultiModalConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
@@ -34,12 +35,21 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
-from vllm.sequence import SamplerOutput
+from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal.image import (cached_get_tokenizer, cached_get_image_processor,
+                                   repeat_and_pad_image_tokens, repeat_and_pad_token)
+from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
 
 logger = init_logger(__name__)
+
+# Cannot find the following 2 numbers from hf config.
+_IMAGE_TOKEN_ID = 71011
+_NEWLINE_TOKEN_ID = 71019
+
+MAX_IMAGE_FEATURE_SIZE_HEIGHT = 1080
+MAX_IMAGE_FEATURE_SIZE_WIDTH = 1920
 
 
 class FuyuImagePixelInputs(TypedDict):
@@ -51,7 +61,10 @@ class FuyuImagePixelInputs(TypedDict):
     """
 
 
-def calculate_num_image_tokens(image_size: Tuple[int, int]) -> Tuple[int, int]:
+def _calculate_num_image_tokens(
+        height: int,
+        width: int,
+        ) -> Tuple[int, int]:
     """
     calculate number of image tokens needed for a given image size
     The expected Fuyu image prompts is in format:
@@ -62,68 +75,126 @@ def calculate_num_image_tokens(image_size: Tuple[int, int]) -> Tuple[int, int]:
         ncols: int - number of image tokens in x direction
         nrows: int - number of image tokens in y direction
     """
-    W, H = image_size
-    ncol = math.ceil(W / 30)
-    nrow = math.ceil(H / 30)
+    ncol = math.ceil(width / 30)
+    nrow = math.ceil(height / 30)
     return ncol, nrow
 
 
-def _image_processor(
-    data: ImagePixelData,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Dict[str, torch.Tensor]:
-    image = data.image
+def get_max_fuyu_image_feature_size():
 
-    img_processor = MULTIMODAL_REGISTRY \
-                    ._get_plugin_for_data_type(ImagePixelData) \
-                    ._get_hf_image_processor(model_config, vlm_config)
+    return _calculate_num_image_tokens(
+        height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+    )
 
-    if isinstance(image, Image.Image):
-        # Temporary patch before dynamic number of image tokens is supported
-        # It's difficult to infer number of image tokens from image size for
-        # image larger than (1920, 1080)
-        _, _, h, w = vlm_config.image_input_shape
-        if image.width > w or image.height > h:
-            h, w = min(h, image.height), min(w, image.width)
-            logger.warning(
-                "Dynamic image larger than (1920, 1080) currently unsupported. "
-                "Resizing input image to (%d, %d).", w, h)
-            data.image = image.resize((w, h))
 
-        # FuyuImageProcessor's preprocess returns unpatched image,
-        # we need to call patchify_image manually
-        outputs = MULTIMODAL_REGISTRY \
-                    ._get_plugin_for_data_type(ImagePixelData) \
-                    ._default_input_processor(data, model_config, vlm_config)
+def get_max_fuyu_image_tokens():
+    ncol, nrow = get_max_fuyu_image_feature_size()
+    return (ncol + 1) * nrow
 
+
+def dummy_seq_data_for_fuyu(seq_len: int):
+    ncol, nrow = get_max_fuyu_image_feature_size()
+    image_feature_size = get_max_fuyu_image_tokens()
+
+    token_ids = ([_IMAGE_TOKEN_ID] * ncol + [_NEWLINE_TOKEN_ID]) * nrow
+    token_ids += [0] * (seq_len - image_feature_size)
+    return SequenceData(token_ids)
+
+
+def dummy_image_for_fuyu(
+    image_width: int,
+    image_height: int,
+):
+    image = Image.new("RGB", (image_width, image_height), color=0)
+    return {"image": image}
+
+
+def dummy_data_for_fuyu(seq_len: int):
+    seq_data = dummy_seq_data_for_fuyu(seq_len)
+    mm_data = dummy_image_for_fuyu(
+        MAX_IMAGE_FEATURE_SIZE_WIDTH, 
+        MAX_IMAGE_FEATURE_SIZE_HEIGHT
+    )
+    return seq_data, mm_data
+
+
+def input_processor_for_fuyu(
+        ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return llm_inputs
+    
+    model_config = ctx.model_config
+    image_data = multi_modal_data["image"]
+    # process image data
+    if isinstance(image_data, Image.Image):
+        # we need to get transformed image_size for prompts padding
+        image_processor = cached_get_image_processor(model_config.model)
+        outputs = image_processor.preprocess(image_data, return_tensors="pt")
+        if len(outputs["images"]) != 1:
+            logger.warning("Multiple image input is not supported yet, "
+                           "so any extra image tokens will be treated "
+                           "as plain text.")
+
+        # images: [[torch.Tensor(image1)], [torch.Tensor(image2)], ...]
+        # unpadded_heights: [[torch.Tensor(h1)], [torch.Tensor(h2)], ...]
+        # unpadded_widths: [[torch.Tensor(w1)], [torch.Tensor(w2)], ...]
+        # NOTE: This only designed for single image
         image = torch.stack(outputs["images"][0])
-        _, _, h, w = image.shape
-        image_unpadded_h = outputs["image_unpadded_heights"]
-        image_unpadded_w = outputs["image_unpadded_widths"]
-        new_h = min(h, math.ceil(image_unpadded_h[0][0] / 30) * 30)
-        new_w = min(w, math.ceil(image_unpadded_w[0][0] / 30) * 30)
-        image = image[:, :, :new_h, :new_w]
+        
+        image_unpadded_h = outputs["image_unpadded_heights"][0][0].item()
+        image_unpadded_w = outputs["image_unpadded_widths"][0][0].item()
+        image_padded_h = math.ceil(image_unpadded_h / 30) * 30
+        image_padded_w = math.ceil(image_unpadded_w / 30) * 30
+        image_data = image[:, :, :image_padded_h, :image_padded_w]
+        multi_modal_data["image"] = image_data
 
-    image_patches = img_processor.patchify_image(image)
-    return {"image_patches": image_patches}
+    elif isinstance(image_data, torch.Tensor):
+        raise NotImplementedError("Embeddings input is not supported yet")
+    else:
+        raise TypeError(f"Invalid image type: {type(image_data)}")
+
+    # process prompts
+    prompt = llm_inputs["prompt"]
+    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    ncol, nrow = _calculate_num_image_tokens(image_unpadded_h, image_unpadded_w)
+    padding_ids = repeat_and_pad_token(_IMAGE_TOKEN_ID, repeat_count=ncol, pad_token_right=_NEWLINE_TOKEN_ID)
+
+    # image tokens always left padded before text
+    new_prompt_token_ids = padding_ids * nrow + prompt_token_ids
+
+    return LLMInputs(prompt=prompt,
+                     prompt_token_ids=new_prompt_token_ids,
+                     multi_modal_data=multi_modal_data)
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
+def input_mapper_for_fuyu(ctx: InputContext, data: object):
+    model_config = ctx.model_config
+    image_processor = cached_get_image_processor(model_config.model)
+    # image has been processed in input_processor
+    image_patches = image_processor.patchify_image(data)
+    return MultiModalInputs({"image_patches": image_patches})
+
+
+@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_fuyu_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_fuyu)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
 class FuyuForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: FuyuConfig,
-                 vlm_config: VisionLanguageConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.config = config
+        self.multimodal_config = multimodal_config
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.vlm_config = vlm_config
-        self.image_token_id = vlm_config.image_token_id
+        self.image_token_id = _IMAGE_TOKEN_ID
 
         self.vision_embed_tokens = ColumnParallelLinear(
             config.patch_size * config.patch_size * config.num_channels,
@@ -148,14 +219,6 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(self, **kwargs: object):
         image_patches = kwargs.pop("image_patches", None)
 
-        expected_input_type = self.vlm_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
-
-        if expected_input_type != ImageInputType.PIXEL_VALUES:
-            raise ValueError(
-                f"Unexpected image input type: {expected_input_type}."
-                "Phi3v only support pixel_values input currently.")
-
         if isinstance(image_patches, torch.Tensor):
             image_patches = image_patches.to(
                 self.vision_embed_tokens.weight.dtype)
@@ -169,6 +232,7 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ):
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -198,7 +262,7 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.language_model.logits_processor(
-            self.language_model.lm_head.weight, hidden_states,
+            self.language_model.lm_head, hidden_states,
             sampling_metadata)
         return logits
 
