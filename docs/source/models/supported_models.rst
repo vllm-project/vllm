@@ -7,6 +7,8 @@ vLLM supports a variety of generative Transformer models in `HuggingFace Transfo
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
+Decoder-only Language Models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .. list-table::
   :widths: 25 25 50 5
   :header-rows: 1
@@ -173,6 +175,32 @@ Alongside each architecture, we include some popular models that use it.
     -
 
 
+.. _supported_vlms:
+
+Vision Language Models
+^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+  :widths: 25 25 50 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HuggingFace Models
+    - :ref:`LoRA <lora>`
+  * - :code:`LlavaForConditionalGeneration`
+    - LLaVA-1.5
+    - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
+    -
+  * - :code:`LlavaNextForConditionalGeneration`
+    - LLaVA-NeXT
+    - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
+    -
+  * - :code:`Phi3VForCausalLM`
+    - Phi-3-Vision
+    - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    -
+
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
 Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
@@ -210,8 +238,9 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         output = llm.generate("Hello, my name is")
         print(output)
 
+
 Model Support Policy
----------------------
+=====================
 
 At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:
 
