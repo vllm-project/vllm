@@ -9,7 +9,7 @@ from vllm import LLM
 # You can use `.buildkite/download-images.sh` to download them
 
 
-def run_llava():
+def run_paligemma():
     llm = LLM(model="google/paligemma-3b-mix-224")
 
     prompt = "caption es"
@@ -29,7 +29,7 @@ def run_llava():
 
 
 def main():
-    run_llava()
+    run_paligemma()
 
 
 if __name__ == "__main__":
