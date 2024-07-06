@@ -12,7 +12,7 @@ which allows you to pass in multi-modal input alongside text and token prompts.
 
 .. note::
    ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through 
-    :class:`vllm.multimodal.MULTIMODAL_REGISTRY`.
+   the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
 
 By default, vLLM models do not support multi-modal inputs. To enable multi-modal support for a model, please follow :ref:`the guide for adding a new multimodal model. <adding_a_new_multimodal_model>`.
 
