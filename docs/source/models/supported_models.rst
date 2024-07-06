@@ -192,7 +192,7 @@ Vision Language Models
     -
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
-Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Adding a New Multimodal Model <adding_a_new_multimodal_model>` 
+Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
 for instructions on how to implement support for your model.
 Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
 
