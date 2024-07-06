@@ -28,7 +28,7 @@ Further update the model as follows:
       The model class does not have to be named :code:`*ForCausalLM`.
       Check out `the HuggingFace Transformers documentation <https://huggingface.co/docs/transformers/model_doc/auto#multimodal>`__ for some examples.
 
-- In the :meth:`~torch.nn.Module.forward` method, reserve a keyword parameter
+- If you haven't already done so, reserve a keyword parameter in :meth:`~torch.nn.Module.forward`
   for each input tensor that corresponds to a multi-modal input, as shown in the following example:
 
   .. code-block:: diff
