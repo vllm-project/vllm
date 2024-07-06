@@ -14,6 +14,11 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     all_close_1d, create_scale_param, cutlass_fp8_supported, fp8_apply,
     per_tensor_dequantize, per_tensor_quantize, requantize_with_max_scale)
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQMarlinState,
+    marlin_permute_scales)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    pack_fp8_to_int32)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
 
@@ -49,7 +54,7 @@ class Fp8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -101,6 +106,12 @@ class Fp8LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
+        capability = current_platform.get_device_capability()
+        capability = capability[0] * 10 + capability[1]
+        self.use_marlin = capability < 89
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -115,6 +126,10 @@ class Fp8LinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
 
         layer.logical_widths = output_partition_sizes
+
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         # WEIGHT
         weight_dtype = (torch.float8_e4m3fn
@@ -145,6 +160,65 @@ class Fp8LinearMethod(LinearMethodBase):
                                            **extra_weight_attrs)
                 layer.register_parameter("input_scale", scale)
 
+        # For GPUs without FP8 hardware support, we use Marlin for fast
+        # fused dequantization
+        if self.use_marlin:
+            layer.marlin_state = GPTQMarlinState.REPACK
+
+    def prepare_layer_for_marlin(self, layer: Module) -> None:
+        print_warning_once(
+            "Your GPU does not have native support for FP8 computation but "
+            "FP8 quantization is being used. Weight-only FP8 compression will "
+            "be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads.")
+
+        part_size_n = layer.output_size_per_partition
+        part_size_k = layer.input_size_per_partition
+
+        assert layer.marlin_state == GPTQMarlinState.REPACK
+        layer.marlin_state = GPTQMarlinState.READY
+
+        device = layer.weight.device
+
+        # WEIGHTS
+        # Repack weights to gptq format (packed int32 elements)
+        packed_gptq_qweight = pack_fp8_to_int32(layer.weight)
+
+        # Repack weights to marlin format
+        marlin_qweight = ops.gptq_marlin_repack(
+            b_q_weight=packed_gptq_qweight,
+            perm=torch.empty(0, dtype=torch.int, device=device),
+            size_k=part_size_k,
+            size_n=part_size_n,
+            num_bits=8,
+        )
+        layer.weight = Parameter(marlin_qweight, requires_grad=False)
+
+        # WEIGHT SCALES
+        # Currently Marlin doesn't support per-tensor scales, so we
+        # expand it to channelwise
+        scales = layer.weight_scale.repeat(1, part_size_n).to(
+            layer.orig_dtype).to(device)
+        # Permute scales
+        marlin_scales = marlin_permute_scales(
+            s=scales,
+            size_k=part_size_k,
+            size_n=part_size_n,
+            group_size=-1,
+            num_bits=8,
+        )
+        layer.weight_scale = Parameter(marlin_scales, requires_grad=False)
+
+        # Allocate marlin workspace
+        max_workspace_size = (
+            part_size_n // GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
+        workspace = torch.zeros(max_workspace_size,
+                                dtype=torch.int,
+                                device=device,
+                                requires_grad=False)
+
+        layer.workspace = workspace
+
     def process_weights_after_loading(self, layer: Module) -> None:
 
         # If checkpoint not serialized fp8, quantize the weights.
@@ -156,6 +230,8 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.input_scale = None
+            if self.use_marlin:
+                self.prepare_layer_for_marlin(layer)
             return
 
         # If checkpoint is fp8, requantize the separately quantized logical
@@ -177,17 +253,45 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.input_scale = None
 
+            if self.use_marlin:
+                self.prepare_layer_for_marlin(layer)
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
+        if self.use_marlin:
+            # For GPUs that lack FP8 hardware support, we can leverage the
+            # Marlin kernel for fast weight-only FP8 quantization
+
+            reshaped_x = x.reshape(-1, x.shape[-1])
+            out_shape = x.shape[:-1] + (layer.output_size_per_partition, )
+
+            output = ops.fp8_marlin_gemm(
+                a=reshaped_x,
+                b_q_weight=layer.weight,
+                b_scales=layer.weight_scale,
+                workspace=layer.workspace,
+                num_bits=8,
+                size_m=reshaped_x.shape[0],
+                size_n=layer.output_size_per_partition,
+                size_k=layer.input_size_per_partition,
+            )
+
+            if bias is not None:
+                output.add_(bias)  # In-place add
+
+            return output.reshape(out_shape)
+
+
+
         return fp8_apply(input=x,
-                         weight=layer.weight,
-                         weight_scale=layer.weight_scale,
-                         input_scale=layer.input_scale,
-                         bias=bias,
-                         cutlass_fp8_supported=self.cutlass_fp8_supported)
+                     weight=layer.weight,
+                     weight_scale=layer.weight_scale,
+                     input_scale=layer.input_scale,
+                     bias=bias,
+                     cutlass_fp8_supported=self.cutlass_fp8_supported)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

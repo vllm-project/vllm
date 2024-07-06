@@ -20,7 +20,7 @@ You can install vLLM using pip:
 .. code-block:: console
 
     $ # (Recommended) Create a new conda environment.
-    $ conda create -n myenv python=3.9 -y
+    $ conda create -n myenv python=3.10 -y
     $ conda activate myenv
 
     $ # Install vLLM with CUDA 12.1.
@@ -35,7 +35,7 @@ You can install vLLM using pip:
 
         $ # Install vLLM with CUDA 11.8.
         $ export VLLM_VERSION=0.4.0
-        $ export PYTHON_VERSION=39
+        $ export PYTHON_VERSION=310
         $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
 
     In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
