@@ -1,16 +1,16 @@
 import argparse
 import dataclasses
 import json
-import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         TokenizerPoolConfig, VisionLanguageConfig)
+                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         TokenizerPoolConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import str_to_int_tuple
+from vllm.utils import FlexibleArgumentParser
 
 
 def nullable_str(val: str):
@@ -78,83 +78,31 @@ class EngineArgs:
     model_loader_extra_config: Optional[dict] = None
     preemption_mode: Optional[str] = None
 
-    # Related to Vision-language models such as llava
-    image_input_type: Optional[str] = None
-    image_token_id: Optional[int] = None
-    image_input_shape: Optional[str] = None
-    image_feature_size: Optional[int] = None
-    image_processor: Optional[str] = None
-    image_processor_revision: Optional[str] = None
-    disable_image_processor: bool = False
-
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
+    speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-
+    spec_decoding_acceptance_method: str = 'rejection_sampler'
+    typical_acceptance_sampler_posterior_threshold: Optional[float] = None
+    typical_acceptance_sampler_posterior_alpha: Optional[float] = None
     qlora_adapter_name_or_path: Optional[str] = None
+
+    otlp_traces_endpoint: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
 
     @staticmethod
-    def add_cli_args_for_vlm(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        parser.add_argument('--image-input-type',
-                            type=nullable_str,
-                            default=None,
-                            choices=[
-                                t.name.lower()
-                                for t in VisionLanguageConfig.ImageInputType
-                            ],
-                            help=('The image input type passed into vLLM.'))
-        parser.add_argument('--image-token-id',
-                            type=int,
-                            default=None,
-                            help=('Input id for image token.'))
-        parser.add_argument(
-            '--image-input-shape',
-            type=nullable_str,
-            default=None,
-            help=('The biggest image input shape (worst for memory footprint) '
-                  'given an input type. Only used for vLLM\'s profile_run.'))
-        parser.add_argument(
-            '--image-feature-size',
-            type=int,
-            default=None,
-            help=('The image feature size along the context dimension.'))
-        parser.add_argument(
-            '--image-processor',
-            type=str,
-            default=EngineArgs.image_processor,
-            help='Name or path of the huggingface image processor to use. '
-            'If unspecified, model name or path will be used.')
-        parser.add_argument(
-            '--image-processor-revision',
-            type=str,
-            default=None,
-            help='Revision of the huggingface image processor version to use. '
-            'It can be a branch name, a tag name, or a commit id. '
-            'If unspecified, will use the default version.')
-        parser.add_argument(
-            '--disable-image-processor',
-            action='store_true',
-            help='Disables the use of image processor, even if one is defined '
-            'for the model on huggingface.')
-
-        return parser
-
-    @staticmethod
-    def add_cli_args(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
         # Model arguments
@@ -501,15 +449,14 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
-        parser.add_argument(
-            "--device",
-            type=str,
-            default=EngineArgs.device,
-            choices=["auto", "cuda", "neuron", "cpu", "tpu", "xpu"],
-            help='Device type for vLLM execution.')
-
-        # Related to Vision-language models such as llava
-        parser = EngineArgs.add_cli_args_for_vlm(parser)
+        parser.add_argument("--device",
+                            type=str,
+                            default=EngineArgs.device,
+                            choices=[
+                                "auto", "cuda", "neuron", "cpu", "openvino",
+                                "tpu", "xpu"
+                            ],
+                            help='Device type for vLLM execution.')
 
         parser.add_argument(
             '--scheduler-delay-factor',
@@ -534,6 +481,13 @@ class EngineArgs:
             type=int,
             default=EngineArgs.num_speculative_tokens,
             help='The number of speculative tokens to sample from '
+            'the draft model in speculative decoding.')
+        parser.add_argument(
+            '--speculative-draft-tensor-parallel-size',
+            '-spec-draft-tp',
+            type=int,
+            default=EngineArgs.speculative_draft_tensor_parallel_size,
+            help='Number of tensor parallel replicas for '
             'the draft model in speculative decoding.')
 
         parser.add_argument(
@@ -565,6 +519,38 @@ class EngineArgs:
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
 
+        parser.add_argument(
+            '--spec-decoding-acceptance-method',
+            type=str,
+            default=EngineArgs.spec_decoding_acceptance_method,
+            choices=['rejection_sampler', 'typical_acceptance_sampler'],
+            help='Specify the acceptance method to use during draft token '
+            'verification in speculative decoding. Two types of acceptance '
+            'routines are supported: '
+            '1) RejectionSampler which does not allow changing the '
+            'acceptance rate of draft tokens, '
+            '2) TypicalAcceptanceSampler which is configurable, allowing for '
+            'a higher acceptance rate at the cost of lower quality, '
+            'and vice versa.')
+
+        parser.add_argument(
+            '--typical-acceptance-sampler-posterior-threshold',
+            type=float,
+            default=EngineArgs.typical_acceptance_sampler_posterior_threshold,
+            help='Set the lower bound threshold for the posterior '
+            'probability of a token to be accepted. This threshold is '
+            'used by the TypicalAcceptanceSampler to make sampling decisions '
+            'during speculative decoding. Defaults to 0.09')
+
+        parser.add_argument(
+            '--typical-acceptance-sampler-posterior-alpha',
+            type=float,
+            default=EngineArgs.typical_acceptance_sampler_posterior_alpha,
+            help='A scaling factor for the entropy-based threshold for token '
+            'acceptance in the TypicalAcceptanceSampler. Typically defaults '
+            'to sqrt of --typical-acceptance-sampler-posterior-threshold '
+            'i.e. 0.3')
+
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
                             default=EngineArgs.model_loader_extra_config,
@@ -574,7 +560,7 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
         parser.add_argument(
-            '--preemption_mode',
+            '--preemption-mode',
             type=str,
             default=None,
             help='If \'recompute\', the engine performs preemption by block '
@@ -599,6 +585,13 @@ class EngineArgs:
                             type=str,
                             default=None,
                             help='Name or path of the QLoRA adapter.')
+
+        parser.add_argument(
+            '--otlp-traces-endpoint',
+            type=str,
+            default=None,
+            help='Target URL to which OpenTelemetry traces will be sent.')
+
         return parser
 
     @classmethod
@@ -626,6 +619,7 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+        multimodal_config = MultiModalConfig()
 
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
@@ -649,7 +643,8 @@ class EngineArgs:
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
-            served_model_name=self.served_model_name)
+            served_model_name=self.served_model_name,
+            multimodal_config=multimodal_config)
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -677,6 +672,8 @@ class EngineArgs:
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
+            speculative_draft_tensor_parallel_size = \
+                self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
@@ -685,6 +682,12 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
+            draft_token_acceptance_method=\
+                self.spec_decoding_acceptance_method,
+            typical_acceptance_sampler_posterior_threshold=self.
+            typical_acceptance_sampler_posterior_threshold,
+            typical_acceptance_sampler_posterior_alpha=self.
+            typical_acceptance_sampler_posterior_alpha,
         )
 
         scheduler_config = SchedulerConfig(
@@ -723,39 +726,11 @@ class EngineArgs:
             model_loader_extra_config=self.model_loader_extra_config,
         )
 
-        if self.image_input_type:
-            if (not self.image_token_id or not self.image_input_shape
-                    or not self.image_feature_size):
-                raise ValueError(
-                    'Specify `image_token_id`, `image_input_shape` and '
-                    '`image_feature_size` together with `image_input_type`.')
-
-            if self.image_processor is None:
-                self.image_processor = self.model
-            if self.disable_image_processor:
-                if self.image_processor != self.model:
-                    warnings.warn(
-                        "You've specified an image processor "
-                        f"({self.image_processor}) but also disabled "
-                        "it via `--disable-image-processor`.",
-                        stacklevel=2)
-
-                self.image_processor = None
-
-            vision_language_config = VisionLanguageConfig(
-                image_input_type=VisionLanguageConfig.
-                get_image_input_enum_type(self.image_input_type),
-                image_token_id=self.image_token_id,
-                image_input_shape=str_to_int_tuple(self.image_input_shape),
-                image_feature_size=self.image_feature_size,
-                image_processor=self.image_processor,
-                image_processor_revision=self.image_processor_revision,
-            )
-        else:
-            vision_language_config = None
-
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
+
+        observability_config = ObservabilityConfig(
+            otlp_traces_endpoint=self.otlp_traces_endpoint)
 
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled
@@ -764,16 +739,19 @@ class EngineArgs:
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
 
-        return EngineConfig(model_config=model_config,
-                            cache_config=cache_config,
-                            parallel_config=parallel_config,
-                            scheduler_config=scheduler_config,
-                            device_config=device_config,
-                            lora_config=lora_config,
-                            vision_language_config=vision_language_config,
-                            speculative_config=speculative_config,
-                            load_config=load_config,
-                            decoding_config=decoding_config)
+        return EngineConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            lora_config=lora_config,
+            multimodal_config=multimodal_config,
+            speculative_config=speculative_config,
+            load_config=load_config,
+            decoding_config=decoding_config,
+            observability_config=observability_config,
+        )
 
 
 @dataclass
@@ -784,8 +762,8 @@ class AsyncEngineArgs(EngineArgs):
     max_log_len: Optional[int] = None
 
     @staticmethod
-    def add_cli_args(parser: argparse.ArgumentParser,
-                     async_args_only: bool = False) -> argparse.ArgumentParser:
+    def add_cli_args(parser: FlexibleArgumentParser,
+                     async_args_only: bool = False) -> FlexibleArgumentParser:
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--engine-use-ray',
@@ -806,13 +784,9 @@ class AsyncEngineArgs(EngineArgs):
 
 # These functions are used by sphinx to build the documentation
 def _engine_args_parser():
-    return EngineArgs.add_cli_args(argparse.ArgumentParser())
+    return EngineArgs.add_cli_args(FlexibleArgumentParser())
 
 
 def _async_engine_args_parser():
-    return AsyncEngineArgs.add_cli_args(argparse.ArgumentParser(),
+    return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
                                         async_args_only=True)
-
-
-def _vlm_engine_args_parser():
-    return EngineArgs.add_cli_args_for_vlm(argparse.ArgumentParser())

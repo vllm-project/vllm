@@ -46,7 +46,7 @@ class CPUExecutor(ExecutorBase):
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
+            multimodal_config=self.multimodal_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
@@ -83,6 +83,9 @@ class CPUExecutor(ExecutorBase):
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.driver_worker.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.driver_worker.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
