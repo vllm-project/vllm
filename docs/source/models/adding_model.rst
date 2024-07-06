@@ -44,23 +44,23 @@ Next, you need to rewrite the :meth:`~torch.nn.Module.forward` method of your mo
 
 .. code-block:: diff
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-    -    attention_mask: Optional[torch.Tensor] = None,
-    -    position_ids: Optional[torch.LongTensor] = None,
-    -    past_key_values: Optional[List[torch.FloatTensor]] = None,
-    -    inputs_embeds: Optional[torch.FloatTensor] = None,
-    -    labels: Optional[torch.LongTensor] = None,
-    -    use_cache: Optional[bool] = None,
-    -    output_attentions: Optional[bool] = None,
-    -    output_hidden_states: Optional[bool] = None,
-    -    return_dict: Optional[bool] = None,
-    -) -> Union[Tuple, CausalLMOutputWithPast]:
-    +    positions: torch.Tensor,
-    +    kv_caches: List[torch.Tensor],
-    +    attn_metadata: AttentionMetadata,
-    +) -> Optional[SamplerOutput]:
+      def forward(
+          self,
+          input_ids: torch.Tensor,
+    -     attention_mask: Optional[torch.Tensor] = None,
+    -     position_ids: Optional[torch.LongTensor] = None,
+    -     past_key_values: Optional[List[torch.FloatTensor]] = None,
+    -     inputs_embeds: Optional[torch.FloatTensor] = None,
+    -     labels: Optional[torch.LongTensor] = None,
+    -     use_cache: Optional[bool] = None,
+    -     output_attentions: Optional[bool] = None,
+    -     output_hidden_states: Optional[bool] = None,
+    -     return_dict: Optional[bool] = None,
+    - ) -> Union[Tuple, CausalLMOutputWithPast]:
+    +     positions: torch.Tensor,
+    +     kv_caches: List[torch.Tensor],
+    +     attn_metadata: AttentionMetadata,
+    + ) -> Optional[SamplerOutput]:
 
 1. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
 2. Replace the attention operation with either :code:`PagedAttention`, :code:`PagedAttentionWithRoPE`, or :code:`PagedAttentionWithALiBi` depending on the model's architecture.

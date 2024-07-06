@@ -8,7 +8,7 @@ Input Processing
 Each model can override parts of vLLM's :ref:`input processing pipeline <input_processing_pipeline>` via
 :data:`~vllm.inputs.INPUT_REGISTRY` and :data:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
 
-Currently, this mechanism is only utilized in :ref:`multi-modal models <multi_modality>` for preprocessing multi-modal input 
+Currently, this mechanism is only utilized in :ref:`multi-modal <multi_modality>` models for preprocessing multi-modal input 
 data in addition to input prompt, but it can be extended to text-only language models when needed.
 
 Guides

@@ -38,14 +38,14 @@ As usual, follow :ref:`these steps <adding_a_new_model>` to implement the model 
 
   .. code-block:: diff
 
-      def forward(
-          self,
-          input_ids: torch.Tensor,
-          positions: torch.Tensor,
-          kv_caches: List[torch.Tensor],
-          attn_metadata: AttentionMetadata,
-      +   pixel_values: torch.Tensor,
-      ) -> SamplerOutput:
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
+      +     pixel_values: torch.Tensor,
+        ) -> SamplerOutput:
 
 
 2. Register input mappers
@@ -68,8 +68,8 @@ A default mapper is available for each modality in the core vLLM library. This i
     :ref:`input_processing_pipeline`
 
 
-3. Register maximum number of multimodal tokens
-----------------------------------------------------------
+3. Register maximum number of multi-modal tokens
+------------------------------------------------
 
 For each modality type that the model accepts as input, calculate the maximum possible number of tokens
 and register it via :meth:`INPUT_REGISTRY.register_dummy_data <vllm.inputs.registry.InputRegistry.register_max_multimodal_tokens>`.
