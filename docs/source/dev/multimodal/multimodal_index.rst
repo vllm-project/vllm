@@ -7,15 +7,14 @@ Multi-Modality
     
 vLLM provides experimental support for multi-modal models through the :mod:`vllm.multimodal` package.
 
-:class:`vllm.inputs.PromptStrictInputs` accepts an additional attribute ``multi_modal_data``
-which allows you to pass in multi-modal input alongside text and token prompts.
+Multi-modal input can be passed alongside text and token prompts to :ref:`supported models <supported_vlms>`
+via the ``multi_modal_data`` field in :class:`vllm.inputs.PromptStrictInputs`.
 
 .. note::
    ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through 
    the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
 
-By default, vLLM models do not support multi-modal inputs. To enable multi-modal support for a model,
-please follow :ref:`this guide for adding a new multi-modal model. <adding_a_new_multimodal_model>`.
+To implement a new multi-modal model in vLLM, please follow :ref:`this guide <adding_a_new_multimodal_model>`.
 
 ..
   TODO: Add more instructions on how to add new plugins once embeddings is in.

@@ -1,26 +1,21 @@
 .. _adding_a_new_multimodal_model:
 
-Adding a New Multimodal Model
-=============================
+Enabling Multimodal Inputs
+==========================
 
-This document provides a high-level guide on integrating a :ref:`multi-modal <multi_modality>` model into vLLM.
+This document walks you through the steps to extend a vLLM model so that it accepts :ref:`multi-modal <multi_modality>` inputs.
 
-.. note::
-    The complexity of adding a new model depends heavily on the model's architecture.
-    The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
-    However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
-
-.. tip::
-    If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.
-    We will be happy to help you out!
+.. seealso::
+    :ref:`adding_a_new_model`
 
 
-1. Set up the base vLLM model
+1. Update the base vLLM model
 -----------------------------
 
-As usual, follow :ref:`these steps <adding_a_new_model>` to implement the model in vLLM, but note the following:
+It is assumed that you have already implemented the model in vLLM according to :ref:`these steps <adding_a_new_model>`.
+Further update the model as follows:
 
-- You should additionally implement the :class:`~vllm.model_executor.models.interfaces.SupportsVision` interface.
+- Implement the :class:`~vllm.model_executor.models.interfaces.SupportsVision` interface.
 
   .. code-block:: diff
 
@@ -33,7 +28,7 @@ As usual, follow :ref:`these steps <adding_a_new_model>` to implement the model 
       The model class does not have to be named :code:`*ForCausalLM`.
       Check out `the HuggingFace Transformers documentation <https://huggingface.co/docs/transformers/model_doc/auto#multimodal>`__ for some examples.
 
-- While implementing the :meth:`~torch.nn.Module.forward` method, reserve a keyword parameter
+- In the :meth:`~torch.nn.Module.forward` method, reserve a keyword parameter
   for each input tensor that corresponds to a multi-modal input, as shown in the following example:
 
   .. code-block:: diff

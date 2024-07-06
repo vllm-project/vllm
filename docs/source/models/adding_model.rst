@@ -10,6 +10,10 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
     The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
     However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
 
+.. note::
+    By default, vLLM models do not support multi-modal inputs. To enable multi-modal support,
+    please follow :ref:`this guide <adding_a_new_multimodal_model>` after implementing the model.
+
 .. tip::
     If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.
     We will be happy to help you out!
