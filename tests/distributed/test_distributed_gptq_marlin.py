@@ -13,8 +13,8 @@ import os
 import pytest
 
 from tests.models.test_gptq_marlin import MODELS, run_test
-from tests.quantization.utils import (cuda_device_count_stateless,
-                                      is_quant_method_supported)
+from tests.quantization.utils import is_quant_method_supported
+from vllm.utils import cuda_device_count_stateless
 
 
 @pytest.mark.parametrize("tensor_parallel_size", [2])
@@ -28,12 +28,13 @@ def test_models(vllm_runner, example_prompts, model, dtype: str,
                 tensor_parallel_size: int) -> None:
 
     if cuda_device_count_stateless() < tensor_parallel_size:
-        pytest.skip("gptq_marlin is not supported on this GPU type.")
-
+        pytest.skip(
+            "gptq_marlin is not supported on this GPU type.")
+        
     if not is_quant_method_supported("gptq_marlin"):
         pytest.skip(
             f"Need at least {tensor_parallel_size} GPUs to run the test.")
-
+        
     distributed_executor_backend = os.getenv("DISTRIBUTED_EXECUTOR_BACKEND")
     run_test(vllm_runner,
              example_prompts,
