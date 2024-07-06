@@ -85,6 +85,7 @@ main() {
           --result-dir $results_folder \
           --result-filename chunked_prefill_tp8.json \
           --request-rate $qps
+  kill_gpu_processes
 
 
   # chunked prefill with tp=4
@@ -125,12 +126,65 @@ main() {
           --result-dir $results_folder \
           --result-filename chunked_prefill_tp8.json \
           --request-rate $qps
-
   kill_gpu_processes
   pkill -f round_robin_proxy.sh
 
 
   # disaggregated prefill
+
+  # prefill with tp=4
+  python3 -m vllm.entrypoints.openai.api_server \
+          --model $model \
+          --port 8000 \
+          -tp 4 \
+          --disable-log-stats \
+          --disable-log-requests &
+  wait_for_server 8000
+
+  # set output-len to 1 so that it only do prefilling
+  python3 ../benchmark_serving.py \
+          --backend vllm \
+          --model $model \
+          --dataset-name $dataset_name \
+          --dataset-path $dataset_path \
+          --sonnet-input-len $input_len \
+          --sonnet-output-len 1 \
+          --sonnet-prefix-len $prefix_len \
+          --num-prompts $num_prompts \
+          --port 8000 \
+          --save-result \
+          --result-dir $results_folder \
+          --result-filename disagg_prefill_tp4.json \
+          --request-rate $qps
+  kill_gpu_processes
+
+  # decode with tp=4, enable APC
+  python3 -m vllm.entrypoints.openai.api_server \
+          --model $model \
+          --port 8000 \
+          -tp 4 \
+          --enable-prefix-caching \
+          --disable-log-stats \
+          --disable-log-requests &
+  wait_for_server 8000
+
+  # skip prefilling 
+  # by enabling APC and force the input tokens be the same
+  python3 ../benchmark_serving.py \
+          --backend vllm \
+          --model $model \
+          --dataset-name $dataset_name \
+          --dataset-path $dataset_path \
+          --sonnet-input-len $input_len \
+          --sonnet-output-len $output_len \
+          --sonnet-prefix-len $input_len  \
+          --num-prompts $num_prompts \
+          --port 8000 \
+          --save-result \
+          --result-dir $results_folder \
+          --result-filename disagg_decode_tp4.json \
+          --request-rate $qps
+  kill_gpu_processes
 
 }
 
