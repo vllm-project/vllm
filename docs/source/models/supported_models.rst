@@ -125,10 +125,6 @@ Decoder-only Language Models
     - Orion
     - :code:`OrionStarAI/Orion-14B-Base`, :code:`OrionStarAI/Orion-14B-Chat`, etc.
     -
-  * - :code: `PaliGemmaForConditionalGeneration`
-    - PaliGemma
-    - :code:`google/paligemma-3b-mix-224`, :code:`google/paligemma-3b-mix-448`, etc.
-    - 
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
@@ -190,6 +186,10 @@ Vision Language Models
     - LLaVA-NeXT
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
+  * - :code:`PaliGemmaForConditionalGeneration`
+    - PaliGemma
+    - :code:`google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, etc.
+    - 
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
