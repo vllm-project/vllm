@@ -76,12 +76,13 @@ def main(args):
             print(model, metric)
             print(means, stds)
 
-            ax = axes[i, j+1]
+            ax = axes[i, j + 1]
 
-            bars = ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
-                        means,
-                        yerr=stds,
-                        capsize=10,
+            bars = ax.bar(
+                ["vllm", "trt", "lmdeploy", "tgi"],
+                means,
+                yerr=stds,
+                capsize=10,
             )
             for idx, bar in enumerate(bars):
                 bar.set_color(bar_colors[idx])
@@ -90,7 +91,7 @@ def main(args):
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric}")
             ax.grid(axis='y')
-            
+
         metric = "Tput"
         j = 0
         if True:
@@ -103,24 +104,27 @@ def main(args):
                 if filtered_df.empty:
                     tputs.append(0.)
                 else:
-                    tputs.append(filtered_df["Input Tput (tok/s)"].values[0] + filtered_df["Output Tput (tok/s)"].values[0])
+                    input_tput = filtered_df["Input Tput (tok/s)"].values[0]
+                    output_tput = filtered_df["Output Tput (tok/s)"].values[0]
+                    tputs.append(input_tput + output_tput)
 
             print(model, metric)
             print(tputs)
-            
+
             ax = axes[i, j]
 
-            bars = ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
-                        tputs,)
+            bars = ax.bar(
+                ["vllm", "trt", "lmdeploy", "tgi"],
+                tputs,
+            )
             for idx, bar in enumerate(bars):
                 bar.set_color(bar_colors[idx])
-                
+
             ax.set_ylim(bottom=0)
 
-            ax.set_ylabel(f"Tput (token/s)")
+            ax.set_ylabel("Tput (token/s)")
             ax.set_title(f"{model} {metric}")
             ax.grid(axis='y')
-                    
 
     fig.tight_layout()
     fig.savefig("nightly_results.png", bbox_inches='tight')
