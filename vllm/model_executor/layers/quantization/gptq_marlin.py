@@ -1,5 +1,3 @@
-import enum
-from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -13,8 +11,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     verify_marlin_supports_shape, verify_marlin_supported, check_marlin_supported,
-    get_max_workspace_size, marlin_permute_scales, marlin_sort_g_idx,
-    replace_tensor)
+    marlin_make_workspace, marlin_permute_scales, marlin_sort_g_idx,
+    marlin_make_empty_g_idx, replace_tensor)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
@@ -222,11 +220,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             },
         )
 
-        g_idx_sort_indices = torch.empty(
-            g_idx.shape,
-            dtype=torch.int32,
-        )
-
         # Scales
         scales = Parameter(
             torch.empty(
@@ -266,70 +259,50 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             },
         )
 
-        # Allocate marlin workspace
-        workspace = torch.zeros(
-            get_max_workspace_size(output_size_per_partition),
-            dtype=torch.int,
-            requires_grad=False)
-
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
-        layer.g_idx_sort_indices = g_idx_sort_indices
-        layer.workspace = workspace
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
         layer.is_k_full = is_k_full
 
+    # Checkpoints are serialized in AutoGPTQ format, which is different from the 
+    # marlin format. This function is called after the weights are loaded.
+    # Here, we handle the repacking, including the activation reordering case.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-    
-        # To be used as part of repacking
-        part_size_n = layer.output_size_per_partition
-        part_size_k = layer.input_size_per_partition
-        full_size_k = layer.input_size
-
+        device = layer.qweight.device
+        # Allocate marlin workspace
+        layer.workspace = marlin_make_workspace(layer.output_size_per_partition, device)
+        
+        # Handle sorting for activation reordering if needed.
         if self.quant_config.desc_act:
-            # If desc_act, sort for activation_reordering.
-            g_idx, g_idx_sort_indices = marlin_sort_g_idx(
-                layer.g_idx, layer.g_idx_sort_indices)
+            g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.g_idx)
+            layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "g_idx", g_idx)
-            replace_tensor(layer, "g_idx_sort_indices", g_idx_sort_indices)
-
         else:
-            # Otherwise, reset g_idx to empty.
-            layer.g_idx = Parameter(
-                torch.empty(0, dtype=torch.int, device=layer.qweight.device),
-                requires_grad=False)
-            layer.g_idx_sort_indices = Parameter(
-                torch.empty(0, dtype=torch.int, device=layer.qweight.device),
-                requires_grad=False)
+            layer.g_idx = marlin_make_empty_g_idx(device)
+            layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
-        # Repack weights into marlin format
+        # Repack weights from autogptq format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
             layer.qweight,
-            layer.g_idx_sort_indices,
-            part_size_k,
-            part_size_n,
-            self.quant_config.weight_bits,
-        )
+            perm=layer.g_idx_sort_indices,
+            size_k=layer.input_size_per_partition,
+            size_n=layer.output_size_per_partition,
+            num_bits=self.quant_config.weight_bits)
         replace_tensor(layer, "qweight", marlin_qweight)
 
-        # Permute scales
-        scales_size_k = part_size_k
-        scales_size_n = part_size_n
-        if self.quant_config.desc_act:
-            scales_size_k = full_size_k
-
+        # Permute scales from autogptq format to marlin format.
         marlin_scales = marlin_permute_scales(
             layer.scales,
-            scales_size_k,
-            scales_size_n,
-            self.quant_config.group_size,
-            self.quant_config.weight_bits,
-        )
+            size_k=(layer.input_size if self.quant_config.desc_act 
+                    else layer.input_size_per_partition),
+            size_n=layer.output_size_per_partition,
+            group_size=self.quant_config.group_size)
         replace_tensor(layer, "scales", marlin_scales)
+
 
     def apply(
         self,
@@ -338,26 +311,20 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
-
-        size_m = reshaped_x.shape[0]
-        part_size_n = layer.output_size_per_partition
-        part_size_k = layer.input_size_per_partition
-
-        out_shape = x.shape[:-1] + (part_size_n, )
+        out_shape = x.shape[:-1] + (layer.output_size_per_partition, )
 
         output = ops.gptq_marlin_gemm(
             reshaped_x,
             layer.qweight,
             layer.scales,
-            layer.g_idx,
-            layer.g_idx_sort_indices,
-            layer.workspace,
-            self.quant_config.weight_bits,
-            size_m,
-            part_size_n,
-            part_size_k,
-            layer.is_k_full,
-        )
+            g_idx=layer.g_idx,
+            perm=layer.g_idx_sort_indices,
+            workspace=layer.workspace,
+            num_bits=self.quant_config.weight_bits,
+            size_m=reshaped_x.shape[0],
+            size_n=layer.output_size_per_partition,
+            size_k=layer.input_size_per_partition,
+            is_k_full=layer.is_k_full)
 
         if bias is not None:
             output.add_(bias)  # In-place add
