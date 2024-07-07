@@ -275,8 +275,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 input sequence.
         """
         seq_data = seq_group_metadata.seq_data[seq_id]
-        prompt_token_ids = seq_data.get_prompt_token_ids()
-        new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
+        prompt_token_ids = seq_data._prompt_token_ids
+        new_output_token_ids = [*seq_data._output_token_ids, *token_ids]
 
         new_seq_data_dict = {
             target_seq_id:

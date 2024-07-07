@@ -214,6 +214,7 @@ def _prepare_seq_groups(
             assert num_prefill_sample == 1
             assert query_lens is not None and seq_lens is not None
             query_len, seq_len = query_lens[i], seq_lens[i]
+
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
             prompt_logprob_len = (query_len - num_prefill_sample
@@ -221,8 +222,9 @@ def _prepare_seq_groups(
             sample_len = num_prefill_sample if do_sample else 0
         else:
             # Decode
+            assert query_lens is not None
             prompt_logprob_len = 0
-            sample_len = len(seq_ids) if do_sample else 0
+            sample_len = query_lens[i] if do_sample else 0
 
         # Update indices to select from the model output.
         """
@@ -389,14 +391,14 @@ class SamplingTensors:
 
             if seq_group.do_sample:
                 sample_lens = len(seq_group.sample_indices)
-                assert sample_lens == len(seq_ids)
-                temperatures += [temperature] * len(seq_ids)
-                top_ps += [top_p] * len(seq_ids)
-                top_ks += [top_k] * len(seq_ids)
-                min_ps += [min_p] * len(seq_ids)
-                presence_penalties += [p] * len(seq_ids)
-                frequency_penalties += [f] * len(seq_ids)
-                repetition_penalties += [r] * len(seq_ids)
+                assert sample_lens >= len(seq_ids)
+                temperatures += [temperature] * sample_lens
+                top_ps += [top_p] * sample_lens
+                top_ks += [top_k] * sample_lens
+                min_ps += [min_p] * sample_lens
+                presence_penalties += [p] * sample_lens
+                frequency_penalties += [f] * sample_lens
+                repetition_penalties += [r] * sample_lens
 
             if is_prompt:
                 prompt_best_of.append(sampling_params.best_of)
@@ -425,10 +427,13 @@ class SamplingTensors:
                     prompt_tokens.extend([] for _ in range(prefill_len))
                     output_tokens.extend([] for _ in range(prefill_len))
                 if seq_group.do_sample:
+                    sample_lens = len(seq_group.sample_indices)
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
-                        prompt_tokens.append(list(seq_data.prompt_token_ids))
-                        output_tokens.append(list(seq_data.output_token_ids))
+                        for k in range(sample_lens, 0, -1):
+                            prompt_tokens.append(seq_data._prompt_token_ids)
+                            output_tokens.append(
+                                seq_data._output_token_ids[:-k])
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_USE_MULTI_QUERY_SCORER: bool = False
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -251,6 +252,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+
+    # Use multi-query scorer for speculative decoding
+    "VLLM_USE_MULTI_QUERY_SCORER":
+    lambda: bool(int(os.getenv("VLLM_USE_MULTI_QUERY_SCORER", "0"))),
 }
 
 # end-env-vars-definition

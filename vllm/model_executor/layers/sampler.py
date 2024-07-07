@@ -295,12 +295,15 @@ def _greedy_sample(
 
         seq_ids = seq_group.seq_ids
         num_parent_seqs = len(seq_ids)
+        query_len = len(seq_group.sample_indices)
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
-        parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples_lst[sample_idx]]
+        parent_ids = [
+            i for i in range(num_parent_seqs) for _ in range(query_len)
+        ]
+        next_token_ids = samples_lst[sample_idx:sample_idx + query_len]
         results.append((next_token_ids, parent_ids))
-        sample_idx += num_parent_seqs
+        sample_idx += num_parent_seqs * query_len
     return results
 
 
@@ -333,18 +336,25 @@ def _random_sample(
         sampling_params = seq_group.sampling_params
         is_prompt = seq_group.is_prompt
         num_parent_seqs = len(seq_ids)
+        query_len = len(seq_group.sample_indices)
         if is_prompt:
             # Prompt phase.
-            parent_ids = [0] * sampling_params.best_of
+            parent_ids = [0] * (query_len * sampling_params.best_of)
             next_token_ids = random_samples[
-                sample_idx, :sampling_params.best_of].tolist()
+                sample_idx:sample_idx +
+                query_len, :sampling_params.best_of].flatten().tolist()
+            sample_idx += query_len
         else:
             # Generation phase.
-            parent_ids = list(range(num_parent_seqs))
+            parent_ids = [
+                seq_id for seq_id in range(num_parent_seqs)
+                for _ in range(query_len)
+            ]
             next_token_ids = random_samples[sample_idx:sample_idx +
-                                            num_parent_seqs, 0].tolist()
+                                            num_parent_seqs * query_len,
+                                            0].tolist()
+            sample_idx += num_parent_seqs * query_len
         results.append((next_token_ids, parent_ids))
-        sample_idx += num_parent_seqs
     return results
 
 
@@ -752,8 +762,11 @@ def _get_logprobs(
             # The current step may have different number of seq_ids, and
             # we can obtain it from `sample_result[1]`.
             query_idx = seq_group.sample_indices[0]
-            query_indices.extend(
-                [query_idx + parent_id for parent_id in parent_seq_ids])
+            if seq_group.is_prompt and len(seq_group.sample_indices) > 1:
+                query_indices.extend(seq_group.sample_indices)
+            else:
+                query_indices.extend(
+                    [query_idx + parent_id for parent_id in parent_seq_ids])
             next_token_ids.extend(token_ids)
 
             if sampling_params.logprobs is not None:

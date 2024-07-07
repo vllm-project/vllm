@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
@@ -20,6 +21,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
+from vllm.spec_decode.multi_query import MultiQueryTop1Scorer
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -219,10 +221,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._metrics.init_gpu_tensors(self.rank)
         self.spec_decode_sampler.init_gpu_tensors(self.rank)
 
-        self.scorer = BatchExpansionTop1Scorer(
-            scorer_worker=self.scorer_worker,
-            device=self.device,
-            vocab_size=self._vocab_size)
+        if envs.VLLM_USE_MULTI_QUERY_SCORER:
+            self.scorer = MultiQueryTop1Scorer(
+                scorer_worker=self.scorer_worker,
+                device=self.device,
+                vocab_size=self._vocab_size)
+        else:
+            self.scorer = BatchExpansionTop1Scorer(
+                scorer_worker=self.scorer_worker,
+                device=self.device,
+                vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 

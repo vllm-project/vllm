@@ -680,6 +680,18 @@ class SequenceGroupMetadata:
         assert self._token_chunk_size is not None
         return self._token_chunk_size
 
+    @token_chunk_size.setter
+    def token_chunk_size(self, value: int) -> None:
+        self._token_chunk_size = value
+
+    def __repr__(self) -> str:
+        return (f"SequenceGroupMetadata(request_id={self.request_id}, "
+                f"is_prompt={self.is_prompt}, "
+                f"seq_data={self.seq_data}, "
+                f"sampling_params={self.sampling_params}, "
+                f"block_tables={self.block_tables}, "
+                f"token_chunk_size={self.token_chunk_size})")
+
 
 class SequenceOutput:
     """The model output associated with a sequence.
@@ -890,14 +902,16 @@ class HiddenStates:
 
     def __init__(self, seq_group_metadata_list: List[SequenceGroupMetadata],
                  hidden_states: torch.Tensor):
-        assert len(seq_group_metadata_list) == len(hidden_states)
+        assert seq_group_metadata_list[0].is_prompt or len(
+            seq_group_metadata_list) == len(hidden_states)
         self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
         self.hidden_states: torch.Tensor = hidden_states
 
     def update(self, seq_group_metadata_list: List[SequenceGroupMetadata],
                hidden_states: torch.Tensor) -> None:
         """Update hidden states from target model invocation."""
-        assert len(seq_group_metadata_list) == len(hidden_states)
+        assert seq_group_metadata_list[0].is_prompt or len(
+            seq_group_metadata_list) == len(hidden_states)
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
 

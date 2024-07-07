@@ -6,6 +6,7 @@ from typing import List, Optional, Set, Tuple, Type
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig)
@@ -68,6 +69,7 @@ class Worker(LocalOrDistributedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
         self.multimodal_config = multimodal_config
+        self.speculative_config = speculative_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
@@ -93,6 +95,7 @@ class Worker(LocalOrDistributedWorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             multimodal_config=multimodal_config,
+            speculative_config=speculative_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -228,6 +231,10 @@ class Worker(LocalOrDistributedWorkerBase):
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
+            if (envs.VLLM_USE_MULTI_QUERY_SCORER and self.speculative_config
+                    and self.speculative_config.draft_model_config !=
+                    self.model_config):
+                self.model_runner.capture_multi_query_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)

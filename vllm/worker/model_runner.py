@@ -22,10 +22,11 @@ except ImportError:
     BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, SpeculativeConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
@@ -68,6 +69,11 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
+
+
+def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
+    assert len(x) <= max_len
+    return x + [pad] * (max_len - len(x))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -130,6 +136,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "seq_lens": self.seq_lens,
+            "query_lens": self.query_lens,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
@@ -173,6 +181,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         multimodal_config: Optional[MultiModalConfig] = None,
+        speculative_config: Optional[SpeculativeConfig] = None,
         return_hidden_states: bool = False,
     ):
         self.model_config = model_config
@@ -184,6 +193,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.multimodal_config = multimodal_config
+        self.speculative_config = speculative_config
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
@@ -195,6 +205,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
 
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
+            {} for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.multi_query_graph_runners: List[Dict[int, CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.graph_memory_pool: Optional[Tuple[
@@ -416,17 +429,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # get_num_computed_tokens is incorrect for spec decoding.
                     # So, we should have a special logic here.
                     # TODO(sang): Fix it.
-                    context_len = seq_data.get_len() - 1
+                    context_len = (seq_data.get_len() -
+                                   seq_group_metadata.token_chunk_size)
 
                 seq_len = min(
                     seq_data.get_len(),
                     context_len + seq_group_metadata.token_chunk_size)
-                if is_prompt:
-                    tokens = seq_data.get_token_ids()[context_len:seq_len]
-                else:
-                    # Optimization. get_token_ids requires the entire copy of
-                    # tokens.
-                    tokens = [seq_data.get_last_token_id()]
+                tokens = seq_data.get_token_ids()[context_len:seq_len]
 
                 # Prefix cache was hit.
                 # Prefix is not supported with sliding_window
@@ -482,7 +491,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     else:
                         block_table = computed_block_nums
                 elif (self.scheduler_config.chunked_prefill_enabled
-                      or not is_prompt):
+                      # multi-query verify for speculative decoding
+                      or context_len != 0 or not is_prompt):
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
@@ -512,9 +522,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     decode_only = False
                     prefill_seq_lens.append(seq_len)
                 else:
-                    assert query_len == 1, (
-                        "seq_len: {}, context_len: {}, query_len: {}".format(
-                            seq_len, context_len, query_len))
+                    # assert query_len == 1, (
+                    #     "seq_len: {}, context_len: {}, query_len: {}".format(
+                    #         seq_len, context_len, query_len))
                     num_decode_tokens += query_len
                     decode_seq_lens.append(sliding_seq_len)
 
@@ -596,10 +606,17 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         last_page_len = self.block_size
                     paged_kv_last_page_len.append(last_page_len)
 
-        batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
+
+        if (decode_only and max_query_len > 1
+                and envs.VLLM_USE_MULTI_QUERY_SCORER
+                and not self.model_config.enforce_eager
+                and max_decode_seq_len <= self.max_seq_len_to_capture):
+            batch_size = len(query_lens)
+        else:
+            batch_size = len(input_tokens)
 
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
@@ -608,7 +625,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             decode_only and not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_decode_seq_len <= self.max_seq_len_to_capture)
-        if use_captured_graph:
+        if use_captured_graph and max_query_len == 1:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
             for _ in range(graph_batch_size - batch_size):
@@ -626,6 +643,43 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             batch_size = graph_batch_size
             num_decode_tokens = batch_size
+        elif use_captured_graph and max_query_len > 1:
+            graph_batch_size = _get_graph_batch_size(batch_size)
+            assert graph_batch_size >= batch_size
+            if (self.speculative_config
+                    and self.speculative_config.num_speculative_tokens
+                    and max_query_len > 1):
+                max_query_len = (
+                    1 + self.speculative_config.num_speculative_tokens)
+            padded_input_tokens = []
+            padded_input_positions = []
+            padded_slot_mapping = []
+            offset = 0
+            for i in range(0, batch_size):
+                padded_input_tokens.extend(
+                    _pad_to_max(input_tokens[offset:offset + query_lens[i]],
+                                max_query_len, 0))
+                padded_input_positions.extend(
+                    _pad_to_max(input_positions[offset:offset + query_lens[i]],
+                                max_query_len, 0))
+                padded_slot_mapping.extend(
+                    _pad_to_max(slot_mapping[offset:offset + query_lens[i]],
+                                max_query_len, _PAD_SLOT_ID))
+
+                offset += query_lens[i]
+                query_lens[i] = max_query_len
+
+            for _ in range(batch_size, graph_batch_size):
+                input_tokens.extend([0] * max_query_len)
+                input_positions.extend([0] * max_query_len)
+                slot_mapping.extend([_PAD_SLOT_ID] * max_query_len)
+                query_lens.append(max_query_len)
+                seq_lens.append(1)
+                block_tables.append([])
+                lora_index_mapping.append(0)
+
+            batch_size = graph_batch_size
+            num_decode_tokens = batch_size * max_query_len
 
         if use_captured_graph:
             # The shape of graph_block_tables is
@@ -1046,7 +1100,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             slot_mapping=slot_mapping[:batch_size],
                             seq_lens=None,
                             seq_lens_tensor=seq_lens[:batch_size],
-                            max_query_len=None,
+                            max_query_len=1,
                             max_prefill_seq_len=0,
                             max_decode_seq_len=self.max_seq_len_to_capture,
                             query_start_loc=None,
@@ -1115,6 +1169,239 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
+
+    @torch.inference_mode()
+    def capture_multi_query_model(self,
+                                  kv_caches: List[List[torch.Tensor]]) -> None:
+        """Cuda graph capture a model.
+        Note that CUDA graph's performance gain is negligible if number
+        of batched tokens are larger than 200. And since CUDA graph
+        requires fixed sized tensors, supporting large/variable batch
+        size requires high GPU memory overhead. Thus, vLLM only captures
+        decoding requests. Mixed batch (chunked prefill + decoding) or
+        prefill requests are not captured.
+        Since it is used for decoding-only, it assumes there's only 1 token
+        per sequence in the batch.
+        """
+        assert not self.model_config.enforce_eager
+        logger.info("Capturing the model for CUDA graphs. This may lead to "
+                    "unexpected consequences if the model is not static. To "
+                    "run the model in eager mode, set 'enforce_eager=True' or "
+                    "use '--enforce-eager' in the CLI.")
+        logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
+                    "If you are running out of memory, consider decreasing "
+                    "`gpu_memory_utilization` or enforcing eager mode. "
+                    "You can also reduce the `max_num_seqs` as needed "
+                    "to decrease memory usage.")
+        start_time = time.perf_counter()
+
+        if (self.speculative_config
+                and self.speculative_config.num_speculative_tokens):
+            max_query_len = 1 + self.speculative_config.num_speculative_tokens
+        else:
+            max_query_len = 1
+
+        # Prepare dummy inputs. These will be reused for all batch sizes.
+        max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
+        input_tokens = torch.zeros(max_batch_size * max_query_len,
+                                   dtype=torch.long).cuda()
+        input_positions = torch.zeros(max_batch_size * max_query_len,
+                                      dtype=torch.long).cuda()
+        slot_mapping = torch.empty(max_batch_size * max_query_len,
+                                   dtype=torch.long).cuda()
+        slot_mapping.fill_(_PAD_SLOT_ID)
+        seq_lens_tensor = torch.empty(max_batch_size, dtype=torch.int32).cuda()
+        seq_lens_tensor.fill_(max_query_len)  # make the flash kernel
+        seq_lens = seq_lens_tensor.tolist()
+        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
+        intermediate_inputs = None
+        if not get_pp_group().is_first_rank:
+            intermediate_inputs = self.model.make_empty_intermediate_tensors(
+                batch_size=max_batch_size,
+                dtype=self.model_config.dtype,
+                device=self.device)
+
+        # Prepare buffer for outputs. These will be reused for all batch sizes.
+        # It will be filled after the first graph capture.
+        hidden_or_intermediate_states: List[Optional[torch.Tensor]] = [
+            None
+        ] * self.parallel_config.pipeline_parallel_size
+
+        # Reduce the time used to capture the model as speculative decoding
+        # cannot work with large batch size
+        graph_batch_size = _get_graph_batch_size(
+            max(64, self.scheduler_config.max_num_seqs))
+        batch_size_capture_list = [
+            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
+        ]
+
+        if self.attn_backend.get_name() == "flashinfer":
+            # For flashinfer, different batch sizes will share the
+            # same workspace buffer.
+            decode_workspace_buffer = \
+            torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                                                dtype=torch.uint8,
+                                              device=self.device)
+            indices_buffer = torch.empty(max_batch_size *
+                                         self.cache_config.num_gpu_blocks,
+                                         dtype=torch.int32,
+                                         device=self.device)
+            indptr_buffer = torch.empty(max_batch_size + 1,
+                                        dtype=torch.int32,
+                                        device=self.device)
+            last_page_len_buffer = torch.empty(max_batch_size,
+                                               dtype=torch.int32,
+                                               device=self.device)
+
+        with graph_capture() as graph_capture_context:
+            # NOTE: Capturing the largest batch size first may help reduce the
+            # memory usage of CUDA graph.
+            for virtual_engine in range(
+                    self.parallel_config.pipeline_parallel_size):
+                for batch_size in reversed(batch_size_capture_list):
+                    query_start_loc_host = torch.arange(
+                        0,
+                        batch_size * max_query_len + 1,
+                        max_query_len,
+                        dtype=torch.int32)
+                    seq_start_loc_host = torch.zeros(batch_size + 1,
+                                                     dtype=torch.int32)
+                    torch.cumsum(seq_lens_tensor.cpu()[:batch_size],
+                                 dim=0,
+                                 dtype=seq_start_loc_host.dtype,
+                                 out=seq_start_loc_host[1:])
+                    if self.attn_backend.get_name() == "flashinfer":
+                        indptr_buffer = indptr_buffer[:batch_size + 1]
+                        last_page_len_buffer = last_page_len_buffer[:
+                                                                    batch_size]
+
+                        num_qo_heads = (
+                            self.model_config.get_num_attention_heads(
+                                self.parallel_config))
+                        num_kv_heads = self.model_config.get_num_kv_heads(
+                            self.parallel_config)
+                        if num_qo_heads // num_kv_heads >= 4:
+                            use_tensor_cores = True
+                        else:
+                            use_tensor_cores = False
+                        decode_wrapper = \
+                            CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+                            decode_workspace_buffer, indptr_buffer,
+                            indices_buffer, last_page_len_buffer, "NHD",
+                            use_tensor_cores)
+                        kv_cache_dtype = get_kv_cache_torch_dtype(
+                            self.kv_cache_dtype, self.model_config.dtype)
+
+                        paged_kv_indptr_tensor_host = torch.arange(
+                            0, batch_size + 1, dtype=torch.int32)
+                        paged_kv_indices_tensor_host = torch.arange(
+                            0, batch_size, dtype=torch.int32)
+                        paged_kv_last_page_len_tensor_host = torch.full(
+                            (batch_size, ), self.block_size, dtype=torch.int32)
+
+                        attn_metadata = self.attn_backend.make_metadata(
+                            num_prefills=0,
+                            slot_mapping=slot_mapping[:batch_size *
+                                                      max_query_len],
+                            num_prefill_tokens=0,
+                            num_decode_tokens=batch_size * max_query_len,
+                            max_prefill_seq_len=0,
+                            block_tables=block_tables,
+                            paged_kv_indptr=paged_kv_indptr_tensor_host,
+                            paged_kv_indices=paged_kv_indices_tensor_host,
+                            paged_kv_last_page_len=
+                            paged_kv_last_page_len_tensor_host,
+                            num_qo_heads=num_qo_heads,
+                            num_kv_heads=num_kv_heads,
+                            head_dim=self.model_config.get_head_size(),
+                            page_size=self.block_size,
+                            seq_start_loc=seq_start_loc_host,
+                            query_start_loc=query_start_loc_host,
+                            device=self.device,
+                            data_type=kv_cache_dtype,
+                            use_cuda_graph=True,
+                            decode_wrapper=decode_wrapper,
+                            prefill_wrapper=None)
+                        attn_metadata.begin_forward()
+                    else:
+                        attn_metadata = self.attn_backend.make_metadata(
+                            num_prefills=0,
+                            num_prefill_tokens=0,
+                            num_decode_tokens=batch_size * max_query_len,
+                            slot_mapping=slot_mapping[:batch_size *
+                                                      max_query_len],
+                            seq_lens=seq_lens[:batch_size],
+                            seq_lens_tensor=seq_lens_tensor[:batch_size],
+                            max_query_len=max_query_len,
+                            max_prefill_seq_len=0,
+                            max_decode_seq_len=self.max_seq_len_to_capture,
+                            seq_start_loc=seq_start_loc_host.cuda(),
+                            query_start_loc=query_start_loc_host.cuda(),
+                            context_lens_tensor=None,
+                            block_tables=block_tables[:batch_size],
+                            use_cuda_graph=True,
+                        )
+
+                    if self.lora_config:
+                        lora_mapping = LoRAMapping(
+                            [0] * batch_size,
+                            [0] * batch_size,
+                        )
+                        self.set_active_loras(set(), lora_mapping)
+
+                    graph_runner = CUDAGraphRunner(
+                        self.model, self.attn_backend.get_name())
+
+                    if self.attn_backend.get_name() == "flashinfer":
+                        graph_runner.flashinfer_indptr_buffer = indptr_buffer
+                        graph_runner.flashinfer_indices_buffer = indices_buffer
+                        graph_runner.flashinfer_last_page_len_buffer = \
+                            last_page_len_buffer
+                        graph_runner.flashinfer_decode_workspace_buffer = \
+                                decode_workspace_buffer
+                        graph_runner.flashinfer_decode_wrapper = \
+                            decode_wrapper
+
+                    capture_inputs = {
+                        "input_ids":
+                        input_tokens[:batch_size * max_query_len],
+                        "positions":
+                        input_positions[:batch_size * max_query_len],
+                        "hidden_or_intermediate_states":
+                        hidden_or_intermediate_states[
+                            virtual_engine]  # type: ignore
+                        [:batch_size]
+                        if hidden_or_intermediate_states[virtual_engine]
+                        is not None else None,
+                        "intermediate_inputs":
+                        intermediate_inputs[:batch_size]
+                        if intermediate_inputs is not None else None,
+                        "kv_caches":
+                        kv_caches[virtual_engine],
+                        "attn_metadata":
+                        attn_metadata,
+                        "memory_pool":
+                        self.graph_memory_pool,
+                        "stream":
+                        graph_capture_context.stream
+                    }
+                    if self.has_seqlen_agnostic:
+                        # Only used by Mamba-based models CUDA graph atm (Jamba)
+                        capture_inputs.update({
+                            "seqlen_agnostic_capture_inputs":
+                            self.model.get_seqlen_agnostic_capture_inputs(
+                                batch_size)
+                        })
+                    graph_runner.capture(**capture_inputs)
+                    self.graph_memory_pool = graph_runner.graph.pool()
+                    self.multi_query_graph_runners[virtual_engine][
+                        batch_size] = (graph_runner)
+
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        # This usually takes < 10 seconds.
+        logger.info("Graph capturing (for multi-query) finished in %.0f secs.",
+                    elapsed_time)
 
     @property
     def vocab_size(self) -> int:
@@ -1229,9 +1516,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         virtual_engine = model_input.virtual_engine
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
-            graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = self.graph_runners[virtual_engine][
-                graph_batch_size]
+            if (model_input.attn_metadata.max_query_len is not None
+                    and model_input.attn_metadata.max_query_len > 1):
+                assert envs.VLLM_USE_MULTI_QUERY_SCORER
+                assert model_input.query_lens is not None
+                graph_batch_size = len(model_input.query_lens)  # noqa
+                model_executable = self.multi_query_graph_runners[
+                    virtual_engine][graph_batch_size]
+            else:
+                graph_batch_size = model_input.input_tokens.shape[0]
+                model_executable = self.graph_runners[virtual_engine][
+                    graph_batch_size]
         else:
             model_executable = self.model
 

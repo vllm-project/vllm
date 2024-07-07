@@ -172,7 +172,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            max_query_len=None,
+            max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             query_start_loc=None,
@@ -304,8 +304,6 @@ class FlashAttentionImpl(AttentionImpl):
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
         query = query[:num_prefill_tokens]
-        key = key[:num_prefill_tokens]
-        value = value[:num_prefill_tokens]
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
@@ -319,8 +317,8 @@ class FlashAttentionImpl(AttentionImpl):
                 # prompt, and they have the same length.
                 out = flash_attn_varlen_func(
                     q=query,
-                    k=key,
-                    v=value,
+                    k=key[:num_prefill_tokens],
+                    v=value[:num_prefill_tokens],
                     cu_seqlens_q=prefill_meta.seq_start_loc,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
                     max_seqlen_q=prefill_meta.max_prefill_seq_len,
@@ -353,7 +351,7 @@ class FlashAttentionImpl(AttentionImpl):
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             output[num_prefill_tokens:] = flash_attn_with_kvcache(
-                decode_query.unsqueeze(1),
+                decode_query.unflatten(0, (-1, decode_meta.max_query_len)),
                 key_cache,
                 value_cache,
                 block_table=decode_meta.block_tables,
@@ -361,7 +359,7 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
-            ).squeeze(1)
+            ).flatten(0, 1)
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
