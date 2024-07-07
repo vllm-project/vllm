@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from PIL import Image
-from transformers import FuyuConfig
+from transformers import FuyuConfig, FuyuImageProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -36,8 +36,7 @@ from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.image import (cached_get_tokenizer, cached_get_image_processor,
-                                   repeat_and_pad_image_tokens, repeat_and_pad_token)
+from vllm.multimodal.image import cached_get_tokenizer, cached_get_image_processor
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
@@ -129,26 +128,27 @@ def input_processor_for_fuyu(
     image_data = multi_modal_data["image"]
     # process image data
     if isinstance(image_data, Image.Image):
-        # we need to get transformed image_size for prompts padding
-        image_processor = cached_get_image_processor(model_config.model)
-        outputs = image_processor.preprocess(image_data, return_tensors="pt")
-        if len(outputs["images"]) != 1:
-            logger.warning("Multiple image input is not supported yet, "
-                           "so any extra image tokens will be treated "
-                           "as plain text.")
+        # Fuyu's image_processor can also finish token padding
+        image_processor: FuyuImageProcessor = cached_get_image_processor(model_config.model)
 
-        # images: [[torch.Tensor(image1)], [torch.Tensor(image2)], ...]
-        # unpadded_heights: [[torch.Tensor(h1)], [torch.Tensor(h2)], ...]
-        # unpadded_widths: [[torch.Tensor(w1)], [torch.Tensor(w2)], ...]
-        # NOTE: This only designed for single image
-        image = torch.stack(outputs["images"][0])
-        
-        image_unpadded_h = outputs["image_unpadded_heights"][0][0].item()
-        image_unpadded_w = outputs["image_unpadded_widths"][0][0].item()
-        image_padded_h = math.ceil(image_unpadded_h / 30) * 30
-        image_padded_w = math.ceil(image_unpadded_w / 30) * 30
-        image_data = image[:, :, :image_padded_h, :image_padded_w]
-        multi_modal_data["image"] = image_data
+        image_encoding = image_processor.preprocess(image_data, return_tensors="pt")
+        batch_images = torch.stack([img[0] for img in image_encoding["images"]]).unsqueeze(1)
+        image_unpadded_heights = torch.tensor(image_encoding["image_unpadded_heights"])
+        image_unpadded_widths = torch.tensor(image_encoding["image_unpadded_widths"])
+
+        batch_size = len(image_encoding["images"])
+        image_present = torch.ones(batch_size, 1, 1)
+        model_image_input = image_processor.preprocess_with_tokenizer_info(
+            image_input=batch_images,
+            image_present=image_present,
+            image_unpadded_h=image_unpadded_heights,
+            image_unpadded_w=image_unpadded_widths,
+            image_placeholder_id=_IMAGE_TOKEN_ID,
+            image_newline_id=_NEWLINE_TOKEN_ID,
+            variable_sized=True,
+        )
+        image_patches = torch.stack([image_patch[0] for image_patch in model_image_input["image_patches"]])
+        multi_modal_data["image"] = image_patches
 
     elif isinstance(image_data, torch.Tensor):
         raise NotImplementedError("Embeddings input is not supported yet")
@@ -158,11 +158,14 @@ def input_processor_for_fuyu(
     # process prompts
     prompt = llm_inputs["prompt"]
     prompt_token_ids = llm_inputs["prompt_token_ids"]
-    ncol, nrow = _calculate_num_image_tokens(image_unpadded_h, image_unpadded_w)
-    padding_ids = repeat_and_pad_token(_IMAGE_TOKEN_ID, repeat_count=ncol, pad_token_right=_NEWLINE_TOKEN_ID)
+    tokenizer = cached_get_tokenizer(model_config.model)
+    # dim0 is batch_size, dim1 is subseq_size which will always be 1
+    image_input_ids: List[List[torch.Tensor]] = model_image_input["image_input_ids"]
+    image_input_ids = image_input_ids[0][0].tolist()
+    bos_token = tokenizer.encode("<s>", add_special_tokens=False)[1:]
+    boa_token = tokenizer.encode("\x04", add_special_tokens=False)[1:]
 
-    # image tokens always left padded before text
-    new_prompt_token_ids = padding_ids * nrow + prompt_token_ids
+    new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[1:] + boa_token
 
     return LLMInputs(prompt=prompt,
                      prompt_token_ids=new_prompt_token_ids,
@@ -170,11 +173,8 @@ def input_processor_for_fuyu(
 
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):
-    model_config = ctx.model_config
-    image_processor = cached_get_image_processor(model_config.model)
-    # image has been processed in input_processor
-    image_patches = image_processor.patchify_image(data)
-    return MultiModalInputs({"image_patches": image_patches})
+    # image has been processed with prompt in input processor
+    return MultiModalInputs({"image_patches": data})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)

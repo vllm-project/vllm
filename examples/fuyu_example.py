@@ -5,11 +5,10 @@ from vllm import LLM, SamplingParams
 
 
 def run_fuyu():
-    # llm = LLM(model="adept/fuyu-8b", max_model_len=4096)
-    llm = LLM(model="/data/LLM-model/fuyu-8b", max_model_len=4096)
+    llm = LLM(model="adept/fuyu-8b", max_model_len=4096)
 
     # single-image prompt
-    prompt = "What is the highest life expectancy at birth of male?\n"
+    prompt = "What is the highest life expectancy at of male?\n"
     url = "https://huggingface.co/adept/fuyu-8b/resolve/main/chart.png"
     image = Image.open(requests.get(url, stream=True).raw)
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
