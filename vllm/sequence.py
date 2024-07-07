@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
     from vllm.multimodal import MultiModalDataDict
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+    from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
 @dataclass
@@ -914,7 +915,7 @@ class HiddenStates:
 
 class SamplingController:
 
-    def prepare(self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+    def prepare(self, sampling_metadata: "SamplingMetadata"):
         """Prepare the sampling controller for the next step."""
         pass
 

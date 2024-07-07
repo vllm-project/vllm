@@ -24,6 +24,7 @@ class SequenceGroupToSample:
     #                                   |-- query_len ---|
 
     # Sequence ids for the sequence group in a previous step.
+    request_id: str
     seq_ids: List[int]
     sampling_params: SamplingParams
     # seq_id -> sequence data.
@@ -273,6 +274,7 @@ def _prepare_seq_groups(
 
         seq_groups.append(
             SequenceGroupToSample(
+                request_id=seq_group_metadata.request_id,
                 seq_ids=seq_ids,
                 sampling_params=sampling_params,
                 seq_data=seq_group_metadata.seq_data,
