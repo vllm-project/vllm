@@ -147,3 +147,25 @@ def test_compressed_tensors_fp8(vllm_runner):
         sampling_params = SamplingParams()
         output = llm.generate("Hello world!", sampling_params=sampling_params)
         assert output
+
+
+def test_compressed_tensors_fp8(vllm_runner):
+    model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
+    with vllm_runner(model_path) as llm:
+        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        layer = model.model.layers[0]
+
+        qkv_proj = layer.self_attn.qkv_proj
+
+        assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+        assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
+        assert qkv_proj.weight.dtype is torch.float8_e4m3fn
+        assert qkv_proj.input_scale.dtype is torch.float32
+        assert qkv_proj.weight_scale.dtype is torch.float32
+        # should be scalars after processing
+        assert len(qkv_proj.input_scale.shape) == 0
+        assert len(qkv_proj.weight_scale.shape) == 0
+
+        sampling_params = SamplingParams()
+        output = llm.generate("Hello world!", sampling_params=sampling_params)
+        assert output

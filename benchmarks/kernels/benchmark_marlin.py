@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    marlin_quantize)
+    marlin_quantize, MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -24,20 +24,6 @@ DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
-
-
-class MarlinWorkspace:
-
-    def __init__(self, out_features, min_thread_n, max_parallel):
-        assert (out_features % min_thread_n == 0), (
-            "out_features = {} is undivisible by min_thread_n = {}".format(
-                out_features, min_thread_n))
-
-        max_workspace_size = ((out_features // min_thread_n) * max_parallel)
-
-        self.scratch = torch.zeros(max_workspace_size,
-                                   dtype=torch.int,
-                                   device="cuda")
 
 
 def bench_run(results: List[benchmark.Measurement], model: str,
