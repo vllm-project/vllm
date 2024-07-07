@@ -92,6 +92,7 @@ Documentation
 
    models/supported_models
    models/adding_model
+   models/enabling_multimodal_inputs
    models/engine_args
    models/lora
    models/vlm
@@ -116,6 +117,7 @@ Documentation
    automatic_prefix_caching/details
 
 .. toctree::
+   :maxdepth: 2
    :caption: Developer Documentation
 
    dev/sampling_params
