@@ -374,7 +374,7 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOfiutput], request_id: str,
+            result_generator: AsyncIterator[RequestOutput], request_id: str,
             conversation: List[ConversationMessage]
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
