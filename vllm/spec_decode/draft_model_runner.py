@@ -126,25 +126,47 @@ class TP1DraftModelRunner(ModelRunner):
 
     def _advance_step(self, model_input: ModelInputForGPUWithSamplingMetadata,
                       last_output: SamplerOutput) -> None:
+        print("Inside _advance_step")
+        # Append output tokens
+        assert self.cached_seq_group_metadata_list is not None
+        for seq_group_metadata, sequence_group_outputs in zip(
+                self.cached_seq_group_metadata_list, last_output.outputs):
+            seq_group_metadata.is_prompt = False
+
+            for seq_output in sequence_group_outputs.samples:
+                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
+
+                token_id = seq_output.output_token
+                token_logprob = seq_output.logprobs[token_id]
+
+                seq.append_token_id(token_id, token_logprob.logprob)
+                seq.update_num_computed_tokens(1)
+
+                print("appended seq_id = {} token_id = {}".format(
+                    seq_output.parent_seq_id, token_id))
+
+        # 
         num_prefills = 0
         num_prefill_tokens = 0
         max_prefill_seq_len = 0
         use_captured_graph = False
-
+        
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
 
         sampled_token_ids = last_output.sampled_token_ids
 
+        # model_input
         model_input.input_tokens = sampled_token_ids
         input_positions = model_input.input_positions
         seq_lens = model_input.seq_lens  # List
-        # model_input.
-
-        context_lens_tensor = attn_metadata.context_lens_tensor
+        query_lens = model_input.query_lens  # List
+        
+        # context_lens_tensor = attn_metadata.context_lens_tensor
 
         slot_mapping_tensor = attn_metadata.slot_mapping
 
+        # Update attn_metadata
         attn_metadata.num_decode_tokens = len(seq_lens)
         attn_metadata.num_prefill_tokens = num_prefill_tokens
 
@@ -160,6 +182,29 @@ class TP1DraftModelRunner(ModelRunner):
                          seq_lens=seq_lens_tensor,
                          slot_mapping_tensor=slot_mapping_tensor,
                          block_tables=block_tables)
+
+        # Update sampling metadata
+        sampling_metadata = model_input.sampling_metadata
+        assert sampling_metadata.num_prompts == 0
+        
+        # selected_token_indices = sampling_metadata.selected_token_indices
+        # categorized_sample_indices = sampling_metadata.categorized_sample_indices
+
+        for i in range(len(sampling_metadata.seq_groups)):
+            assert sampling_metadata.seq_groups[i].is_prompt == False
+            assert sampling_metadata.seq_groups[i].prompt_logprob_indices == []
+            assert sampling_metadata.seq_groups[i].sample_indices == [i]
+            assert sampling_metadata.seq_groups[i].seq_len == seq_lens[i]
+            assert sampling_metadata.seq_groups[i].query_len == query_lens[i]
+            assert sampling_metadata.seq_groups[i].query_len == 1
+
+            sampling_metadata.seq_groups[i].seq_len = seq_lens[i] + 1
+            sampling_metadata.seq_groups[i].query_len = query_lens[i]
+            
+        # Update local to CPU
+        for i in range(num_seqs):
+            seq_lens[i] += 1
+            query_lens[i] = 1
 
         # num_decode_tokens = num_seqs
         # max_query_len = 1
@@ -202,6 +247,7 @@ class TP1DraftModelRunner(ModelRunner):
             model_executable = self.model
 
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -223,7 +269,10 @@ class TP1DraftModelRunner(ModelRunner):
 
             # Prepare the inputs for the next step.
             if step != num_steps - 1:
-                self._advance_step(model_input, outputs[-1])
+                if step == 0:
+                    model_input = self.update_model_input(model_input, outputs[-1])
+                else:
+                    self._advance_step(model_input, outputs[-1])
 
         return outputs
 
