@@ -164,13 +164,15 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         scales_and_zp_size = input_size // group_size
         scales_and_zp_input_dim = None
 
-        # Act-order case:
         if self.quant_config.desc_act:
+            # Act-order case
             assert self.quant_config.group_size != -1
+
             is_k_full = input_size_per_partition == input_size
 
-        # No act-order case:
         else:
+            # No act-order case
+
             # K is always full due to full alignment with
             # group-size and shard of scales/zp
             is_k_full = True
