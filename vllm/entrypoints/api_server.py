@@ -111,7 +111,7 @@ if __name__ == "__main__":
 
     app.root_path = args.root_path
 
-    logger.info("Available endpoints are:")
+    logger.info("Available routes are:")
     for route in app.routes:
         methods = ', '.join(route.methods) if hasattr(
             route, 'methods') else 'No methods'
