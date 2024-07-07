@@ -98,19 +98,19 @@ main() {
     --disable-log-requests \
     --enable-chunked-prefill &
 
-  CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
-    --port 8200 \
-    -tp 4 \
-    --disable-log-stats \
-    --disable-log-requests \
-    --enable-chunked-prefill &
+  # CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+  #   -m vllm.entrypoints.openai.api_server \
+  #   --model $model \
+  #   --port 8200 \
+  #   -tp 4 \
+  #   --disable-log-stats \
+  #   --disable-log-requests \
+  #   --enable-chunked-prefill &
 
   wait_for_server 8100
-  wait_for_server 8200
-  # launch round robin proxy
-  bash ./round_robin_proxy.sh &
+  # wait_for_server 8200
+  # # launch round robin proxy
+  # bash ./round_robin_proxy.sh &
 
   python3 ../benchmark_serving.py \
           --backend vllm \
@@ -121,13 +121,13 @@ main() {
           --sonnet-output-len $output_len \
           --sonnet-prefix-len $prefix_len \
           --num-prompts $num_prompts \
-          --port 8000 \
+          --port 8100 \
           --save-result \
           --result-dir $results_folder \
           --result-filename chunked_prefill_tp8.json \
-          --request-rate $qps
+          --request-rate $((qps / 2))
   kill_gpu_processes
-  pkill -f round_robin_proxy.sh
+  # pkill -f round_robin_proxy.sh
 
 
   # disaggregated prefill
