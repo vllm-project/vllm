@@ -51,9 +51,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
 
         # If group_size is -1, we are in channelwise case.
-        if self.group_size is None:
-            raise ValueError("Gr")
-        elif self.group_size == -1:
+        if self.group_size == -1:
             group_size = input_size
         else:
             group_size = self.group_size
