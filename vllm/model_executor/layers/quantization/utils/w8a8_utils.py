@@ -147,7 +147,7 @@ def apply_int8_linear(
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+):
     if bias is not None:
         raise NotImplementedError("W8A8 with int8 does not yet support bias.")
 
