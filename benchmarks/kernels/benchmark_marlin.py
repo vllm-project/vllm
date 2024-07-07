@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    marlin_quantize, MarlinWorkspace)
+    MarlinWorkspace, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

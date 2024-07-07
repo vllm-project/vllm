@@ -4,7 +4,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64

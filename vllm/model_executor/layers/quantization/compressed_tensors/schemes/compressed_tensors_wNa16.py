@@ -50,10 +50,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
 
         # If group_size is -1, we are in channelwise case.
-        if self.group_size == -1:
-            group_size = input_size
-        else:
-            group_size = self.group_size
+        group_size = input_size if self.group_size == -1 else self.group_size
 
         verify_marlin_supports_shape(
             output_size_per_partition=output_size_per_partition,

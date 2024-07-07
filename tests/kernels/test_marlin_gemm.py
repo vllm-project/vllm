@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    get_weight_perm, marlin_quantize, marlin_weights, MarlinWorkspace)
+    MarlinWorkspace, get_weight_perm, marlin_quantize, marlin_weights)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
