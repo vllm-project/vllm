@@ -26,7 +26,7 @@ def parse_arguments():
 
 
 def main(args):
-    bar_colors = ['#E69F00', '#56B4E9','#D55E00', '#009E73']
+    bar_colors = ['#56B4E9', '#009E73', '#D55E00', '#E69F00']
     results_folder = Path(args.results_folder)
 
     results = []
@@ -53,7 +53,7 @@ def main(args):
     plt.rcParams.update({'font.size': 15})
 
     # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(10, 12))
+    fig, axes = plt.subplots(3, 3, figsize=(14, 14))
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
@@ -74,7 +74,7 @@ def main(args):
 
             print(means, stds)
 
-            ax = axes[i, j]
+            ax = axes[i, j+1]
 
             bars = ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
                         means,
@@ -90,7 +90,7 @@ def main(args):
             ax.grid(axis='y')
             
         metric = "Tput"
-        j = 2
+        j = 0
         if True:
             tputs = []
             for method in methods:
