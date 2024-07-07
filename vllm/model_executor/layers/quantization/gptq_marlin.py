@@ -10,9 +10,9 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    verify_marlin_supports_shape, verify_marlin_supported,
-    check_marlin_supported, marlin_make_workspace, marlin_permute_scales,
-    marlin_sort_g_idx, marlin_make_empty_g_idx, replace_tensor)
+    check_marlin_supported, marlin_make_empty_g_idx, marlin_make_workspace,
+    marlin_permute_scales, marlin_sort_g_idx, replace_tensor,
+    verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)

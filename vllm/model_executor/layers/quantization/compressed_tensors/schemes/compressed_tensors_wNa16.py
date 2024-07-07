@@ -7,8 +7,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    replace_tensor, marlin_permute_scales, marlin_make_workspace,
-    marlin_make_empty_g_idx, apply_marlin_linear)
+    apply_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
+    marlin_permute_scales, replace_tensor)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsWNA16"]
@@ -29,7 +29,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if self.strategy == "group" and self.group_size is None:
             raise ValueError(
                 "group_size must be given when using strategy group")
-
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -104,9 +103,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size = input_size
         layer.group_size = group_size
 
-
-    # Checkpoints are serialized in compressed-tensors format, which is different
-    # from marlin format. Handle repacking here.
+    # Checkpoints are serialized in compressed-tensors format, which is
+    # different from marlin format. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.weight_packed.device
 
@@ -135,9 +133,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             group_size=layer.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
 
-
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-        return apply_marlin_linear(input=x,
+        return apply_marlin_linear(
+            input=x,
             weight=layer.weight_packed,
             weight_scale=layer.weight_scale,
             g_idx=layer.g_idx,

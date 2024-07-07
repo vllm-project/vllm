@@ -3,10 +3,10 @@ from typing import Optional
 import torch
 
 import vllm._custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_scale_perms, marlin_permute_scales, marlin_make_workspace)
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
+
+from .marlin_utils import marlin_make_workspace, marlin_permute_scales
 
 
 def is_fp8_marlin_supported():
@@ -79,13 +79,10 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     scales = layer.weight_scale.repeat(1, part_size_n).to(
         layer.orig_dtype).to(device)
     # Permute scales
-    scale_perm, scale_perm_single = get_scale_perms()
     marlin_scales = marlin_permute_scales(s=scales,
                                           size_k=part_size_k,
                                           size_n=part_size_n,
-                                          group_size=-1,
-                                          scale_perm=scale_perm,
-                                          scale_perm_single=scale_perm_single)
+                                          group_size=-1)
     layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
 
 

@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
-from vllm .model_executor.layers.quantization.utils.marlin_utils_test_24 import (
+from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
@@ -27,6 +27,7 @@ K_FULL_OPTS = [False, True]
 
 
 class MarlinWorkspace:
+
     def __init__(self, out_features, min_thread_n, max_parallel):
         assert (out_features % min_thread_n == 0), (
             "out_features = {} is undivisible by min_thread_n = {}".format(

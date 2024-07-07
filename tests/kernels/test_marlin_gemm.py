@@ -6,9 +6,7 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-
 from vllm import _custom_ops as ops
-
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
@@ -19,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    get_weight_perm, marlin_weights, marlin_quantize)
+    get_weight_perm, marlin_quantize, marlin_weights)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -47,6 +45,7 @@ DTYPES = [torch.float16, torch.bfloat16]
 
 
 class MarlinWorkspace:
+
     def __init__(self, out_features, min_thread_n, max_parallel):
         assert (out_features % min_thread_n == 0), (
             "out_features = {} is undivisible by min_thread_n = {}".format(

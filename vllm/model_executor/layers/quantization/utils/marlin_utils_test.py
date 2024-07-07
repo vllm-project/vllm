@@ -1,4 +1,4 @@
-"""This file contains utility functions used for vllm/test and vllm/benchmarks"""
+"""Utility functions used for tests and benchmarks"""
 
 from typing import List
 
@@ -74,9 +74,7 @@ def get_weight_perm(num_bits: int):
     return perm
 
 
-def marlin_quantize(w: torch.Tensor,
-                    num_bits: int,
-                    group_size: int,
+def marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int,
                     act_order: bool):
     size_k, size_n = w.shape
 
