@@ -42,6 +42,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
+engine_args: AsyncEngineArgs
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -167,9 +168,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-if __name__ == "__main__":
-    args = parse_args()
-
+def create_engine(args):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
@@ -206,15 +205,20 @@ if __name__ == "__main__":
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
-
+    global engine_args
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
+
+    return engine
+
+
+def start_engine(args, engine):
+    if args.served_model_name is not None:
+        served_model_names = args.served_model_name
+    else:
+        served_model_names = [args.model]
 
     event_loop: Optional[asyncio.AbstractEventLoop]
     try:
@@ -229,6 +233,9 @@ if __name__ == "__main__":
     else:
         # When using single vLLM without engine_use_ray
         model_config = asyncio.run(engine.get_model_config())
+
+    global openai_serving_chat, openai_serving_completion
+    global openai_serving_embedding
 
     openai_serving_chat = OpenAIServingChat(engine, model_config,
                                             served_model_names,
@@ -249,3 +256,9 @@ if __name__ == "__main__":
                 ssl_certfile=args.ssl_certfile,
                 ssl_ca_certs=args.ssl_ca_certs,
                 ssl_cert_reqs=args.ssl_cert_reqs)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    engine = create_engine(args)
+    start_engine(args, engine)
