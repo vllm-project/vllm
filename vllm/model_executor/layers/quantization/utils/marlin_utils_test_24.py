@@ -1,9 +1,9 @@
 """Utility functions used for tests and benchmarks"""
 
+import random
 from typing import List
 
 import numpy
-import random
 import torch
 
 from .marlin_utils_test import marlin_weights
