@@ -234,19 +234,18 @@ class ShmRingBufferIO:
         return self.handle
 
     @staticmethod
-    def create_from_handle(handle: Handle, reader_rank) -> "ShmRingBufferIO":
+    def create_from_handle(handle: Handle, rank) -> "ShmRingBufferIO":
         self = ShmRingBufferIO.__new__(ShmRingBufferIO)
         self.handle = handle
         self._is_writer = False
 
         context = Context()
 
-        if reader_rank in handle.local_reader_ranks:
+        if rank in handle.local_reader_ranks:
             assert handle.buffer is not None
             self.buffer = handle.buffer
             self.current_idx = 0
-            self.local_reader_rank = handle.local_reader_ranks.index(
-                reader_rank)
+            self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
             self._is_remote_reader = False
 
@@ -457,7 +456,6 @@ class ShmRingBufferIO:
                                   writer_rank=0) -> "ShmRingBufferIO":
         group_rank = dist.get_rank(pg)
         group_world_size = dist.get_world_size(pg)
-        ranks_inside_group = list(range(group_world_size))
         global_ranks = dist.get_process_group_ranks(pg)
 
         from vllm.distributed.parallel_state import in_the_same_node_as
@@ -481,8 +479,6 @@ class ShmRingBufferIO:
                                        src=global_ranks[writer_rank],
                                        group=pg)
             handle = recv[0]  # type: ignore
-            rest_ranks = [r for r in ranks_inside_group if r != writer_rank]
-            buffer_io = ShmRingBufferIO.create_from_handle(
-                handle, rest_ranks.index(group_rank))
+            buffer_io = ShmRingBufferIO.create_from_handle(handle, group_rank)
         buffer_io.wait_until_ready()
         return buffer_io
