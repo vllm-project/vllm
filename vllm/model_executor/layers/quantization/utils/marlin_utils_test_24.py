@@ -368,6 +368,17 @@ def compress_quantized_24_weight(q_24, size_k, size_n, num_bits):
 
     return q_24_comp, meta
 
+
+def get_scale_perms_24():
+    scale_perm: List[int] = []
+    for i in range(8):
+        scale_perm.extend([i * 8 + j for j in [0, 4, 1, 5, 2, 6, 3, 7]])
+    scale_perm_single: List[int] = []
+    for i in range(8):
+        scale_perm_single.extend([8 * i + j for j in [0, 1, 2, 3, 4, 5, 6, 7]])
+    return scale_perm, scale_perm_single
+
+
 def get_weight_perm_24(num_bits: int):
     perm_list: List[int] = []
     for i in range(32):
@@ -397,6 +408,18 @@ def get_weight_perm_24(num_bits: int):
     perm = perm.reshape((-1, len(interleave)))[:, interleave].ravel()
     perm = torch.from_numpy(perm)
     return perm
+
+def marlin_permute_scales_24(s: torch.Tensor, size_k: int, size_n: int,
+                             group_size: int) -> torch.Tensor:
+    
+    scale_perm, scale_perm_single = get_scale_perms_24()
+    if group_size < size_k and group_size != -1:
+        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
+    else:
+        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    s = s.reshape((-1, size_n)).contiguous()
+
+    return s
 
 def marlin_24_quantize(
     w: torch.Tensor,
@@ -428,7 +451,8 @@ def marlin_24_quantize(
     weight_perm = get_weight_perm_24(num_bits)
     marlin_24_q_w_comp = marlin_weights(q_w_24_comp, size_k_comp, size_n,
                                         num_bits, weight_perm)
-    marlin_24_s = marlin_permute_scales(s, size_k, size_n, group_size)
+    marlin_24_s = marlin_permute_scales_24(s, size_k, size_n, 
+                                           group_size)
 
     # Create result
     res_list = [w_24_ref, marlin_24_q_w_comp, meta, marlin_24_s]

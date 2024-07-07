@@ -30,35 +30,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             raise ValueError(
                 "group_size must be given when using strategy group")
 
-    # Checkpoints are serialized in compressed-tensors format, which is different
-    # from marlin format. Handle repacking here.
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        device = layer.weight_packed.device
-
-        # Allocate marlin workspace.
-        layer.workspace = marlin_make_workspace(
-            layer.output_size_per_partition, device)
-
-        # Act-order not supported in compressed-tensors yet, so set to empty.
-        layer.g_idx = marlin_make_empty_g_idx(device)
-        layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
-
-        # Repack weights from compressed-tensors format to marlin format.
-        marlin_qweight = ops.gptq_marlin_repack(
-            layer.weight_packed.t().contiguous(),
-            perm=layer.g_idx_sort_indices,
-            size_k=layer.input_size_per_partition,
-            size_n=layer.output_size_per_partition,
-            num_bits=self.weight_bits)
-        replace_tensor(layer, "weight_packed", marlin_qweight)
-
-        # Permute scales from compressed-tensors format to marlin format.
-        marlin_scales = marlin_permute_scales(
-            layer.weight_scale.squeeze().t().contiguous(),
-            size_k=layer.input_size_per_partition,
-            size_n=layer.output_size_per_partition,
-            group_size=self.quant_config.group_size)
-        replace_tensor(layer, "scales", marlin_scales)
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -133,8 +104,40 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size = input_size
         layer.group_size = group_size
 
+
+    # Checkpoints are serialized in compressed-tensors format, which is different
+    # from marlin format. Handle repacking here.
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        device = layer.weight_packed.device
+
+        # Allocate marlin workspace.
+        layer.workspace = marlin_make_workspace(
+            layer.output_size_per_partition, device)
+
+        # Act-order not supported in compressed-tensors yet, so set to empty.
+        layer.g_idx = marlin_make_empty_g_idx(device)
+        layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+
+        # Repack weights from compressed-tensors format to marlin format.
+        marlin_qweight = ops.gptq_marlin_repack(
+            layer.weight_packed.t().contiguous(),
+            perm=layer.g_idx_sort_indices,
+            size_k=layer.input_size_per_partition,
+            size_n=layer.output_size_per_partition,
+            num_bits=self.num_bits)
+        replace_tensor(layer, "weight_packed", marlin_qweight)
+
+        # Permute scales from compressed-tensors format to marlin format.
+        marlin_scales = marlin_permute_scales(
+            layer.weight_scale.squeeze().t().contiguous(),
+            size_k=layer.input_size_per_partition,
+            size_n=layer.output_size_per_partition,
+            group_size=layer.group_size)
+        replace_tensor(layer, "weight_scale", marlin_scales)
+
+
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-        return apply_marlin_linear(
+        return apply_marlin_linear(input=x,
             weight=layer.weight_packed,
             weight_scale=layer.weight_scale,
             g_idx=layer.g_idx,
