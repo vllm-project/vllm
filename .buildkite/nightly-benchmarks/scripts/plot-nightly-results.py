@@ -53,8 +53,8 @@ def main(args):
     plt.rcParams.update({'font.size': 18})
 
     # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(14, 14))
-    fig.subplots_adjust(hspace=0.5)
+    fig, axes = plt.subplots(3, 3, figsize=(15, 14))
+    fig.subplots_adjust(hspace=1)
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
@@ -73,6 +73,7 @@ def main(args):
                     success = filtered_df["Successful req."].values[0]
                     stds.append(std / math.sqrt(success))
 
+            print(model, metric)
             print(means, stds)
 
             ax = axes[i, j+1]
@@ -103,6 +104,9 @@ def main(args):
                     tputs.append(0.)
                 else:
                     tputs.append(filtered_df["Input Tput (tok/s)"].values[0] + filtered_df["Output Tput (tok/s)"].values[0])
+
+            print(model, metric)
+            print(tputs)
             
             ax = axes[i, j]
 
