@@ -8,6 +8,18 @@ import torch
 from .marlin_utils import GPTQ_MARLIN_TILE, marlin_permute_scales
 from .quant_utils import get_pack_factor, quantize_weights, sort_weights
 
+class MarlinWorkspace:
+    def __init__(self, out_features, min_thread_n, max_parallel):
+        assert (out_features % min_thread_n == 0), (
+            "out_features = {} is undivisible by min_thread_n = {}".format(
+                out_features, min_thread_n))
+
+        max_workspace_size = ((out_features // min_thread_n) * max_parallel)
+
+        self.scratch = torch.zeros(max_workspace_size,
+                                   dtype=torch.int,
+                                   device="cuda")
+
 
 def marlin_permute_weights(q_w, size_k, size_n, perm, tile=GPTQ_MARLIN_TILE):
     assert q_w.shape == (size_k, size_n)
