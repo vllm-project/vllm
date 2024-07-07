@@ -5,7 +5,7 @@ from transformers import AutoTokenizer
 # MODEL="nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test-bos"
 # MODEL="neuralmagic/Meta-Llama-3-8B-Instruct-FP8"
 # MODEL="nm-testing/Meta-Llama-3-8B-Instruct-GPTQ"
-MODEL="llm-compressor/Meta-Llama-3-8B-Instruct-W8A8-FP8-BOS"
+MODEL = "llm-compressor/Meta-Llama-3-8B-Instruct-W8A8-FP8-BOS"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -26,5 +26,6 @@ print("========================================\n\n")
 output = model.generate(prompt_token_ids=[TOKENS], sampling_params=PARAMS)
 print(f"===== TOKENS: {output[0].outputs[0].text}")
 
-output = model.generate(prompt_token_ids=[TOKENS_WITH_BOS], sampling_params=PARAMS)
+output = model.generate(prompt_token_ids=[TOKENS_WITH_BOS],
+                        sampling_params=PARAMS)
 print(f"===== TOKENS WITHOUT WITH BOS: {output[0].outputs[0].text}")

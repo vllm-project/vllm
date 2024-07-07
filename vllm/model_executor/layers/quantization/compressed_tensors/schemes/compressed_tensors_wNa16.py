@@ -7,8 +7,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    replace_tensor, marlin_permute_scales, marlin_make_workspace, marlin_make_empty_g_idx,
-    apply_marlin_linear)
+    replace_tensor, marlin_permute_scales, marlin_make_workspace,
+    marlin_make_empty_g_idx, apply_marlin_linear)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsWNA16"]
@@ -30,19 +30,19 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             raise ValueError(
                 "group_size must be given when using strategy group")
 
-
-    # Checkpoints are serialized in compressed-tensors format, which is different 
+    # Checkpoints are serialized in compressed-tensors format, which is different
     # from marlin format. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.weight_packed.device
 
         # Allocate marlin workspace.
-        layer.workspace = marlin_make_workspace(layer.output_size_per_partition, device)
-        
+        layer.workspace = marlin_make_workspace(
+            layer.output_size_per_partition, device)
+
         # Act-order not supported in compressed-tensors yet, so set to empty.
         layer.g_idx = marlin_make_empty_g_idx(device)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
-        
+
         # Repack weights from compressed-tensors format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
             layer.weight_packed.t().contiguous(),
@@ -59,7 +59,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             size_n=layer.output_size_per_partition,
             group_size=self.quant_config.group_size)
         replace_tensor(layer, "scales", marlin_scales)
-
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -128,12 +127,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             "weight_loader": weight_loader,
             "ignore_warning": True,
         })
-    
+
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
         layer.group_size = group_size
-
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         return apply_marlin_linear(

@@ -5,19 +5,26 @@ Run `pytest tests/kernels/marlin/test_marlin_gemm.py`.
 import pytest
 import torch
 
+from tests.quantization.utils import is_quant_method_supported
+
 from vllm import _custom_ops as ops
+
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
-from vllm.model_executor.layers.quantization.test_utils.marlin_perms import (
-    marlin_perm)
-from vllm.model_executor.layers.quantization.test_utils.marlin_utils import (
-    MarlinWorkspace, compute_max_diff, is_marlin_supported, marlin_24_quantize,
-    marlin_quantize, marlin_weights, pack_fp8_to_int32)
+    GPTQ_MARLIN_24_MAX_PARALLEL,
+    GPTQ_MARLIN_24_MIN_THREAD_N,
+    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES,
+    GPTQ_MARLIN_24_SUPPORTED_NUM_BITS,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
     marlin_permute_scales)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    pack_fp8_to_int32)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
+    MarlinWorkspace, compute_max_diff, get_weight_perm, marlin_weights,
+    marlin_24_quantize, marlin_quantize)
+
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
 
@@ -46,7 +53,7 @@ def rand_data(shape, dtype=torch.float16):
     return torch.randn(shape, dtype=dtype, device="cuda")
 
 
-@pytest.mark.skipif(not is_marlin_supported(),
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
@@ -93,8 +100,8 @@ def test_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
         q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
 
     # Pack to Marlin format
-    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, num_bits,
-                                  marlin_perm[num_bits])
+    weight_perm = get_weight_perm(num_bits)
+    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
 
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.gptq_marlin_repack(
@@ -109,7 +116,7 @@ def test_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
     assert torch.allclose(marlin_q_w_1, marlin_q_w_2)
 
 
-@pytest.mark.skipif(not is_marlin_supported(),
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
@@ -174,7 +181,7 @@ def test_marlin_gemm(
     assert max_diff < 0.04
 
 
-@pytest.mark.skipif(not is_marlin_supported(),
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_24_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_24_N_CHUNKS)
@@ -222,7 +229,7 @@ def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):
     assert max_diff < 0.04
 
 
-@pytest.mark.skipif(not is_marlin_supported(),
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
@@ -268,11 +275,10 @@ def test_fp8_marlin_gemm(
     # expand it to channelwise
     scales = weight_scale.repeat(1, size_n).to(a_input.dtype).to("cuda")
     # Permute scales
-    marlin_scales = marlin_permute_scales(
-        s=scales,
-        size_k=size_k,
-        size_n=size_n,
-        group_size=-1)
+    marlin_scales = marlin_permute_scales(s=scales,
+                                          size_k=size_k,
+                                          size_n=size_n,
+                                          group_size=-1)
 
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)

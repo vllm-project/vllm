@@ -79,20 +79,24 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
             "with --quantization gptq.")
 
 
-def marlin_make_workspace(output_size_per_partition: int, 
+def marlin_make_workspace(output_size_per_partition: int,
                           device: torch.device) -> torch.Tensor:
     max_workspace_size = (output_size_per_partition //
-            GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
-    
-    return torch.zeros(max_workspace_size, dtype=torch.int,
-                       device=device, requires_grad=False)
+                          GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
+
+    return torch.zeros(max_workspace_size,
+                       dtype=torch.int,
+                       device=device,
+                       requires_grad=False)
+
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
                               requires_grad=False)
 
 
-def marlin_sort_g_idx(g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def marlin_sort_g_idx(
+        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
     return g_idx[g_idx_sort_indices], g_idx_sort_indices
 
@@ -108,9 +112,7 @@ def get_scale_perms():
     return scale_perm, scale_perm_single
 
 
-def marlin_permute_scales(s: torch.Tensor,
-                          size_k: int,
-                          size_n: int,
+def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
                           group_size: int) -> torch.Tensor:
 
     scale_perm, scale_perm_single = get_scale_perms()
@@ -121,6 +123,7 @@ def marlin_permute_scales(s: torch.Tensor,
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
+
 
 # Newly generated tensors need to replace existing tensors that are
 # already registered as parameters by vLLM (and won't be freed)
@@ -133,34 +136,31 @@ def replace_tensor(layer: torch.nn.Module, name: str,
     del new_t
 
 
-def apply_marlin_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    g_idx: torch.Tensor,
-    g_idx_sort_indices: torch.Tensor,
-    workspace: torch.Tensor,
-    num_bits: int,
-    output_size_per_partition: int,
-    input_size_per_partition: int,
-    is_k_full: bool,
-    bias: Optional[torch.Tensor] = None
-) -> torch.Tensor:
+def apply_marlin_linear(input: torch.Tensor,
+                        weight: torch.Tensor,
+                        weight_scale: torch.Tensor,
+                        g_idx: torch.Tensor,
+                        g_idx_sort_indices: torch.Tensor,
+                        workspace: torch.Tensor,
+                        num_bits: int,
+                        output_size_per_partition: int,
+                        input_size_per_partition: int,
+                        is_k_full: bool,
+                        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = ops.gptq_marlin_gemm(
-        reshaped_x,
-        weight,
-        weight_scale,
-        g_idx,
-        g_idx_sort_indices,
-        workspace,
-        num_bits,
-        size_m=reshaped_x.shape[0],
-        size_n=output_size_per_partition,
-        size_k=input_size_per_partition,
-        is_k_full=is_k_full)
+    output = ops.gptq_marlin_gemm(reshaped_x,
+                                  weight,
+                                  weight_scale,
+                                  g_idx,
+                                  g_idx_sort_indices,
+                                  workspace,
+                                  num_bits,
+                                  size_m=reshaped_x.shape[0],
+                                  size_n=output_size_per_partition,
+                                  size_k=input_size_per_partition,
+                                  is_k_full=is_k_full)
 
     if bias is not None:
         output.add_(bias)  # In-place add

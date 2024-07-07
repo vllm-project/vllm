@@ -10,9 +10,9 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    verify_marlin_supports_shape, verify_marlin_supported, check_marlin_supported,
-    marlin_make_workspace, marlin_permute_scales, marlin_sort_g_idx,
-    marlin_make_empty_g_idx, replace_tensor)
+    verify_marlin_supports_shape, verify_marlin_supported,
+    check_marlin_supported, marlin_make_workspace, marlin_permute_scales,
+    marlin_sort_g_idx, marlin_make_empty_g_idx, replace_tensor)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
@@ -268,14 +268,15 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         layer.input_size = input_size
         layer.is_k_full = is_k_full
 
-    # Checkpoints are serialized in AutoGPTQ format, which is different from the 
+    # Checkpoints are serialized in AutoGPTQ format, which is different from the
     # marlin format. This function is called after the weights are loaded.
     # Here, we handle the repacking, including the activation reordering case.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
         # Allocate marlin workspace
-        layer.workspace = marlin_make_workspace(layer.output_size_per_partition, device)
-        
+        layer.workspace = marlin_make_workspace(
+            layer.output_size_per_partition, device)
+
         # Handle sorting for activation reordering if needed.
         if self.quant_config.desc_act:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.g_idx)
@@ -297,12 +298,11 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # Permute scales from autogptq format to marlin format.
         marlin_scales = marlin_permute_scales(
             layer.scales,
-            size_k=(layer.input_size if self.quant_config.desc_act 
-                    else layer.input_size_per_partition),
+            size_k=(layer.input_size if self.quant_config.desc_act else
+                    layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
             group_size=self.quant_config.group_size)
         replace_tensor(layer, "scales", marlin_scales)
-
 
     def apply(
         self,
@@ -313,18 +313,17 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         reshaped_x = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (layer.output_size_per_partition, )
 
-        output = ops.gptq_marlin_gemm(
-            reshaped_x,
-            layer.qweight,
-            layer.scales,
-            g_idx=layer.g_idx,
-            perm=layer.g_idx_sort_indices,
-            workspace=layer.workspace,
-            num_bits=self.quant_config.weight_bits,
-            size_m=reshaped_x.shape[0],
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            is_k_full=layer.is_k_full)
+        output = ops.gptq_marlin_gemm(reshaped_x,
+                                      layer.qweight,
+                                      layer.scales,
+                                      g_idx=layer.g_idx,
+                                      perm=layer.g_idx_sort_indices,
+                                      workspace=layer.workspace,
+                                      num_bits=self.quant_config.weight_bits,
+                                      size_m=reshaped_x.shape[0],
+                                      size_n=layer.output_size_per_partition,
+                                      size_k=layer.input_size_per_partition,
+                                      is_k_full=layer.is_k_full)
 
         if bias is not None:
             output.add_(bias)  # In-place add

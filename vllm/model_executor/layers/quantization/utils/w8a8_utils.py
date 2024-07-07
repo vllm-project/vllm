@@ -7,6 +7,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+
 def cutlass_fp8_supported() -> bool:
     capability = current_platform.get_device_capability()
     capability = capability[0] * 10 + capability[1]
@@ -28,20 +29,25 @@ def all_close_1d(x: torch.Tensor) -> bool:
 
 
 def create_per_tensor_scale_param(
-        output_partition_sizes: List[int],
-        **extra_weight_attrs,) -> Parameter:
+    output_partition_sizes: List[int],
+    **extra_weight_attrs,
+) -> Parameter:
     scale = Parameter(torch.empty(len(output_partition_sizes),
-                                  dtype=torch.float32), requires_grad=False)
+                                  dtype=torch.float32),
+                      requires_grad=False)
     scale[:] = torch.finfo(torch.float32).min
-    set_weight_attrs(scale, {"needs_scalar_to_array": True, **extra_weight_attrs})
+    set_weight_attrs(scale, {
+        "needs_scalar_to_array": True,
+        **extra_weight_attrs
+    })
     return scale
 
 
-def create_per_channel_scale_param(
-        output_partition_sizes: List[int],
-        **extra_weight_attrs) -> Parameter:
+def create_per_channel_scale_param(output_partition_sizes: List[int],
+                                   **extra_weight_attrs) -> Parameter:
     scale = Parameter(torch.empty((sum(output_partition_sizes), 1),
-                                  dtype=torch.float32), requires_grad=False)
+                                  dtype=torch.float32),
+                      requires_grad=False)
     scale[:] = torch.finfo(torch.float32).min
     set_weight_attrs(scale, {"output_dim": 0, **extra_weight_attrs})
     return scale
@@ -54,7 +60,7 @@ def convert_to_channelwise(
     weight_scale_channel = torch.empty((sum(logical_widths), 1),
                                        dtype=torch.float32,
                                        device=weight_scale.device)
-    
+
     # Expand each scale to match the size of each logical matrix.
     start = 0
     for idx, logical_width in enumerate(logical_widths):
@@ -63,6 +69,7 @@ def convert_to_channelwise(
         start = end
 
     return weight_scale_channel
+
 
 def requantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
@@ -86,8 +93,8 @@ def requantize_with_max_scale(
             end = start + logical_width
             weight_dq = per_tensor_dequantize(weight[start:end, :],
                                               weight_scale[idx])
-            weight[start:end, :], _ = ops.scaled_fp8_quant(weight_dq, 
-                                                           max_w_scale)
+            weight[start:end, :], _ = ops.scaled_fp8_quant(
+                weight_dq, max_w_scale)
             start = end
 
     return max_w_scale, weight
@@ -133,6 +140,7 @@ def apply_fp8_linear(
 
     return torch.narrow(output, 0, 0, input.shape[0])
 
+
 def apply_int8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -141,9 +149,8 @@ def apply_int8_linear(
     bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if bias is not None:
-        raise NotImplementedError(
-            "W8A8 with int8 does not yet support bias.")
-    
+        raise NotImplementedError("W8A8 with int8 does not yet support bias.")
+
     # ops.scaled_int8_quant supports both dynamic and static quant.
     # * dynamic, layer.input_scale is None and x_scale computed from x.
     # * static, layer.input_scale is scalar and x_scale is input_scale.

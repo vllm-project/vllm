@@ -63,12 +63,14 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
 
     # WEIGHT
     # Repack weights to marlin format
-    marlin_qweight = ops.gptq_marlin_repack(
-        b_q_weight=pack_fp8_to_int32(layer.weight),
-        perm=torch.empty(0, dtype=torch.int, device=device),
-        size_k=part_size_k,
-        size_n=part_size_n,
-        num_bits=8)
+    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=pack_fp8_to_int32(
+        layer.weight),
+                                            perm=torch.empty(0,
+                                                             dtype=torch.int,
+                                                             device=device),
+                                            size_k=part_size_k,
+                                            size_n=part_size_n,
+                                            num_bits=8)
     layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
 
     # WEIGHT SCALES
@@ -78,15 +80,14 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
         layer.orig_dtype).to(device)
     # Permute scales
     scale_perm, scale_perm_single = get_scale_perms()
-    marlin_scales = marlin_permute_scales(
-        s=scales,
-        size_k=part_size_k,
-        size_n=part_size_n,
-        group_size=-1,
-        scale_perm=scale_perm,
-        scale_perm_single=scale_perm_single)
+    marlin_scales = marlin_permute_scales(s=scales,
+                                          size_k=part_size_k,
+                                          size_n=part_size_n,
+                                          group_size=-1,
+                                          scale_perm=scale_perm,
+                                          scale_perm_single=scale_perm_single)
     layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
- 
+
 
 def pack_fp8_to_int32(fp8_tensor: torch.Tensor) -> torch.Tensor:
     """
