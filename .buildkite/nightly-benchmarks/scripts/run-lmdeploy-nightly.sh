@@ -46,7 +46,7 @@ wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
   timeout 1200 bash -c '
-    until curl localhost:8000/v1/completions; do
+    until curl -s localhost:8000/v1/completions > /dev/null; do
       sleep 1
     done' && return 0 || return 1
 }

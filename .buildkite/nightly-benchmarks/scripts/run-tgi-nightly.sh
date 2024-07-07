@@ -44,7 +44,7 @@ json2args() {
 
 wait_for_server() {
   timeout 1200 bash -c '
-    until curl localhost:8000/generate_stream; do
+    until curl -s localhost:8000/generate_stream > /dev/null; do
       sleep 1
     done' && return 0 || return 1
 }
