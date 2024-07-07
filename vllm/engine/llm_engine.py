@@ -29,8 +29,8 @@ from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           PoolerOutput, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata,
+                           PoolerOutput, SamplerOutput, SamplingController,
+                           Sequence, SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
@@ -225,6 +225,7 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
+        self.sampling_controller: Optional[SamplingController] = None
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -857,7 +858,8 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-                finished_requests_ids=finished_requests_ids)
+                finished_requests_ids=finished_requests_ids,
+                sampling_controller=self.sampling_controller)
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:

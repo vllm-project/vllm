@@ -237,7 +237,8 @@ class _AsyncLLMEngine(LLMEngine):
                 virtual_engine=virtual_engine,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-                finished_requests_ids=finished_requests_ids)
+                finished_requests_ids=finished_requests_ids,
+                sampling_controller=self.sampling_controller)
             output = await self.model_executor.execute_model_async(
                 execute_model_req)
         else:

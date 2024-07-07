@@ -236,6 +236,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     execute_model_req.seq_group_metadata_list,
                     execute_model_req.virtual_engine,
                     execute_model_req.finished_requests_ids))
+            ctrl = execute_model_req.sampling_controller
+            if ctrl is not None:
+                ctrl.prepare(execute_model_req.seq_group_metadata_list)
+                model_input = dataclasses.replace(model_input,
+                                                  sampling_controller=ctrl)
             num_steps = execute_model_req.num_steps
 
             if self.do_metadata_broadcast:

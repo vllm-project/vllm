@@ -912,6 +912,17 @@ class HiddenStates:
             self.seq_ids = seq_ids
 
 
+class SamplingController:
+
+    def prepare(self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+        """Prepare the sampling controller for the next step."""
+        pass
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply the sampling controller to the logits."""
+        return logits
+
+
 @dataclass
 class ExecuteModelRequest:
     """The model execution request, containing CPU metadata only. The LLM
@@ -936,6 +947,8 @@ class ExecuteModelRequest:
     num_steps: int = 1
     # Finished request ids since last step.
     finished_requests_ids: List[str] = field(default_factory=list)
+    # Sampling controller to use for this step.
+    sampling_controller: Optional[SamplingController] = None
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -951,4 +964,5 @@ class ExecuteModelRequest:
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
             num_steps=self.num_steps,
-            finished_requests_ids=self.finished_requests_ids)
+            finished_requests_ids=self.finished_requests_ids,
+            sampling_controller=self.sampling_controller)
