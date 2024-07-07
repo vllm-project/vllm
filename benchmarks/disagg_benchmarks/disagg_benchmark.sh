@@ -57,7 +57,7 @@ main() {
   num_prompts=500
   qps=8
   prefix_len=64
-  input_len=2048
+  input_len=8192
   output_len=128
 
 
@@ -124,7 +124,7 @@ main() {
           --port 8100 \
           --save-result \
           --result-dir $results_folder \
-          --result-filename chunked_prefill_tp8.json \
+          --result-filename chunked_prefill_tp4.json \
           --request-rate $((qps / 2))
   kill_gpu_processes
   # pkill -f round_robin_proxy.sh
