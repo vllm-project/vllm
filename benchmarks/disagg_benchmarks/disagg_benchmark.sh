@@ -8,7 +8,7 @@
 # Resource: 8x H100
 # Approaches:
 # 1. Chunked prefill: 1 vllm instance with tp=8
-# 2. Chunked prefill: 2 vllm instance with tp=4
+# 2. Chunked prefill: 2 vllm instance with tp=4, equivalent to 1 tp=4 instance with QPS 4
 # 3. Disaggregated prefill: 1 prefilling instance and 1 decoding instance
 # Prefilling instance: max_output_token=1
 # Decoding instance: force the input tokens be the same across requests to bypass prefilling
@@ -49,11 +49,21 @@ main() {
 
   cd "$(dirname "$0")"
 
+  cd ..
+  # create sonnet-4x.txt
+  echo "" > sonnet_4x.txt
+  for _ in {1..4}
+  do
+    cat sonnet.txt >> sonnet_4x.txt
+  done
+  cd disagg_benchmarks
+
+
   mkdir -p results
   results_folder="./results"
   model="neuralmagic/Meta-Llama-3-70B-Instruct-FP8"
   dataset_name="sonnet"
-  dataset_path="../sonnet.txt"
+  dataset_path="../sonnet_4x.txt"
   num_prompts=500
   qps=8
   prefix_len=64
