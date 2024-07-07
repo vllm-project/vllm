@@ -30,7 +30,7 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 - Output length: the corresponding output length of these 500 prompts.
 - Models: llama-3 8B, llama-3 70B, mixtral 8x7B.
 - Average QPS (query per second): 4 for the small model (llama-3 8B) and 2 for other two models. For each QPS, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
-- Evaluation metrics: Throughput, TTFT (time to the first token), ITL (inter-token latency).
+- Evaluation metrics: Throughput (higher the better), TTFT (time to the first token, lower the better), ITL (inter-token latency, lower the better).
 
 <!-- Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.buildkite/nightly-benchmarks/tests/nightly-tests.json">nightly-tests.json</a> artifact for more details. -->
 

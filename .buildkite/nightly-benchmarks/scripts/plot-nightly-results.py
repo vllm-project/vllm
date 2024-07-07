@@ -50,10 +50,11 @@ def main(args):
     with open("nightly_results.md", "w") as f:
         f.write(description)
 
-    plt.rcParams.update({'font.size': 15})
+    plt.rcParams.update({'font.size': 20})
 
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(14, 14))
+    fig.subplots_adjust(hspace=0.5)
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
@@ -117,7 +118,7 @@ def main(args):
             ax.grid(axis='y')
                     
 
-    fig.tight_layout(pad=0.6)
+    fig.tight_layout()
     fig.savefig("nightly_results.png", bbox_inches='tight')
 
 
