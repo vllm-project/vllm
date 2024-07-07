@@ -50,7 +50,7 @@ def main(args):
     with open("nightly_results.md", "w") as f:
         f.write(description)
 
-    plt.rcParams.update({'font.size': 20})
+    plt.rcParams.update({'font.size': 18})
 
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(14, 14))
