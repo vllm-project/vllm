@@ -696,8 +696,8 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = None
+    finish_reason: Optional[str] = Field(default='stop')  # per OpenAI spec this is the default
+    stop_reason: Optional[Union[int, str]] = None  # ??? Not part of the OpenAI spec
 
 
 class ChatCompletionResponse(OpenAIBaseModel):

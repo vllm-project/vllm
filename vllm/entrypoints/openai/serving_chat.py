@@ -246,8 +246,7 @@ class OpenAIServingChat(OpenAIServing):
             self,
             request: ChatCompletionRequest,
             raw_request: Optional[Request] = None
-    ) -> Union[ErrorResponse, AsyncGenerator[str, None],
-    ChatCompletionResponse]:
+    ) -> Union[ErrorResponse, AsyncGenerator[str, None], ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
@@ -375,7 +374,7 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str,
+            result_generator: AsyncIterator[RequestOfiutput], request_id: str,
             conversation: List[ConversationMessage]
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
@@ -620,11 +619,12 @@ class OpenAIServingChat(OpenAIServing):
                 # FOR NOW make it a chat message; we will have to detect the type to make it later.
                     message = ChatMessage(role=role, content=output.text)
 
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason='tool_calls' if tools_called else output.stop_reason,
+                finish_reason='tool_calls' if tools_called else output.stop_reason if output.stop_reason else 'stop',
                 stop_reason=output.stop_reason
             )
             choices.append(choice_data)
