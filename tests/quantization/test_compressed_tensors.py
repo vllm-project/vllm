@@ -133,7 +133,10 @@ def test_compressed_tensors_fp8(vllm_runner):
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
         assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-        assert qkv_proj.weight.dtype is torch.int32
+        assert qkv_proj.weight.dtype is torch.float8_e4m3fn
+        assert qkv_proj.input_scale.dtype is torch.float32
+        assert qkv_proj.input_scale.shape[0] == 1
+        assert qkv_proj.weight_scale.shape[0] == 1
 
         sampling_params = SamplingParams()
         output = llm.generate("Hello world!", sampling_params=sampling_params)
