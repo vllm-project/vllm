@@ -1,9 +1,11 @@
 """This file is used for /tests and /benchmarks"""
 import random
-import numpy
-import torch
 from typing import Optional
 
+import numpy
+import torch
+
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.format_24 import (
     mask_creator, sparse_semi_structured_from_dense_cutlass)
 from vllm.model_executor.layers.quantization.utils.marlin_24_perms import (
@@ -13,7 +15,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_perms import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_pack_factor, quantize_weights, sort_weights)
 from vllm.platforms import current_platform
-from vllm import _custom_ops as ops
 from vllm.utils import print_warning_once
 
 GPTQ_MARLIN_TILE = 16
@@ -95,13 +96,14 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     scales = layer.weight_scale.repeat(1, part_size_n).to(
         layer.orig_dtype).to(device)
     # Permute scales
+    num_bits = 8
     marlin_scales = marlin_permute_scales(
         s=scales,
         size_k=part_size_k,
         size_n=part_size_n,
         group_size=-1,
-        num_bits=8,
-    )
+        scale_perm=marlin_scale_perm[num_bits],
+        scale_perm_single=marlin_scale_perm_single[num_bits])
     layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
 
     # Allocate marlin workspace

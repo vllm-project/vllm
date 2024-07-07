@@ -11,13 +11,11 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    all_close_1d, create_per_tensor_scale_param, cutlass_fp8_supported,
-    apply_fp8_linear, per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    prepare_fp8_layer_for_marlin,
-    apply_fp8_marlin_linear,
-)
+    apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    all_close_1d, apply_fp8_linear, create_per_tensor_scale_param,
+    cutlass_fp8_supported, per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once

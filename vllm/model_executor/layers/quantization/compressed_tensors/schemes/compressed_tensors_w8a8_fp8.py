@@ -5,7 +5,7 @@ import torch
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    create_per_tensor_scale_param, cutlass_fp8_supported, apply_fp8_linear,
+    apply_fp8_linear, create_per_tensor_scale_param, cutlass_fp8_supported,
     requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 

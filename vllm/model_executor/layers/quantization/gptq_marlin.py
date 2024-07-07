@@ -11,12 +11,13 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_K,
+    GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_SUPPORTED_GROUP_SIZES,
+    GPTQ_MARLIN_SUPPORTED_NUM_BITS, GPTQ_MARLIN_SUPPORTED_SYM,
+    GPTQ_MARLIN_TILE)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    GPTQ_MARLIN_TILE, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MIN_THREAD_K,
-    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
-    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_SYM)
 
 logger = init_logger(__name__)
 

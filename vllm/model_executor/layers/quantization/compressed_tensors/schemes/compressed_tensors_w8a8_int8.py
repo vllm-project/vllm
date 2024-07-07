@@ -1,17 +1,16 @@
-from typing import Callable, List, Tuple, Union
+from typing import Callable, List
 
 import torch
 from torch.nn import Parameter
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_int8_linear, convert_to_channelwise, create_per_channel_scale_param,
     create_per_tensor_scale_param)
+from vllm.model_executor.utils import set_weight_attrs
 
 
 class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
