@@ -56,7 +56,7 @@ def main(args):
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
-            means, stds = [], [], []
+            means, stds = [], []
             for method in methods:
                 target = df['Test name'].str.contains(model)
                 target = target & df['Engine'].str.contains(method)
