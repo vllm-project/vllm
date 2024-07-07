@@ -31,7 +31,7 @@ def check_marlin_supported(num_bits: int, group_size: int, is_sym: bool,
             and is_sym in GPTQ_MARLIN_SUPPORTED_SYM)
 
 
-def verify_marlin_supported(num_bits: int, group_size: int,
+def verify_marlin_supported(num_bits: int, group_size: Optional[int],
                             is_sym: bool) -> None:
 
     if num_bits not in GPTQ_MARLIN_SUPPORTED_NUM_BITS:
@@ -39,7 +39,8 @@ def verify_marlin_supported(num_bits: int, group_size: int,
             f"Marlin does not support weight_bits = {num_bits}. "
             f"Only weight_bits = {GPTQ_MARLIN_SUPPORTED_NUM_BITS} "
             "are supported.")
-    if group_size not in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES:
+    if (group_size is None
+            or group_size not in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES):
         raise ValueError(
             f"Marlin does not support group_size = {group_size}. "
             f"Only group_sizes = {GPTQ_MARLIN_SUPPORTED_GROUP_SIZES} "

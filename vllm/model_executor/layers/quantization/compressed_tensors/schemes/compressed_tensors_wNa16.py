@@ -7,9 +7,9 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    verify_marlin_supported, verify_marlin_supports_shape,
     apply_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, replace_tensor)
+    marlin_permute_scales, replace_tensor, verify_marlin_supported,
+    verify_marlin_supports_shape)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsWNA16"]
@@ -25,7 +25,17 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
-        self.group_size = group_size
+
+        self.group_size: int
+        if group_size is None:
+            if self.strategy != "channel":
+                raise ValueError(
+                    "Marlin kernels require group quantization or "
+                    "channelwise quantization, but found no group "
+                    "size and strategy is not channelwise.")
+            self.group_size = -1
+        else:
+            self.group_size = group_size
 
         if self.strategy == "group" and self.group_size is None:
             raise ValueError(
@@ -34,12 +44,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if self.strategy == "channel":
             assert self.group_size is None
             self.group_size = -1
-        
+
         # Verify supported on platform.
         verify_marlin_supported(num_bits=self.num_bits,
                                 group_size=self.group_size,
                                 is_sym=True)
-
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -49,10 +58,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
 
         # If group_size is -1, we are in channelwise case.
-        if self.group_size == -1:
-            group_size = self.group_size
-        else:
+        if self.group_size is None:
+            raise ValueError("Gr")
+        elif self.group_size == -1:
             group_size = input_size
+        else:
+            group_size = self.group_size
 
         verify_marlin_supports_shape(
             output_size_per_partition=output_size_per_partition,
@@ -149,7 +160,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             size_n=layer.output_size_per_partition,
             group_size=layer.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
-
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         return apply_marlin_linear(
