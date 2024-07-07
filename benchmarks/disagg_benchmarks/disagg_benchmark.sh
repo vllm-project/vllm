@@ -65,10 +65,10 @@ main() {
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
   num_prompts=500
-  qps=8
+  qps=4
   prefix_len=64
-  input_len=8192
-  output_len=128
+  input_len=2048
+  output_len=11
 
 
   # chunked prefill with tp=8
