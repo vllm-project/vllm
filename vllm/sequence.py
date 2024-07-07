@@ -14,9 +14,9 @@ from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
+    from vllm.model_executor.sampling_metadata import SamplingMetadata
     from vllm.multimodal import MultiModalDataDict
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
-    from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
 @dataclass
@@ -702,6 +702,26 @@ class SequenceOutput:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+        # If present, these tokens should appended to the output
+        # instead of output_token.
+        self.fast_forward_tokens: Optional[List[int]] = None
+
+    def append_to(self, seq: Sequence) -> None:
+        if self.fast_forward_tokens is not None:
+            logprobs = self.logprobs
+            for token in self.fast_forward_tokens:
+                # On first iteration, use the existing self.logprobs, provided
+                # they contain the token.
+                # On subsequent iterations, logprobs is cleared, so always use
+                # artificially created logprobs.
+                if token not in logprobs:
+                    logprobs = {
+                        token: Logprob(logprob=0.0, rank=1, decoded_token=None)
+                    }
+                seq.append_token_id(token, logprobs)
+                logprobs = {}
+        else:
+            seq.append_token_id(self.output_token, self.logprobs)
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
@@ -919,9 +939,13 @@ class SamplingController:
         """Prepare the sampling controller for the next step."""
         pass
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+    def transform_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply the sampling controller to the logits."""
         return logits
+
+    def transform_sampler_output(self, output: SamplerOutput) -> SamplerOutput:
+        """Apply the sampling controller to the sampler output."""
+        return output
 
 
 @dataclass

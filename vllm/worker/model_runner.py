@@ -1265,13 +1265,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             return []
 
         if ctrl is not None:
-            logits = ctrl.apply(logits)
+            logits = ctrl.transform_logits(logits)
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+
+        if ctrl is not None:
+            ctrl.transform_sampler_output(output)
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
