@@ -19,6 +19,8 @@ serving_column_mapping = {
     "std_ttft_ms": "Std TTFT (ms)",
     "mean_itl_ms": "Mean ITL (ms)",
     "std_itl_ms": "Std ITL (ms)",
+    "input_throughput": "Input Tput (tok/s)",
+    "output_throughput": "Output Tput (tok/s)",
     "engine": "Engine",
 }
 

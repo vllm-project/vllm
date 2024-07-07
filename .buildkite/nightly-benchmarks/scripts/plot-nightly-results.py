@@ -52,11 +52,11 @@ def main(args):
     plt.rcParams.update({'font.size': 15})
 
     # plot results
-    fig, axes = plt.subplots(3, 2, figsize=(10, 12))
+    fig, axes = plt.subplots(3, 3, figsize=(10, 12))
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
-            means, stds = [], []
+            means, stds = [], [], []
             for method in methods:
                 target = df['Test name'].str.contains(model)
                 target = target & df['Engine'].str.contains(method)
@@ -75,24 +75,42 @@ def main(args):
 
             ax = axes[i, j]
 
-            ax.errorbar(["vllm", "trt", "lmdeploy", "tgi"],
-                        means,
-                        yerr=stds,
-                        fmt='o',
-                        capsize=5)
+            ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
+                    means,
+                    yerr=stds,
+                    capsize=5,
+                    colors=['#E69F00', '#56B4E9','#D55E00', '#009E73'])
             ax.set_ylim(bottom=0)
-
-            # for i, (method, mean, std) in enumerate(zip(method, means, stds)):
-            #     ax.text(
-            #         i - 0.2, mean,  # Adjust position above the error bar
-            #         f'{mean:.0f}',
-            #         ha='center',
-            #         va='bottom'
-            #     )
 
             ax.set_ylabel(f"{metric} (ms)")
             ax.set_title(f"{model} {metric} comparison")
-            ax.grid()
+            ax.grid(axis='y')
+            
+        metric = "Tput"
+        j = 2
+        if True:
+            tputs = []
+            for method in methods:
+                target = df['Test name'].str.contains(model)
+                target = target & df['Engine'].str.contains(method)
+                filtered_df = df[target]
+
+                if filtered_df.empty:
+                    tputs.append(0.)
+                else:
+                    tputs.append(filtered_df["Input Tput (tok/s)"].values[0] + filtered_df["Output Tput (tok/s)"].values[0])
+            
+            ax = axes[i, j]
+
+            ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
+                    tputs,
+                    colors=['#E69F00', '#56B4E9','#D55E00', '#009E73'])
+            ax.set_ylim(bottom=0)
+
+            ax.set_ylabel(f"Tput (token/s)")
+            ax.set_title(f"{model} {metric} comparison")
+            ax.grid(axis='y')
+                    
 
     fig.tight_layout(pad=0.6)
     fig.savefig("nightly_results.png", bbox_inches='tight')
