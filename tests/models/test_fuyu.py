@@ -110,7 +110,7 @@ if is_cpu():
         # Single-scale, batched
         [0.25, 0.25, 0.25],
         # Multi-scale
-        [0.75, 0.5, 0.25],
+        [0.25, 0.20, 0.15],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
