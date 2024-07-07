@@ -697,7 +697,7 @@ if __name__ == "__main__":
         type=int,
         default=1024,
         help=
-        "Number of input token per request, used for random samping"  # noqa: E501
+        "Number of input token per request, used for random samping",  # noqa: E501
     )
 
     parser.add_argument(
@@ -705,14 +705,15 @@ if __name__ == "__main__":
         type=int,
         default=128,
         help=
-        "Number of output token per request, used for random samping"  # noqa: E501
+        "Number of output token per request, used for random samping",  # noqa: E501
     )
 
     parser.add_argument(
         "--random-range-ratio",
         type=float,
         default=1.0,
-        help="Range sampled ratio, used for random sampling values"  # noqa: E501
+        help=
+        "Range sampled ratio, used for random sampling values",  # noqa: E501
     )
 
     args = parser.parse_args()
