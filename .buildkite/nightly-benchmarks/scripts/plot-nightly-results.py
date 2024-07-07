@@ -81,7 +81,7 @@ def main(args):
             bars = ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
                         means,
                         yerr=stds,
-                        capsize=5,
+                        capsize=10,
             )
             for idx, bar in enumerate(bars):
                 bar.set_color(bar_colors[idx])
