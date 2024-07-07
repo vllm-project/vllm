@@ -1025,7 +1025,7 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
                 torch.distributed.broadcast_object_list([shm.name],
                                                         src=ranks[source_rank],
                                                         group=pg)
-                is_in_the_same_node[0] = 1
+                is_in_the_same_node[rank] = 1
             else:
                 # try to open the shared memory segment
                 recv = [None]
