@@ -50,10 +50,10 @@ def main(args):
     with open("nightly_results.md", "w") as f:
         f.write(description)
 
-    plt.rcParams.update({'font.size': 18})
+    plt.rcParams.update({'font.size': 20})
 
     # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(15, 14))
+    fig, axes = plt.subplots(3, 3, figsize=(16, 14))
     fig.subplots_adjust(hspace=1)
     methods = ["vllm", "trt", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
@@ -88,7 +88,7 @@ def main(args):
             ax.set_ylim(bottom=0)
 
             ax.set_ylabel(f"{metric} (ms)")
-            ax.set_title(f"{model} {metric} comparison")
+            ax.set_title(f"{model} {metric}")
             ax.grid(axis='y')
             
         metric = "Tput"
@@ -118,7 +118,7 @@ def main(args):
             ax.set_ylim(bottom=0)
 
             ax.set_ylabel(f"Tput (token/s)")
-            ax.set_title(f"{model} {metric} comparison")
+            ax.set_title(f"{model} {metric}")
             ax.grid(axis='y')
                     
 
