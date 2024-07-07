@@ -4,7 +4,7 @@
 
 
 # Model: neuralmagic/Meta-Llama-3-70B-Instruct-FP8-KV 
-# Query: 2048 input tokens, 128 output tokens, QPS 8, 1000 requests
+# Query: 2048 input tokens, 11 output tokens, QPS 4, 500 requests
 # Resource: 8x H100
 # Approaches:
 # 1. Chunked prefill: 1 vllm instance with tp=8
