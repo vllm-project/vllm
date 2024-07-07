@@ -184,9 +184,10 @@ def sample_sonnet_requests(
     return sampled_requests
 
 
-def sample_random_requests(input_len: int, output_len: int, num_prompts: int,
-                           range_ratio: float,
-                           tokenizer: PreTrainedTokenizerBase):
+def sample_random_requests(
+        input_len: int, output_len: int, num_prompts: int, range_ratio: float,
+        tokenizer: PreTrainedTokenizerBase) -> List[Tuple[str, int, int]]:
+
     input_lens = np.random.randint(
         int(input_len * range_ratio),
         input_len + 1,
@@ -626,21 +627,21 @@ if __name__ == "__main__":
         type=int,
         default=550,
         help=
-        "Number of input tokens per request, used only for sonnet dataset.",  # noqa: E501
+        "Number of input tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
         "--sonnet-output-len",
         type=int,
         default=150,
         help=
-        "Number of output tokens per request, used only for sonnet dataset.",  # noqa: E501
+        "Number of output tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
         "--sonnet-prefix-len",
         type=int,
         default=200,
         help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",  # noqa: E501
+        "Number of prefix tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
         "--request-rate",
@@ -696,24 +697,22 @@ if __name__ == "__main__":
         "--random-input-len",
         type=int,
         default=1024,
-        help=
-        "Number of input token per request, used for random samping",  # noqa: E501
+        help="Number of input tokens per request, used for random sampling",
     )
 
     parser.add_argument(
         "--random-output-len",
         type=int,
         default=128,
-        help=
-        "Number of output token per request, used for random samping",  # noqa: E501
+        help="Number of output tokens per request, used for random sampling",
     )
 
     parser.add_argument(
         "--random-range-ratio",
         type=float,
         default=1.0,
-        help=
-        "Range sampled ratio, used for random sampling values",  # noqa: E501
+        help="Range of sampled ratio of input/output length, "
+        "used for random sampling values",
     )
 
     args = parser.parse_args()
