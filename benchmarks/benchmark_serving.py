@@ -184,7 +184,8 @@ def sample_sonnet_requests(
     return sampled_requests
 
 
-def sample_random_requests(input_len, output_len, num_prompts, range_ratio,
+def sample_random_requests(input_len: int, output_len: int, num_prompts: int,
+                           range_ratio: float,
                            tokenizer: PreTrainedTokenizerBase):
     input_lens = np.random.randint(
         int(input_len * range_ratio),
@@ -691,20 +692,29 @@ if __name__ == "__main__":
         " format.",
     )
 
-    parser.add_argument("--random-input-len",
-                        type=int,
-                        default=1024,
-                        help="random sample input length")
+    parser.add_argument(
+        "--random-input-len",
+        type=int,
+        default=1024,
+        help=
+        "Number of input token per request, used for random samping"  # noqa: E501
+    )
 
-    parser.add_argument("--random-output-len",
-                        type=int,
-                        default=128,
-                        help="random sample output length")
+    parser.add_argument(
+        "--random-output-len",
+        type=int,
+        default=128,
+        help=
+        "Number of output token per request, used for random samping",  # noqa: E501
+    )
 
-    parser.add_argument("--random-range-ratio",
-                        type=float,
-                        default=1.0,
-                        help="random sample range ratio")
+    parser.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help=
+        "Range sampled ratio, used for random sampling values",  # noqa: E501
+    )
 
     args = parser.parse_args()
     main(args)
