@@ -157,9 +157,9 @@ class ShmRingBufferIO:
         n_reader,  # number of all readers
         n_local_reader,  # number of local readers through shared memory
         local_reader_ranks: Optional[List[int]] = None,
-        connect_ip: Optional[str] = None,
         max_chunk_bytes: int = 1024 * 1024 * 10,
         max_chunks: int = 10,
+        connect_ip: Optional[str] = None,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -466,9 +466,13 @@ class ShmRingBufferIO:
         local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
         buffer_io: ShmRingBufferIO
         if group_rank == writer_rank:
-            buffer_io = ShmRingBufferIO(n_reader, n_local_reader,
-                                        local_reader_ranks, max_chunk_bytes,
-                                        max_chunks)
+            buffer_io = ShmRingBufferIO(
+                n_reader=n_reader,
+                n_local_reader=n_local_reader,
+                local_reader_ranks=local_reader_ranks,
+                max_chunk_bytes=max_chunk_bytes,
+                max_chunks=max_chunks,
+            )
             handle = buffer_io.export_handle()
             dist.broadcast_object_list([handle],
                                        src=global_ranks[writer_rank],
