@@ -312,6 +312,7 @@ def mask_creator(tensor):
 
     return mask
 
+
 def inject_24(w, size_k, size_n):
     assert w.shape == (size_k, size_n)
 
@@ -410,9 +411,10 @@ def get_weight_perm_24(num_bits: int):
     perm = torch.from_numpy(perm)
     return perm
 
+
 def marlin_permute_scales_24(s: torch.Tensor, size_k: int, size_n: int,
                              group_size: int) -> torch.Tensor:
-    
+
     scale_perm, scale_perm_single = get_scale_perms_24()
     if group_size < size_k and group_size != -1:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
@@ -421,6 +423,7 @@ def marlin_permute_scales_24(s: torch.Tensor, size_k: int, size_n: int,
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
+
 
 def marlin_24_quantize(
     w: torch.Tensor,
@@ -452,8 +455,7 @@ def marlin_24_quantize(
     weight_perm = get_weight_perm_24(num_bits)
     marlin_24_q_w_comp = marlin_weights(q_w_24_comp, size_k_comp, size_n,
                                         num_bits, weight_perm)
-    marlin_24_s = marlin_permute_scales_24(s, size_k, size_n, 
-                                           group_size)
+    marlin_24_s = marlin_permute_scales_24(s, size_k, size_n, group_size)
 
     # Create result
     res_list = [w_24_ref, marlin_24_q_w_comp, meta, marlin_24_s]
