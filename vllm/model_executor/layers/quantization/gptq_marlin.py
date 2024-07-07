@@ -1,7 +1,8 @@
+import enum
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
@@ -10,57 +11,14 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-<<<<<<< HEAD
-from vllm.model_executor.layers.quantization.utils.marlin import (
-    check_marlin_supported, get_max_workspace_size, marlin_permute_scales,
-    replace_tensor, sort_g_idx, verify_marlin_supported,
-    verify_marlin_supports_shape)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-
-logger = init_logger(__name__)
-
-=======
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_K,
-    GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_SUPPORTED_GROUP_SIZES,
-    GPTQ_MARLIN_SUPPORTED_NUM_BITS, GPTQ_MARLIN_SUPPORTED_SYM,
-    GPTQ_MARLIN_TILE)
+    verify_marlin_supports_shape, verify_marlin_supported, check_marlin_supported,
+    get_max_workspace_size, marlin_permute_scales, marlin_sort_g_idx,
+    replace_tensor)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-
-# Permutations for Marlin scale shuffling
-def get_scale_perms(num_bits: int):
-    scale_perm: List[int] = []
-    for i in range(8):
-        scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single: List[int] = []
-    for i in range(4):
-        scale_perm_single.extend(
-            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
-    return scale_perm, scale_perm_single
-
-
-def get_pack_factor(num_bits: int):
-    assert (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
-            ), f"Unsupported num_bits = {num_bits}"
-    return 32 // num_bits
-
-
-def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
-                          group_size: int, num_bits: int):
-    scale_perm, scale_perm_single = get_scale_perms(num_bits)
-    if group_size < size_k and group_size != -1:
-        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
-    else:
-        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
-    s = s.reshape((-1, size_n)).contiguous()
-
-    return s
-
->>>>>>> compressed-tensors-fp8
 
 class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
@@ -79,6 +37,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.is_sym = is_sym
         self.lm_head_quantized = lm_head_quantized
 
+        # Verify supported on platform.
         verify_marlin_supported(num_bits=self.weight_bits,
                                 group_size=self.group_size,
                                 is_sym=self.is_sym)
@@ -160,28 +119,10 @@ class GPTQMarlinConfig(QuantizationConfig):
                 or desc_act is None):
             return False
 
-<<<<<<< HEAD
         return check_marlin_supported(num_bits=num_bits,
                                       group_size=group_size,
                                       is_sym=sym,
                                       min_capability=cls.get_min_capability())
-=======
-        # If the capability of the device is too low, cannot convert.
-        major, minor = current_platform.get_device_capability()
-        device_capability = major * 10 + minor
-        if device_capability < cls.get_min_capability():
-            return False
-
-        # Otherwise, can convert if model satisfies marlin constraints.
-        return (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
-                and group_size in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES
-                and sym in GPTQ_MARLIN_SUPPORTED_SYM)
-
-
-class GPTQMarlinState(Enum):
-    REPACK = enum.auto()
-    READY = enum.auto()
->>>>>>> compressed-tensors-fp8
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
@@ -205,7 +146,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         del output_size
-
         output_size_per_partition = sum(output_partition_sizes)
 
         # Normalize group_size
@@ -215,7 +155,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             group_size = input_size
 
         verify_marlin_supports_shape(
-            output_size_per_partition=sum(output_partition_sizes),
+            output_size_per_partition=output_size_per_partition,
             input_size_per_partition=input_size_per_partition,
             input_size=input_size,
             group_size=group_size)
@@ -226,14 +166,13 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         scales_and_zp_size = input_size // group_size
         scales_and_zp_input_dim = None
 
+        # Act-order case:
         if self.quant_config.desc_act:
-            # Act-order case
             assert self.quant_config.group_size != -1
             is_k_full = input_size_per_partition == input_size
 
+        # No act-order case:
         else:
-            # No act-order case
-
             # K is always full due to full alignment with
             # group-size and shard of scales/zp
             is_k_full = True
@@ -344,27 +283,28 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         layer.input_size = input_size
         layer.is_k_full = is_k_full
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    
         # To be used as part of repacking
         part_size_n = layer.output_size_per_partition
         part_size_k = layer.input_size_per_partition
         full_size_k = layer.input_size
 
-        # Sort for act_order
         if self.quant_config.desc_act:
-            # Get sorting based on g_idx
-            sort_g_idx(layer, "g_idx", "g_idx_sort_indices")
+            # If desc_act, sort for activation_reordering.
+            g_idx, g_idx_sort_indices = marlin_sort_g_idx(
+                layer.g_idx, layer.g_idx_sort_indices)
+            replace_tensor(layer, "g_idx", g_idx)
+            replace_tensor(layer, "g_idx_sort_indices", g_idx_sort_indices)
+
         else:
-            # Reset g_idx to empty
-            device = layer.qweight.device
-            layer.g_idx = Parameter(torch.empty(0, dtype=torch.int,
-                                                device=device),
-                                    requires_grad=False)
-            layer.g_idx_sort_indices = Parameter(torch.empty(0,
-                                                             dtype=torch.int,
-                                                             device=device),
-                                                 requires_grad=False)
+            # Otherwise, reset g_idx to empty.
+            layer.g_idx = Parameter(
+                torch.empty(0, dtype=torch.int, device=layer.qweight.device),
+                requires_grad=False)
+            layer.g_idx_sort_indices = Parameter(
+                torch.empty(0, dtype=torch.int, device=layer.qweight.device),
+                requires_grad=False)
 
         # Repack weights into marlin format
         marlin_qweight = ops.gptq_marlin_repack(

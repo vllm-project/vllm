@@ -6,7 +6,7 @@ from torch.nn import Parameter
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.layers.quantization.utils.marlin import (
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQMarlinState,
     marlin_permute_scales)
 from vllm.model_executor.utils import set_weight_attrs

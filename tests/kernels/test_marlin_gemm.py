@@ -6,10 +6,6 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.marlin import (
-    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
-    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
-    marlin_permute_scales)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
@@ -18,6 +14,10 @@ from vllm.model_executor.layers.quantization.test_utils.marlin_perms import (
 from vllm.model_executor.layers.quantization.test_utils.marlin_utils import (
     MarlinWorkspace, compute_max_diff, is_marlin_supported, marlin_24_quantize,
     marlin_quantize, marlin_weights, pack_fp8_to_int32)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
+    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
+    marlin_permute_scales)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
 
@@ -272,9 +272,7 @@ def test_fp8_marlin_gemm(
         s=scales,
         size_k=size_k,
         size_n=size_n,
-        group_size=-1,
-        num_bits=8,
-    )
+        group_size=-1)
 
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
