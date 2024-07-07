@@ -192,7 +192,8 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.shm_broadcast import (
             ShmRingBufferIO)
         self.shm_broadcaster: Optional[ShmRingBufferIO] = None
-        if self.world_size > 1 and is_in_the_same_node(self.cpu_group):
+        if self.world_size > 1 and all(
+                in_the_same_node_as(self.cpu_group, source_rank=0), ):
             self.shm_broadcaster = ShmRingBufferIO.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
 
@@ -993,15 +994,15 @@ def destroy_distributed_environment():
         torch.distributed.destroy_process_group()
 
 
-def is_in_the_same_node(pg: ProcessGroup):
+def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
     """
-    This is a collective operation that checks if all processes in the group
-    are in the same node. It tests if all processes are attached to the same
+    This is a collective operation that returns if each rank is in the same node
+    as the source rank. It tests if processes are attached to the same
     memory system (shared access to shared memory).
     """
     assert torch.distributed.get_backend(
         pg) != torch.distributed.Backend.NCCL, (
-            "is_in_the_same_node should be tested with a non-NCCL group.")
+            "in_the_same_node_as should be tested with a non-NCCL group.")
     # local rank inside the group
     rank = torch.distributed.get_rank(group=pg)
     world_size = torch.distributed.get_world_size(group=pg)
@@ -1017,19 +1018,19 @@ def is_in_the_same_node(pg: ProcessGroup):
 
     try:
         with contextlib.suppress(OSError):
-            if rank == 0:
+            if rank == source_rank:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
                 shm.buf[:len(magic_message)] = magic_message
                 torch.distributed.broadcast_object_list([shm.name],
-                                                        src=ranks[0],
+                                                        src=ranks[source_rank],
                                                         group=pg)
                 is_in_the_same_node[0] = 1
             else:
                 # try to open the shared memory segment
                 recv = [None]
                 torch.distributed.broadcast_object_list(recv,
-                                                        src=ranks[0],
+                                                        src=ranks[source_rank],
                                                         group=pg)
                 name = recv[0]
                 # fix to https://stackoverflow.com/q/62748654/9191338
@@ -1050,8 +1051,8 @@ def is_in_the_same_node(pg: ProcessGroup):
 
     # clean up the shared memory segment
     with contextlib.suppress(OSError):
-        if rank == 0 and shm:
+        if rank == source_rank and shm:
             shm.unlink()
     torch.distributed.all_reduce(is_in_the_same_node, group=pg)
 
-    return is_in_the_same_node.sum().item() == world_size
+    return [x == 1 for x in is_in_the_same_node.tolist()]
