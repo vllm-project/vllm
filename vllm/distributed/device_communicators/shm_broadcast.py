@@ -293,14 +293,16 @@ class ShmRingBufferIO:
                 recv = self.local_sync_socket.recv()
                 assert recv == b"READY"
                 self.local_sync_socket.send(b"READY")
-            self.local_socket.send(b"READY")
+            if self.n_local_reader > 0:
+                self.local_socket.send(b"READY")
 
             # remote readers
             for i in range(self.n_remote_reader):
                 recv = self.remote_sync_socket.recv()
                 assert recv == b"READY"
                 self.remote_sync_socket.send(b"READY")
-            self.remote_socket.send(b"READY")
+            if self.n_remote_reader > 0:
+                self.remote_socket.send(b"READY")
         elif self._is_local_reader:
             self.local_sync_socket.send(b"READY")
             recv = self.local_sync_socket.recv()
