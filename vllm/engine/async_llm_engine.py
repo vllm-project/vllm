@@ -224,6 +224,8 @@ class _AsyncLLMEngine(LLMEngine):
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
+        finished_requests_ids = self.scheduler[
+            virtual_engine].get_and_reset_finished_requests_ids()
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
@@ -235,7 +237,7 @@ class _AsyncLLMEngine(LLMEngine):
                 virtual_engine=virtual_engine,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-            )
+                finished_requests_ids=finished_requests_ids)
             output = await self.model_executor.execute_model_async(
                 execute_model_req)
         else:
@@ -378,6 +380,11 @@ class AsyncLLMEngine:
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
+
+        if engine_args.engine_use_ray:
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
+
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
 

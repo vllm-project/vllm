@@ -5,20 +5,22 @@ from PIL import Image
 
 from vllm import LLM, SamplingParams
 
+# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
+# You can use `.buildkite/download-images.sh` to download them
+
 
 def run_phi3v():
     model_path = "microsoft/Phi-3-vision-128k-instruct"
 
     # Note: The default setting of max_num_seqs (256) and
     # max_model_len (128k) for this model may cause OOM.
+    # You may lower either to run this example on lower-end GPUs.
+
     # In this example, we override max_num_seqs to 5 while
     # keeping the original context length of 128k.
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
-        image_token_id=32044,
-        image_input_shape="1,3,1008,1344",
-        image_feature_size=1921,
         max_num_seqs=5,
     )
 
@@ -26,8 +28,6 @@ def run_phi3v():
 
     # single-image prompt
     prompt = "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n"  # noqa: E501
-    prompt = prompt.replace("<|image_1|>", "<|image|>" * 1921 + "<s>")
-
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
 
     outputs = llm.generate(
