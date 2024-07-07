@@ -51,6 +51,8 @@ _GENERATION_MODELS = {
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
+    "PaliGemmaForConditionalGeneration":
+    ("paligemma", "PaliGemmaForConditionalGeneration"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
