@@ -37,13 +37,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         else:
             self.group_size = group_size
 
-        if self.strategy == "group" and self.group_size is None:
-            raise ValueError(
-                "group_size must be given when using strategy group")
-
-        if self.strategy == "channel":
-            assert self.group_size is None
-            self.group_size = -1
 
         # Verify supported on platform.
         verify_marlin_supported(num_bits=self.num_bits,
