@@ -124,7 +124,7 @@ class GroupCoordinator:
     # communicators are only created for world size > 1
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
-    shm_broadcaster: Optional[Any]  # shared memory broadcaster
+    mq_broadcaster: Optional[Any]  # shared memory broadcaster
 
     def __init__(
         self,
@@ -133,6 +133,7 @@ class GroupCoordinator:
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
+        use_mq_broadcaster: bool = False,
     ):
 
         self.rank = torch.distributed.get_rank()
@@ -191,10 +192,9 @@ class GroupCoordinator:
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
-        self.shm_broadcaster: Optional[MessageQueue] = None
-        if self.world_size > 1 and all(
-                in_the_same_node_as(self.cpu_group, source_rank=0), ):
-            self.shm_broadcaster = MessageQueue.create_from_process_group(
+        self.mq_broadcaster: Optional[MessageQueue] = None
+        if use_mq_broadcaster and self.world_size > 1:
+            self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
 
     @property
@@ -378,9 +378,9 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return obj
-        if self.shm_broadcaster is not None:
+        if self.mq_broadcaster is not None:
             assert src == 0, "Shared memory broadcaster only supports src=0"
-            return self.shm_broadcaster.broadcast_object(obj)
+            return self.mq_broadcaster.broadcast_object(obj)
         if self.rank_in_group == src:
             torch.distributed.broadcast_object_list([obj],
                                                     src=self.ranks[src],
@@ -697,8 +697,8 @@ class GroupCoordinator:
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
-        if self.shm_broadcaster is not None:
-            self.shm_broadcaster = None
+        if self.mq_broadcaster is not None:
+            self.mq_broadcaster = None
 
 
 _WORLD: Optional[GroupCoordinator] = None
@@ -721,10 +721,12 @@ def init_world_group(ranks: List[int], local_rank: int,
 
 
 def init_model_parallel_group(
-        group_ranks: List[List[int]],
-        local_rank: int,
-        backend: str,
-        use_custom_allreduce: Optional[bool] = None) -> GroupCoordinator:
+    group_ranks: List[List[int]],
+    local_rank: int,
+    backend: str,
+    use_custom_allreduce: Optional[bool] = None,
+    use_mq_broadcaster: bool = False,
+) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
     return GroupCoordinator(
@@ -733,6 +735,7 @@ def init_model_parallel_group(
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
+        use_mq_broadcaster=use_mq_broadcaster,
     )
 
 
@@ -881,8 +884,12 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
+
+    # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
-                                    get_world_group().local_rank, backend)
+                                    get_world_group().local_rank,
+                                    backend,
+                                    use_mq_broadcaster=True)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
