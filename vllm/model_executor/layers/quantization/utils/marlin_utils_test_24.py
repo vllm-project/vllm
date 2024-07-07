@@ -1,3 +1,5 @@
+"""Utility functions used for tests and benchmarks"""
+
 from typing import List
 
 import numpy
