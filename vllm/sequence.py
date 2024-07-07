@@ -712,14 +712,17 @@ class SequenceOutput:
             for token in self.fast_forward_tokens:
                 # On first iteration, use the existing self.logprobs, provided
                 # they contain the token.
-                # On subsequent iterations, logprobs is cleared, so always use
-                # artificially created logprobs.
                 if token not in logprobs:
                     logprobs = {
                         token: Logprob(logprob=0.0, rank=1, decoded_token=None)
                     }
                 seq.append_token_id(token, logprobs)
+                # On subsequent iterations always use artificially created
+                # logprobs.
                 logprobs = {}
+            # If more than one token was appended, switch to prefill stage.
+            if seq.data.get_num_uncomputed_tokens() > 1:
+                seq.data._stage = SequenceStage.PREFILL
         else:
             seq.append_token_id(self.output_token, self.logprobs)
 
