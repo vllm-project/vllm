@@ -9,10 +9,11 @@ from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8, CompressedTensorsWNA16)
+    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
-    find_first_name_or_class_match)
+    QuantizationType, find_first_name_or_class_match)
 from vllm.platforms import current_platform
 
 
@@ -117,6 +118,40 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         return is_8_bits and is_token and is_symmetric and is_dynamic
 
+    def _is_fp8_w8a8(self, weight_quant: BaseModel,
+                     input_quant: BaseModel) -> bool:
+        # Confirm weights and activations quantized.
+        if weight_quant is None or input_quant is None:
+            return False
+
+        # Confirm we have floating points.
+        if not (weight_quant.type == QuantizationType.FLOAT
+                and input_quant.type == QuantizationType.FLOAT):
+            return False
+
+        # Confirm weight scheme is supported.
+        is_symmetric_weight = weight_quant.symmetric
+        is_static_weight = not weight_quant.dynamic
+        is_per_tensor_weight = (
+            weight_quant.strategy == QuantizationStrategy.TENSOR)
+        if not (is_symmetric_weight and is_static_weight
+                and is_per_tensor_weight):
+            return False
+
+        # Dynamic quantization is always supported if weights supported.
+        if input_quant.dynamic:
+            return True
+
+        # Confirm activation scheme is supported.
+        is_symmetric_activation = input_quant.symmetric
+        is_per_tensor_activation = (
+            input_quant.strategy == QuantizationStrategy.TENSOR)
+        if not (is_symmetric_activation and is_per_tensor_activation):
+            return False
+
+        # All conditions satisfied.
+        return True
+
     def _is_wNa16_group_channel(self, weight_quant: BaseModel,
                                 input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
@@ -147,14 +182,21 @@ class CompressedTensorsConfig(QuantizationConfig):
                     strategy=weight_quant.strategy,
                     group_size=weight_quant.group_size)
 
-        if self.quant_format == CompressionFormat.int_quantized.value:
+        if (self.quant_format == CompressionFormat.int_quantized.value or
+                self.quant_format == CompressionFormat.float_quantized.value):
+            if self._is_fp8_w8a8(weight_quant, input_quant):
+                return CompressedTensorsW8A8Fp8(
+                    input_dynamic=input_quant.dynamic)
+
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8(strategy=weight_quant.strategy,
-                                             is_static_input_scheme=True)
+                return CompressedTensorsW8A8Int8(
+                    strategy=weight_quant.strategy,
+                    is_static_input_scheme=True)
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8(strategy=weight_quant.strategy,
-                                             is_static_input_scheme=False)
+                return CompressedTensorsW8A8Int8(
+                    strategy=weight_quant.strategy,
+                    is_static_input_scheme=False)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
@@ -187,7 +229,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         self.quantization_config = quantization_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        return layer.scheme.process_weights_after_loading(layer)
+        layer.scheme.process_weights_after_loading(layer)
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
