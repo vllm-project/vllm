@@ -3,8 +3,8 @@ from typing import List, Optional
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
@@ -47,7 +47,7 @@ class TP1DraftModelRunner(ModelRunner):
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
     ):
         if return_hidden_states:
@@ -65,7 +65,7 @@ class TP1DraftModelRunner(ModelRunner):
             lora_config=lora_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
-            vision_language_config=vision_language_config,
+            multimodal_config=multimodal_config,
             return_hidden_states=return_hidden_states,
         )
 
@@ -75,15 +75,19 @@ class TP1DraftModelRunner(ModelRunner):
             List[SequenceGroupMetadata]] = None
 
     def prepare_model_input(
-            self,
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            virtual_engine: int = 0) -> ModelInputForGPUWithSamplingMetadata:
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None
+    ) -> ModelInputForGPUWithSamplingMetadata:
         """A temporary solution that caches the seq_group_metadata_list
         for multi-step execution.
         TODO: In-place update model_input and remove this function.
         """
         self.cached_seq_group_metadata_list = seq_group_metadata_list
-        return super().prepare_model_input(seq_group_metadata_list)
+        return super().prepare_model_input(
+            seq_group_metadata_list,
+            finished_requests_ids=finished_requests_ids)
 
     def update_model_input(
             self, model_input: ModelInputForGPUWithSamplingMetadata,

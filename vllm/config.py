@@ -1,11 +1,10 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 
 import torch
-from transformers import PretrainedConfig, PreTrainedTokenizerBase
+from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -120,7 +119,7 @@ class ModelConfig:
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
-        multimodal_config: Optional["VisionLanguageConfig"] = None,
+        multimodal_config: Optional["MultiModalConfig"] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -266,8 +265,6 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = getattr(self.hf_text_config,
-                                          "num_hidden_layers", 0)
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         architectures = getattr(self.hf_config, "architectures", [])
         if not all(arch in _PP_SUPPORTED_MODELS
@@ -275,12 +272,6 @@ class ModelConfig:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported for the following "
                 f" architectures: {_PP_SUPPORTED_MODELS}.")
-
-        if total_num_hidden_layers % pipeline_parallel_size != 0:
-            raise ValueError(
-                f"Total number of hidden layers ({total_num_hidden_layers}) "
-                "must be divisible by pipeline parallel size "
-                f"({pipeline_parallel_size}).")
 
         if self.quantization == "bitsandbytes" and (
                 parallel_config.tensor_parallel_size > 1
@@ -386,8 +377,39 @@ class ModelConfig:
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
-        return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+        from vllm.distributed.utils import get_pp_indices
+        total_num_hidden_layers = getattr(self.hf_text_config,
+                                          "num_hidden_layers", 0)
+        pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
+        start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
+        return end - start
+
+    def contains_seqlen_agnostic_layers(
+            self, parallel_config: "ParallelConfig") -> bool:
+        """True for Mamba/SSM models (Jamba)"""
+        return self._get_num_seqlen_agnostic_layers(parallel_config) > 0
+
+    def get_layers_block_type(self,
+                              parallel_config: "ParallelConfig") -> List[str]:
+        num_layers = self.get_num_layers(parallel_config)
+        # Transformers supports layers_block_type @property
+        return getattr(self.hf_config, "layers_block_type",
+                       ["attention"] * num_layers)
+
+    def get_num_attention_layers(self,
+                                 parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t == "attention"
+        ])
+
+    def _get_num_seqlen_agnostic_layers(
+            self, parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t != "attention"
+        ])
 
 
 class CacheConfig:
@@ -655,11 +677,13 @@ class ParallelConfig:
 
             from vllm.executor import ray_utils
             backend = "mp"
-            ray_found = ray_utils.ray is not None
+            ray_found = ray_utils.ray_is_available()
             if cuda_device_count_stateless() < self.world_size:
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
-                                     "required for multi-node inference")
+                                     "required for multi-node inference, "
+                                     "please install Ray with `pip install "
+                                     "ray`.") from ray_utils.ray_import_err
                 backend = "ray"
             elif ray_found:
                 if self.placement_group:
@@ -681,6 +705,7 @@ class ParallelConfig:
                 {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
+        self.rank = 0
 
     def _verify_args(self) -> None:
         if (self.pipeline_parallel_size > 1
@@ -691,17 +716,14 @@ class ParallelConfig:
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
                 "are 'ray' or 'mp'.")
-        if not self.disable_custom_all_reduce and self.world_size > 1:
-            if is_hip():
-                self.disable_custom_all_reduce = True
-                logger.info(
-                    "Disabled the custom all-reduce kernel because it is not "
-                    "supported on AMD GPUs.")
-            elif self.pipeline_parallel_size > 1:
-                self.disable_custom_all_reduce = True
-                logger.info(
-                    "Disabled the custom all-reduce kernel because it is not "
-                    "supported with pipeline parallelism.")
+        if self.distributed_executor_backend == "ray":
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
+        if is_hip():
+            self.disable_custom_all_reduce = True
+            logger.info(
+                "Disabled the custom all-reduce kernel because it is not "
+                "supported on AMD GPUs.")
         if self.ray_workers_use_nsight and (
                 not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
@@ -1263,45 +1285,12 @@ class LoRAConfig:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
-# TODO: To be replaced by MultiModalConfig.
 @dataclass
-class VisionLanguageConfig:
+class MultiModalConfig:
     """Configs the input data format and how models should run for
-    vision language models."""
-    # The input id corresponding to image token.
-    image_token_id: int
-    # Used for running `run_prefill_max_token`.
-    # For models that support varying resolution, this corresponds to
-    # worst case scenario (biggest supported resolution).
-    image_input_shape: tuple
-    image_feature_size: int
-
-    #TODO(ywang96): make this a cached property once we refactor the
-    # VisionLanguageConfig class.
-    def get_image_token_text(
-            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
-        """Get the image token placeholder text to be inserted into the 
-        text prompt and the string representation of the image token id.
-        """
-        image_token_str = tokenizer.decode(self.image_token_id)
-        return image_token_str * self.image_feature_size, image_token_str
-
-    def as_cli_args_dict(self) -> Dict[str, Any]:
-        """Flatten vision language config to pure args.
-
-        Compatible with what llm entrypoint expects.
-        """
-        result: Dict[str, Any] = {}
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if isinstance(value, enum.Enum):
-                result[f.name] = value.name.lower()
-            elif isinstance(value, tuple):
-                result[f.name] = ",".join([str(item) for item in value])
-            else:
-                result[f.name] = value
-
-        return result
+    multimodal models."""
+    # TODO: Add configs to init vision tower or not.
+    pass
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -1525,7 +1514,7 @@ class EngineConfig:
     device_config: DeviceConfig
     load_config: LoadConfig
     lora_config: Optional[LoRAConfig]
-    vision_language_config: Optional[VisionLanguageConfig]
+    multimodal_config: Optional[MultiModalConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
     observability_config: Optional[ObservabilityConfig]

@@ -10,6 +10,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+<<<<<<< HEAD
 from vllm.model_executor.layers.quantization.utils.marlin import (
     check_marlin_supported, get_max_workspace_size, marlin_permute_scales,
     replace_tensor, sort_g_idx, verify_marlin_supported,
@@ -18,6 +19,48 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
 
+=======
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_K,
+    GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_SUPPORTED_GROUP_SIZES,
+    GPTQ_MARLIN_SUPPORTED_NUM_BITS, GPTQ_MARLIN_SUPPORTED_SYM,
+    GPTQ_MARLIN_TILE)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
+
+
+# Permutations for Marlin scale shuffling
+def get_scale_perms(num_bits: int):
+    scale_perm: List[int] = []
+    for i in range(8):
+        scale_perm.extend([i + 8 * j for j in range(8)])
+    scale_perm_single: List[int] = []
+    for i in range(4):
+        scale_perm_single.extend(
+            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+    return scale_perm, scale_perm_single
+
+
+def get_pack_factor(num_bits: int):
+    assert (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
+            ), f"Unsupported num_bits = {num_bits}"
+    return 32 // num_bits
+
+
+def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
+                          group_size: int, num_bits: int):
+    scale_perm, scale_perm_single = get_scale_perms(num_bits)
+    if group_size < size_k and group_size != -1:
+        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
+    else:
+        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    s = s.reshape((-1, size_n)).contiguous()
+
+    return s
+
+>>>>>>> compressed-tensors-fp8
 
 class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
@@ -117,10 +160,28 @@ class GPTQMarlinConfig(QuantizationConfig):
                 or desc_act is None):
             return False
 
+<<<<<<< HEAD
         return check_marlin_supported(num_bits=num_bits,
                                       group_size=group_size,
                                       is_sym=sym,
                                       min_capability=cls.get_min_capability())
+=======
+        # If the capability of the device is too low, cannot convert.
+        major, minor = current_platform.get_device_capability()
+        device_capability = major * 10 + minor
+        if device_capability < cls.get_min_capability():
+            return False
+
+        # Otherwise, can convert if model satisfies marlin constraints.
+        return (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
+                and group_size in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES
+                and sym in GPTQ_MARLIN_SUPPORTED_SYM)
+
+
+class GPTQMarlinState(Enum):
+    REPACK = enum.auto()
+    READY = enum.auto()
+>>>>>>> compressed-tensors-fp8
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
