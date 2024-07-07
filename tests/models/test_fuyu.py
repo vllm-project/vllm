@@ -106,9 +106,9 @@ if is_cpu():
         # No image
         [],
         # Single-scale
-        [1.0],
+        [0.25],
         # Single-scale, batched
-        [1.0, 1.0, 1.0],
+        [0.25, 0.25, 0.25],
         # Multi-scale
         [0.25, 0.5, 1.0],
     ],
