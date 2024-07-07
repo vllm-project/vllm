@@ -120,7 +120,7 @@ main() {
           --sonnet-input-len $input_len \
           --sonnet-output-len $output_len \
           --sonnet-prefix-len $prefix_len \
-          --num-prompts $num_prompts \
+          --num-prompts $((num_prompts / 2)) \
           --port 8100 \
           --save-result \
           --result-dir $results_folder \
