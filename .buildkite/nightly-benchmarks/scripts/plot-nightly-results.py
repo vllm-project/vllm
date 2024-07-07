@@ -26,6 +26,7 @@ def parse_arguments():
 
 
 def main(args):
+    bar_colors = ['#E69F00', '#56B4E9','#D55E00', '#009E73']
     results_folder = Path(args.results_folder)
 
     results = []
@@ -75,11 +76,13 @@ def main(args):
 
             ax = axes[i, j]
 
-            ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
-                    means,
-                    yerr=stds,
-                    capsize=5,
-                    colors=['#E69F00', '#56B4E9','#D55E00', '#009E73'])
+            bars = ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
+                        means,
+                        yerr=stds,
+                        capsize=5,
+            )
+            for idx, bar in enumerate(bars):
+                bar.set_color(bar_colors[idx])
             ax.set_ylim(bottom=0)
 
             ax.set_ylabel(f"{metric} (ms)")
@@ -102,9 +105,11 @@ def main(args):
             
             ax = axes[i, j]
 
-            ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
-                    tputs,
-                    colors=['#E69F00', '#56B4E9','#D55E00', '#009E73'])
+            bars = ax.bar(["vllm", "trt", "lmdeploy", "tgi"],
+                        tputs,)
+            for idx, bar in enumerate(bars):
+                bar.set_color(bar_colors[idx])
+                
             ax.set_ylim(bottom=0)
 
             ax.set_ylabel(f"Tput (token/s)")
