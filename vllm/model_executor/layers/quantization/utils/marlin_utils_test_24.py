@@ -5,7 +5,7 @@ import random
 import torch
 
 from .marlin_utils import marlin_permute_scales
-from .marlin_utils_test import get_scale_perms, marlin_weights
+from .marlin_utils_test import marlin_weights
 from .quant_utils import quantize_weights
 
 
@@ -426,11 +426,9 @@ def marlin_24_quantize(
 
     # Reformat to marlin
     weight_perm = get_weight_perm_24(num_bits)
-    scale_perm, scale_perm_single = get_scale_perms()
     marlin_24_q_w_comp = marlin_weights(q_w_24_comp, size_k_comp, size_n,
                                         num_bits, weight_perm)
-    marlin_24_s = marlin_permute_scales(s, size_k, size_n, group_size,
-                                        scale_perm, scale_perm_single)
+    marlin_24_s = marlin_permute_scales(s, size_k, size_n, group_size)
 
     # Create result
     res_list = [w_24_ref, marlin_24_q_w_comp, meta, marlin_24_s]

@@ -10,11 +10,8 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQ_MARLIN_24_MAX_PARALLEL,
-    GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES,
-    GPTQ_MARLIN_24_SUPPORTED_NUM_BITS,
-)
+    GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
+    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
@@ -22,9 +19,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    MarlinWorkspace, compute_max_diff, get_weight_perm, marlin_weights,
-    marlin_24_quantize, marlin_quantize)
-
+    get_weight_perm, marlin_weights, marlin_quantize)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
+    marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
 
@@ -47,6 +44,24 @@ MNK_FACTORS = [
 ]
 
 DTYPES = [torch.float16, torch.bfloat16]
+
+
+class MarlinWorkspace:
+    def __init__(self, out_features, min_thread_n, max_parallel):
+        assert (out_features % min_thread_n == 0), (
+            "out_features = {} is undivisible by min_thread_n = {}".format(
+                out_features, min_thread_n))
+
+        max_workspace_size = ((out_features // min_thread_n) * max_parallel)
+
+        self.scratch = torch.zeros(max_workspace_size,
+                                   dtype=torch.int,
+                                   device="cuda")
+
+
+def compute_max_diff(output, output_ref):
+    return torch.mean(torch.abs(output - output_ref)) / torch.mean(
+        torch.abs(output_ref))
 
 
 def rand_data(shape, dtype=torch.float16):

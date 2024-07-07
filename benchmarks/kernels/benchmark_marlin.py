@@ -24,6 +24,19 @@ ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
 
+class MarlinWorkspace:
+    def __init__(self, out_features, min_thread_n, max_parallel):
+        assert (out_features % min_thread_n == 0), (
+            "out_features = {} is undivisible by min_thread_n = {}".format(
+                out_features, min_thread_n))
+
+        max_workspace_size = ((out_features // min_thread_n) * max_parallel)
+
+        self.scratch = torch.zeros(max_workspace_size,
+                                   dtype=torch.int,
+                                   device="cuda")
+
+
 def bench_run(results: List[benchmark.Measurement], model: str,
               act_order: bool, is_k_full: bool, num_bits: int, group_size: int,
               size_m: int, size_k: int, size_n: int):
