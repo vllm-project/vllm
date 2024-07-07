@@ -177,7 +177,7 @@ main() {
           --dataset-path $dataset_path \
           --sonnet-input-len $input_len \
           --sonnet-output-len $output_len \
-          --sonnet-prefix-len $input_len  \
+          --sonnet-prefix-len $((input_len - 1))  \
           --num-prompts $num_prompts \
           --port 8000 \
           --save-result \
