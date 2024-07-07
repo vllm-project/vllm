@@ -168,14 +168,18 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         model_config = self.model_config
 
         if supports_vision(self.model):
-            # TODO: properly inject these numbers from MultiModalRegistry.
-            # Right now, just use an overly conservative number.
-            max_num_seqs = max(
-                1,
-                min(
-                    max_num_seqs,
-                    int(max_num_batched_tokens /
-                        MULTIMODAL_REGISTRY.get_num_input_tokens())))
+            max_mm_tokens = MULTIMODAL_REGISTRY \
+                .get_max_multimodal_tokens(model_config)
+            max_num_seqs_orig = max_num_seqs
+            max_num_seqs = min(max_num_seqs,
+                               max_num_batched_tokens // max_mm_tokens)
+            if max_num_seqs < 1:
+                expr = (f"min({max_num_seqs_orig}, "
+                        f"{max_num_batched_tokens} // {max_mm_tokens})")
+                logger.warning(
+                    "Computed max_num_seqs (%s) to be less than 1. "
+                    "Setting it to the minimum value of 1.", expr)
+                max_num_seqs = 1
 
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
