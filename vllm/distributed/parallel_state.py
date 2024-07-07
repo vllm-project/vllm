@@ -190,11 +190,11 @@ class GroupCoordinator:
             self.ca_comm = None
 
         from vllm.distributed.device_communicators.shm_broadcast import (
-            ShmRingBufferIO)
-        self.shm_broadcaster: Optional[ShmRingBufferIO] = None
+            MessageQueue)
+        self.shm_broadcaster: Optional[MessageQueue] = None
         if self.world_size > 1 and all(
                 in_the_same_node_as(self.cpu_group, source_rank=0), ):
-            self.shm_broadcaster = ShmRingBufferIO.create_from_process_group(
+            self.shm_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
 
     @property

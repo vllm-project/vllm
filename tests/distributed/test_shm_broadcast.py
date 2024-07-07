@@ -6,7 +6,7 @@ from typing import List
 import numpy as np
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.shm_broadcast import ShmRingBufferIO
+from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.utils import update_environment_variables
 
 
@@ -55,7 +55,7 @@ def worker_fn_wrapper(fn):
 @worker_fn_wrapper
 def worker_fn():
     writer_rank = 2
-    broadcaster = ShmRingBufferIO.create_from_process_group(
+    broadcaster = MessageQueue.create_from_process_group(
         dist.group.WORLD, 40 * 1024, 2, writer_rank)
     if dist.get_rank() == writer_rank:
         seed = random.randint(0, 1000)

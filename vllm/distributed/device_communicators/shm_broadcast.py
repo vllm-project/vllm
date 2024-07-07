@@ -150,7 +150,7 @@ class Handle:
     remote_sync_port: Optional[int] = None
 
 
-class ShmRingBufferIO:
+class MessageQueue:
 
     def __init__(
         self,
@@ -234,8 +234,8 @@ class ShmRingBufferIO:
         return self.handle
 
     @staticmethod
-    def create_from_handle(handle: Handle, rank) -> "ShmRingBufferIO":
-        self = ShmRingBufferIO.__new__(ShmRingBufferIO)
+    def create_from_handle(handle: Handle, rank) -> "MessageQueue":
+        self = MessageQueue.__new__(MessageQueue)
         self.handle = handle
         self._is_writer = False
 
@@ -455,7 +455,7 @@ class ShmRingBufferIO:
     def create_from_process_group(pg: ProcessGroup,
                                   max_chunk_bytes,
                                   max_chunks,
-                                  writer_rank=0) -> "ShmRingBufferIO":
+                                  writer_rank=0) -> "MessageQueue":
         group_rank = dist.get_rank(pg)
         group_world_size = dist.get_world_size(pg)
         global_ranks = dist.get_process_group_ranks(pg)
@@ -466,9 +466,9 @@ class ShmRingBufferIO:
         n_reader = group_world_size - 1
         n_local_reader = len(same_node_ranks) - 1
         local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
-        buffer_io: ShmRingBufferIO
+        buffer_io: MessageQueue
         if group_rank == writer_rank:
-            buffer_io = ShmRingBufferIO(
+            buffer_io = MessageQueue(
                 n_reader=n_reader,
                 n_local_reader=n_local_reader,
                 local_reader_ranks=local_reader_ranks,
@@ -485,6 +485,6 @@ class ShmRingBufferIO:
                                        src=global_ranks[writer_rank],
                                        group=pg)
             handle = recv[0]  # type: ignore
-            buffer_io = ShmRingBufferIO.create_from_handle(handle, group_rank)
+            buffer_io = MessageQueue.create_from_handle(handle, group_rank)
         buffer_io.wait_until_ready()
         return buffer_io
