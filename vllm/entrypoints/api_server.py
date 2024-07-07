@@ -16,9 +16,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
+
+logger = init_logger(__name__)
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
@@ -107,6 +110,13 @@ if __name__ == "__main__":
         engine_args, usage_context=UsageContext.API_SERVER)
 
     app.root_path = args.root_path
+
+    logger.info("Available endpoints are:")
+    for route in app.routes:
+        methods = ', '.join(route.methods) if hasattr(
+            route, 'methods') else 'No methods'
+        logger.info("Path: %s, Methods: %s", route.path, methods)
+
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
