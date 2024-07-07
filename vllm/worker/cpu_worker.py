@@ -13,7 +13,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, init_kmp_env
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
@@ -149,6 +149,9 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
+
+        # try to initialize intel openmp optimized tunings
+        init_kmp_env()
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing

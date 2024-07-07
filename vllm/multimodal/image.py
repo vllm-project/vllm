@@ -130,3 +130,6 @@ class ImagePlugin(MultiModalPlugin):
             raise NotImplementedError("Embeddings input is not supported yet")
 
         raise TypeError(f"Invalid image type: {type(data)}")
+
+    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
+        return 3000
