@@ -9,7 +9,8 @@ import torch
 from vllm import SamplingParams
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8Int8, CompressedTensorsW8A8Fp8, CompressedTensorsWNA16)
+    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationType)
 
@@ -123,6 +124,7 @@ def test_compressed_tensors_w4a16_marlin24(vllm_runner):
         output = llm.generate("Hello world!", sampling_params=sampling_params)
         assert output
 
+
 def test_compressed_tensors_fp8(vllm_runner):
     model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
     with vllm_runner(model_path) as llm:
@@ -135,10 +137,11 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
         assert qkv_proj.weight.dtype is torch.float8_e4m3fn
         assert qkv_proj.input_scale.dtype is torch.float32
-        assert qkv_proj.input_scale.shape[0] == 1
-        assert qkv_proj.weight_scale.shape[0] == 1
+        assert qkv_proj.weight_scale.dtype is torch.float32
+        # should be scalars after processing
+        assert len(qkv_proj.input_scale.shape) == 0
+        assert len(qkv_proj.weight_scale.shape) == 0
 
         sampling_params = SamplingParams()
         output = llm.generate("Hello world!", sampling_params=sampling_params)
         assert output
-    
