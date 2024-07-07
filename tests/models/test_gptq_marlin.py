@@ -96,7 +96,6 @@ def run_test(
     )
 
 
-@pytest.mark.flaky(reruns=3)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])

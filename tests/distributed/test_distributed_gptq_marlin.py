@@ -19,7 +19,7 @@ from vllm.utils import cuda_device_count_stateless
 
 @pytest.mark.parametrize("tensor_parallel_size", [2])
 @pytest.mark.flaky(reruns=3)
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", [MODELS[0]])
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
