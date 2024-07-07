@@ -24,7 +24,8 @@ TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 
 def launch_lm_eval(eval_config):
     model_args = f"pretrained={eval_config['model_name']}," \
-                 f"tensor_parallel_size={TP_SIZE}"
+                 f"tensor_parallel_size={TP_SIZE}," \
+                 f"add_bos_token=true"
 
     results = lm_eval.simple_evaluate(
         model="vllm",
