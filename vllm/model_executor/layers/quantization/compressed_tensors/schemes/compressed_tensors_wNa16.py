@@ -37,7 +37,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         else:
             self.group_size = group_size
 
-
         # Verify supported on platform.
         verify_marlin_supported(num_bits=self.num_bits,
                                 group_size=self.group_size,
