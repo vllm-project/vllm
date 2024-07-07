@@ -6,7 +6,6 @@ import numpy
 import random
 import torch
 
-from .marlin_utils import marlin_permute_scales
 from .marlin_utils_test import marlin_weights
 from .quant_utils import quantize_weights
 
