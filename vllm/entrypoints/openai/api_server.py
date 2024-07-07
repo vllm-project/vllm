@@ -243,9 +243,10 @@ if __name__ == "__main__":
 
     logger.info("Available routes are:")
     for route in app.routes:
-        methods = ', '.join(route.methods) if hasattr(
-            route, 'methods') else 'No methods'
-        logger.info("Path: %s, Methods: %s", route.path, methods)
+        if not hasattr(route, 'methods'):
+            continue
+        methods = ', '.join(route.methods)
+        logger.info("Route: %s, Methods: %s", route.path, methods)
 
     uvicorn.run(app,
                 host=args.host,
