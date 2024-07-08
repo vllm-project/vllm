@@ -137,7 +137,7 @@ benchmark() {
           --request-rate $qps
   kill_gpu_processes
 
-  python3 analyze_results.py \
+  python3 analyze_benchmark_results.py \
           --results-folder $results_folder \
           --output-len $output_len \
           --qps $qps
