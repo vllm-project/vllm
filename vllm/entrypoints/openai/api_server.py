@@ -240,6 +240,14 @@ if __name__ == "__main__":
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     app.root_path = args.root_path
+
+    logger.info("Available routes are:")
+    for route in app.routes:
+        if not hasattr(route, 'methods'):
+            continue
+        methods = ', '.join(route.methods)
+        logger.info("Route: %s, Methods: %s", route.path, methods)
+
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
