@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Type
 
 import pytest
 
@@ -6,12 +6,12 @@ from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_outputs_equal
+from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "What color is the stop sign?\n",  # noqa: E501
+    "stop_sign": "What's the content of the image?\n",  # noqa: E501
     "cherry_blossom": "What is the season?\n",
     "boardwalk": "What's in this image?\n",
 })
@@ -19,16 +19,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 models = ["adept/fuyu-8b"]
 
 
-def hf_to_vllm_output(hf_output: Tuple[List[int], str]):
-    """remove image placeholder from prompts"""
-    hf_output_ids, hf_output_str = hf_output
-    hf_output_str = hf_output_str.split("<s> ")[1]
-    return hf_output_ids, hf_output_str
-
-
-# FIXME: Fuyu in transformers miss get_output_embeddings method,
-# which break the generate_greedy_logprobs for hf_runner.
-# Use check_outputs_equal to pass the test temporarily until the issue is fixed.
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
@@ -65,29 +55,37 @@ def run_test(
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
-                     max_model_len=2560,
+                     max_model_len=4096,
                      max_num_seqs=1,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
         vllm_outputs_per_image = [
-            vllm_model.generate_greedy(prompts, max_tokens, images=vllm_images)
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=vllm_images)
             for prompts, vllm_images in inputs_per_image
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model:
+        hf_model.model.get_output_embeddings = lambda: \
+            hf_model.model.language_model.get_output_embeddings()
+        eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_image = [
-            hf_model.generate_greedy(prompts, max_tokens, images=hf_images)
+            hf_model.generate_greedy_logprobs_limit(prompts,
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    images=hf_images,
+                                                    eos_token_id=eos_token_id)
             for prompts, hf_images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-        check_outputs_equal(
-            outputs_0_lst=[
-                hf_to_vllm_output(hf_output) for hf_output in hf_outputs
-            ],
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
             name_0="hf",
             name_1="vllm",
@@ -106,11 +104,11 @@ if is_cpu():
         # No image
         [],
         # Single-scale
-        [0.25],
+        [0.5],
         # Single-scale, batched
-        [0.25, 0.25, 0.25],
+        [0.5, 0.5, 0.5],
         # Multi-scale
-        [0.25, 0.20, 0.15],
+        [0.5, 0.4, 0.3],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
