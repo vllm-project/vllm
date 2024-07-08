@@ -27,6 +27,7 @@ from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
+
 class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide):
