@@ -170,7 +170,7 @@ class LLMEngine:
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "rope_scaling=%r, rope_theta=%r, hf_kwargs=%r, tokenizer_revision=%s, "
+            "rope_scaling=%r, rope_theta=%r, hf_kwargs=%r "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "pipeline_parallel_size=%d, "
@@ -179,7 +179,7 @@ class LLMEngine:
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
-            "enable_prefix_caching=%s)",
+            "enable_prefix_caching=%s, tokenizer_revision=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,

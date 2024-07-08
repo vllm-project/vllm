@@ -131,4 +131,4 @@ def test_hf_kwargs():
                          dtype="float16",
                          seed=0,
                          hf_kwargs=HF_KWARGS)
-    assert config.hf_config.output_attentions == True
+    assert config.hf_config.output_attentions is True
