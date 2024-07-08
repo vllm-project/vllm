@@ -239,6 +239,8 @@ class Sequence:
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
         lora_request: LoRA request.
+        prompt_adapter_request: Prompt Adapter request.
+
     """
 
     def __init__(
@@ -422,6 +424,7 @@ class SequenceGroup:
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
+        prompt_adapter_request: Prompt Adapter request.
     """
 
     def __init__(
@@ -644,6 +647,7 @@ class SequenceGroupMetadata:
                            (SequenceGroup.encoder_seq). Should be None
                            unless you are working with an encoder/decoder
                            model.
+        prompt_adapter_request: Prompt Adapter request.
     """
 
     def __init__(

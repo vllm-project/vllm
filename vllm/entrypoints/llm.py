@@ -273,6 +273,8 @@ class LLM:
                 prompts and it is paired one by one with the prompt.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
+            prompt_adapter_request: Prompt Adapter request to use for 
+                generation, if any.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -415,6 +417,8 @@ class LLM:
                 use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
+            prompt_adapter_request: Prompt Adapter request to use for 
+                generation, if any.
 
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the

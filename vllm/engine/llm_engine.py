@@ -95,6 +95,8 @@ class LLMEngine:
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
+        prompt_adapter_config (Optional): The configuration related to serving 
+            prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
     """
