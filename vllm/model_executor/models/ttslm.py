@@ -8,10 +8,12 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
+from vllm.model_executor.layers.prarllel_logits_processor import ParallelLogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
@@ -43,6 +45,8 @@ class ChatTtsLlm(nn.Module):
         self.head_code = nn.ModuleList([
             weight_norm(nn.Linear(self.model_dim, self.num_audio_tokens, bias=False), name='weight') for _ in range(self.num_vq)
         ])
+        self.logits_processor = ParallelLogitsProcessor(self.num_audio_tokens, self.num_vq)
+        self.sampler = Sampler()
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -76,7 +80,37 @@ class ChatTtsLlm(nn.Module):
                     pass
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        code_emb = [
+            self.emb_all[i](input_ids)
+            for i in range(self.num_vq)
+        ]
+        emb = torch.stack(code_emb, 1).sum(1)
+        return emb
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        # # compute logits for each vq
+        # # hidden: [token_count, model_dim]
+        # # logits: [token_count, num_audio_tokens, num_vq]
+        # logits = torch.zeros(hidden_states.size(0), self.num_audio_tokens, self.num_vq, dtype=hidden_states.dtype)
+        # for num_vq_iter in range(self.num_vq):
+        #     x = self.head_code[num_vq_iter](hidden_states)
+        #     logits[:, :, num_vq_iter] = x
+        
+        # # logits: [num_audio_tokens, num_vq]
+        # logits = logits.narrow(0, -1, 1).squeeze_(0)
+        # logits = logits.permute(1, 0)
+        # return logits
+        logits = self.logits_processor(self.head_code, hidden_states, sampling_metadata)
+        return logits
+    
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
 
     def forward(
         self,
@@ -87,13 +121,14 @@ class ChatTtsLlm(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.get_input_embeddings(input_ids)
         model_output = self.gpt(
             input_ids=input_ids,
+            inputs_embeds=hidden_states,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors
         )
         return model_output
 
