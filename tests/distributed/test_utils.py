@@ -52,8 +52,7 @@ def test_deferred_tensor():
 
     with safe_open("model.safetensors", framework="pt") as f:  # type: ignore
         for k in f.keys():  # noqa: SIM118
-            tensor_slice = f.get_slice(k)
-            dt = DeferredTensor(tensor_slice)
+            dt = DeferredTensor(f, k)
             real_tensor = dt.materialize()
             real_tensor.copy_(dt)  # test we can use `copy_`
             stacked = torch.stack([real_tensor, real_tensor])

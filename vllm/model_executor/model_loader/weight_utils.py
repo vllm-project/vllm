@@ -358,13 +358,12 @@ def safetensors_weights_iterator(
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
-                param = f.get_slice(name)
                 # we actually return the DeferredTensor here
                 # but use `torch.Tensor` as the type hint to avoid
                 # changing too many user-side code
                 # users can use this value just like a torch.Tensor,
                 # except that slicing and `narrow` are optimized for I/O
-                yield name, DeferredTensor(param)  # type: ignore
+                yield name, DeferredTensor(f, name)  # type: ignore
 
 
 def pt_weights_iterator(

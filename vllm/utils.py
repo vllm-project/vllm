@@ -939,8 +939,10 @@ class DeferredTensor:
     tensor, but don't need in-place update of the tensor.
     """ # noqa
 
-    def __init__(self, slice_view):
-        self._slice_view = slice_view
+    def __init__(self, f, name):
+        self._f = f
+        self._name = name
+        self._slice_view = f.get_slice(name)
 
         # code from https://github.com/huggingface/safetensors/blob/079781fd0dc455ba0fe851e2b4507c33d0c0d407/bindings/python/src/lib.rs#L40 # noqa
         type_mapping = {
@@ -960,8 +962,8 @@ class DeferredTensor:
             "F8_E4M3": torch.float8_e4m3fn,
             "F8_E5M2": torch.float8_e5m2
         }
-        dtype = type_mapping[slice_view.get_dtype()]
-        shape = tuple(slice_view.get_shape())
+        dtype = type_mapping[self._slice_view.get_dtype()]
+        shape = tuple(self._slice_view.get_shape())
         if shape:
             self._meta_tensor = torch.zeros(*shape, dtype=dtype, device="meta")
         else:
@@ -984,7 +986,7 @@ class DeferredTensor:
         return self._slice_view[key]
 
     def materialize(self) -> torch.Tensor:
-        return self._slice_view[tuple()]
+        return self._f.get_tensor(self._name)
 
     def narrow(input, dim, start, length) -> torch.Tensor:
         # `input` is a `DeferredTensor` object
