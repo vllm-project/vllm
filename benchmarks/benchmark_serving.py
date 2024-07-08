@@ -483,10 +483,10 @@ def main(args: argparse.Namespace):
 
     elif args.dataset_name == "random":
         input_requests = sample_random_requests(
-            input_len=args.input_len,
-            output_len=args.output_len,
+            input_len=args.random_input_len,
+            output_len=args.random_output_len,
             num_prompts=args.num_prompts,
-            range_ratio=args.range_ratio,
+            range_ratio=args.random_range_ratio,
             tokenizer=tokenizer,
         )
 
