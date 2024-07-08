@@ -87,6 +87,7 @@ class MultiModalDataBuiltins(TypedDict, total=False):
     """Modality types that are predefined by vLLM."""
 
     image: Image.Image
+    """The input image."""
 
 
 MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]

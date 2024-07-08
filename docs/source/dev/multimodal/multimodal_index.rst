@@ -40,9 +40,13 @@ Registry
 Base Classes
 ------------
 
-.. autoclass:: vllm.multimodal.MultiModalDataDict
+.. autodata:: vllm.multimodal.BatchedTensors
+
+.. autoclass:: vllm.multimodal.MultiModalDataBuiltins
     :members:
     :show-inheritance:
+
+.. autodata:: vllm.multimodal.MultiModalDataDict
 
 .. autoclass:: vllm.multimodal.MultiModalInputs
     :members:
