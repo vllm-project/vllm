@@ -301,7 +301,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         else:
                             chunk.usage = None
 
-                    response_json = chunk.model_dump_json(exclude_unset=True)
+                    response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
 
             if (request.stream_options
@@ -314,7 +314,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     usage=usage,
                 )
                 final_usage_data = (final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True))
+                    exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
         except ValueError as e:
