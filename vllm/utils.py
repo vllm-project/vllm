@@ -1129,10 +1129,3 @@ class DeferredTensor:
 
     def __invert__(self):
         return ~self.materialize()
-
-
-def ensure_tensor(x: Union[DeferredTensor, torch.Tensor]) -> torch.Tensor:
-    if isinstance(x, DeferredTensor):
-        x = x.materialize()
-    assert isinstance(x, torch.Tensor)
-    return x
