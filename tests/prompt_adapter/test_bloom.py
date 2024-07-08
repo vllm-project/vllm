@@ -1,3 +1,5 @@
+import pytest
+
 import vllm
 from vllm.prompt_adapter.request import PromptAdapterRequest
 
