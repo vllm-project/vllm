@@ -567,6 +567,24 @@ void cutlass_scaled_mm_sm75(torch::Tensor& out, torch::Tensor const& a,
   }
 }
 
+void cutlass_scaled_mm_azp_sm75(torch::Tensor& out, torch::Tensor const& a,
+                                torch::Tensor const& b,
+                                torch::Tensor const& a_scales,
+                                torch::Tensor const& b_scales,
+                                torch::Tensor const& bias,
+                                torch::Tensor const& azp,
+                                torch::Tensor const& azp_adj) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(bias.dtype() == out.dtype(),
+              "currently bias dtype must match output dtype ", out.dtype());
+  TORCH_CHECK(azp.dtype() == torch::kFloat32);
+  TORCH_CHECK(azp_adj.dtype() == torch::kFloat32);
+
+  return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzp>(
+      out, a, b, a_scales, b_scales, bias, azp, azp_adj);
+}
+
 template <template <typename, typename> typename Epilogue,
           typename... EpilogueArgs>
 void cutlass_scaled_mm_sm80_epilogue(torch::Tensor& out, torch::Tensor const& a,
@@ -682,4 +700,22 @@ void cutlass_scaled_mm_sm89(torch::Tensor& out, torch::Tensor const& a,
     return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogue>(out, a, b, a_scales,
                                                            b_scales);
   }
+}
+
+void cutlass_scaled_mm_azp_sm89(torch::Tensor& out, torch::Tensor const& a,
+                                torch::Tensor const& b,
+                                torch::Tensor const& a_scales,
+                                torch::Tensor const& b_scales,
+                                torch::Tensor const& bias,
+                                torch::Tensor const& azp,
+                                torch::Tensor const& azp_adj) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(bias.dtype() == out.dtype(),
+              "currently bias dtype must match output dtype ", out.dtype());
+  TORCH_CHECK(azp.dtype() == torch::kFloat32);
+  TORCH_CHECK(azp_adj.dtype() == torch::kFloat32);
+
+  return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzp>(
+      out, a, b, a_scales, b_scales, bias, azp, azp_adj);
 }
