@@ -283,10 +283,11 @@ def _get_attn_bias(
         return attn_metadata.cross_attn_bias
 
 
-def _set_attn_bias(attn_metadata: XFormersMetadata,
-                   attn_bias: List[Optional[AttentionBias]],
-                   attn_type: AttentionType,
-                   ) -> None:
+def _set_attn_bias(
+    attn_metadata: XFormersMetadata,
+    attn_bias: List[Optional[AttentionBias]],
+    attn_type: AttentionType,
+) -> None:
     '''
     Update appropriate attention bias field of attention metadata,
     according to attention type.
@@ -626,13 +627,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         return output.view(-1, self.num_heads * self.head_size)
 
     def _run_memory_efficient_xformers_forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            attn_metadata: XFormersMetadata,
-            attn_type: AttentionType = AttentionType.DECODER,
-            ) -> torch.Tensor:
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: XFormersMetadata,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
         tokens are flattened in to `query` input.
 
