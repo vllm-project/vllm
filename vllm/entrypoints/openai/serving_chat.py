@@ -373,8 +373,10 @@ class OpenAIServingChat(OpenAIServing):
             return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
-            self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str,
+            self,
+            request: ChatCompletionRequest,
+            result_generator: AsyncIterator[RequestOutput],
+            request_id: str,
             conversation: List[ConversationMessage]
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
@@ -386,6 +388,7 @@ class OpenAIServingChat(OpenAIServing):
         assert request.n is not None
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
+        previous_token_ids = [[]] * request.n
         finish_reason_sent = [False] * request.n
         try:
             async for res in result_generator:
@@ -447,7 +450,9 @@ class OpenAIServingChat(OpenAIServing):
                     first_iteration = False
 
                 for output in res.outputs:
+
                     i = output.index
+                    print(f'[{i}]:', output)
 
                     if finish_reason_sent[i]:
                         continue
@@ -467,20 +472,37 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         logprobs = None
 
-                    delta_text = output.text[len(previous_texts[i]):]
-                    previous_texts[i] = output.text
-                    previous_num_tokens[i] = len(output.token_ids)
 
+                    delta_text = output.text[len(previous_texts[i]):]
+
+                    # handle streaming deltas for tools with tool_choice
                     if request.tool_choice and type(
                             request.tool_choice
                     ) is ChatCompletionNamedToolChoiceParam:
+                        print('handling streaming for tools with tool choice!')
                         delta_message = DeltaMessage(tool_calls=[
                             ToolCall(function=FunctionCall(
                                 name=request.tool_choice.function.name,
                                 arguments=delta_text))
                         ])
-                    else:
+
+                    # handle streaming deltas for tools with tool_choice
+                    elif request.tools and (request.tool_choice is None or request.tool_choice == 'auto'):
+                        print('handling streaming for tools with no tool choice!')
                         delta_message = DeltaMessage(content=delta_text)
+                    else:
+                        print('handling streaming for normal message')
+                        delta_message = DeltaMessage(content=delta_text)
+
+                    # handle setting the previous values for the next iteration
+                    previous_texts[i] = output.text
+                    previous_num_tokens[i] = len(output.token_ids)
+                    previous_token_ids[i] = output.token_ids
+                    print('previous texts:', previous_texts)
+                    print('delta_text:', delta_text)
+                    print('previous_num_tokens:', previous_num_tokens)
+                    print('previous token IDs', previous_token_ids)
+                    print('delta token IDs: ', delta_token_ids)
 
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
@@ -523,6 +545,7 @@ class OpenAIServingChat(OpenAIServing):
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
 
+            # once the final token is handled, if stream_options.include_usage is sent, send the usage
             if (request.stream_options
                     and request.stream_options.include_usage):
                 final_usage = UsageInfo(

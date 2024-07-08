@@ -6,7 +6,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 import json
 from pydantic import BaseModel
 import re
-
+from vllm.entrypoints.openai.protocol import DeltaMessage
 logger = init_logger(__name__)
 
 
@@ -18,7 +18,14 @@ class ToolParser:
     def extract_tool_calls(self, model_output: str) -> ExtractedToolCallInformation:
         raise NotImplementedError('AbstractToolParser.extract_tool_calls has not been implemented!')
 
-    def extract_tool_calls_streaming(self, generator):
+    def extract_tool_calls_streaming(self,
+                                     previous_text: str,
+                                     current_text: str,
+                                     delta_text: str,
+                                     previous_token_ids: List[int],
+                                     current_token_ids: List[int],
+                                     delta_token_ids: List[int],
+                                     ) -> DeltaMessage:
         raise NotImplementedError('AbstractToolParser.extract_tool_calls_streaming has not been implemented!')
 
 
@@ -130,5 +137,12 @@ class Hermes2ProToolParser(ToolParser):
                     content=model_output
                 )
 
-    def extract_tool_calls_streaming(self, generator):
+    def extract_tool_calls_streaming(self,
+                                     previous_text: str,
+                                     current_text: str,
+                                     delta_text: str,
+                                     previous_token_ids: List[int],
+                                     current_token_ids: List[int],
+                                     delta_token_ids: List[int]
+                                     ) -> DeltaMessage:
         raise NotImplementedError('Hermes2ProToolParser.extract_tool_calls_streaming has not been implemented!')
