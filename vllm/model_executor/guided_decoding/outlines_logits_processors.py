@@ -25,7 +25,7 @@ from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
-
+from outlines.caching import cache
 
 class BaseLogitsProcessor:
 
@@ -67,7 +67,7 @@ class BaseLogitsProcessor:
 class RegexLogitsProcessor(BaseLogitsProcessor):
 
     @classmethod
-    @lru_cache(maxsize=32)
+    @cache
     def _get_guide(cls, regex_string: str,
                    tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
