@@ -1,5 +1,5 @@
 import weakref
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -50,7 +50,7 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         sample_len: int,
         # Unused parameter. NGramWorker does not use the KV Cache and
         # therefore does not need this parameter.
-        seq_ids_with_bonus_token_in_last_step: set=set(),
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[Optional[List[Optional[SamplerOutput]]], bool]:
         """NGram match algo to pick proposal candidate. Returns the list of
         sampler output, one per SequenceGroupMetadata.
@@ -138,7 +138,7 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         execute_model_req: ExecuteModelRequest,
         # Unused parameter. NGramWorker does not use the KV Cache and
         # therefore does not need this parameter.
-        seq_ids_with_bonus_token_in_last_step: set = set(),
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.

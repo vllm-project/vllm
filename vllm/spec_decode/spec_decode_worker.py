@@ -1,5 +1,6 @@
+from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -13,7 +14,7 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SamplerOutput, SequenceGroupMetadata,
-                           get_all_seq_ids)
+                           get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -110,7 +111,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
-            draft_worker_kwargs.pop("ngram_prompt_lookup_min"))        
+            draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
         disable_bonus_tokens = False
         if ngram_prompt_lookup_max > 0:
             proposer_worker = NGramWorker(**draft_worker_kwargs)
@@ -127,7 +128,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             if draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "mlp_speculator":
-                disable_bonus_tokens = False
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
@@ -203,10 +203,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Tracks the sequence IDs that received a bonus token ID in
         # their last forward pass. Needed only if KV cache is being
         # used for token generation such as in the case of MultiStepWorker.
-        if (isinstance(self.proposer_worker, MultiStepWorker)):
-           self.seq_with_bonus_token_in_last_step = set()
-        else:
-            self.seq_with_bonus_token_in_last_step = None
+        self.seq_with_bonus_token_in_last_step: Set[int] = set()
+        # Tracks the currently active request ids and the sequence IDs
+        # corresponding to them
+        self.request_id_seq_id_mapping: Dict[str, Set[int]] = defaultdict(set)
+        # Tracks if the proposer worker uses the KV cache or not.
+        self.proposer_uses_kv_cache = True
+        if (isinstance(self.proposer_worker,
+                       (MLPSpeculatorWorker, NGramWorker))):
+            self.proposer_uses_kv_cache = False
+
         self.probs_dtype = self.spec_decode_sampler.probs_dtype
         self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
         # Lazy initiazliation.
@@ -313,6 +319,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # execution loop.
             broadcast_tensor_dict({}, src=0)
             return []
+
+        if self.proposer_uses_kv_cache:
+            for finished_request in execute_model_req.finished_requests_ids:
+                for seq_id in self.request_id_seq_id_mapping[finished_request]:
+                    self.seq_with_bonus_token_in_last_step.discard(seq_id)
+                del self.request_id_seq_id_mapping[finished_request]
 
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
@@ -458,7 +470,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Pass last hidden states from target model to proposer
         execute_model_req.previous_hidden_states = self.previous_hidden_states
         self.previous_hidden_states = None
-    
+
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(
             execute_model_req, self.seq_with_bonus_token_in_last_step)
@@ -590,11 +602,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
              k=self.scorer_worker.model_config.max_logprobs,
              dim=-1,
          )
-        
+
         # Get the sequence ids and num_logprobs (sampling parameter) in the
         # batch.
-        seq_ids = get_all_seq_ids(seq_group_metadata_list)
-        #seq_ids_with_request_ids = get_all_seq_ids_with_request_ids(seq_group_metadata_list)
+        seq_ids, request_ids_seq_ids_mapping = get_all_seq_ids_and_request_ids(
+            seq_group_metadata_list)
+
         num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
 
         # Serialize all tensors to CPU Python lists.
@@ -635,16 +648,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     ))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
-        if self.seq_with_bonus_token_in_last_step is not None:
-            # TODO (sroy) - Remove sequence ids from
-            # seq_with_bonus_token_in_last_step when a sequence terminates.
+        if self.proposer_uses_kv_cache:
+            # The proposer worker uses KV cache. Hence populate the data
+            # structures needed to keep track of bonus tokens.
             for seq_index, seq_id in enumerate(seq_ids):
                 last_token_id = accepted_token_ids_by_step[-1][seq_index]
                 if last_token_id == -1:
                     self.seq_with_bonus_token_in_last_step.discard(seq_id)
                 else:
                     self.seq_with_bonus_token_in_last_step.add(seq_id)
-        
+            for request_id, seq_ids in request_ids_seq_ids_mapping.items():
+                self.request_id_seq_id_mapping[request_id].update(seq_ids)
+
         maybe_rejsample_metrics = (
             self._metrics.maybe_collect_rejsample_metrics(k))
         if maybe_rejsample_metrics is not None:

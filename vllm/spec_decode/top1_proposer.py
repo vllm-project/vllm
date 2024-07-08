@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -42,7 +42,7 @@ class Top1Proposer(SpeculativeProposer):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
-        seq_ids_with_bonus_token_in_last_step: set,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Get speculative proposals given the input batch.
 

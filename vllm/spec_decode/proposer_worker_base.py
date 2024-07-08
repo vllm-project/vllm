@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposer
@@ -20,7 +20,7 @@ class ProposerWorkerBase(LoraNotSupportedWorkerBase, SpeculativeProposer):
         # This parameter is only used by the MultiStepWorker, which relies on
         # the KV cache for token generation. It is not used by workers that
         # do not utilize the KV cache.
-        seq_ids_with_bonus_token_in_last_step: set,
+        seq_ids_with_bonus_token_in_last_step: Set[int]
     ) -> Tuple[Optional[List[SamplerOutput]], bool]:
         raise NotImplementedError
 

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Set
 
 import torch
 
@@ -63,8 +63,8 @@ class SpeculativeProposer(ABC):
         self,
         execute_model_req: ExecuteModelRequest,
         # If set, this contains all sequence IDs that were assigned
-        # bonus tokens in their last forward pass.        
-        seq_ids_with_bonus_token_in_last_step: set,
+        # bonus tokens in their last forward pass.
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         raise NotImplementedError
 

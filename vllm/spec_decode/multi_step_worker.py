@@ -1,6 +1,6 @@
 import copy
 import weakref
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import torch
 
@@ -51,7 +51,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-        seq_ids_with_bonus_token_in_last_step: set,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
@@ -61,14 +61,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         For multi step worker, this indicator shall be True.
         """
         self._raise_if_unsupported(execute_model_req)
-
-        # Assert enough KV space for sample_len tokens per sequence.
-        self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list,
-                                     sample_len)
-        # Run model sample_len times.
-        model_outputs = []
-        # Step 0: Expand the batch for sequences with a bonus token.
-        # Perform a forward pass on the expanded batch and filter the 
+        # Expand the batch for sequences with a bonus token.
+        # Perform a forward pass on the expanded batch and filter the
         # response to retain only the original sequences' responses.
         expanded_request, indices_of_seq_with_bonus_tokens =\
             self._expand_execute_model_request(
@@ -76,7 +70,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
         if isinstance(self.model_runner, TP1DraftModelRunner):
-            execute_model_req.num_steps = sample_len
+            expanded_request.num_steps = sample_len
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)
         else:
@@ -89,8 +83,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 model_output = model_output[0]
 
                 self._append_new_tokens(
-                    model_output,
-                    expanded_request.seq_group_metadata_list)
+                    model_output, expanded_request.seq_group_metadata_list)
                 model_outputs.append(model_output)
 
         filtered_model_outputs = self._filter_model_output(
@@ -103,75 +96,71 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         seq_with_bonus_token_in_last_step: set,
     ) -> Tuple[ExecuteModelRequest, List[int]]:
         """
-        Expands the execute model request based on sequences with bonus tokens.
+        Expands the execute model request based on sequences with bonus
+        tokens.
 
-        For each sequence with a bonus token, this method creates a new sequence
-        without the bonus token and adds it to the execute model request. The original
-        sequence groups are also retained. The indices of the original sequence groups
-        are returned for further processing.
+        For each sequence with a bonus token, this method creates a new
+        sequence without the bonus token and adds it to the execute model
+        request. The original sequence groups are also retained. The indices
+        of the original sequence groups are returned for further processing.
 
         Args:
-            execute_model_req (ExecuteModelRequest): The original execute model request.
-            seq_with_bonus_token_in_last_step (set): Set of sequence IDs that contain bonus tokens.
+            execute_model_req (ExecuteModelRequest): The original execute
+            model request.
+            seq_with_bonus_token_in_last_step (set): Set of sequence IDs that 
+            contain bonus tokens.
 
         Returns:
-            Tuple[ExecuteModelRequest, List[int]]: The updated execute model request with expanded 
-            sequences and a list of indices corresponding to the original sequence groups.
+            Tuple[ExecuteModelRequest, List[int]]: The updated execute model
+            request with expanded sequences and a list of indices corresponding
+            to the original sequence groups.
         """
-        updated_seq_group_metadata_list = []
-        updated_execute_model_req = execute_model_req.clone(updated_seq_group_metadata_list)
+        updated_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        updated_execute_model_req = execute_model_req.clone(
+            updated_seq_group_metadata_list)
         indices_of_original_sequence_groups = []
         for seq_group in execute_model_req.seq_group_metadata_list:
-            seq_ids_with_bonus_tokens = []
-            for seq_id, seq_data in seq_group.seq_data.items():
+            seq_group_has_bonus_tokens = False
+            for seq_id, _ in seq_group.seq_data.items():
                 # Identify sequences with bonus tokens in the sequence group.
                 if seq_id in seq_with_bonus_token_in_last_step:
-                    seq_ids_with_bonus_tokens.append(seq_id)
-            if seq_ids_with_bonus_tokens:
+                    seq_group_has_bonus_tokens = True
+                    break
+            if seq_group_has_bonus_tokens:
                 #Create new sequences without the last bonus token. These new
-                # sequence have the same sequence id as the original sequence. 
+                # sequence have the same sequence id as the original sequence.
                 # We create a new sequence group and add them there.
-                updated_seq_group_without_bonus_token = copy.copy(seq_group)
-                seq_group_without_bonus_token_data = {
-                    seq_id: SequenceData(
-                        prompt_token_ids=seq_group.seq_data[seq_id].prompt_token_ids,
-                        output_token_ids=seq_group.seq_data[seq_id].output_token_ids[:-1]
-                    )
-                    for seq_id in seq_ids_with_bonus_tokens
-                }
-                # Update the number of computed tokens for the new sequences.
-                for seq_data in seq_group_without_bonus_token_data.values():
-                    seq_data.update_num_computed_tokens(len(seq_data.output_token_ids) - 1)
-                # Add the new sequence groups (without bonus tokens) first. We add these
-                # first because these are the ones without the bonus tokens and hence
-                # should be processed before the ones with the bonus tokens.
-                updated_seq_group_without_bonus_token.seq_data = seq_group_without_bonus_token_data
-                updated_seq_group_metadata_list.append(updated_seq_group_without_bonus_token)
+                updated_seq_group_without_bonus_token  = \
+                    MultiStepWorker._copy_seq_metadata_excluding_last_token(
+                        seq_group, seq_with_bonus_token_in_last_step)
+                updated_seq_group_metadata_list.append(
+                    updated_seq_group_without_bonus_token)
             # Add the original sequence group.
             updated_seq_group_metadata_list.append(
-                MultiStepWorker._shallow_copy_input(seq_group))
+                MultiStepWorker._shallow_copy_seq_group_metadata(seq_group))
             # Record the index of the original sequence group.
-            indices_of_original_sequence_groups.append(len(updated_seq_group_metadata_list) - 1)
+            indices_of_original_sequence_groups.append(
+                len(updated_seq_group_metadata_list) - 1)
 
-        updated_execute_model_req.seq_group_metadata_list = updated_seq_group_metadata_list
+        updated_execute_model_req.seq_group_metadata_list =\
+            updated_seq_group_metadata_list
         return updated_execute_model_req, indices_of_original_sequence_groups
 
     @staticmethod
     def _filter_model_output(
-        expanded_batch_outputs: List[SamplerOutput],
-        output_indices_to_retain: List[int]
-    ) -> List[SamplerOutput]:
+            expanded_batch_outputs: List[SamplerOutput],
+            output_indices_to_retain: List[int]) -> List[SamplerOutput]:
         """
-        Filters the model output to include only the specified sequence outputs.
-
-        This method contracts the expanded batch output from the model to retain 
-        the outputs of only those sequences indicated by the provided indices.
+        Filters the model output to include only the specified sequence
+        outputs. This method contracts the expanded batch output from the
+        model to retain the outputs of only those sequences indicated by the
+        provided indices.
 
         Args:
-            expanded_batch_output (List[SamplerOutput]): The expanded output batch 
-                from the model.
-            output_indices_to_retain (List[int]): Indices of the model outputs to
-                retain.
+            expanded_batch_output (List[SamplerOutput]): The expanded output
+                batch from the model.
+            output_indices_to_retain (List[int]): Indices of the model outputs
+                to retain.
 
         Returns:
             List[SamplerOutput]: A list containing the filtered model 
@@ -179,21 +168,23 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """
         return [
             SamplerOutput(
-                outputs=[expanded_batch_output.outputs[i] for i in output_indices_to_retain],
+                outputs=[
+                    expanded_batch_output.outputs[i]
+                    for i in output_indices_to_retain
+                ],
                 sampled_token_probs=(
-                    expanded_batch_output.sampled_token_probs[output_indices_to_retain]
-                    if expanded_batch_output.sampled_token_probs is not None else None
-                ),
+                    expanded_batch_output.
+                    sampled_token_probs[output_indices_to_retain]
+                    if expanded_batch_output.sampled_token_probs is not None
+                    else None),
                 logprobs=(
                     expanded_batch_output.logprobs[output_indices_to_retain]
-                    if expanded_batch_output.logprobs is not None else None
-                ),
-                sampled_token_ids=(
-                    expanded_batch_output.sampled_token_ids[output_indices_to_retain]
-                    if expanded_batch_output.sampled_token_ids is not None else None
-                )
-            )
-            for  expanded_batch_output  in expanded_batch_outputs 
+                    if expanded_batch_output.logprobs is not None else None),
+                sampled_token_ids=(expanded_batch_output.
+                                   sampled_token_ids[output_indices_to_retain]
+                                   if expanded_batch_output.sampled_token_ids
+                                   is not None else None))
+            for expanded_batch_output in expanded_batch_outputs
         ]
 
     def get_spec_proposals(
@@ -206,7 +197,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """
         return self._proposer.get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
-
 
     @staticmethod
     def _append_new_tokens(
@@ -232,8 +222,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 seq.update_num_computed_tokens(1)
 
     @staticmethod
-    def _shallow_copy_input(seq_group_metadata: SequenceGroupMetadata
-    ) -> SequenceGroupMetadata:
+    def _shallow_copy_seq_group_metadata(
+        seq_group_metadata: SequenceGroupMetadata, ) -> SequenceGroupMetadata:
         """Copy input data structures to remove side-effects when input data
         structures are shared with other modules.
 
@@ -241,8 +231,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         The alternative is deep-copying (or other form of deep copy); this has
         performance downsides.
         """
-
-        # Shallow-copy the list of SequenceGroupMetadata. This allows us to
+        # Shallow-copy the SequenceGroupMetadata. This allows us to
         # append tokens and change is_prompt without external side-effects.
         # We must shallow-copy seq_group_metadata as is_prompt could change.
         new_seq_group_metadata = copy.copy(seq_group_metadata)
@@ -251,33 +240,48 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         new_seq_data: Dict[int, SequenceData] = {}
         for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
             new_seq_data[seq_id] = copy.copy(old_seq_data)
-            new_seq_data[
-                seq_id].output_token_ids = old_seq_data.output_token_ids[:]
+            new_seq_data[seq_id].output_token_ids =\
+                old_seq_data.output_token_ids[:]
 
         new_seq_group_metadata.seq_data = new_seq_data
-
         return new_seq_group_metadata
 
     @staticmethod
-    def _shallow_copy_sequence_group_metadata(
-        seq_group_metadata: SequenceGroupMetadata) -> SequenceGroupMetadata:
-        return SequenceGroupMetadata(
-            seq_group_metadata.request_id,
-            seq_group_metadata.is_prompt,
-            seq_group_metadata.seq_data,
-            seq_group_metadata.sampling_params,
-            seq_group_metadata.block_tables,
-            seq_group_metadata.do_sample,
-            seq_group_metadata.pooling_params,
-            seq_group_metadata.token_chunk_size,
-            seq_group_metadata.lora_request,
-            seq_group_metadata.computed_block_nums,
-            seq_group_metadata.state,
-            seq_group_metadata.multi_modal_data,
-            seq_group_metadata.encoder_seq_data,
-            seq_group_metadata.cross_block_table,            
-        )
-
+    def _copy_seq_metadata_excluding_last_token(
+        seq_group_metadata: SequenceGroupMetadata,
+        seq_ids_to_copy: Set[int],
+    ) -> SequenceGroupMetadata:
+        """
+        Creates a shallow copy of the given SequenceGroupMetadata, retaining
+        only the sequence IDs specified in seq_ids_to_copy. For each of these
+        sequence IDs, all output_token_ids except the last one are copied.
+        Sequence IDs not in seq_ids_to_copy are excluded from the copy.
+        
+        Parameters:
+        seq_group_metadata (SequenceGroupMetadata): The original sequence
+            group metadata.
+        seq_ids_to_copy (Set[int]): The set of sequence IDs to include in the
+            copy.
+        
+        Returns:
+        SequenceGroupMetadata: A shallow copy of the sequence group metadata
+            with the specified modifications.
+        """
+        # Shallow-copy the SequenceGroupMetadata.
+        new_seq_group_metadata = copy.copy(seq_group_metadata)
+        # Shallow-copy seq_data and modify the output_token_ids.
+        new_seq_data: Dict[int, SequenceData] = {}
+        for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
+            if (seq_id in seq_ids_to_copy):
+                new_seq_data[seq_id] = copy.copy(old_seq_data)
+                # Copy all the output token ids except the last.
+                # Also reduce num_computed_tokens by 1 since we are not
+                # including the last output token.
+                new_seq_data[seq_id].output_token_ids =\
+                    old_seq_data.output_token_ids[:-1]
+                new_seq_data[seq_id].update_num_computed_tokens(-1)
+        new_seq_group_metadata.seq_data = new_seq_data
+        return new_seq_group_metadata
 
     def _assert_enough_kv_space(
             self, seq_group_metadata_list: List[SequenceGroupMetadata],
