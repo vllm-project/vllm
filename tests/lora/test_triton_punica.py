@@ -62,10 +62,10 @@ HIDDEN_SIZES = [
     128256,
 ]
 
-BATCHES = [1, 2, 4] + [8 * i for i in range(1, 4)]
+BATCHES = [1, 2, 4] + [8 * i for i in range(1, 7)]
 NUM_LORA = [1, 4, 8, 16, 32, 64, 128]
 DTYPES = [torch.float16, torch.bfloat16]
-MAX_RANKS = [1]
+MAX_RANKS = [1, 4, 8, 16, 32, 64, 128]
 SCALES = [0.5]
 SEED = [0]
 CUDA_DEVICES = [f"cuda:{0}"]

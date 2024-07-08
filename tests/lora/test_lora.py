@@ -20,7 +20,7 @@ TOLERANCES = {
     torch.bfloat16: (3e-2, 2e-2),
 }
 
-STAGES = [0, 1]  #prefilling(1) or decoding(0)
+STAGES = [0, 1]  #prefill stage(1) or decode stage(0)
 
 
 @pytest.mark.parametrize("m", TENSOR_SIZES)
@@ -68,7 +68,7 @@ def test_apply_lora(m, n, k, rank, dtype, stage) -> None:
                               device="cuda"),
                 indices_info,
                 output,
-                cache_clear=True)
+                need_update=True)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -80,7 +80,7 @@ def test_apply_lora(m, n, k, rank, dtype, stage) -> None:
                 torch.full((len(input), ), -1, device="cuda"),
                 indices_info,
                 output,
-                cache_clear=True)
+                need_update=True)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -149,7 +149,7 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype, stage) -> None:
                                             device="cuda"),
                               indices_info,
                               output, (m // 2, m // 2),
-                              cache_clear=True)
+                              need_update=True)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -161,7 +161,7 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype, stage) -> None:
                               torch.full((len(input), ), -1, device="cuda"),
                               indices_info,
                               output, (m // 2, m // 2),
-                              cache_clear=True)
+                              need_update=True)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -245,7 +245,7 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype, stage) -> None:
                                             device="cuda"),
                               indices_info,
                               output, (qkv[0], qkv[1], qkv[2]),
-                              cache_clear=True)
+                              need_update=True)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -257,7 +257,7 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype, stage) -> None:
                               torch.full((len(input), ), -1, device="cuda"),
                               indices_info,
                               output, (qkv[0], qkv[1], qkv[2]),
-                              cache_clear=True)
+                              need_update=True)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()

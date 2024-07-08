@@ -69,7 +69,7 @@ def _apply_lora(x: torch.Tensor,
                 lora_index_tensor: torch.Tensor,
                 indices_info: List[int],
                 output: torch.Tensor,
-                cache_clear: bool = False) -> torch.Tensor:
+                need_update: bool = False) -> torch.Tensor:
     """Applies lora to each input. This method applies all loras to each
     input. It uses the `lora_index_tensor` vector to determine which lora
     yields the correct output. An index of -1 means no lora should be
@@ -85,6 +85,8 @@ def _apply_lora(x: torch.Tensor,
             sampler_indices_padded,embeddings_indices, long_lora_indices,
             prefill flag). 
         output (torch.Tensor):  (batch_size, output_dim)
+        need_update (bool, optional): Indicates whether updating sgmv metadata 
+            is needed. Defaults to False.
 
     Returns:
         output (torch.Tensor):  (batch_size*seq_number, output_dim)
@@ -103,7 +105,7 @@ def _apply_lora(x: torch.Tensor,
              0,
              1.0,
              is_prefill,
-             cache_clear=cache_clear)
+             need_update=need_update)
     return output.view_as(org_output)
 
 
@@ -116,7 +118,7 @@ def _apply_lora_packed_nslice(x: torch.Tensor,
                               indices_info: List[int],
                               output: torch.Tensor,
                               output_slices: Tuple[int, ...],
-                              cache_clear: bool = False) -> torch.Tensor:
+                              need_update: bool = False) -> torch.Tensor:
     """
     Applies lora to each input. Similar to _apply_lora, This method is 
     used for layers that are composed of multiple sublayers
@@ -141,7 +143,7 @@ def _apply_lora_packed_nslice(x: torch.Tensor,
                  is_prefill,
                  offset_left,
                  output_slices[slice_idx],
-                 cache_clear=cache_clear)
+                 need_update=need_update)
         offset_left += output_slices[slice_idx]
 
     return output.view_as(org_output)

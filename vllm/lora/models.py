@@ -12,11 +12,11 @@ from torch import nn
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora import punica
 from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.punica import PrefillHelper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models.interfaces import SupportsLoRA
@@ -25,6 +25,9 @@ from vllm.utils import LRUCache, is_pin_memory_available
 logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
+
+# NOTE This value comes fromllm/worker/model_runner.py
+_MAX_BATCH_SIZE = 256
 
 
 @dataclass
@@ -460,6 +463,9 @@ class LoRAModelManager:
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices,long_lora_indices,prefill or decode stage
         self.indices_len: List[Optional[int]] = [None] * 6
+        self.prefill_helper = PrefillHelper(max_batches=_MAX_BATCH_SIZE,
+                                            device=str(
+                                                self.base_indices.device))
 
         self.model = model
         if hasattr(self.model, "supported_lora_modules"):
@@ -621,10 +627,9 @@ class LoRAModelManager:
             self.long_lora_indices.zero_()
         # Maintain the reference
         self.indices_len[:] = indices_len
-        #
         if mapping.is_prefill:
-            punica.reset_params_cache()
-            punica._compute_params(self.base_indices[:base_indices.shape[0]])
+            self.prefill_helper.get_metadata(
+                self.base_indices[:base_indices.shape[0]], need_update=True)
 
     def set_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
         if self._last_mapping != lora_mapping:
@@ -643,7 +648,6 @@ class LoRAModelManager:
         self._registered_loras.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_loras.clear()
-        punica.reset_params_cache()
 
     def _create_lora_modules(self):
         for module_name, module in self.model.named_modules(

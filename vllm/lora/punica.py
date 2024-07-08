@@ -1,6 +1,11 @@
-# Based on code from https://github.com/punica-ai/punica
+"""
+Based on:
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
+Punica: Multi-Tenant LoRA Serving. 
+https://arxiv.org/abs/2310.18547
+"""
 
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -11,12 +16,10 @@ from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 
-_PARAMS_CACHE: Dict[int, Tuple] = {}
 
-
-def _compute_params(
+def _compute_meta(
     token_lora_tensor: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:
     """
     Get the information required for the sgmv kernel. With the  features:
     1. If consecutive requests in the batch use the same LoRA, this function 
@@ -25,38 +28,94 @@ def _compute_params(
     2. At the beginning of each prefill stage inference, recalculations are 
     needed based on the input, but only once. 
     """
-    pointer = token_lora_tensor.data_ptr()
-    if pointer not in _PARAMS_CACHE:
-        lora_indices_tensor, seq_length_tensor = torch.unique_consecutive(
-            token_lora_tensor, return_counts=True)
-        cum_result = torch.cumsum(seq_length_tensor, dim=0)
-        b_seq_start_tensor = torch.zeros_like(seq_length_tensor)
-        b_seq_start_tensor[1:].copy_(cum_result[:-1])
-        max_length = seq_length_tensor.max().item()
-        batch_size = lora_indices_tensor.size(0)
-        _PARAMS_CACHE[pointer] = (
-            b_seq_start_tensor,
-            seq_length_tensor,
-            lora_indices_tensor,
-            batch_size,
-            max_length,
-        )
-    return _PARAMS_CACHE[pointer]
+
+    lora_indices_tensor, seq_length_tensor = torch.unique_consecutive(
+        token_lora_tensor, return_counts=True)
+    cum_result = torch.cumsum(seq_length_tensor, dim=0)
+    b_seq_start_tensor = torch.zeros_like(seq_length_tensor)
+    b_seq_start_tensor[1:].copy_(cum_result[:-1])
+    max_length = seq_length_tensor.max().item()
+    batch_size = lora_indices_tensor.size(0)
+    return (
+        b_seq_start_tensor,
+        seq_length_tensor,
+        lora_indices_tensor,
+        batch_size,
+        max_length,
+    )
 
 
-def reset_params_cache():
-    """At the beginning of the prefill stage, we need  clear the
-    cache explicitly
+class PrefillHelper:
+    """PrefillHelper is designed to manage and provide metadata for the sgmv 
+    kernel during  prefill stage, utilizing the singleton pattern to guarantee 
+    the existence of only one instance of the class.
     """
-    _PARAMS_CACHE.clear()
-    torch.cuda.empty_cache()
+    _instance: Optional["PrefillHelper"] = None
+    initialized: bool
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.initialized = False
+        return cls._instance
+
+    def __init__(self, max_batches: int = 256, device: str = "cuda"):
+        """
+        Args:
+            max_batches (int, optional):  the maximum batch to pre-allocate.
+                Defaults to 256.
+            device (str, optional): Defaults to "cuda".
+        """
+        if not self.initialized:
+            self.initialized = True
+            # these attributes are the information required for sgmv kernel
+            self.b_seq_start_tensor = torch.zeros(max_batches,
+                                                  dtype=torch.long,
+                                                  device=device)
+            self.seq_length_tensor = torch.empty(max_batches,
+                                                 dtype=torch.long,
+                                                 device=device)
+            self.lora_indices_tensor = torch.empty(max_batches,
+                                                   dtype=torch.long,
+                                                   device=device)
+            self.max_length: int = 0
+            self.batch_size: int = -1
+
+    def _update_metada(self, token_lora_tensor: torch.Tensor) -> None:
+
+        (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
+         batch_size, max_length) = _compute_meta(token_lora_tensor)
+
+        self.b_seq_start_tensor[:b_seq_start_tensor.shape[0]].copy_(
+            b_seq_start_tensor)
+        self.seq_length_tensor[:seq_length_tensor.shape[0]].copy_(
+            seq_length_tensor)
+        self.lora_indices_tensor[:lora_indices_tensor.shape[0]].copy_(
+            lora_indices_tensor)
+        self.batch_size = batch_size
+        self.max_length = max_length
+
+    def get_metadata(
+        self,
+        token_lora_tensor: torch.Tensor,
+        need_update: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:
+
+        #Need to recalculate and fill metadata.
+        if need_update:
+            self._update_metada(token_lora_tensor)
+
+        return (self.b_seq_start_tensor[:self.batch_size],
+                self.seq_length_tensor[:self.batch_size],
+                self.lora_indices_tensor[:self.batch_size], self.batch_size,
+                self.max_length)
 
 
-def _get_prefill_params(token_lora_tensor: torch.Tensor,
-                        cache_clear: bool = False):
-    if cache_clear:
-        reset_params_cache()
-    return _compute_params(token_lora_tensor)
+def get_prefill_meta(token_lora_tensor: torch.Tensor,
+                     need_update: bool = False):
+    prefill_helper = PrefillHelper(max_batches=256,
+                                   device=str(token_lora_tensor.device))
+    return prefill_helper.get_metadata(token_lora_tensor, need_update)
 
 
 def shrink_prefill(
@@ -66,7 +125,7 @@ def shrink_prefill(
     lora_indices_tensor: torch.Tensor,
     layer_idx: int,
     scale: float,
-    cache_clear: bool = False,
+    need_update: bool = False,
 ):
     (
         b_seq_start_tensor,
@@ -74,7 +133,7 @@ def shrink_prefill(
         last_lora_indices_tensor,
         batch_size,
         max_length,
-    ) = _get_prefill_params(lora_indices_tensor, cache_clear)
+    ) = get_prefill_meta(lora_indices_tensor, need_update)
     sgmv_shrink(
         x,
         w_t_all,
@@ -106,7 +165,7 @@ def expand_prefill(
     lora_indices_tensor: torch.Tensor,
     layer_idx: int,
     add_input: bool,
-    cache_clear: bool = False,
+    need_update: bool = False,
 ):
     (
         b_seq_start_tensor,
@@ -114,7 +173,7 @@ def expand_prefill(
         last_lora_indices_tensor,
         batch_size,
         max_length,
-    ) = _get_prefill_params(lora_indices_tensor, cache_clear)
+    ) = get_prefill_meta(lora_indices_tensor, need_update)
     sgmv_expand(x, w_t_all, y, b_seq_start_tensor, seq_length_tensor,
                 last_lora_indices_tensor, batch_size, max_length, add_input)
 
@@ -139,7 +198,7 @@ def expand_slice_prefill(
     y_offset: Optional[int],
     y_slice_size: Optional[int],
     add_input: bool,
-    cache_clear: bool = False,
+    need_update: bool = False,
 ):
     (
         b_seq_start_tensor,
@@ -147,7 +206,7 @@ def expand_slice_prefill(
         last_lora_indices_tensor,
         batch_size,
         max_length,
-    ) = _get_prefill_params(lora_indices_tensor, cache_clear)
+    ) = get_prefill_meta(lora_indices_tensor, need_update)
     sgmv_expand_slice(x, w_t_all, y, b_seq_start_tensor, seq_length_tensor,
                       last_lora_indices_tensor, batch_size, max_length,
                       y_offset, y_slice_size, add_input)
@@ -170,7 +229,7 @@ def add_shrink(
     layer_idx: int,
     scale: float,
     is_prefill: bool,
-    cache_clear: bool = False,
+    need_update: bool = False,
 ):
     """
     Perform the ` y+=x@w_t_all` computation, which is suitable for the 
@@ -182,7 +241,7 @@ def add_shrink(
     """
     if is_prefill:
         shrink_prefill(y, x, w_t_all, lora_indices_tensor, layer_idx, scale,
-                       cache_clear)
+                       need_update)
     else:
         shrink_decode(y, x, w_t_all, lora_indices_tensor, layer_idx, scale)
 
@@ -195,7 +254,7 @@ def add_expand(
     layer_idx: int,
     is_prefill: bool,
     add_input: bool = True,
-    cache_clear: bool = False,
+    need_update: bool = False,
 ):
     """
     Perform the ` y+=x@w_t_all` computation, which is suitable for the 
@@ -207,7 +266,7 @@ def add_expand(
     """
     if is_prefill:
         expand_prefill(y, x, w_t_all, lora_indices_tensor, layer_idx,
-                       add_input, cache_clear)
+                       add_input, need_update)
     else:
         expand_decode(y, x, w_t_all, lora_indices_tensor, layer_idx, add_input)
 
@@ -222,14 +281,14 @@ def add_expand_slice(
     y_offset: Optional[int],
     y_slice_size: Optional[int],
     add_input: bool = True,
-    cache_clear: bool = False,
+    need_update: bool = False,
 ):
     """
     Similar to `add_expand`
     """
     if is_prefill:
         expand_slice_prefill(y, x, w_t_all, lora_indices_tensor, layer_idx,
-                             y_offset, y_slice_size, add_input, cache_clear)
+                             y_offset, y_slice_size, add_input, need_update)
     else:
         expand_slice_decode(y, x, w_t_all, lora_indices_tensor, layer_idx,
                             y_offset, y_slice_size, add_input)
@@ -248,7 +307,7 @@ def add_lora(
     y_slice_size: Optional[int] = None,
     *,
     buffer: Optional[torch.Tensor] = None,
-    cache_clear: bool = False,
+    need_update: bool = False,
 ):
     """
     Semantics:
@@ -271,7 +330,8 @@ def add_lora(
             column of y.
         y_slice_size (Optional[int], optional): Size of the y column slice..
         buffer (Optional[torch.Tensor], optional): Defaults to None.
-        cache_clear (bool, optional):  Defaults to False.
+        need_update (bool, optional): Indicates whether updating sgmv metadata 
+            is needed. Defaults to False.
     """
 
     r = wb_t_all.size(-1)
@@ -290,7 +350,7 @@ def add_lora(
         0,
         scale,
         is_prefill,
-        cache_clear=cache_clear,
+        need_update=need_update,
     )
     if y_offset is None and y_slice_size is None:
         add_expand(y,
@@ -300,7 +360,7 @@ def add_lora(
                    0,
                    is_prefill,
                    add_input=True,
-                   cache_clear=cache_clear)
+                   need_update=need_update)
     else:
         add_expand_slice(y,
                          buffer,
@@ -311,4 +371,4 @@ def add_lora(
                          y_offset,
                          y_slice_size,
                          add_input=True,
-                         cache_clear=cache_clear)
+                         need_update=need_update)
