@@ -109,7 +109,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def get_input(tokenizer, prompt, image):
+def get_input(tokenizer, prompt, image, dtype):
 
     image_id = 100015
     prompt = prompt[0]
@@ -127,8 +127,7 @@ def get_input(tokenizer, prompt, image):
         "input_ids":
         input_ids,
         "pixel_values":
-        images_outputs.pixel_values.to(torch.bfloat16).reshape(
-            1, -1, 3, 1024, 1024),
+        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 1024, 1024),
         "num_image_tokens":
         576,
         "images_seq_mask":
@@ -191,17 +190,21 @@ def run_test(
     tokenizer = AutoTokenizer.from_pretrained(model)
     hf_model = AutoModelForCausalLM.from_pretrained(model,
                                                     trust_remote_code=True)
+    dtype_dict = {
+        'float16': torch.float16,
+        'half': torch.bfloat16,
+        'float32': torch.float32,
+        'auto': hf_model.dtype
+    }
+    dtype = dtype_dict.get(dtype, hf_model.dtype)
+    hf_model = hf_model.to(dtype)
     hf_model = hf_model
     prepare_input_list = []
     inputs_embeds_list = []
     for prompts, images in inputs_per_image:
         print(f'prompt: {prompts}')
         print(f'images: {images}')
-        prepare_input = get_input(
-            tokenizer,
-            prompts,
-            images,
-        )
+        prepare_input = get_input(tokenizer, prompts, images, dtype)
         prepare_input_list.append(prepare_input)
         inputs_embeds_list.append(
             hf_model.prepare_inputs_embeds(**prepare_input))
