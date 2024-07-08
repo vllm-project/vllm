@@ -128,12 +128,13 @@ class AttentionImpl(ABC, Generic[T]):
 
     @abstractmethod
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            kv_cache: torch.Tensor,
-            attn_metadata: T,
-            kv_scale: float = 1.0,
-            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+        kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
         raise NotImplementedError

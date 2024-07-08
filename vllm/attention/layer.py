@@ -83,14 +83,15 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params)
 
-    def forward(self,
-                query: torch.Tensor,
-                key: torch.Tensor,
-                value: torch.Tensor,
-                kv_cache: Optional[torch.Tensor],
-                attn_metadata: AttentionMetadata,
-                attn_type: AttentionType = AttentionType.DECODER) \
-                    -> torch.Tensor:
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
 
         return self.impl.forward(query,
                                  key,

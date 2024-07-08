@@ -138,14 +138,15 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 "Please use xFormers backend instead.")
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            kv_cache: Optional[torch.Tensor],
-            attn_metadata: TorchSDPAMetadata,  # type: ignore
-            kv_scale: float = 1.0,
-            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: TorchSDPAMetadata,  # type: ignore
+        kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
         Args:
@@ -159,9 +160,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         """
         assert kv_scale == 1.0
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and " + \
-                                      "encoder/decoder cross-attention " + \
-                                      "are not implemented for " + \
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
                                       "TorchSDPABackendImpl")
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.

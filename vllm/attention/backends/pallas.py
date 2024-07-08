@@ -125,14 +125,15 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 self.megacore_mode = "batch"
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
-            attn_metadata: PallasMetadata,
-            kv_scale: float = 1.0,
-            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
+        attn_metadata: PallasMetadata,
+        kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
         Args:
@@ -147,9 +148,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
         """
         assert kv_scale == 1.0
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and " + \
-                                      "encoder/decoder cross-attention " + \
-                                      "are not implemented for " + \
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
                                       "PallasAttentionBackendImpl")
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)

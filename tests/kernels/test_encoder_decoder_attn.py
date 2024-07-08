@@ -100,7 +100,7 @@ class TestResources(NamedTuple):
     kv_cache: torch.Tensor
 
 
-def _make_test_resources(test_pt: TestPoint) -> TestResources:
+def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     '''
     Build key components for performing encoder/decoder attention test.
 
@@ -147,8 +147,10 @@ def _make_test_resources(test_pt: TestPoint) -> TestResources:
     return TestResources(scale, attn_backend, attn, kv_cache)
 
 
-def _encoder_attn_setup(test_pt: TestPoint, test_rsrcs: TestResources) \
-                          -> PhaseTestParameters:
+def _encoder_attn_setup(
+    test_pt: TestPoint,
+    test_rsrcs: TestResources,
+) -> PhaseTestParameters:
     '''
     Set up test vectors & data structures for encoder attention test.
 
@@ -178,7 +180,16 @@ def _encoder_attn_setup(test_pt: TestPoint, test_rsrcs: TestResources) \
       implementation, and (3) KVCache field set to None
     '''
 
-    (num_heads, head_size, _, batch_size, _, _, max_q_seq_len, _) = test_pt
+    (
+        num_heads,
+        head_size,
+        _,
+        batch_size,
+        _,
+        _,
+        max_q_seq_len,
+        _,
+    ) = test_pt
 
     scale = test_rsrcs.scale
 
@@ -211,12 +222,9 @@ def _encoder_attn_setup(test_pt: TestPoint, test_rsrcs: TestResources) \
     packed_qkv = pack_qkv(qkv_in, device=CUDA_DEVICE)
 
     return PhaseTestParameters(
-             PackedQKVO(
-               packed_qkv, \
-               packed_ideal_output),
-
-             None # No KV cache
-           )
+        PackedQKVO(packed_qkv, packed_ideal_output),
+        None  # No KV cache
+    )
 
 
 def _decoder_attn_setup(
@@ -280,8 +288,16 @@ def _decoder_attn_setup(
                       constructed in this function)
     '''
 
-    (num_heads, head_size, _, batch_size, block_size, max_q_seq_len, _,
-     _) = test_pt
+    (
+        num_heads,
+        head_size,
+        _,
+        batch_size,
+        block_size,
+        max_q_seq_len,
+        _,
+        _,
+    ) = test_pt
 
     scale = test_rsrcs.scale
 
@@ -289,15 +305,17 @@ def _decoder_attn_setup(
 
     # Build test tensors
 
-    qkv, \
-    prefill_qkv, \
-    decode_qkv = make_qkv(batch_size,
-                          max_q_seq_len,
-                          max_kv_seq_len,
-                          num_heads,
-                          head_size,
-                          attn_type=AttentionType.DECODER,
-                          device=CUDA_DEVICE)
+    (
+        qkv,
+        prefill_qkv,
+        decode_qkv,
+    ) = make_qkv(batch_size,
+                 max_q_seq_len,
+                 max_kv_seq_len,
+                 num_heads,
+                 head_size,
+                 attn_type=AttentionType.DECODER,
+                 device=CUDA_DEVICE)
 
     # Compute correct answer using naive attention implementation
     # with causal attention mask
@@ -352,49 +370,45 @@ def _decoder_attn_setup(
 
     prefill_block_tables = make_empty_block_tables_tensor(device=CUDA_DEVICE)
 
-    decode_block_tables, \
-    slot_mapping_list, \
-    max_block_idx = make_block_tables_slot_mapping(block_size,
-                            qkv.q_seq_lens,
-                            device=CUDA_DEVICE,
-                            block_base_addr = block_base_addr)
+    (
+        decode_block_tables,
+        slot_mapping_list,
+        max_block_idx,
+    ) = make_block_tables_slot_mapping(block_size,
+                                       qkv.q_seq_lens,
+                                       device=CUDA_DEVICE,
+                                       block_base_addr=block_base_addr)
 
-    prefill_slot_mapping, \
-    decode_slot_mapping = split_slot_mapping(slot_mapping_list,
-                                             qkv.q_seq_lens,
-                                             device=CUDA_DEVICE)
+    (
+        prefill_slot_mapping,
+        decode_slot_mapping,
+    ) = split_slot_mapping(slot_mapping_list,
+                           qkv.q_seq_lens,
+                           device=CUDA_DEVICE)
 
     prefill_pckd_qkv = pack_qkv(prefill_qkv, device=CUDA_DEVICE)
 
     decode_pckd_qkv = pack_qkv(decode_qkv, device=CUDA_DEVICE)
 
-    return qkv, \
-           PhaseTestParameters( # Prefill test params
-              PackedQKVO(
-                  prefill_pckd_qkv, \
-                  prefill_packed_ideal_output), \
-              KVMemoryMap(
-                  prefill_block_tables, \
-                  prefill_slot_mapping)), \
-           PhaseTestParameters( # Decode test params
-              PackedQKVO(
-                decode_pckd_qkv, \
-                decode_packed_ideal_output), \
-              KVMemoryMap(
-                decode_block_tables, \
-                decode_slot_mapping)), \
-           max_block_idx
+    return (
+        qkv,
+        PhaseTestParameters(  # Prefill test params
+            PackedQKVO(prefill_pckd_qkv, prefill_packed_ideal_output),
+            KVMemoryMap(prefill_block_tables, prefill_slot_mapping)),
+        PhaseTestParameters(  # Decode test params
+            PackedQKVO(decode_pckd_qkv, decode_packed_ideal_output),
+            KVMemoryMap(decode_block_tables, decode_slot_mapping)),
+        max_block_idx)
 
-def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
-                                           encoder_test_params:
-                                            PhaseTestParameters,
-                                           prefill_decoder_phase_test_params:
-                                            PhaseTestParameters,
-                                           test_pt: TestPoint,
-                                           test_rsrcs: TestResources,
-                                           block_base_addr: int=0) \
-                                            -> Tuple[PhaseTestParameters,
-                                                     PhaseTestParameters]:
+
+def _enc_dec_cross_attn_setup_reuses_query(
+    decoder_qkv: QKVInputs,
+    encoder_test_params: PhaseTestParameters,
+    prefill_decoder_phase_test_params: PhaseTestParameters,
+    test_pt: TestPoint,
+    test_rsrcs: TestResources,
+    block_base_addr: int = 0,
+) -> Tuple[PhaseTestParameters, PhaseTestParameters]:
     '''
     Set up test vectors & data structures for cross-attention test.
 
@@ -461,22 +475,32 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     assert encoder_test_params.packed_qkvo.packed_qkv is not None
     assert prefill_decoder_phase_test_params.packed_qkvo.packed_qkv is not None
 
-    (num_heads, head_size, _, batch_size, block_size, max_decoder_seq_len,
-     max_encoder_seq_len, _) = test_pt
+    (
+        num_heads,
+        head_size,
+        _,
+        batch_size,
+        block_size,
+        max_decoder_seq_len,
+        max_encoder_seq_len,
+        _,
+    ) = test_pt
 
     scale = test_rsrcs.scale
 
     decoder_query = decoder_qkv.query
     decoder_seq_lens = decoder_qkv.q_seq_lens
     encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
-    prefill_q_seq_lens = \
-      prefill_decoder_phase_test_params.packed_qkvo.packed_qkv.q_seq_lens
+    prefill_q_seq_lens = (
+        prefill_decoder_phase_test_params.packed_qkvo.packed_qkv.q_seq_lens)
 
     assert prefill_q_seq_lens is not None
 
-    cross_kv, \
-    _, \
-    _ = make_qkv(batch_size,
+    (
+        cross_kv,
+        _,
+        _,
+    ) = make_qkv(batch_size,
                  max_decoder_seq_len,
                  max_encoder_seq_len,
                  num_heads,
@@ -538,13 +562,14 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     prefill_block_tables = make_empty_block_tables_tensor(device=CUDA_DEVICE)
     decode_slot_mapping = make_empty_slot_mapping_tensor(device=CUDA_DEVICE)
 
-    decode_block_tables, \
-    prefill_slot_mapping_list, \
-    _ = make_block_tables_slot_mapping(
-        block_size,
-        cross_kv.kv_seq_lens,
-        block_base_addr=block_base_addr,
-        device=CUDA_DEVICE)
+    (
+        decode_block_tables,
+        prefill_slot_mapping_list,
+        _,
+    ) = make_block_tables_slot_mapping(block_size,
+                                       cross_kv.kv_seq_lens,
+                                       block_base_addr=block_base_addr,
+                                       device=CUDA_DEVICE)
 
     prefill_slot_mapping = maybe_make_long_tensor(prefill_slot_mapping_list,
                                                   device=CUDA_DEVICE)
@@ -552,26 +577,20 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     # Packed key/value (query is already provided)
     packed_cross_kv = pack_qkv(cross_kv, device=CUDA_DEVICE)
 
-    return PhaseTestParameters( # Prefill-phase test params
-            PackedQKVO(
-              packed_cross_kv, \
-              prefill_packed_ideal_output), \
-            KVMemoryMap(
-              prefill_block_tables, \
-              prefill_slot_mapping)), \
-           PhaseTestParameters( # Decode-phase test params
-            PackedQKVO(
-              None,
-              decode_packed_ideal_output), \
-            KVMemoryMap(
-              decode_block_tables, \
-              decode_slot_mapping))
+    return (
+        PhaseTestParameters(  # Prefill-phase test params
+            PackedQKVO(packed_cross_kv, prefill_packed_ideal_output),
+            KVMemoryMap(prefill_block_tables, prefill_slot_mapping)),
+        PhaseTestParameters(  # Decode-phase test params
+            PackedQKVO(None, decode_packed_ideal_output),
+            KVMemoryMap(decode_block_tables, decode_slot_mapping)))
 
 
-def _run_encoder_attention_test(attn: Attention,
-                                encoder_test_params: PhaseTestParameters,
-                                attn_metadata: AttentionMetadata) \
-                                  -> torch.Tensor:
+def _run_encoder_attention_test(
+    attn: Attention,
+    encoder_test_params: PhaseTestParameters,
+    attn_metadata: AttentionMetadata,
+) -> torch.Tensor:
     '''
     Run encoder attention.
 
@@ -606,10 +625,11 @@ def _run_encoder_attention_test(attn: Attention,
                         attn_type=attn_type)
 
 
-def _run_decoder_self_attention_test(test_rsrcs: TestResources,
-                                     decoder_test_params: PhaseTestParameters,
-                                     attn_metadata: AttentionMetadata) \
-                                      -> torch.Tensor:
+def _run_decoder_self_attention_test(
+    test_rsrcs: TestResources,
+    decoder_test_params: PhaseTestParameters,
+    attn_metadata: AttentionMetadata,
+) -> torch.Tensor:
     '''
     Run decoder self-attention test.
 
@@ -645,9 +665,11 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
 
 
 def _run_encoder_decoder_cross_attention_test(
-        test_rsrcs: TestResources, decoder_test_params: PhaseTestParameters,
-        cross_test_params: Optional[PhaseTestParameters],
-        attn_metadata: AttentionMetadata) -> torch.Tensor:
+    test_rsrcs: TestResources,
+    decoder_test_params: PhaseTestParameters,
+    cross_test_params: Optional[PhaseTestParameters],
+    attn_metadata: AttentionMetadata,
+) -> torch.Tensor:
     '''
     Run encoder/decoder cross-attention test.
 
@@ -690,10 +712,8 @@ def _run_encoder_decoder_cross_attention_test(
         value = None
     else:
         cross_pckd_qkv = cross_test_params.packed_qkvo.packed_qkv
-        key = None if cross_pckd_qkv is None else \
-                cross_pckd_qkv.key
-        value = None if cross_pckd_qkv is None else \
-                cross_pckd_qkv.value
+        key = (None if cross_pckd_qkv is None else cross_pckd_qkv.key)
+        value = (None if cross_pckd_qkv is None else cross_pckd_qkv.value)
     return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query,
                         key,
                         value,
@@ -745,11 +765,8 @@ def test_encoder_only(num_heads: int, head_size: int, backend_name: str,
 
     # PREFILL: encoder attention
 
-    enc_pckd_act_out: torch.Tensor = \
-      _run_encoder_attention_test(
-        test_rsrcs.attn,
-        enc_test_params,
-        prephase_attn_metadata)
+    enc_pckd_act_out: torch.Tensor = (_run_encoder_attention_test(
+        test_rsrcs.attn, enc_test_params, prephase_attn_metadata))
 
     # - Is encoder attention result correct?
     assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
@@ -763,10 +780,16 @@ def test_encoder_only(num_heads: int, head_size: int, backend_name: str,
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
 @pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
-def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
-                          batch_size: int, block_size: int,
-                          max_dec_seq_len: int, max_enc_seq_len: int,
-                          monkeypatch) -> None:
+def test_e2e_enc_dec_attn(
+    num_heads: int,
+    head_size: int,
+    backend_name: str,
+    batch_size: int,
+    block_size: int,
+    max_dec_seq_len: int,
+    max_enc_seq_len: int,
+    monkeypatch,
+) -> None:
     '''
     End-to-end encoder/decoder test:
 
@@ -841,23 +864,26 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
     # decoder self-attention block-table, i.e. a base address which the
     # encoder/decoder cross-attention block-table may build downward toward.
 
-    dec_qkv, \
-    prephase_dec_test_params, \
-    decphase_dec_test_params, \
-    cross_block_base_addr = _decoder_attn_setup(test_pt,test_rsrcs)
+    (
+        dec_qkv,
+        prephase_dec_test_params,
+        decphase_dec_test_params,
+        cross_block_base_addr,
+    ) = _decoder_attn_setup(test_pt, test_rsrcs)
 
     # Construct encoder/decoder cross-attention prefill-phase & decode-phase
     # test params, including key/value tensors, cross-attention memory-mapping
 
-    prephase_cross_test_params, \
-    decphase_cross_test_params, \
-    = _enc_dec_cross_attn_setup_reuses_query(dec_qkv,
-                                             enc_test_params,
-                                             prephase_dec_test_params,
-                                             test_pt,
-                                             test_rsrcs,
-                                             block_base_addr = \
-                                              cross_block_base_addr)
+    (
+        prephase_cross_test_params,
+        decphase_cross_test_params,
+    ) = _enc_dec_cross_attn_setup_reuses_query(
+        dec_qkv,
+        enc_test_params,
+        prephase_dec_test_params,
+        test_pt,
+        test_rsrcs,
+        block_base_addr=cross_block_base_addr)
 
     # Shared prefill metadata structure
     assert prephase_dec_test_params.packed_qkvo.packed_qkv is not None
@@ -872,22 +898,17 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
 
     # PREFILL: encoder attention
 
-    enc_pckd_act_out: torch.Tensor = \
-      _run_encoder_attention_test(
-        test_rsrcs.attn,
-        enc_test_params,
-        prephase_attn_metadata)
+    enc_pckd_act_out = _run_encoder_attention_test(test_rsrcs.attn,
+                                                   enc_test_params,
+                                                   prephase_attn_metadata)
 
     # - Is encoder attention result correct?
     assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
     # PREFILL: decoder self-attention test
 
-    prephase_dec_pckd_act_out: torch.Tensor = \
-      _run_decoder_self_attention_test(
-        test_rsrcs,
-        prephase_dec_test_params,
-        prephase_attn_metadata)
+    prephase_dec_pckd_act_out = _run_decoder_self_attention_test(
+        test_rsrcs, prephase_dec_test_params, prephase_attn_metadata)
 
     # - Is prefill decoder self-attention correct?
     assert_actual_matches_ideal(prephase_dec_test_params,
@@ -895,11 +916,8 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
 
     # PREFILL: encoder/decoder cross-attention test
 
-    prephase_cross_pckd_act_out: torch.Tensor = \
-      _run_encoder_decoder_cross_attention_test(
-        test_rsrcs,
-        prephase_dec_test_params,
-        prephase_cross_test_params,
+    prephase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
+        test_rsrcs, prephase_dec_test_params, prephase_cross_test_params,
         prephase_attn_metadata)
 
     # - Is prefill encoder/decoder cross-attention correct?
@@ -919,11 +937,8 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
 
     # DECODE: decoder self-attention test
 
-    decphase_dec_pckd_act_out: torch.Tensor = \
-      _run_decoder_self_attention_test(
-        test_rsrcs,
-        decphase_dec_test_params,
-        decphase_attn_metadata)
+    decphase_dec_pckd_act_out = _run_decoder_self_attention_test(
+        test_rsrcs, decphase_dec_test_params, decphase_attn_metadata)
 
     # - Is decode-phase decoder self-attention correct?
     assert_actual_matches_ideal(decphase_dec_test_params,
@@ -931,12 +946,8 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
 
     # DECODE: encoder/decoder cross-attention test
 
-    decphase_cross_pckd_act_out: torch.Tensor = \
-      _run_encoder_decoder_cross_attention_test(
-        test_rsrcs,
-        decphase_dec_test_params,
-        None,
-        decphase_attn_metadata)
+    decphase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
+        test_rsrcs, decphase_dec_test_params, None, decphase_attn_metadata)
 
     # - Is decode-phase encoder/decoder cross-attention correct?
     assert_actual_matches_ideal(decphase_cross_test_params,
