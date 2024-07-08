@@ -27,6 +27,7 @@ def is_custom_op_supported(op_name: str) -> bool:
 
 
 def hint_on_error(fn):
+
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
@@ -227,7 +228,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-    assert bias is None or bias.shape[0] == b.shape[1] and bias.dtype == out_dtype
+    assert bias is None or bias.shape[0] == b.shape[
+        1] and bias.dtype == out_dtype
 
     m = a.shape[0]
     n = b.shape[1]
@@ -248,14 +250,16 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-    assert bias is None or bias.shape[0] == b.shape[1] and bias.dtype == out_dtype
+    assert bias is None or bias.shape[0] == b.shape[
+        1] and bias.dtype == out_dtype
     m = a.shape[0]
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
     if bias is None:
-        bias = torch.zeros((n,), device=a.device, dtype=out_dtype)
-    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, bias, azp, azp_adj)
+        bias = torch.zeros((n, ), device=a.device, dtype=out_dtype)
+    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, bias, azp,
+                                       azp_adj)
 
     return out
 
@@ -344,8 +348,8 @@ def scaled_fp8_quant(
 
 # int8
 def scaled_int8_quant(
-    input: torch.Tensor,
-    scale: Optional[torch.Tensor] = None
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale.

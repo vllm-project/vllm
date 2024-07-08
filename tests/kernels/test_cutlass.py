@@ -31,6 +31,7 @@ def to_int8(tensor: torch.Tensor):
 def rand_int8(shape: tuple, device: str = "cuda"):
     return to_int8(torch.randn(shape, device=device) * 255)
 
+
 def baseline_scaled_mm(a: torch.Tensor,
                        b: torch.Tensor,
                        scale_a: torch.Tensor,
@@ -257,7 +258,7 @@ def test_cutlass_int8_azp():
 
     b_dq = scale_b * bq_f32
 
-    azp_a = torch.rand((1,), device="cuda", dtype=torch.float32) + 2.0
+    azp_a = torch.rand((1, ), device="cuda", dtype=torch.float32) + 2.0
     azp_aq_i8 = (azp_a / scale_a).to(dtype=torch.int8)
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
@@ -271,9 +272,10 @@ def test_cutlass_int8_azp():
     azp_bias = (azp_a * scale_b *
                 (J @ bq_f32).to(dtype=torch.float32)).to(out_dtype)
     assert azp_bias.shape == (1, n)
-    assert azp_bias[0, :].shape == (n,)
+    assert azp_bias[0, :].shape == (n, )
 
-    baseline_q = (scale_a * scale_b * naive_mm(aq_i32 + azp_aq_i8, bq_i32)).to(dtype=out_dtype)
+    baseline_q = (scale_a * scale_b *
+                  naive_mm(aq_i32 + azp_aq_i8, bq_i32)).to(dtype=out_dtype)
 
     out = ops.cutlass_scaled_mm(aq_i8,
                                 bq_i8,
@@ -317,14 +319,11 @@ def test_cutlass_int8_per_token_azp():
     J = torch.ones((1, k), device="cuda", dtype=torch.float32)
     azp_adj = scale_b * (J @ bq_f32).to(dtype=torch.float32)
 
-    baseline_q = (scale_a * scale_b * naive_mm(aq_i32 + azp_aq_i8, bq_i32)).to(dtype=out_dtype)
+    baseline_q = (scale_a * scale_b *
+                  naive_mm(aq_i32 + azp_aq_i8, bq_i32)).to(dtype=out_dtype)
 
-    out = ops.cutlass_scaled_mm_azp(aq_i8,
-                                    bq_i8,
-                                    scale_a,
-                                    scale_b,
-                                    out_dtype,
-                                    azp_a[:,0], azp_adj[0,:])
+    out = ops.cutlass_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b, out_dtype,
+                                    azp_a[:, 0], azp_adj[0, :])
     assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
     assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
 
