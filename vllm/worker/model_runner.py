@@ -25,7 +25,7 @@ except ImportError:
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY

@@ -7,8 +7,8 @@ from typing import List, Optional, Tuple, Union
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig,
-                         TokenizerPoolConfig, PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TokenizerPoolConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 

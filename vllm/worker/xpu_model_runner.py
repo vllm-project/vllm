@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger

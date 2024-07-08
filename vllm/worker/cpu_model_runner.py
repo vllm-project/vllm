@@ -8,7 +8,7 @@ from torch import nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model

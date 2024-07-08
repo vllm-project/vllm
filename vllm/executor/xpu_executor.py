@@ -4,8 +4,8 @@ import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig, 
-                         PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger

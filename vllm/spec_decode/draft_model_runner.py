@@ -4,7 +4,7 @@ import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)

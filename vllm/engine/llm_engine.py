@@ -8,8 +8,9 @@ from transformers import PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, PromptAdapterConfig)
+                         ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs

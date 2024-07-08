@@ -10,8 +10,8 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig, 
-                         PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
