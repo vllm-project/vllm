@@ -222,10 +222,11 @@ def run_test(
                                                 skip_special_tokens=True)))
     vllm_outputs_list = []
     for vllm_outputs in vllm_outputs_per_image:
-        vllm_outputs_list.append([
-            vllm_to_hf_output(vllm_output, model)
-            for vllm_output in vllm_outputs
-        ][:2])
+        vllm_outputs_list.append(
+            tuple([
+                vllm_to_hf_output(vllm_output, model)
+                for vllm_output in vllm_outputs
+            ][:2]))
     print(f'hf_outputs --> {hf_outputs}')
     print(f'vllm_outputs --> {vllm_outputs_list}')
     check_outputs_equal(outputs_0_lst=hf_outputs,
