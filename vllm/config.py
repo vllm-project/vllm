@@ -1309,6 +1309,11 @@ class LoRAConfig:
         if scheduler_config.chunked_prefill_enabled:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 
+    def verify_with_parallel_config(self, parallel_config: ParallelConfig):
+        if self.lora_vocab_padding_size % parallel_config.world_size != 0:
+            raise ValueError("LoRA vocab padding size must be divisible "
+                             "by world size.")
+
 
 # TODO: To be replaced by MultiModalConfig.
 @dataclass
@@ -1577,6 +1582,7 @@ class EngineConfig:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+            self.lora_config.verify_with_parallel_config(self.parallel_config)
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.
