@@ -104,11 +104,11 @@ if is_cpu():
         # No image
         [],
         # Single-scale
-        [0.5],
+        [0.25],
         # Single-scale, batched
-        [0.5, 0.5, 0.5],
+        [0.25, 0.25, 0.25],
         # Multi-scale
-        [0.5, 0.4, 0.3],
+        [0.25, 0.2, 0.15],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
