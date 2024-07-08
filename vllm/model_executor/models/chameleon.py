@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -132,6 +133,17 @@ class ChameleonAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
+    def _apply_qk_norm(self, q: torch.Tensor,
+                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # reshape for layernorm
+        q = q.view(*q.shape[:-1], -1, self.head_dim)
+        k = k.view(*k.shape[:-1], -1, self.head_dim)
+        q, _ = self.q_norm(q)
+        k, _ = self.k_norm(k)
+        q = q.view(*q.shape[:-2], -1)
+        k = k.view(*k.shape[:-2], -1)
+        return q, k
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -143,8 +155,9 @@ class ChameleonAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.qk_layernorm:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
+            # reshape for layernorm
+            q, k = self._apply_qk_norm(q, k)
+
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -246,6 +259,62 @@ class ChameleonDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+class ChameleonImageVocabularyMapping:
+    """
+    A class for mapping discrete image tokens from VQGAN to BPE tokens.
+    """
+
+    def __init__(self, vocab_map):
+        self.vocab_map = vocab_map
+        self.image_token_id = vocab_map.get("<image>")
+
+    @cached_property
+    def val2name(self):
+        return {v: k for k, v in self.vocab_map.items()}
+
+    @cached_property
+    def image_tokens(self):
+        return sorted([
+            val for name, val in self.vocab_map.items()
+            if name.startswith("IMGIMG")
+        ])
+
+    @cached_property
+    def bpe2img(self):
+        img_tkn_chr_mapping = {chr(ord("A") + i): str(i) for i in range(10)}
+
+        def remap(old_name: str) -> str:
+            return "".join(
+                img_tkn_chr_mapping.get(c, c)
+                for c in old_name[len("IMGIMG"):-1])
+
+        return {
+            tok: int(remap(self.val2name[tok]))
+            for tok in self.image_tokens
+        }
+
+    @cached_property
+    def img2bpe(self):
+        return {v: k for k, v in self.bpe2img.items()}
+
+    @cached_property
+    def bpe2img_search_tensors(self):
+        return torch.tensor(sorted(self.bpe2img.keys())), torch.tensor(
+            sorted(self.bpe2img.values()))
+
+    @cached_property
+    def img2bpe_mapping_tensor(self):
+        mapping = torch.zeros(max(self.img2bpe.keys()) + 1, dtype=torch.int)
+        for k, v in self.img2bpe.items():
+            mapping[k] = v
+        return mapping
+
+    def convert_img2bpe(self, img_batch: torch.Tensor) -> torch.Tensor:
+        device = img_batch.device
+        img_tokens = self.img2bpe_mapping_tensor[img_batch.to("cpu")]
+        return img_tokens.to(device)
+
+
 class ChameleonModel(nn.Module):
 
     def __init__(
@@ -262,6 +331,8 @@ class ChameleonModel(nn.Module):
             self.vocab_size,
             config.hidden_size,
         )
+        self.vocabulary_mapping = ChameleonImageVocabularyMapping(
+            config.vocabulary_map)
         self.layers = nn.ModuleList([
             ChameleonDecoderLayer(config=config,
                                   cache_config=cache_config,
@@ -334,6 +405,7 @@ class ChameleonForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
         return hidden_states
@@ -343,7 +415,11 @@ class ChameleonForCausalLM(nn.Module):
         logits = self.logits_processor(self.lm_head.weight, hidden_states,
                                        sampling_metadata)
 
-        # TODO: update logits for image tokens
+        # Disallow image tokens which does not include special
+        # begin-image and end-image tokens
+        image_tokens = self.model.vocabulary_mapping.image_tokens
+        logits[:, image_tokens] = torch.finfo(logits.dtype).min
+
         return logits
 
     def sample(
