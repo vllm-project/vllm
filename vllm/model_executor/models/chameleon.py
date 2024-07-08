@@ -155,7 +155,6 @@ class ChameleonAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.qk_layernorm:
-            # reshape for layernorm
             q, k = self._apply_qk_norm(q, k)
 
         q, k = self.rotary_emb(positions, q, k)
