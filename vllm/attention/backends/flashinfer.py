@@ -14,7 +14,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 
 
 class FlashInferBackend(AttentionBackend):
@@ -224,8 +224,14 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: FlashInferMetadata,
         kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         assert kv_scale == 1.0
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "FlashInferImpl")
         num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
