@@ -126,7 +126,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
 class CFGLogitsProcessor(BaseLogitsProcessor):
 
     @classmethod
-    @lru_cache(maxsize=32)
+    @cache()
     def _get_guide(cls, cfg: str, tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
         return CFGGuide(cfg, tokenizer)
