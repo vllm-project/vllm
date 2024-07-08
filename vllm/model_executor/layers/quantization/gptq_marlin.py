@@ -11,19 +11,15 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_K,
+    GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_SUPPORTED_GROUP_SIZES,
+    GPTQ_MARLIN_SUPPORTED_NUM_BITS, GPTQ_MARLIN_SUPPORTED_SYM,
+    GPTQ_MARLIN_TILE)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
-GPTQ_MARLIN_TILE = 16
-GPTQ_MARLIN_MIN_THREAD_N = 64
-GPTQ_MARLIN_MIN_THREAD_K = 128
-GPTQ_MARLIN_MAX_PARALLEL = 16
-
-GPTQ_MARLIN_SUPPORTED_NUM_BITS = [4, 8]
-GPTQ_MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
-GPTQ_MARLIN_SUPPORTED_SYM = [True]
 
 
 # Permutations for Marlin scale shuffling
