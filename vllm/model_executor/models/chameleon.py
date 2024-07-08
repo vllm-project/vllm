@@ -343,7 +343,6 @@ class ChameleonModel(nn.Module):
 
         # TODO: Support image input
         # self.vqmodel = ChameleonVQModel(config.vq_config)
-        # self.vocabulary_mapping = ChameleonImageVocabularyMapping(config.vocabulary_map) #noqa
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -405,7 +404,13 @@ class ChameleonForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        **kwargs,
     ) -> torch.Tensor:
+
+        # TODO (ywang96): Support image input
+        # image_tokens = self.process_image_input(**kwargs)
+        # image_mask = input_ids == self.vocabulary_mapping.image_token_id
+        # input_ids[special_image_mask] = image_tokens.flatten().to(input_ids.dtype) #noqa
 
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
