@@ -5,9 +5,10 @@ from transformers import GenerationConfig, PretrainedConfig
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             JAISConfig, MLPSpeculatorConfig,
-                                             MPTConfig, RWConfig)
+from vllm.transformers_utils.configs import (ChameleonConfig, ChatGLMConfig,
+                                             DbrxConfig, JAISConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             RWConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -17,6 +18,7 @@ else:
 logger = init_logger(__name__)
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
+    "chameleon": ChameleonConfig,
     "chatglm": ChatGLMConfig,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
