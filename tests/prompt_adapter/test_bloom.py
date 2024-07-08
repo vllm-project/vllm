@@ -31,9 +31,10 @@ def do_sample(llm, pa_name: str, pa_id: int):
     return generated_texts
 
 
-def test_twitter_prompt_adapter():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_twitter_prompt_adapter(enforce_eager: bool):
     llm = vllm.LLM(MODEL_PATH,
-                   enforce_eager=True,
+                   enforce_eager=enforce_eager,
                    enable_prompt_adapter=True,
                    max_prompt_adapter_token=8)
 
