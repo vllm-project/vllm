@@ -12,7 +12,8 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         remove_adapter, set_adapter_mapping)
 from vllm.config import PromptAdapterConfig
 from vllm.prompt_adapter.layers import (
-    PromptAdapterMapping, VocabParallelEmbeddingWithPromptAdapter)
+    VocabParallelEmbeddingWithPromptAdapter)  # yapf: disable
+from vllm.prompt_adapter.layers import PromptAdapterMapping
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,11 @@ class PromptAdapterModelManager(AdapterModelManager):
 
         Args:
             model: the model to be adapted.
+            max_num_seqs: the maximum number of sequences model can run in a
+                single batch.
+            max_num_batched_tokens: the maximum number of tokens model can run
+                in a single batch.
+            prompt_adapter_config: the PromptAdapter config,
         """
         self.model: nn.Module = model
         # Dict instead of a Set for compatibility with LRUCache.
