@@ -2,7 +2,7 @@ import codecs
 import time
 from dataclasses import dataclass, field
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
-                    List, Optional)
+                    List, Optional, Type)
 from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
 
@@ -91,9 +91,9 @@ class OpenAIServingChat(OpenAIServing):
             raise TypeError('Error: --enable-auto-tool-choice requires --tool-choice-parser')
 
         if tool_parser == 'mistral':
-            self.tool_parser: ToolParser = MistralToolParser()
+            self.tool_parser: Type[ToolParser] = MistralToolParser
         elif tool_parser == 'hermes':
-            self.tool_parser: ToolParser = Hermes2ProToolParser()
+            self.tool_parser: Type[ToolParser] = Hermes2ProToolParser
         else:
             raise ValueError(f'Invalid tool parser value {tool_parser}!')
 
@@ -390,6 +390,8 @@ class OpenAIServingChat(OpenAIServing):
         previous_num_tokens = [0] * request.n
         previous_token_ids = [[]] * request.n
         finish_reason_sent = [False] * request.n
+
+        tool_parser: ToolParser = self.tool_parser()
         try:
             async for res in result_generator:
                 # We need to do it here, because if there are exceptions in
@@ -475,6 +477,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     delta_text = output.text[len(previous_texts[i]):]
 
+
                     # handle streaming deltas for tools with tool_choice
                     if request.tool_choice and type(
                             request.tool_choice
@@ -487,9 +490,18 @@ class OpenAIServingChat(OpenAIServing):
                         ])
 
                     # handle streaming deltas for tools with tool_choice
-                    elif request.tools and (request.tool_choice is None or request.tool_choice == 'auto'):
+                    elif (request.tools and (request.tool_choice is None or request.tool_choice == 'auto')
+                          and self.enable_auto_tools):
+
                         print('handling streaming for tools with no tool choice!')
-                        delta_message = DeltaMessage(content=delta_text)
+                        delta_message = tool_parser.extract_tool_calls_streaming(
+                            previous_text=previous_texts[i],
+                            current_text=output.text,
+                            delta_text=delta_text,
+                            previous_token_ids=previous_token_ids[i],
+                            current_token_ids=output.token_ids,
+                            delta_token_ids=delta_token_ids
+                        )
                     else:
                         print('handling streaming for normal message')
                         delta_message = DeltaMessage(content=delta_text)
@@ -498,11 +510,11 @@ class OpenAIServingChat(OpenAIServing):
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
                     previous_token_ids[i] = output.token_ids
-                    print('previous texts:', previous_texts)
-                    print('delta_text:', delta_text)
-                    print('previous_num_tokens:', previous_num_tokens)
-                    print('previous token IDs', previous_token_ids)
-                    print('delta token IDs: ', delta_token_ids)
+
+                    # if the message delta is None (e.g. because it was a "control token" for tool calls, then
+                    #   get the next token without streaming a chunk
+                    if delta_message is None:
+                        continue
 
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
@@ -631,7 +643,7 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(role=role, content=output.text)
 
             # handle when there are tools and tool choice is auto
-            elif request.tools and (request.tool_choice == "auto" or request.tool_choice is None) and self.enable_auto_tools and self.tool_parser:
+            elif request.tools and (request.tool_choice == "auto" or request.tool_choice is None) and self.enable_auto_tools:
 
                 tool_call_info = self.tool_parser.extract_tool_calls(output.text)
                 tools_called = tool_call_info.tools_called

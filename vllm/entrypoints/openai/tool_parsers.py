@@ -15,7 +15,8 @@ class ToolParser:
     def __init__(self):
         pass
 
-    def extract_tool_calls(self, model_output: str) -> ExtractedToolCallInformation:
+    @staticmethod
+    def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
         raise NotImplementedError('AbstractToolParser.extract_tool_calls has not been implemented!')
 
     def extract_tool_calls_streaming(self,
@@ -25,17 +26,19 @@ class ToolParser:
                                      previous_token_ids: List[int],
                                      current_token_ids: List[int],
                                      delta_token_ids: List[int],
-                                     ) -> DeltaMessage:
+                                     ) -> DeltaMessage | None:
         raise NotImplementedError('AbstractToolParser.extract_tool_calls_streaming has not been implemented!')
 
 
 class MistralToolParser(ToolParser):
     bot_token: str = '[TOOL_CALLS]'
+    bot_token_id: int = 5
 
-    def extract_tool_calls(self, model_output: str) -> ExtractedToolCallInformation:
+    @staticmethod
+    def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
 
         # Get the tool call token from the tokenizer
-        if self.bot_token not in model_output:
+        if MistralToolParser.bot_token not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
@@ -60,7 +63,7 @@ class MistralToolParser(ToolParser):
                     )
                     for raw_function_call in function_call_arr
                 ]
-                content = model_output.split(self.bot_token)[0]
+                content = model_output.split(MistralToolParser.bot_token)[0]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -77,9 +80,17 @@ class MistralToolParser(ToolParser):
                     content=model_output
                 )
 
-    def extract_tool_calls_streaming(self, generator):
-        for chunk in generator:
-            print('CHUNK', chunk)
+    def extract_tool_calls_streaming(self,
+                                     previous_text: str,
+                                     current_text: str,
+                                     delta_text: str,
+                                     previous_token_ids: List[int],
+                                     current_token_ids: List[int],
+                                     delta_token_ids: List[int],
+                                     ) -> DeltaMessage | None:
+
+
+        return DeltaMessage(content=delta_text)
 
 
 class Hermes2ProToolParser(ToolParser):
@@ -91,10 +102,11 @@ class Hermes2ProToolParser(ToolParser):
     tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>|<tool_call>(.*)', re.DOTALL)
     scratch_pad_regex = re.compile(r'<scratch_pad>(.*?)</scratch_pad>', re.DOTALL)
 
-    def extract_tool_calls(self, model_output: str) -> ExtractedToolCallInformation:
+    @staticmethod
+    def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
-        if self.tool_call_start not in model_output:
+        if Hermes2ProToolParser.tool_call_start not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
@@ -106,7 +118,7 @@ class Hermes2ProToolParser(ToolParser):
             try:
                 # there are two possible captures - between tags, or between a tag and end-of-string so the result of findall
                 #   is an array of tuples where one is a function call and the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+                function_call_tuples = Hermes2ProToolParser.tool_call_regex.findall(model_output)
 
                 # load the JSON, and then use it to build the Function and Tool Call
                 raw_function_calls = [json.loads(match[0] if match[0] else match[1]) for match in function_call_tuples]
@@ -120,7 +132,7 @@ class Hermes2ProToolParser(ToolParser):
                         )
                     ) for function_call in raw_function_calls
                 ]
-                content_match = self.scratch_pad_regex.search(model_output)
+                content_match = Hermes2ProToolParser.scratch_pad_regex.search(model_output)
                 content = content_match.group(1) if content_match else None
                 return ExtractedToolCallInformation(
                     tools_called=True,
