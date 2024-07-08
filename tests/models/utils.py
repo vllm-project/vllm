@@ -77,6 +77,7 @@ def check_logprobs_close(
                 # Each predicted token must be in top N logprobs of the other
                 fail_msg = (
                     f"Test{prompt_idx}:"
+                    f"\nMatched tokens:\t{output_ids_0[:idx]}"
                     f"\n{name_0}:\t{output_str_0!r}\t{logprobs_elem_0}"
                     f"\n{name_1}:\t{output_str_1!r}\t{logprobs_elem_1}")
 

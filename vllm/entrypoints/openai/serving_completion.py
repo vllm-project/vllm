@@ -271,16 +271,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_num_tokens[i] = len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
-                    if output.finish_reason is not None:  # return final usage
-                        prompt_tokens = len(res.prompt_token_ids)
-                        completion_tokens = len(output.token_ids)
-                        final_usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=prompt_tokens + completion_tokens,
-                        )
-                    else:
-                        final_usage = None
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -297,9 +287,21 @@ class OpenAIServingCompletion(OpenAIServing):
                         ])
                     if (request.stream_options
                             and request.stream_options.include_usage):
-                        chunk.usage = None
+                        if (request.stream_options.continuous_usage_stats
+                                or output.finish_reason is not None):
+                            prompt_tokens = len(res.prompt_token_ids)
+                            completion_tokens = len(output.token_ids)
+                            usage = UsageInfo(
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=prompt_tokens + completion_tokens,
+                            )
+                        if request.stream_options.continuous_usage_stats:
+                            chunk.usage = usage
+                        else:
+                            chunk.usage = None
 
-                    response_json = chunk.model_dump_json(exclude_unset=True)
+                    response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
 
             if (request.stream_options
@@ -309,10 +311,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     created=created_time,
                     model=model_name,
                     choices=[],
-                    usage=final_usage,
+                    usage=usage,
                 )
                 final_usage_data = (final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True))
+                    exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
         except ValueError as e:

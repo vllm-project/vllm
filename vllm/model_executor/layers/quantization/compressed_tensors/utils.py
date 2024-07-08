@@ -9,6 +9,7 @@ from torch.nn import Module
 class CompressionFormat(Enum):
     dense = "dense"
     sparse_bitmask = "sparse-bitmask"
+    float_quantized = "float-quantized"
     int_quantized = "int-quantized"
     pack_quantized = "pack-quantized"
     marlin_24 = "marlin-24"
