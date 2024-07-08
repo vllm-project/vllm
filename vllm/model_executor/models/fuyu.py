@@ -41,6 +41,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
+from .utils import merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -222,9 +223,10 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.image_token_id = _IMAGE_TOKEN_ID
+        self.image_feature_size = config.patch_size**2 * config.num_channels
 
         self.vision_embed_tokens = ColumnParallelLinear(
-            config.patch_size * config.patch_size * config.num_channels,
+            self.image_feature_size,
             config.hidden_size,
             quant_config=quant_config,
         )
@@ -232,21 +234,15 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
                                                    cache_config=cache_config,
                                                    quant_config=quant_config)
 
-    def merge_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        vision_embeddings: torch.Tensor,
-    ) -> torch.Tensor:
-        mask = input_ids == self.image_token_id
-        inputs_embeds[mask] = vision_embeddings.view(
-            -1, vision_embeddings.shape[-1])
-        return inputs_embeds
-
     def _parse_and_validate_image_input(self, **kwargs: object):
         image_patches = kwargs.pop("image_patches", None)
 
         if isinstance(image_patches, torch.Tensor):
+            expected_feature_size = self.image_feature_size
+            if image_patches.size(-1) != expected_feature_size:
+                raise ValueError(
+                    f"Expected image patches to have the last dimension of "
+                    f"{expected_feature_size}, got {image_patches.size(-1)}")
             image_patches = image_patches.to(
                 self.vision_embed_tokens.weight.dtype)
             return FuyuImagePixelInputs(type="pixel_values",
@@ -268,11 +264,9 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
             vision_embeddings, _ = self.vision_embed_tokens(
                 image_input["data"])
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)
-            inputs_embeds = self.merge_embeddings(
-                input_ids,
-                inputs_embeds,
-                vision_embeddings,
-            )
+            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
+                                                    vision_embeddings,
+                                                    self.image_token_id)
 
         else:
             inputs_embeds = None
