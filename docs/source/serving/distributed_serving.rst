@@ -19,7 +19,7 @@ To run multi-GPU serving, pass in the :code:`--tensor-parallel-size` argument wh
 
 .. code-block:: console
 
-    $ python -m vllm.entrypoints.api_server \
+    $ python -m vllm.entrypoints.openai.api_server \
     $     --model facebook/opt-13b \
     $     --tensor-parallel-size 4
 
@@ -36,3 +36,6 @@ To scale vLLM beyond a single machine, install and start a `Ray runtime <https:/
     $ ray start --address=<ray-head-address>
 
 After that, you can run inference and serving on multiple machines by launching the vLLM process on the head node by setting :code:`tensor_parallel_size` to the number of GPUs to be the total number of GPUs across all machines.
+
+.. warning::
+    Please make sure you downloaded the model to all the nodes, or the model is downloaded to some distributed file system that is accessible by all nodes.
