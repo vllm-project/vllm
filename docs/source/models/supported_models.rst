@@ -161,10 +161,6 @@ Decoder-only Language Models
     - Xverse
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
     -
-  * - :code:`DeepSeekMultiModalityCausalLM`
-    - deepseek-ai
-    - :code:`deepseek-ai/deepseek-vl-1.3b-chat`, :code:`deepseek-ai/deepseek-vl-7b-chat`, etc.
-    -
 
 .. note::
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
@@ -197,6 +193,10 @@ Vision Language Models
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    -
+  * - :code:`DeepSeekMultiModalityCausalLM`
+    - deepseek-ai
+    - :code:`deepseek-ai/deepseek-vl-1.3b-chat`, :code:`deepseek-ai/deepseek-vl-7b-chat`, etc.
     -
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.

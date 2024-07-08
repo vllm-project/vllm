@@ -199,43 +199,39 @@ def run_test(
     }
     dtype = dtype_dict.get(dtype, hf_model.dtype)
     hf_model = hf_model.to(dtype)
-    hf_model = hf_model
-    prepare_input_list = []
-    inputs_embeds_list = []
+    hf_outputs: List = []
     for prompts, images in inputs_per_image:
         print(f'prompt: {prompts}')
         print(f'images: {images}')
         prepare_input = get_input(tokenizer, prompts, images, dtype)
-        prepare_input_list.append(prepare_input)
-        inputs_embeds_list.append(
-            hf_model.prepare_inputs_embeds(**prepare_input))
-
-    inputs_embeds = torch.concat(inputs_embeds_list)
-    attention_mask = torch.concat(
-        [x['attention_mask'] for x in prepare_input_list])
-    outputs = hf_model.generate(
-        inputs_embeds=inputs_embeds,
-        attention_mask=attention_mask,
-        max_new_tokens=max_tokens,
-        pad_token_id=tokenizer.eos_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        do_sample=False,
-        use_cache=True,
-    )
-    hf_outputs: List = []
-
-    for o in outputs:
-        hf_outputs.append(
-            (o, tokenizer.decode(o.cpu().tolist(), skip_special_tokens=True)))
-
-    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs_per_image):
-        check_outputs_equal(
-            outputs_0_lst=hf_output,
-            outputs_1_lst=vllm_output[:2],
-            name_0="hf",
-            name_1="vllm",
+        attention_mask = prepare_input['attention_mask']
+        inputs_embeds = hf_model.prepare_inputs_embeds(**prepare_input)
+        outputs = hf_model.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_tokens,
+            pad_token_id=tokenizer.eos_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            do_sample=False,
+            use_cache=True,
         )
+        for o in outputs:
+            hf_outputs.append((o.cpu().tolist(),
+                               tokenizer.decode(o.cpu().tolist(),
+                                                skip_special_tokens=True)))
+    vllm_outputs_list = []
+    for vllm_outputs in vllm_outputs_per_image:
+        vllm_outputs_list.append([
+            vllm_to_hf_output(vllm_output, model)
+            for vllm_output in vllm_outputs
+        ][:2])
+    print(f'hf_outputs --> {hf_outputs}')
+    print(f'vllm_outputs --> {vllm_outputs_list}')
+    check_outputs_equal(outputs_0_lst=hf_outputs,
+                        outputs_1_lst=vllm_outputs_list,
+                        name_0='hf',
+                        name_1='vllm')
     print('END---->')
 
 
