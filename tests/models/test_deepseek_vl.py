@@ -191,6 +191,7 @@ def run_test(
     hf_model = AutoModelForCausalLM.from_pretrained(model,
                                                     trust_remote_code=True)
     dtype_dict = {
+        'bfloat16': torch.bfloat16,
         'float16': torch.float16,
         'half': torch.bfloat16,
         'float32': torch.float32,
