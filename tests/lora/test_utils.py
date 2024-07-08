@@ -1,9 +1,12 @@
 from collections import OrderedDict
+from unittest.mock import patch
 
 import pytest
+from huggingface_hub.utils import RepositoryNotFoundError
 from torch import nn
 
-from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
+from vllm.lora.utils import (get_lora_absolute_path,
+                             parse_fine_tuned_lora_name, replace_submodule)
 from vllm.utils import LRUCache
 
 
@@ -182,3 +185,44 @@ def test_lru_cache():
     assert 2 in cache
     assert 4 in cache
     assert 6 in cache
+
+
+# Unit tests for get_lora_absolute_path
+@patch('os.path.isabs', True)
+def test_get_lora_absolute_path_absolute(mock_isabs):
+    path = '/absolute/path/to/lora'
+    assert get_lora_absolute_path(path) == path
+
+
+@patch('os.path.expanduser', '/home/user/relative/path/to/lora')
+def test_get_lora_absolute_path_expanduser(mock_expanduser):
+    # Path with ~ that needs to be expanded
+    path = '~/relative/path/to/lora'
+    assert get_lora_absolute_path(path) == '/home/user/relative/path/to/lora'
+
+
+@patch('os.path.exists', True)
+@patch('os.path.abspath', '/absolute/path/to/lora')
+def test_get_lora_absolute_path_local_existing(mock_exists, mock_abspath):
+    # Relative path that exists locally
+    path = 'relative/path/to/lora'
+    assert get_lora_absolute_path(path) == '/absolute/path/to/lora'
+
+
+@patch('huggingface_hub.snapshot_download', '/mock/snapshot/path')
+@patch('os.path.exists', False)
+def test_get_lora_absolute_path_huggingface(mock_exists,
+                                            mock_snapshot_download):
+    # Hugging Face model identifier
+    path = 'org/repo'
+    assert get_lora_absolute_path(path) == '/mock/snapshot/path'
+
+
+@patch('huggingface_hub.snapshot_download',
+       side_effect=RepositoryNotFoundError)
+@patch('os.path.exists', False)
+def test_get_lora_absolute_path_huggingface_error(mock_exists,
+                                                  mock_snapshot_download):
+    # Hugging Face model identifier with download error
+    path = 'org/repo'
+    assert get_lora_absolute_path(path) == path
