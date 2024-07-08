@@ -10,6 +10,10 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
     The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
     However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
 
+.. note::
+    By default, vLLM models do not support multi-modal inputs. To enable multi-modal support,
+    please follow :ref:`this guide <enabling_multimodal_inputs>` after implementing the model here.
+
 .. tip::
     If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.
     We will be happy to help you out!
@@ -37,30 +41,30 @@ For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/
 2. Rewrite the :code:`forward` methods
 --------------------------------------
 
-Next, you need to rewrite the :code:`forward` methods of your model by following these steps:
+Next, you need to rewrite the :meth:`~torch.nn.Module.forward` method of your model by following these steps:
 
 1. Remove any unnecessary code, such as the code only used for training.
 2. Change the input parameters:
 
 .. code-block:: diff
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-    -    attention_mask: Optional[torch.Tensor] = None,
-    -    position_ids: Optional[torch.LongTensor] = None,
-    -    past_key_values: Optional[List[torch.FloatTensor]] = None,
-    -    inputs_embeds: Optional[torch.FloatTensor] = None,
-    -    labels: Optional[torch.LongTensor] = None,
-    -    use_cache: Optional[bool] = None,
-    -    output_attentions: Optional[bool] = None,
-    -    output_hidden_states: Optional[bool] = None,
-    -    return_dict: Optional[bool] = None,
-    -) -> Union[Tuple, CausalLMOutputWithPast]:
-    +    positions: torch.Tensor,
-    +    kv_caches: List[torch.Tensor],
-    +    attn_metadata: AttentionMetadata,
-    +) -> Optional[SamplerOutput]:
+      def forward(
+          self,
+          input_ids: torch.Tensor,
+    -     attention_mask: Optional[torch.Tensor] = None,
+    -     position_ids: Optional[torch.LongTensor] = None,
+    -     past_key_values: Optional[List[torch.FloatTensor]] = None,
+    -     inputs_embeds: Optional[torch.FloatTensor] = None,
+    -     labels: Optional[torch.LongTensor] = None,
+    -     use_cache: Optional[bool] = None,
+    -     output_attentions: Optional[bool] = None,
+    -     output_hidden_states: Optional[bool] = None,
+    -     return_dict: Optional[bool] = None,
+    - ) -> Union[Tuple, CausalLMOutputWithPast]:
+    +     positions: torch.Tensor,
+    +     kv_caches: List[torch.Tensor],
+    +     attn_metadata: AttentionMetadata,
+    + ) -> Optional[SamplerOutput]:
 
 1. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
 2. Replace the attention operation with either :code:`PagedAttention`, :code:`PagedAttentionWithRoPE`, or :code:`PagedAttentionWithALiBi` depending on the model's architecture.
@@ -75,7 +79,7 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
 
 If your model is too large to fit into a single GPU, you can use tensor parallelism to manage it.
 To do this, substitute your model's linear and embedding layers with their tensor-parallel versions.
-For the embedding layer, you can simply replace :code:`nn.Embedding` with :code:`VocabParallelEmbedding`. For the output LM head, you can use :code:`ParallelLMHead`.
+For the embedding layer, you can simply replace :class:`torch.nn.Embedding` with :code:`VocabParallelEmbedding`. For the output LM head, you can use :code:`ParallelLMHead`.
 When it comes to the linear layers, we provide the following options to parallelize them:
 
 * :code:`ReplicatedLinear`: Replicates the inputs and weights across multiple GPUs. No memory saving.
