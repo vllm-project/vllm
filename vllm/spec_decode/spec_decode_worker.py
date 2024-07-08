@@ -192,9 +192,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._metrics = AsyncMetricsCollector(
             self.spec_decode_sampler
         ) if metrics_collector is None else metrics_collector
-
-        self.probs_dtype = self.spec_decode_sampler.probs_dtype
-        self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
         # Tracks the sequence IDs that received a bonus token ID in
         # their last forward pass. Needed only if KV cache is being
         # used for token generation such as in the case of MultiStepWorker.
