@@ -695,6 +695,7 @@ class Scheduler:
 
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(seq_group)
+            can_allocate = True #TODO HACK TMS
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:
@@ -757,6 +758,8 @@ class Scheduler:
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
         """
+        import pdb
+        pdb.set_trace()
         # Include running requests to the budget.
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
@@ -1054,6 +1057,7 @@ class Scheduler:
                              if not seq_group.is_finished())
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
+        return #TODO TMS HACK
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING

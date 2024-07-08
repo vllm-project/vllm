@@ -23,6 +23,8 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention.backends.no_attention import NoAttentionBackend
+
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          SchedulerConfig)
@@ -222,7 +224,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        ) if num_attn_heads else None
+        ) if num_attn_heads else NoAttentionBackend() 
 
         # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
@@ -394,6 +396,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                      1) // self.block_size
             block_aligned_sliding_window = \
                 sliding_window_blocks * self.block_size
+
+        import pdb
+        pdb.set_trace()
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())

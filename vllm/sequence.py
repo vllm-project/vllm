@@ -643,6 +643,9 @@ class SequenceGroupMetadata:
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
     ) -> None:
+        import pdb
+        pdb.set_trace()
+
         self.request_id = request_id
         self.is_prompt = is_prompt
         self.seq_data = seq_data

@@ -312,6 +312,12 @@ class ModelConfig:
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             return 256
+
+        if hasattr(self.hf_text_config, "model_type"
+                   ) and self.hf_text_config.model_type == 'mamba':
+            # Is this going to explode
+            return 0 
+
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
@@ -342,6 +348,8 @@ class ModelConfig:
         if self.hf_config.model_type == "dbrx":
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
+        if self.hf_config.model_type == "mamba":
+            return 0
 
         attributes = [
             # For Falcon:
@@ -393,6 +401,10 @@ class ModelConfig:
     def get_layers_block_type(self,
                               parallel_config: "ParallelConfig") -> List[str]:
         num_layers = self.get_num_layers(parallel_config)
+       
+        if self.hf_config.model_type == "mamba":
+            return ["mamba"] * num_layers
+
         # Transformers supports layers_block_type @property
         return getattr(self.hf_config, "layers_block_type",
                        ["attention"] * num_layers)

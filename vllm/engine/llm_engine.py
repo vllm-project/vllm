@@ -252,8 +252,12 @@ class LLMEngine:
             load_config=load_config,
         )
 
-        if not self.model_config.embedding_mode:
+        if self.model_config.get_num_attention_layers(parallel_config) == 0:
+            self.cache_config.num_gpu_blocks = 0
+            self.cache_config.num_cpu_blocks = 0 
+        elif not self.model_config.embedding_mode:
             self._initialize_kv_caches()
+
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
