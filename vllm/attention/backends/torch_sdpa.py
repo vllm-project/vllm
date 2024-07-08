@@ -138,15 +138,15 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 "Please use xFormers backend instead.")
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            kv_cache: Optional[torch.Tensor],
-            attn_metadata: TorchSDPAMetadata,  # type: ignore
-            kv_scale: float = 1.0,
-            attn_type: AttentionType = AttentionType.DECODER,
-            ) -> torch.Tensor:
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: TorchSDPAMetadata,  # type: ignore
+        kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
         Args:
