@@ -1,8 +1,9 @@
-from typing import List, Optional, Type
+from typing import List, Optional, Tuple, Type
 
 import pytest
 
 from vllm.multimodal.utils import rescale_image_size
+from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
@@ -17,6 +18,16 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 models = ["adept/fuyu-8b"]
+
+
+def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+                                         Optional[SampleLogprobs]]):
+    """Sanitize vllm output to be comparable with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    hf_output_str = output_str + "|ENDOFTEXT|"
+
+    return output_ids, hf_output_str, out_logprobs
 
 
 def run_test(
@@ -86,7 +97,9 @@ def run_test(
                                         vllm_outputs_per_image):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_outputs,
+            outputs_1_lst=[
+                vllm_to_hf_output(vllm_output) for vllm_output in vllm_outputs
+            ],
             name_0="hf",
             name_1="vllm",
         )
