@@ -57,12 +57,14 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         assert qkv_proj.weight_scale.dtype is torch.float32
         assert qkv_proj.input_scale.dtype is torch.float32
 
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        assert output
+
 
 def test_compressed_tensors_no_enforce_eager(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change"
     with vllm_runner(model_path) as llm:
-        sampling_params = SamplingParams()
-        output = llm.generate("Hello world!", sampling_params=sampling_params)
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
 
 
@@ -84,6 +86,8 @@ def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner, model_args):
         assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.weight.dtype is torch.int8
 
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        assert output
 
 @pytest.mark.parametrize(
     "wNa16_args",
@@ -101,13 +105,13 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
         assert isinstance(qkv_proj.scheme, CompressedTensorsWNA16)
 
         assert qkv_proj.scheme.strategy == strategy
-        assert qkv_proj.scheme.group_size == group
+        assert qkv_proj.scheme.group_size == (-1 if group is None else group)
 
         assert qkv_proj.weight_packed.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is torch.float16
         assert qkv_proj.weight_packed.pack_factor == pack_factor
 
-        output = llm.generate_greedy("Hello my name is")
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
 
 
@@ -123,7 +127,7 @@ def test_compressed_tensors_w4a16_marlin24(vllm_runner):
         assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16Sparse24)
         assert qkv_proj.weight_packed.dtype is torch.int32
 
-        output = llm.generate_greedy("Hello my name is")
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
 
 
@@ -145,5 +149,5 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert len(qkv_proj.weight_scale.shape) == 0
 
         sampling_params = SamplingParams()
-        output = llm.generate("Hello world!", sampling_params=sampling_params)
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
