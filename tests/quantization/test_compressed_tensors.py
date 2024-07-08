@@ -6,7 +6,6 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 import pytest
 import torch
 
-from vllm import SamplingParams
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
@@ -89,6 +88,7 @@ def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner, model_args):
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
 
+
 @pytest.mark.parametrize(
     "wNa16_args",
     [("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8),
@@ -148,6 +148,5 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert len(qkv_proj.input_scale.shape) == 0
         assert len(qkv_proj.weight_scale.shape) == 0
 
-        sampling_params = SamplingParams()
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
