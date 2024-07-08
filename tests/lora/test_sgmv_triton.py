@@ -118,3 +118,4 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     # diff = (ref_out - out).abs()
     # print(f'max diff {diff.max():0.5f}, mean {diff.mean():0.5f}')
     assert_close(ref_out, out, dtype=dtype, tl_dot=repeats_per_lora >= 9)
+    torch.cuda.empty_cache()

@@ -190,7 +190,8 @@ def convert_mapping(
     if long_lora_indices_len is not None:
         indices_len.append(long_lora_indices_len)
 
-    max_repeats = (repeats[1:] - repeats[:-1]).max().item()
+    max_repeats = ((repeats[1:] -
+                    repeats[:-1]).max().item() if repeats.numel() > 1 else 0)
     return (base_indices, repeats, [max_repeats], ranks, sampler_indices,
             sampler_indices_padded, embeddings_indices, long_lora_indices,
             indices_len)
@@ -559,7 +560,8 @@ class LoRAModelManager:
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
-            del self.lora_id_to_r[lora_id]
+            if lora_id in self.lora_id_to_r:
+                del self.lora_id_to_r[lora_id]
         except ValueError:
             pass
 

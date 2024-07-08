@@ -904,7 +904,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-@pytest.mark.parametrize("seed", [list(range(256))])
+@pytest.mark.parametrize("seed", list(range(256)))
 def test_vocab_parallel_embedding_indices(tp_size, seed):
     random.seed(seed)
     vocab_size = random.randint(4000, 64000)
