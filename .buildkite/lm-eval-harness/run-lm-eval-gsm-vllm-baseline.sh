@@ -46,6 +46,6 @@ while getopts "m:b:l:f:t:" OPT; do
 done
 
 lm_eval --model vllm \
-  --model_args pretrained=$MODEL,tensor_parallel_size=$TP_SIZE \
+  --model_args pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,add_bos_token=true \
   --tasks gsm8k --num_fewshot $FEWSHOT --limit $LIMIT \
   --batch_size $BATCH_SIZE
