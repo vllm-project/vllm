@@ -117,9 +117,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
-        elif draft_worker_kwargs[
-                "model_config"].hf_config.model_type == "mlp_speculator":
-            proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
         else:
             draft_parallel_config: ParallelConfig = draft_worker_kwargs[
                 'parallel_config']
@@ -177,8 +174,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             scorer_worker: A worker that produces probabilities of speculative
                 tokens according to some base model. Typically a vanilla vLLM
                 Worker.
-            rejection_sampler: A Torch module used to perform modified rejection
-                sampling for speculative decoding.
             spec_decode_sampler: A Torch module used to perform acceptance
                 sampling of the draft tokens in the verification step of
                 speculative decoding. Currently we support two different 
@@ -630,7 +625,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             for sequence_index in range(batch_size):
                 # Each sequence may have a different num_logprobs; retrieve it.
                 num_logprobs = num_logprobs_per_seq[sequence_index]
-                #seq_id = seq_ids_with_request_ids[sequence_index][0]
                 seq_id = seq_ids[sequence_index]
                 step_output_token_ids.append(
                     create_sequence_group_output(
