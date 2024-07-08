@@ -60,12 +60,13 @@ def convert_mapping(
         for idx, id_ in enumerate(prompt_adapter_index_to_id)
         if id_ is not None
     }
-    pa_indices = torch.tensor([
+    pa_indices = ([
         id_to_index.get(id_, -1) if id_ > 0 else -1
         for id_ in mapping.index_mapping
     ])
 
     pa_embedding_mapping = convert_to_embedding_indices(pa_indices)
+    pa_indices = torch.tensor(pa_indices)
     return pa_indices, pa_embedding_mapping
 
 
