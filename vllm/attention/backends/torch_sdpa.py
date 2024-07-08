@@ -160,9 +160,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         """
         assert kv_scale == 1.0
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and " + \
-                                      "encoder/decoder cross-attention " + \
-                                      "are not implemented for " + \
+            raise NotImplementedError("Encoder self-attention and " +
+                                      "encoder/decoder cross-attention " +
+                                      "are not implemented for " +
                                       "TorchSDPABackendImpl")
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
