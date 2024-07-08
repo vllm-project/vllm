@@ -138,8 +138,8 @@ class ChameleonAttention(nn.Module):
         # reshape for layernorm
         q = q.view(*q.shape[:-1], -1, self.head_dim)
         k = k.view(*k.shape[:-1], -1, self.head_dim)
-        q, _ = self.q_norm(q)
-        k, _ = self.k_norm(k)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         q = q.view(*q.shape[:-2], -1)
         k = k.view(*k.shape[:-2], -1)
         return q, k
