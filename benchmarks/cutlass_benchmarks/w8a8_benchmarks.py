@@ -106,6 +106,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
 
     timers = []
 
@@ -113,8 +114,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     timers.append(
         bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales",
                  torch.mm, a.to(dtype=torch.bfloat16, device="cuda"),
-                 b.to(dtype=torch.bfloat16,
-                      device="cuda"), scale_a, scale_b, torch.bfloat16))
+                 b.to(dtype=torch.bfloat16, device="cuda")))
 
     # pytorch impl: bf16 output, without fp8 fast accum
     timers.append(
@@ -175,6 +175,19 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_mm",
                  ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.float16))
+
+    # cutlass impl: bf16 output, with bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_mm_bias",
+                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.bfloat16,
+                 bias))
+
+    # cutlass impl: fp16 output, with bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_mm_bias",
+                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.float16,
+                 bias.to(dtype=torch.float16)))
+
     return timers
 
 
