@@ -89,8 +89,23 @@ class MistralToolParser(ToolParser):
                                      delta_token_ids: List[int],
                                      ) -> DeltaMessage | None:
 
+        # if the tool call token ID is not in the tokens generated so far, append output to contents
+        if self.bot_token_id not in current_token_ids:
+            return DeltaMessage(content=delta_text)
+        else:
 
-        return DeltaMessage(content=delta_text)
+            # if the bot token is the only token in the delta, return None so we don't ship a delta to the client
+            if len(delta_token_ids) == 1 and delta_token_ids[0] == self.bot_token_id:
+                return None
+
+            # for mistral, everything after the BOT token is tool call, not content. If there's content
+            #   which I have yet to see, it would HAVE to come BEFORE the BOT token
+            else:
+                # Now we get into partial JSON parsing
+                # TODO IMPLEMENT THIS
+                return DeltaMessage(content=delta_text)
+
+
 
 
 class Hermes2ProToolParser(ToolParser):
@@ -148,6 +163,11 @@ class Hermes2ProToolParser(ToolParser):
                     tool_calls=[],
                     content=model_output
                 )
+
+
+    def __init__(self):
+        self.current_tool_count: int = 0
+        self.current_tool_name_sent: bool = False # reset each time we encounter a new tool in the array
 
     def extract_tool_calls_streaming(self,
                                      previous_text: str,
