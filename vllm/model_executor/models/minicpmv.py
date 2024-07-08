@@ -242,23 +242,6 @@ class MiniCPMV(VisionLanguageModelBase):
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
         self.resampler.to(device="cuda", dtype=param_dtype)
         self.sampler = Sampler()
-        self.img2tensor_transform, self.tensor2img_transform = \
-            self.init_transform()
-
-    def init_transform(self):
-        return transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=IMAGENET_INCEPTION_MEAN, std=IMAGENET_INCEPTION_STD
-                ),
-            ]
-            ), \
-            transforms.Compose(
-                [
-                    transforms.ToPILImage()
-                ]
-            )
 
     def init_vision_module(self):
         default_dtype = torch.get_default_dtype()
@@ -295,7 +278,7 @@ class MiniCPMV(VisionLanguageModelBase):
         dtype = self.vpm.pos_embed.data.dtype
         for pixel_value in pixel_values:
             # V2.0 start
-            H, W = pixel_value.shape[-2:]
+            H, W = pixel_value[0].shape[-2:]
             tgt_size = (math.ceil(H / self.vpm.patch_embed.patch_size[0]),
                         math.ceil(W / self.vpm.patch_embed.patch_size[0]))
             # V2.0 end
@@ -308,269 +291,31 @@ class MiniCPMV(VisionLanguageModelBase):
             res.append(self.resampler(vision_embedding, tgt_size))
         return torch.vstack(res)
 
-    def get_image_bound(self, input_ids, im_start_token_id, im_end_token_id,
-                        unk_token_id):
-        length = len(input_ids)
-        bound = []
-        im_start_idx = -1
-        flag = False
-        for x in range(length):
-            if input_ids[x] == im_start_token_id:
-                if flag is False:
-                    flag = True
-                im_start_idx = x + 1
-            elif input_ids[x] == im_end_token_id:
-                if flag is True:
-                    flag = False
-                    bound.append(im_start_idx)
-                    bound.append(x - 1)
-            elif input_ids[x] != unk_token_id:
-                if flag is True:
-                    flag = False
-        if len(bound) > 0:
-            bound = torch.tensor(bound).reshape(-1, 2)
-        return bound
-
-    def ensure_divide(self, length, patch_size):
-        return max(round(length / patch_size) * patch_size, patch_size)
-
-    def find_best_resize(self,
-                         original_size,
-                         scale_resolution,
-                         patch_size,
-                         allow_upscale=False):
-        width, height = original_size
-        if (width * height >
-                scale_resolution * scale_resolution) or allow_upscale:
-            r = width / height
-            height = int(scale_resolution / math.sqrt(r))
-            width = int(height * r)
-        best_width = self.ensure_divide(width, patch_size)
-        best_height = self.ensure_divide(height, patch_size)
-        return (best_width, best_height)
-
-    def get_refine_size(self,
-                        original_size,
-                        grid,
-                        scale_resolution,
-                        patch_size,
-                        allow_upscale=False):
-        width, height = original_size
-        grid_x, grid_y = grid
-
-        refine_width = self.ensure_divide(width, grid_x)
-        refine_height = self.ensure_divide(height, grid_y)
-
-        grid_width = refine_width / grid_x
-        grid_height = refine_height / grid_y
-
-        best_grid_size = self.find_best_resize((grid_width, grid_height),
-                                               scale_resolution,
-                                               patch_size,
-                                               allow_upscale=allow_upscale)
-        refine_size = (best_grid_size[0] * grid_x, best_grid_size[1] * grid_y)
-        return refine_size
-
-    def split_to_patches(self, image, grid):
-        patches = []
-        width, height = (image.shape[-1], image.shape[-2])
-        grid_x = int(width / grid[0])
-        grid_y = int(height / grid[1])
-        for i in range(0, height, grid_y):
-            images = []
-            for j in range(0, width, grid_x):
-                patch = image[:, i:i + grid_y, j:j + grid_x]
-                images.append(patch)
-            patches.append(images)
-        return patches
-
-    def slice_image(self,
-                    image_tensor: torch.Tensor,
-                    max_slice_nums=9,
-                    scale_resolution=448,
-                    patch_size=14,
-                    never_split=False):
-        original_size = (image_tensor.shape[-1], image_tensor.shape[-2])
-        original_width, original_height = original_size
-        log_ratio = math.log(original_width / original_height)
-        ratio = original_width * original_height / (scale_resolution *
-                                                    scale_resolution)
-        multiple = min(math.ceil(ratio), max_slice_nums)
-
-        image = self.tensor2img_transform(image_tensor)
-
-        source_image = None
-        best_grid = None
-        patches = []
-
-        if multiple <= 1 or never_split:
-            best_size = self.find_best_resize(original_size,
-                                              scale_resolution,
-                                              patch_size,
-                                              allow_upscale=True)
-            # The resizing of torchvision is also available in this function.
-            # But there are slight deviations between the results of
-            # torchvision resizing and pillow image resizing.
-            # For the consistency with MiniCPM-V-2 in HF,
-            # we choose PIL resizing and this may take a little more time.
-            #
-            # resize_transform = transforms.Compose([
-            #     transforms.Resize((best_size[::-1]),
-            #                       InterpolationMode.BICUBIC,
-            #                       antialias=True),
-            #     transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
-            #                          std=IMAGENET_INCEPTION_STD)
-            # ])
-            # source_image = resize_transform(image)
-            source_image = self.img2tensor_transform(
-                image.resize(best_size,
-                             Image.Resampling.BICUBIC)).to(image_tensor.device)
-        else:
-            candidate_split_grids_nums = []
-            for i in [multiple - 1, multiple, multiple + 1]:
-                if i == 1 or i > max_slice_nums:
-                    continue
-                candidate_split_grids_nums.append(i)
-
-            best_resize = self.find_best_resize(original_size,
-                                                scale_resolution, patch_size)
-            # resize_transform = transforms.Compose([
-            #     transforms.Resize(best_resize[::-1],
-            #                       InterpolationMode.BICUBIC,
-            #                       antialias=True),
-            #     transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
-            #                          std=IMAGENET_INCEPTION_STD)
-            # ])
-            # source_image = resize_transform(image_tensor.clone())
-            source_image = self.img2tensor_transform(image.copy().resize(
-                best_resize, Image.Resampling.BICUBIC)).to(image_tensor.device)
-
-            candidate_grids = []
-
-            # find best grid
-            for split_grids_nums in candidate_split_grids_nums:
-                m = 1
-                while m <= split_grids_nums:
-                    if split_grids_nums % m == 0:
-                        candidate_grids.append([m, split_grids_nums // m])
-                    m += 1
-
-            best_grid = [1, 1]
-            min_error = float("inf")
-            for grid in candidate_grids:
-                error = abs(log_ratio - math.log(grid[0] / grid[1]))
-                if error < min_error:
-                    best_grid = grid
-                    min_error = error
-
-            refine_size = self.get_refine_size(original_size,
-                                               best_grid,
-                                               scale_resolution,
-                                               patch_size,
-                                               allow_upscale=True)
-
-            # resize_transform = transforms.Compose([
-            #     transforms.Resize(refine_size[::-1],
-            #                       InterpolationMode.BICUBIC,
-            #                       antialias=True),
-            #     transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
-            #                          std=IMAGENET_INCEPTION_STD)
-            # ])
-            # refine_image = resize_transform(image.clone())
-            refine_image = self.img2tensor_transform(image.copy().resize(
-                refine_size, Image.Resampling.BICUBIC)).to(image_tensor.device)
-            patches = self.split_to_patches(refine_image, best_grid)
-
-        return source_image, patches, best_grid
-
-    def get_grid_placeholder(self, grid, query_num):
-        image_placeholder = [self.config.im_start_token_id] + \
-            [self.config.unk_token_id] * query_num + \
-            [self.config.im_end_token_id]
-
-        cols = grid[0]
-        rows = grid[1]
-        slices = []
-        for i in range(rows):
-            lines = []
-            for j in range(cols):
-                lines += image_placeholder
-            slices = slices + lines
-            if i < rows - 1:
-                slices += [5]  # \n
-        slice_placeholder = [self.config.slice_start_token_id
-                             ] + slices + [self.config.slice_end_token_id]
-        return slice_placeholder
-
-    def get_slice_image_placeholder(self, image):
-        image_placeholder = [self.config.im_start_token_id] + \
-            [self.config.unk_token_id] * self.config.query_num + \
-            [self.config.im_end_token_id]
-        slice_images = []
-
-        source_image, patches, best_grid = self.slice_image(
-            image,
-            self.config.max_slice_nums,  # default: 9
-            self.config.scale_resolution,  # default: 448
-            self.config.patch_size  # default: 14
-        )
-
-        slice_images.append(source_image)
-        final_placeholder = image_placeholder
-
-        if len(patches) > 0:
-            for i in range(len(patches)):
-                for j in range(len(patches[0])):
-                    slice_images.append(patches[i][j])
-
-            final_placeholder += self.get_grid_placeholder(
-                best_grid, self.config.query_num)
-        return slice_images, final_placeholder
-
-    def modify_input_ids(self, input_ids, place_holder, im_start_token_id,
-                         im_end_token_id):
-        if len(torch.where(input_ids == im_end_token_id)[0]) == 0:
-            return [], input_ids
-        place_holder = torch.tensor(place_holder + [5]).to(
-            device=input_ids.device, dtype=input_ids.dtype)
-        start_idx = 0
-        end_idx = 0
-        for x in range(input_ids.shape[0]):
-            if input_ids[x] == im_start_token_id:
-                start_idx = x
-            elif input_ids[x] == im_end_token_id:
-                end_idx = x
-        input_ids = torch.cat([
-            input_ids[:start_idx], place_holder,
-            input_ids[end_idx + 1:-place_holder.shape[0] + 2]
-        ],
-                              dim=0)
+    def get_image_bound(self, input_ids, im_start_token_id, im_end_token_id):
         image_start_tokens = torch.where(input_ids == im_start_token_id)[0]
-
         image_start_tokens += 1
         image_end_tokens = torch.where(input_ids == im_end_token_id)[0]
-        valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
-        if image_start_tokens[:valid_image_nums].unsqueeze(
-                -1).shape[0] == image_end_tokens[:valid_image_nums].unsqueeze(
-                    -1).shape[0]:
-            image_bound = torch.cat([
+        valid_image_nums = min(len(image_start_tokens), len(image_end_tokens))
+        if valid_image_nums == 0:
+            return []
+        image_bound = torch.hstack(
+            [
                 image_start_tokens[:valid_image_nums].unsqueeze(-1),
                 image_end_tokens[:valid_image_nums].unsqueeze(-1),
-            ],
-                                    dim=1)
-        else:
-            image_bound = torch.tensor([]).to(device=input_ids.device,
-                                              dtype=input_ids.dtype)
-        return image_bound, input_ids
+            ]
+        )
+        
+        return image_bound
 
-    def get_embedding(self, data, im_start_token_id, im_end_token_id,
-                      unk_token_id):
+    def get_embedding(self, data, im_start_token_id, im_end_token_id):
+        input_ids = data['input_ids']
         if 'vision_hidden_states' not in data:
-            pixel_values = data['pixel_values']
-            if pixel_values is not None and len(pixel_values) > 0:
-                images, places_holder = self.get_slice_image_placeholder(
-                    pixel_values[0])
-                vision_hidden_states = self.get_vision_embedding(images)
+            pixel_values_list = data['pixel_values']
+            vision_hidden_states = []
+            if pixel_values_list is not None:
+                for pixel_values in pixel_values_list:
+                    if pixel_values is not None and len(pixel_values) > 0:
+                        vision_hidden_states.append(self.get_vision_embedding(pixel_values))
             else:
                 vision_hidden_states = torch.tensor([]).to(
                     data['input_ids'].device)
@@ -578,17 +323,21 @@ class MiniCPMV(VisionLanguageModelBase):
             vision_hidden_states = data['vision_hidden_states']
 
         if data['pixel_values'] is not None:
-            image_bound, input_ids = self.modify_input_ids(
-                data['input_ids'], places_holder, im_start_token_id,
-                im_end_token_id)
+            image_bound = self.get_image_bound(input_ids, 
+                                               im_start_token_id,
+                                               im_end_token_id)
         else:
-            input_ids = data['input_ids']
             image_bound = []
 
         vlm_embedding = self.llm.model.embed_tokens(
             input_ids) * self.llm.config.scale_emb
-        vision_hidden_states = vision_hidden_states.type(vlm_embedding.dtype)
+        vision_hidden_states = [
+            i.type(vlm_embedding.dtype) if isinstance(i, torch.Tensor) else i
+            for i in vision_hidden_states
+        ]
+
         if len(vision_hidden_states) > 0 and len(image_bound) > 0:
+            vision_hidden_states = torch.cat(vision_hidden_states, dim=0)
             image_indices = torch.stack([
                 torch.arange(r[0], r[1], dtype=torch.long) for r in image_bound
             ]).to(vlm_embedding.device)
@@ -607,14 +356,11 @@ class MiniCPMV(VisionLanguageModelBase):
         **kwargs: object,
     ):
         image_input = kwargs.pop("pixel_values", None)
-        if image_input is not None:
-            image_input = image_input.float()
         vlm_embeddings, vision_hidden_states = self.get_embedding(
             {
                 "pixel_values": image_input,
                 "input_ids": input_ids
-            }, self.config.im_start_token_id, self.config.im_end_token_id,
-            self.config.unk_token_id)
+            }, self.config.im_start_token_id, self.config.im_end_token_id)
 
         output = self.llm(input_ids=None,
                           positions=positions,

@@ -637,10 +637,25 @@ class ModelRunner:
         else:
             lora_mapping = None
 
-        multi_modal_kwargs = {
-            k: torch.cat(v, dim=0).to(self.device)
-            for k, v in multi_modal_kwargs_list.items()
-        }
+        # MiniCPMV needs dynamic image size, which can not be concanated.
+        if "MiniCPMV" == self.model.__class__.__name__:
+            def to_device_recursive(value):
+                if isinstance(value, list):
+                    new_value = []
+                    for v in value:
+                        new_value += [to_device_recursive(v)]
+                    return new_value
+                else:
+                    return value.to(self.device)
+            multi_modal_kwargs = {
+                k: to_device_recursive(v)
+                for k, v in multi_modal_kwargs_list.items()
+            }
+        else:
+            multi_modal_kwargs = {
+                k: torch.cat(v, dim=0).to(self.device)
+                for k, v in multi_modal_kwargs_list.items()
+            }
 
         return ModelInput(
             input_tokens=input_tokens_tensor,
