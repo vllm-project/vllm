@@ -25,7 +25,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
-    hf_output_str = output_str + "|ENDOFTEXT|"
+    hf_output_str = output_str.lstrip() + "|ENDOFTEXT|"
 
     return output_ids, hf_output_str, out_logprobs
 
