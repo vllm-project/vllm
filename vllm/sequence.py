@@ -469,8 +469,8 @@ class SequenceGroup:
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
-        # If still in prefill phase, raise Error.
-        if self.is_prefill():
+        # If still in initial prefill phase, raise Error.
+        if self.is_prefill() and self.get_seqs()[0].get_output_len() == 0:
             raise ValueError(
                 "seq_group.get_last_latency() should not be called "
                 "if the seq_group is in prefill phase.")
