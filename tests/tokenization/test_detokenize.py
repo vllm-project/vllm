@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 
-import torch
 import pytest
+import torch
 from transformers import AutoTokenizer
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
@@ -249,7 +249,7 @@ def test_decode_prompt_logprobs_chunked_prefill(
         enable_chunked_prefill = True
         max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
         max_num_batched_tokens = chunked_prefill_token_size
-  
+
     with vllm_runner(model,
                      dtype="half",
                      max_logprobs=5,
