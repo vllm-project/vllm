@@ -75,7 +75,7 @@ class Detokenizer:
                          spaces_between_special_tokens=prms.
                          spaces_between_special_tokens,
                      )
-                    
+
                     sample_logprob.decoded_token = new_text
 
                     # Use the offsets & prev tokens corresponding to
@@ -85,7 +85,6 @@ class Detokenizer:
                         next_iter_prefix_offset = new_prefix_offset
                         next_iter_read_offset = new_read_offset
                         next_iter_tokens = new_tokens
-
 
             # Advance to the next token position.
             prefix_offset = next_iter_prefix_offset
