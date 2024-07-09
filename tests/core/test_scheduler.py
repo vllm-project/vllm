@@ -12,12 +12,9 @@ from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup, SequenceStatus
 
-from .utils import (create_dummy_prompt,
-                    get_sequence_groups,
-                    append_new_token,
-                    schedule_and_update_computed_tokens,
-                    append_new_token_seq_group,
-                    )
+from .utils import (append_new_token, append_new_token_seq_group,
+                    create_dummy_prompt, get_sequence_groups,
+                    schedule_and_update_computed_tokens)
 
 
 def test_scheduler_add_seq_group():

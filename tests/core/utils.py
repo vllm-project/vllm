@@ -8,7 +8,6 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, Sequence, SequenceGroup
 
 
-
 def create_dummy_prompt(
     request_id: str,
     prompt_length: int,
@@ -180,7 +179,9 @@ def create_seq_group_encoder_decoder(
 def round_up_to_next_block(seq_len: int, block_size: int) -> int:
     return (seq_len + block_size - 1) // block_size
 
+
 # Helper functions for scheduler tests
+
 
 def get_sequence_groups(scheduler_output):
     return [s.seq_group for s in scheduler_output.scheduled_seq_groups]

@@ -2,17 +2,13 @@ from typing import List
 
 import pytest  # noqa
 
-from vllm.config import (CacheConfig, 
-                         SchedulerConfig,
-                         )
+from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import SequenceGroup
 
-from .utils import (create_dummy_prompt_encoder_decoder,
-                    get_sequence_groups,
-                    append_new_token,
-                    schedule_and_update_computed_tokens,
-                    )
+from .utils import (append_new_token, create_dummy_prompt_encoder_decoder,
+                    get_sequence_groups, schedule_and_update_computed_tokens)
+
 
 def test_scheduler_schedule_simple_encoder_decoder():
     block_size = 4
@@ -28,7 +24,6 @@ def test_scheduler_schedule_simple_encoder_decoder():
     # Add seq groups to scheduler.
     req_id_list = []
     for i in range(num_seq_group):
-        # _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
         req_id = str(i)
         req_id_list.append(req_id)
         _, _, seq_group = create_dummy_prompt_encoder_decoder(
