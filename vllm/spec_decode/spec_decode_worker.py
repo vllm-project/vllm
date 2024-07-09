@@ -44,8 +44,10 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
     assert speculative_config is not None
 
+    kwargs["enable_mqa"] = True
     target_worker = Worker(*args, **kwargs)
 
+    kwargs["enable_mqa"] = False
     draft_worker_kwargs = kwargs.copy()
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
@@ -67,7 +69,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_threshold=speculative_config.
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
-        typical_acceptance_sampler_posterior_alpha)
+        typical_acceptance_sampler_posterior_alpha,
+        enable_mqa=True)
 
     return spec_decode_worker
 
@@ -99,15 +102,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """
 
     @classmethod
-    def create_worker(
-        cls,
-        scorer_worker: Worker,
-        draft_worker_kwargs: Dict[str, Any],
-        disable_by_batch_size: Optional[int],
-        draft_token_acceptance_method: str,
-        typical_acceptance_sampler_posterior_threshold: float,
-        typical_acceptance_sampler_posterior_alpha: float,
-    ) -> "SpecDecodeWorker":
+    def create_worker(cls, scorer_worker: Worker,
+                      draft_worker_kwargs: Dict[str, Any],
+                      disable_by_batch_size: Optional[int],
+                      draft_token_acceptance_method: str,
+                      typical_acceptance_sampler_posterior_threshold: float,
+                      typical_acceptance_sampler_posterior_alpha: float,
+                      enable_mqa: bool) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
@@ -160,16 +161,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         return SpecDecodeWorker(proposer_worker,
                                 scorer_worker,
                                 disable_by_batch_size=disable_by_batch_size,
-                                spec_decode_sampler=spec_decode_sampler)
+                                spec_decode_sampler=spec_decode_sampler,
+                                enable_mqa=enable_mqa)
 
-    def __init__(
-        self,
-        proposer_worker: ProposerWorkerBase,
-        scorer_worker: WorkerBase,
-        spec_decode_sampler: SpecDecodeBaseSampler,
-        metrics_collector: Optional[AsyncMetricsCollector] = None,
-        disable_by_batch_size: Optional[int] = None,
-    ):
+    def __init__(self,
+                 proposer_worker: ProposerWorkerBase,
+                 scorer_worker: WorkerBase,
+                 spec_decode_sampler: SpecDecodeBaseSampler,
+                 metrics_collector: Optional[AsyncMetricsCollector] = None,
+                 disable_by_batch_size: Optional[int] = None,
+                 enable_mqa: bool = False):
         """
         Create a SpecDecodeWorker.
 
@@ -206,6 +207,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
 
+        self.enable_mqa = enable_mqa
+
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
         """
@@ -219,14 +222,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.load_model()
 
         self._metrics.init_gpu_tensors(self.rank)
-        self.rejection_sampler.init_gpu_tensors(self.rank)
-        # self.scorer = BatchExpansionTop1Scorer(
-        #     scorer_worker=self.scorer_worker,
-        #     device=self.device,
-        #     vocab_size=self._vocab_size)
-        self.scorer = MQAScorer(scorer_worker=self.scorer_worker,
-                                device=self.device,
-                                vocab_size=self._vocab_size)
+        self.spec_decode_sampler.init_gpu_tensors(self.rank)
+        if self.enable_mqa:
+            self.scorer = MQAScorer(scorer_worker=self.scorer_worker,
+                                    device=self.device,
+                                    vocab_size=self._vocab_size)
+        else:
+            self.scorer = BatchExpansionTop1Scorer(
+                scorer_worker=self.scorer_worker,
+                device=self.device,
+                vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -344,7 +349,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         output = self._run_speculative_decoding_step(execute_model_req,
                                                      num_lookahead_slots)
-        print("return sampler output===", len(output))
+        # print("return sampler output===", len(output))
         return output
 
     @torch.inference_mode()
@@ -456,10 +461,17 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
 
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
             proposals,
         )
+        end.record()
+        torch.cuda.synchronize()
+        print("Score Time====================", start.elapsed_time(end))
+
 
         accepted_token_ids, target_logprobs = self._verify_tokens(
             execute_model_req.seq_group_metadata_list, proposal_scores,

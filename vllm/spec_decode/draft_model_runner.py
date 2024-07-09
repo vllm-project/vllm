@@ -142,8 +142,8 @@ class TP1DraftModelRunner(ModelRunner):
             # Currently cuda graph is only supported by the decode phase.
             assert model_input.attn_metadata is not None
             prefill_meta = model_input.attn_metadata.prefill_metadata
-            decode_meta = model_input.attn_metadata.decode_metadata
-            if prefill_meta is None and decode_meta.use_cuda_graph:
+            if prefill_meta is None and \
+                model_input.attn_metadata.use_cuda_graph:
                 assert model_input.input_tokens is not None
                 graph_batch_size = model_input.input_tokens.shape[0]
                 model_executable = (

@@ -174,6 +174,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         is_driver_worker: bool = False,
         multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
+        enable_mqa: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -185,6 +186,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.is_driver_worker = is_driver_worker
         self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
+        self.enable_mqa = enable_mqa
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -421,8 +423,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     seq_len = seq_data.get_len()
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
                 # tokens = [seq_data.get_last_token_id()]
-                print("tokens", tokens)
-                print("context_len, seq_len", context_len, seq_len)
+                # print("tokens", tokens)
+                # print("context_len, seq_len", context_len, seq_len)
 
                 # Prefix cache was hit.
                 # Prefix is not supported with sliding_window
@@ -589,7 +591,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         last_page_len = self.block_size
                     paged_kv_last_page_len.append(last_page_len)
 
-        batch_size = len(input_tokens)
+        batch_size = len(query_lens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
@@ -605,11 +607,17 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
             for _ in range(graph_batch_size - batch_size):
-                input_tokens.append(0)
-                input_positions.append(0)
-                slot_mapping.append(_PAD_SLOT_ID)
-                seq_lens.append(1)
-                query_lens.append(1)
+                if self.enable_mqa:
+                    token_per_seq = \
+                        self.scheduler_config.num_lookahead_slots + 1
+                else:
+                    token_per_seq = 1
+                for _ in range(token_per_seq):
+                    input_tokens.append(0)
+                    input_positions.append(0)
+                    slot_mapping.append(_PAD_SLOT_ID)
+                seq_lens.append(token_per_seq)
+                query_lens.append(token_per_seq)
                 block_tables.append([])
                 lora_index_mapping.append(0)
 
@@ -927,9 +935,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
+        if self.enable_mqa:
+            assert self.scheduler_config.num_lookahead_slots > 1
+            token_per_seq = self.scheduler_config.num_lookahead_slots + 1
+        else:
+            token_per_seq = 1
+
+        input_tokens = torch.zeros(max_batch_size * token_per_seq,
+                                   dtype=torch.long).cuda()
+        input_positions = torch.zeros(max_batch_size * token_per_seq,
+                                      dtype=torch.long).cuda()
+        slot_mapping = torch.empty(max_batch_size * token_per_seq,
+                                   dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
@@ -1049,10 +1066,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             num_prefills=0,
                             num_prefill_tokens=0,
                             num_decode_tokens=batch_size,
-                            slot_mapping=slot_mapping[:batch_size],
+                            slot_mapping=slot_mapping[:batch_size *
+                                                      token_per_seq],
                             seq_lens=seq_lens[:batch_size],
                             seq_lens_tensor=seq_lens_tensor[:batch_size],
-                            max_query_len=1,
+                            max_query_len=token_per_seq,
                             max_prefill_seq_len=0,
                             max_decode_seq_len=self.max_seq_len_to_capture,
                             query_start_loc=query_start_loc[:batch_size + 1],
@@ -1084,9 +1102,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     capture_inputs = {
                         "input_ids":
-                        input_tokens[:batch_size],
+                        input_tokens[:batch_size * token_per_seq],
                         "positions":
-                        input_positions[:batch_size],
+                        input_positions[:batch_size * token_per_seq],
                         "hidden_or_intermediate_states":
                         hidden_or_intermediate_states[
                             virtual_engine]  # type: ignore
@@ -1231,6 +1249,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if model_input.attn_metadata.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
+            if self.enable_mqa:
+                assert graph_batch_size % (
+                    self.scheduler_config.num_lookahead_slots + 1) == 0
+                graph_batch_size /= (
+                    self.scheduler_config.num_lookahead_slots + 1)
             model_executable = self.graph_runners[
                 model_input.virtual_engine][graph_batch_size]
         else:

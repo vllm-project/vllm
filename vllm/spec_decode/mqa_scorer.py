@@ -38,7 +38,7 @@ class MQAScorer(SpeculativeScorer):
             prompt_token_ids = seq_data.get_prompt_token_ids()
             output_token_ids = seq_data.get_output_token_ids()
             proposal_token_ids = proposals.proposal_token_ids.tolist()[i]
-            print("propoese token ids", proposal_token_ids)
+            # print("propoese token ids", proposal_token_ids)
             new_output_token_ids = [*output_token_ids, *proposal_token_ids]
 
             target_seq_id = next(target_seq_ids_iter)

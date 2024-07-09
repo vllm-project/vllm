@@ -115,13 +115,13 @@ class SamplingMetadata:
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
                                 device)
-        print("seq_lens", seq_lens)
-        print("query_lens", query_lens)
+        # print("seq_lens", seq_lens)
+        # print("query_lens", query_lens)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
                                                   pin_memory=pin_memory)
-        print("selected_token_indices", selected_token_indices)
+        # print("selected_token_indices", selected_token_indices)
         categorized_sample_indices = {
             t: maybe_expand_dim(
                 async_tensor_h2d(seq_ids,
