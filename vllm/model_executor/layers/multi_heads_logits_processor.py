@@ -11,7 +11,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
-class ParallelLogitsProcessor(nn.Module):
+class MultiHeadLogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
 
     This layer does the following:

@@ -173,7 +173,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         multimodal_config: Optional[MultiModalConfig] = None,
-        return_hidden_states: bool = False,
+        return_hidden_states: bool = True,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -676,6 +676,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.device)
+        # if self.model_config.hf_config have num_token_lens attribute
+        if hasattr(self.model_config.hf_config, "num_token_len"):
+            if self.model_config.hf_config.num_token_len > 1:
+                input_tokens_tensor = input_tokens_tensor.unsqueeze(dim=1).expand(len(input_tokens), self.model_config.hf_config.num_token_len)
         input_positions_tensor = torch.tensor(input_positions,
                                               dtype=torch.long,
                                               device=self.device)

@@ -8,9 +8,9 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.model_executor.layers.prarllel_logits_processor import ParallelLogitsProcessor
+from vllm.model_executor.layers.multi_heads_logits_processor import MultiHeadLogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.multi_heads_sampler import MultiheadsSampler
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -45,8 +45,8 @@ class ChatTtsLlm(nn.Module):
         self.head_code = nn.ModuleList([
             weight_norm(nn.Linear(self.model_dim, self.num_audio_tokens, bias=False), name='weight') for _ in range(self.num_vq)
         ])
-        self.logits_processor = ParallelLogitsProcessor(self.num_audio_tokens, self.num_vq)
-        self.sampler = Sampler()
+        self.logits_processor = MultiHeadLogitsProcessor(self.num_audio_tokens, self.num_vq)
+        self.sampler = MultiheadsSampler(self.num_vq)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -81,10 +81,10 @@ class ChatTtsLlm(nn.Module):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         code_emb = [
-            self.emb_all[i](input_ids)
+            self.emb_all[i](input_ids[:,i])
             for i in range(self.num_vq)
         ]
-        emb = torch.stack(code_emb, 1).sum(1)
+        emb = torch.stack(code_emb, 2).sum(2)
         return emb
 
     def compute_logits(self, hidden_states: torch.Tensor,
