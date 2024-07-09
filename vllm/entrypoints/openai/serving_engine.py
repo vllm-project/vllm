@@ -152,31 +152,21 @@ class OpenAIServing:
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_lora(
+    def _maybe_get_adapter(
         self, request: Union[CompletionRequest, ChatCompletionRequest,
                              EmbeddingRequest]
-    ) -> Optional[LoRARequest]:
+    ) -> Tuple[Optional[str], Optional[Union[LoRARequest,
+                                             PromptAdapterRequest]]]:
         if request.model in self.served_model_names:
-            return None
+            return None, None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
-                return lora
-        return None
-        # if _check_model has been called earlier, this will be unreachable
-        #raise ValueError(f"The model `{request.model}` does not exist.")
-
-    def _maybe_get_prompt_adapter(
-        self, request: Union[CompletionRequest, ChatCompletionRequest,
-                             EmbeddingRequest]
-    ) -> Optional[PromptAdapterRequest]:
-        if request.model in self.served_model_names:
-            return None
+                return 'LoRA', lora
         for prompt_adapter in self.prompt_adapter_requests:
             if request.model == prompt_adapter.prompt_adapter_name:
-                return prompt_adapter
-        return None
+                return 'PromptAdapter', prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
-        #raise ValueError(f"The model `{request.model}` does not exist.")
+        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
             self,

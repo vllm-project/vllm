@@ -104,8 +104,12 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
-            lora_request = self._maybe_get_lora(request)
-            prompt_adapter_request = self._maybe_get_prompt_adapter(request)
+            adapter_type, adapter_request = self._maybe_get_adapter(request)
+            lora_request, prompt_adapter_request = None, None
+            if adapter_type == 'LoRA':
+                lora_request, prompt_adapter_request = adapter_request, None
+            elif adapter_type == 'PromptAdapter':
+                lora_request, prompt_adapter_request = None, adapter_request
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
