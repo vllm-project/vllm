@@ -111,7 +111,7 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def get_lora_absolute_path(lora_path: str) -> str:
+def get_adapter_absolute_path(lora_path: str) -> str:
     """
     Resolves the given lora_path to an absolute local path.
 
