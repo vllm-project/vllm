@@ -29,7 +29,7 @@ def to_int8(tensor: torch.Tensor):
 
 
 def rand_int8(shape: tuple, device: str = "cuda"):
-    return to_int8(torch.randn(shape, device=device) * 255)
+    return to_int8(torch.rand(shape, device=device) * 255 - 128)
 
 
 def baseline_scaled_mm(a: torch.Tensor,
@@ -38,7 +38,6 @@ def baseline_scaled_mm(a: torch.Tensor,
                        scale_b: torch.Tensor,
                        out_dtype: Type[torch.dtype],
                        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
     output = (scale_a * (scale_b * (torch.mm(
         a.to(dtype=torch.float32), b.to(dtype=torch.float32))))).to(out_dtype)
     if bias is not None:
@@ -239,11 +238,11 @@ def naive_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def test_cutlass_int8_azp():
-    m = 32
-    n = 16
-    k = 64
-
+@pytest.mark.parametrize("m", [32, 64, 128])
+@pytest.mark.parametrize("n", [16, 32, 64])
+@pytest.mark.parametrize("k", [64, 128, 256])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype):
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
 
@@ -258,19 +257,17 @@ def test_cutlass_int8_azp():
 
     b_dq = scale_b * bq_f32
 
-    azp_a = torch.rand((1, ), device="cuda", dtype=torch.float32) + 2.0
+    azp_a = torch.rand((1, ), device="cuda", dtype=torch.float32) * 10 + 1.5
     azp_aq_i8 = (azp_a / scale_a).to(dtype=torch.int8)
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
     a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
-    torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
+    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
 
-    out_dtype = torch.bfloat16
     baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
 
     J = torch.ones((1, k), device="cuda", dtype=torch.float32)
-    azp_bias = (azp_a * scale_b *
-                (J @ bq_f32).to(dtype=torch.float32)).to(out_dtype)
+    azp_bias = (azp_a * scale_b * (J @ bq_f32)).to(out_dtype)
     assert azp_bias.shape == (1, n)
     assert azp_bias[0, :].shape == (n, )
 
@@ -287,11 +284,12 @@ def test_cutlass_int8_azp():
     assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
 
 
-def test_cutlass_int8_per_token_azp():
-    m = 32
-    n = 16
-    k = 64
-
+@pytest.mark.parametrize("m", [32, 64, 128])
+@pytest.mark.parametrize("n", [16, 32, 64])
+@pytest.mark.parametrize("k", [64, 128, 256])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+def test_cutlass_int8_per_token_azp(m: int, n: int, k: int,
+                                    out_dtype: torch.dtype):
     scale_a = torch.randn((m, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
 
@@ -311,7 +309,7 @@ def test_cutlass_int8_per_token_azp():
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
     a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
-    torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
+    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
 
     out_dtype = torch.bfloat16
     baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
