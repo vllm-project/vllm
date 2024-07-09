@@ -21,7 +21,7 @@ To run multi-GPU serving, pass in the :code:`--tensor-parallel-size` argument wh
 
     $ python -m vllm.entrypoints.openai.api_server \
     $     --model facebook/opt-13b \
-    $     --tensor-parallel-size 4 \
+    $     --tensor-parallel-size 4
 
 You can also additionally specify :code:`--pipeline-parallel-size` to enable pipeline parallelism. For example, to run API server on 8 GPUs with pipeline parallelism and tensor parallelism:
 
