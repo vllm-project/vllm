@@ -127,7 +127,8 @@ def get_input(tokenizer, prompt, image, dtype, device):
         "input_ids":
         input_ids.to(device),
         "pixel_values":
-        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 384, 384).to(device),
+        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 384,
+                                                      384).to(device),
         "num_image_tokens":
         576,
         "images_seq_mask":
@@ -204,7 +205,7 @@ def run_test(
     for prompts, images in inputs_per_image:
         print(f'prompt: {prompts}')
         print(f'images: {images}')
-        prepare_input = get_input(tokenizer, prompts, images, dtype)
+        prepare_input = get_input(tokenizer, prompts, images, dtype, device)
         attention_mask = prepare_input['attention_mask']
         inputs_embeds = hf_model.prepare_inputs_embeds(**prepare_input)
         outputs = hf_model.language_model.generate(
