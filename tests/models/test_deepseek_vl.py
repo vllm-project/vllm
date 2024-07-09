@@ -77,7 +77,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         # [b, T, D]
         input_ids[input_ids < 0] = 0  # ignore the image embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(
-            input_ids).reshape(1, -1, 4096)
+            input_ids).reshape(1, -1, 2048)
 
         # replace with the image embeddings
         images_embeds = images_embeds.reshape(
