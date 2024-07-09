@@ -109,7 +109,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def get_input(tokenizer, prompt, image, dtype):
+def get_input(tokenizer, prompt, image, dtype, device):
 
     image_id = 100015
     prompt = prompt[0]
@@ -125,17 +125,17 @@ def get_input(tokenizer, prompt, image, dtype):
         "sft_format":
         prompt,
         "input_ids":
-        input_ids,
+        input_ids.to(device),
         "pixel_values":
-        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 384, 384),
+        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 384, 384).to(device),
         "num_image_tokens":
         576,
         "images_seq_mask":
-        image_token_mask.reshape(1, -1),
+        image_token_mask.reshape(1, -1).to(device),
         "images_emb_mask":
-        images_emb_mask,
+        images_emb_mask.to(device),
         "attention_mask":
-        torch.ones(1, len(input_ids)),
+        torch.ones(1, len(input_ids)).to(device),
     }
     return prepare
 
@@ -190,6 +190,7 @@ def run_test(
     tokenizer = AutoTokenizer.from_pretrained(model)
     hf_model = AutoModelForCausalLM.from_pretrained(model,
                                                     trust_remote_code=True)
+    device = 'cuda'
     dtype_dict = {
         'bfloat16': torch.bfloat16,
         'float16': torch.float16,
@@ -198,7 +199,7 @@ def run_test(
         'auto': hf_model.dtype
     }
     dtype = dtype_dict.get(dtype, hf_model.dtype)
-    hf_model = hf_model.to(dtype)
+    hf_model = hf_model.to(dtype).to(device)
     hf_outputs: List = []
     for prompts, images in inputs_per_image:
         print(f'prompt: {prompts}')
