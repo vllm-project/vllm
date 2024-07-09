@@ -145,10 +145,10 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         local_snapshot_path = huggingface_hub.snapshot_download(
             repo_id=lora_path)
     except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
-            HFValidationError) as e:
+            HFValidationError):
         # Handle errors that may occur during the download
         # Return original path instead instead of throwing error here
-        print(f"Error downloading the Hugging Face model: {e}")
+        logger.exception("Error downloading the HuggingFace model")
         return lora_path
 
     return local_snapshot_path

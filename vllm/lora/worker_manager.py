@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_lora_absolute_path
+from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
@@ -90,7 +90,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
-            lora_path = get_lora_absolute_path(lora_request.lora_path)
+            lora_path = get_adapter_absolute_path(lora_request.lora_path)
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
