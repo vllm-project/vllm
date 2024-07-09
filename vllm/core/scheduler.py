@@ -371,8 +371,9 @@ class Scheduler:
 
                 self._free_seq_group(aborted_group)
 
-    def _free_seq_group(self, 
-                       seq_group: SequenceGroup,
+    def _free_seq_group(
+        self,
+        seq_group: SequenceGroup,
     ) -> None:
         """
         Free a sequence group from a cross-attention block table.

@@ -9,7 +9,6 @@ Tests:
 
 """
 
-import copy
 from typing import NamedTuple, Optional
 
 import pytest
