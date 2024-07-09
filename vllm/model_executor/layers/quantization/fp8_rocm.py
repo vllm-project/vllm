@@ -181,6 +181,14 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         weight = layer.weight
         layer.weight = Parameter(weight, requires_grad=False)
 
+        if layer.weight.dtype == torch.float8_e4m3fnuz:
+            layer.activation_scaling_factor = Parameter(
+                layer.activation_scaling_factor * 2.0)
+            layer.weights_scaling_factor = Parameter(
+                layer.weights_scaling_factor * 2.0)
+            layer.output_scaling_factor = Parameter(
+                layer.output_scaling_factor / 2.0)
+
     def scales_shard_indexer(
             self, param: torch.Tensor, loaded_weight: torch.Tensor,
             shard_id: Union[str, int]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -268,15 +276,14 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        weight: torch.Tensor = layer.weight
-        if weight.dtype == torch.float8_e4m3fnuz:
-            asf: torch.Tensor = layer.activation_scaling_factor * 2
-            wsf: torch.Tensor = layer.weights_scaling_factor * 2
-            osf: torch.Tensor = layer.output_scaling_factor / 2
+        if layer.weight.dtype == torch.float8_e4m3fnuz:
 
-            return self._config.gemm_method(self, x, weight, asf, wsf, osf)
+            return self._config.gemm_method(self, x, layer.weight,
+                                            layer.activation_scaling_factor,
+                                            layer.weights_scaling_factor,
+                                            layer.output_scaling_factor)
 
-        return F.linear(x, weight, bias)
+        return F.linear(x, layer.weight, bias)
 
 
 def _per_tensor_quantize(tensor: torch.Tensor,
