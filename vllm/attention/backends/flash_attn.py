@@ -94,9 +94,6 @@ class FlashAttentionMetadata(AttentionMetadata):
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
-    # (batch_size,) A tensor of context lengths (tokens that are computed
-    # so far).
-    context_lens_tensor: Optional[torch.Tensor]
 
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
@@ -110,6 +107,13 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+
+    # Fields that are not used in flash attention backend,
+    # but used in other backends
+    context_lens_tensor: Optional[torch.Tensor] = None
+    seq_lens_tensor: Optional[torch.Tensor] = None
+    max_prefill_seq_len: Optional[int] = None
+    max_decode_seq_len: Optional[int] = None
 
 
 class FlashAttentionImpl(AttentionImpl):
