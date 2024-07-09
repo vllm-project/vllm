@@ -19,10 +19,17 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
-                                              EmbeddingRequest, ErrorResponse)
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              EmbeddingRequest, ErrorResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -83,6 +90,28 @@ async def health() -> Response:
     """Health check."""
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
+
+
+@app.post("/tokenize")
+async def tokenize(request: TokenizeRequest):
+    generator = await openai_serving_completion.create_tokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, TokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
+
+
+@app.post("/detokenize")
+async def detokenize(request: DetokenizeRequest):
+    generator = await openai_serving_completion.create_detokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, DetokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
 
 
 @app.get("/v1/models")
@@ -183,15 +212,6 @@ if __name__ == "__main__":
         served_model_names = [args.model]
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-
-    # Enforce pixel values as image input type for vision language models
-    # when serving with API server
-    if engine_args.image_input_type is not None and \
-        engine_args.image_input_type.upper() != "PIXEL_VALUES":
-        raise ValueError(
-            f"Invalid image_input_type: {engine_args.image_input_type}. "
-            "Only --image-input-type 'pixel_values' is supported for serving "
-            "vision language models with the vLLM API server.")
 
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
