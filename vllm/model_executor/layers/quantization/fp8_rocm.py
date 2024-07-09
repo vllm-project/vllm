@@ -180,11 +180,14 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         #   Transpose weight for passing to torch._scaled_mm
         weight = layer.weight
         layer.weight = Parameter(weight, requires_grad=False)
-        
+
         if layer.weight.dtype == torch.float8_e4m3fnuz:
-            layer.activation_scaling_factor = Parameter(layer.activation_scaling_factor * 2.0)
-            layer.weights_scaling_factor = Parameter(layer.weights_scaling_factor * 2.0)
-            layer.output_scaling_factor = Parameter(layer.output_scaling_factor / 2.0)
+            layer.activation_scaling_factor = Parameter(
+                layer.activation_scaling_factor * 2.0)
+            layer.weights_scaling_factor = Parameter(
+                layer.weights_scaling_factor * 2.0)
+            layer.output_scaling_factor = Parameter(
+                layer.output_scaling_factor / 2.0)
 
     def scales_shard_indexer(
             self, param: torch.Tensor, loaded_weight: torch.Tensor,
@@ -275,7 +278,8 @@ class Fp8RocmLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         if layer.weight.dtype == torch.float8_e4m3fnuz:
 
-            return self._config.gemm_method(self, x, layer.weight, layer.activation_scaling_factor,
+            return self._config.gemm_method(self, x, layer.weight,
+                                            layer.activation_scaling_factor,
                                             layer.weights_scaling_factor,
                                             layer.output_scaling_factor)
 
