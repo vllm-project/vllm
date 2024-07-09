@@ -57,12 +57,11 @@ class RMSNorm(nn.Module):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if residual is not None:
             if x.device.type == "hpu" and FusedRMSNorm:
-                orig_dtype = x.dtype
                 orig_shape = x.shape
                 residual += x.view(residual.shape)
                 # Note: FusedRMSNorm requires 3D tensors as inputs
-                x = FusedRMSNorm.apply(residual.float(), self.weight.float(), self.variance_epsilon)
-                return x.to(orig_dtype).view(orig_shape), residual
+                x = FusedRMSNorm.apply(residual, self.weight, self.variance_epsilon)
+                return x.view(orig_shape), residual
             ops.fused_add_rms_norm(
                 x,
                 residual,
@@ -71,9 +70,8 @@ class RMSNorm(nn.Module):
             )
             return x, residual
         if x.device.type == "hpu" and FusedRMSNorm:
-            orig_dtype = x.dtype
-            x = FusedRMSNorm.apply(x.float(), self.weight.float(), self.variance_epsilon)
-            return x.to(orig_dtype)
+            x = FusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
+            return x
         out = torch.empty_like(x)
         ops.rms_norm(
             out,
