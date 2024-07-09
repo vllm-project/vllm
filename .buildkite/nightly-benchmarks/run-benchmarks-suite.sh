@@ -110,7 +110,7 @@ upload_to_buildkite() {
   fi
 
   # Use the determined command to annotate and upload artifacts
-  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
+  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "h100-benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
   $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
