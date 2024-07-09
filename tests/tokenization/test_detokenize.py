@@ -264,7 +264,7 @@ def test_decode_prompt_logprobs_chunked_prefill(
                 # prompt_logprobs is a dict of the token_id: logprob
                 # We select the token_id corresponding to the actual prompt
                 # Decoded token in the detokenized string corresponding to this
-                # promptt oken.
+                # prompt token.
                 generated_string += prompt_logprobs[prompt_token].decoded_token
 
             assert generated_string == example_prompts[idx], (
