@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
 
-# NOTE This value comes fromllm/worker/model_runner.py
+# NOTE This value comes from vllm/worker/model_runner.py
 _MAX_BATCH_SIZE = 256
 
 
