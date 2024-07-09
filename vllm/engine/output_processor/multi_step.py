@@ -144,5 +144,5 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         if seq.is_finished():
             for scheduler in self.scheduler:
                 scheduler.free_seq(seq)
-        
+
         return output_token_ids
