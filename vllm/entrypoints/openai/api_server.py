@@ -42,8 +42,6 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
-_engine_args: AsyncEngineArgs
-_engine: AsyncLLMEngine
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -56,9 +54,9 @@ async def lifespan(app: fastapi.FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(10)
-            await _engine.do_log_stats()
+            await engine.do_log_stats()
 
-    if not _engine_args.disable_log_stats:
+    if not engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
         _running_tasks.add(task)
         task.add_done_callback(_running_tasks.remove)
@@ -169,7 +167,9 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-def create_engine(args):
+if __name__ == "__main__":
+    args = parse_args()
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
@@ -206,19 +206,16 @@ def create_engine(args):
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
+    if args.served_model_name is not None:
+        served_model_names = args.served_model_name
+    else:
+        served_model_names = [args.model]
+
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-    
-    global _engine_args, _engine
-    _engine_args = engine_args
-    _engine = engine
 
-    return engine
-
-
-def get_model_config(args, engine: AsyncLLMEngine):
     event_loop: Optional[asyncio.AbstractEventLoop]
     try:
         event_loop = asyncio.get_running_loop()
@@ -232,20 +229,6 @@ def get_model_config(args, engine: AsyncLLMEngine):
     else:
         # When using single vLLM without engine_use_ray
         model_config = asyncio.run(engine.get_model_config())
-
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
-
-    return model_config, served_model_names
-
-
-def start_engine(args, engine: AsyncLLMEngine):
-    model_config, served_model_names = get_model_config(args, engine)
-
-    global openai_serving_chat, openai_serving_completion
-    global openai_serving_embedding
 
     openai_serving_chat = OpenAIServingChat(engine, model_config,
                                             served_model_names,
@@ -266,13 +249,3 @@ def start_engine(args, engine: AsyncLLMEngine):
                 ssl_certfile=args.ssl_certfile,
                 ssl_ca_certs=args.ssl_ca_certs,
                 ssl_cert_reqs=args.ssl_cert_reqs)
-
-
-def _main():
-    _args = parse_args()
-    _engine = create_engine(_args)
-    start_engine(_args, _engine)
-
-
-if __name__ == "__main__":
-    _main()
