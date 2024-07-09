@@ -206,12 +206,8 @@ class AGCook(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert bias is None
 
-        if False:
-            # TODO: This produces the wrong answer
-            output = self.ag_gemm_op.forward(x, layer.weight)
-        else:
-            x_gathered = tensor_model_parallel_all_gather(x, 0)
-            output = F.linear(x_gathered, layer.weight)
+        output = self.ag_gemm_op.forward(x, layer.weight)
+        self.ag_gemm_op.reset_signals()
 
         return output
 
