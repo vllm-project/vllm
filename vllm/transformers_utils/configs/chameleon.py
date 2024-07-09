@@ -1,6 +1,9 @@
 from transformers import PretrainedConfig
 
 
+#TODO (ywang96): Remove this file and import it from
+# transformers once the new release with Chameleon support
+# is available.
 class ChameleonConfig(PretrainedConfig):
 
     model_type = "chameleon"
