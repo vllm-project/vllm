@@ -15,7 +15,7 @@ try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 except ImportError:
     BatchDecodeWithPagedKVCacheWrapper = None
     CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
@@ -24,8 +24,8 @@ except ImportError:
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
@@ -36,7 +36,8 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models.interfaces import supports_lora
+from vllm.model_executor.models.interfaces import (supports_lora,
+                                                   supports_vision)
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
@@ -171,7 +172,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
     ):
         self.model_config = model_config
@@ -182,7 +183,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
@@ -244,7 +245,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device_config=self.device_config,
                 load_config=self.load_config,
                 lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
+                multimodal_config=self.multimodal_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,
@@ -256,6 +257,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
+            assert not supports_vision(
+                self.model
+            ), "To be tested: vision language model with LoRA settings."
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
@@ -679,6 +683,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            dtype=torch.long,
                                            device=self.device)
 
+        logits_soft_cap = getattr(self.model_config.hf_config,
+                                  'attn_logit_softcapping', None)
+        if logits_soft_cap is not None and self.attn_backend.get_name(
+        ) != "flashinfer":
+            raise ValueError("Please use Flashinfer backend for models with"
+                             "logits_soft_cap (i.e., Gemma-2)."
+                             " Otherwise, the output might be wrong."
+                             " Set Flashinfer backend by "
+                             "export VLLM_ATTENTION_BACKEND=FLASHINFER.")
+
         if self.attn_backend.get_name() == "flashinfer":
             if len(paged_kv_indptr) > 0:
                 paged_kv_indices_tensor = torch.tensor(paged_kv_indices,
@@ -696,7 +710,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                       self.model_config.dtype)
-
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
                 slot_mapping=slot_mapping_tensor,
@@ -717,7 +730,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 query_start_loc=query_start_loc,
                 device=self.device,
                 data_type=kv_cache_dtype,
-                use_cuda_graph=use_captured_graph)
+                use_cuda_graph=use_captured_graph,
+                logits_soft_cap=logits_soft_cap)
 
         else:
             attn_metadata = self.attn_backend.make_metadata(
@@ -804,12 +818,21 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
         model_config = self.model_config
-        vlm_config = self.vision_language_config
 
-        if vlm_config:
-            max_num_seqs = min(
-                max_num_seqs,
-                int(max_num_batched_tokens / vlm_config.image_feature_size))
+        if supports_vision(self.model):
+            max_mm_tokens = MULTIMODAL_REGISTRY \
+                .get_max_multimodal_tokens(model_config)
+            max_num_seqs_orig = max_num_seqs
+            max_num_seqs = min(max_num_seqs,
+                               max_num_batched_tokens // max_mm_tokens)
+            if max_num_seqs < 1:
+                expr = (f"min({max_num_seqs_orig}, "
+                        f"{max_num_batched_tokens} // {max_mm_tokens})")
+                logger.warning(
+                    "Computed max_num_seqs (%s) to be less than 1. "
+                    "Setting it to the minimum value of 1.", expr)
+                max_num_seqs = 1
+
         batch_size = 0
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
@@ -1190,7 +1213,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             if model_input.attn_metadata.use_cuda_graph:
                 batch_size = model_input.input_tokens.shape[0]
                 model_input.attn_metadata.decode_wrapper = self.graph_runners[
-                    batch_size].flashinfer_decode_wrapper
+                    model_input.
+                    virtual_engine][batch_size].flashinfer_decode_wrapper
             else:
                 model_input.attn_metadata.decode_wrapper = \
                     self.flashinfer_decode_wrapper
