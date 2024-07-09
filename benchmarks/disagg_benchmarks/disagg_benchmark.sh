@@ -168,14 +168,14 @@ main() {
   default_qps=4
   default_output_len=12
 
-  for target_qps in 1 2 4 8 16
+  for target_qps in 2 4 8 16
   do
     benchmark $target_qps $default_output_len
   done
 
-  for output_len in 5 10 20 40 80
+  for target_output_len in 5 10 20 40 80
   do
-    benchmark $default_qps $output_len
+    benchmark $default_qps $target_output_len
   done
 
 }
