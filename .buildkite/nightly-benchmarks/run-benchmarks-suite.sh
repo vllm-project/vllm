@@ -99,12 +99,19 @@ upload_to_buildkite() {
   # upload the benchmarking results to buildkite
 
   # if the agent binary is not found, skip uploading the results, exit 0
-  if [ ! -f /workspace/buildkite-agent ]; then
+  # Check if buildkite-agent is available in the PATH or at /workspace/buildkite-agent
+  if command -v buildkite-agent >/dev/null 2>&1; then
+    BUILDKITE_AGENT_COMMAND="buildkite-agent"
+  elif [ -f /workspace/buildkite-agent ]; then
+    BUILDKITE_AGENT_COMMAND="/workspace/buildkite-agent"
+  else
     echo "buildkite-agent binary not found. Skip uploading the results."
     return 0
   fi
-  /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
-  /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
+
+  # Use the determined command to annotate and upload artifacts
+  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
+  $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
 run_latency_tests() {
