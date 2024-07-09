@@ -66,6 +66,9 @@ class AttentionMetadata:
     # Number of decode tokens. Note that it is equivalent to the number of
     # decode requests.
     num_decode_tokens: int
+    # Number of long decode tokens. Note that it is equivalent to the number of
+    # decode requests.
+    num_long_decode_tokens: int
     # (num_tokens,). The indices of the token slots that input tokens will be
     # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
@@ -123,10 +126,22 @@ class AttentionImpl(ABC, Generic[T]):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: torch.Tensor,
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
+        kv_cache: Optional[torch.Tensor],
         attn_metadata: T,
         kv_scale: float = 1.0,
+        generate_kv_cache:Optional[bool]=True,
     ) -> torch.Tensor:
         raise NotImplementedError
+    
+    @abstractmethod
+    def reducer(
+        self,
+        tmp_out: torch.Tensor,
+        exp_sum: torch.Tensor,
+        max_logits: torch.Tensor,
+        query: torch.Tensor,
+        attn_metadata: T,
+    ) -> torch.Tensor:
+        pass

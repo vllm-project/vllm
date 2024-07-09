@@ -94,6 +94,9 @@ class CacheEngine:
 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
+    #####todo kv cache transfer 
+    def transfer(self,src_to_dsts:torch.Tensor)-> None:
+        pass
 
     @staticmethod
     def get_cache_block_size(

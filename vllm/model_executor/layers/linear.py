@@ -9,7 +9,12 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce)
+                              tensor_model_parallel_all_reduce,
+                              get_sequence_model_parallel_rank,
+                              get_sequence_model_parallel_world_size,
+                              broadcast_tensor_sequence_dict,
+                              tensor_model_parallel_sequence_all_reduce,
+                              get_sp_group)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -655,8 +660,51 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+######modify
+#used for q broastcast and output reduce of sequence parallel 
+class SequenceParallelLinearForBroastcast:
+    
+    def __init__(self):
+        # Divide the weight matrix along the last dimension.
+        self.sp_size = get_sequence_model_parallel_world_size
 
+    def forward(self, input_):
+        # Set up backprop all-reduce.
+        sp_rank=get_sequence_model_parallel_rank()
+        
+        if sp_rank==get_sp_group().first_rank:
+            output=input_
+            get_sp_group().broadcast(input_,0)
+        else:
+            output=get_sp_group().broadcast(0)
 
+        return output
+
+    def extra_repr(self) -> str:
+        s = f", tp_size={self.sp_size}"
+        s += f", reduce_results={self.reduce_results}"
+        return s
+class SequenceParallelLinearForGather:
+    
+    def __init__(self,):
+        # Divide the weight matrix along the last dimension.
+        self.sp_size = get_sequence_model_parallel_world_size
+
+    def forward(self, input_,input_2,input_3):
+        # Set up backprop all-reduce.
+    
+            #########
+        #gather(input_,dst,dim),dim is untest.output need be the shape [num_seqs, num_heads, num_sequece_block, head_size]
+        output=get_sp_group().gather(input_,0,-1)
+        output2=get_sp_group().gather(input_2,0,-1)
+        output3=get_sp_group().gather(input_3,0,-1)
+            
+        return output,output2,output3
+
+    def extra_repr(self) -> str:
+        s = f", tp_size={self.sp_size}"
+        s += f", reduce_results={self.reduce_results}"
+        return s
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
 

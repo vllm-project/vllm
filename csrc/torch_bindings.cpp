@@ -46,7 +46,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
-
+  // PagedAttention V3.
+  ops.def(
+      "paged_attention_v3("
+      "    Tensor! out, Tensor! out_exp_sums, Tensor! out_max_logits,"
+      "    Tensor exp_sums, Tensor max_logits,"
+      "    Tensor tmp_out, Tensor query, Tensor key_cache,"
+      "    Tensor value_cache, int num_kv_heads, float scale,"
+      "    Tensor block_tables, Tensor seq_lens, int block_size,"
+      "    int max_seq_len, Tensor? alibi_slopes,"
+      "    str kv_cache_dtype, float kv_scale, int tp_rank,"
+      "    int blocksparse_local_blocks,"
+      "    int blocksparse_vert_stride, int blocksparse_block_size,"
+      "    int blocksparse_head_sliding_step) -> ()");
+  ops.impl("paged_attention_v3", torch::kCUDA, &paged_attention_v3);
+  
+// Sequence block reducer of attention.
+  ops.def(
+      "sequence_block_reducer("
+      "    Tensor! out, Tensor exp_sums, Tensor max_logits,"
+      "    Tensor tmp_out, Tensor query,Tensor seq_lens,"
+      "    int max_seq_len) -> ()");
+  ops.impl("sequence_block_reducer", torch::kCUDA, &sequence_block_reducer);
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");

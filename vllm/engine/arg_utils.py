@@ -40,6 +40,7 @@ class EngineArgs:
     distributed_executor_backend: Optional[str] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    sequence_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
@@ -309,6 +310,11 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
+        parser.add_argument('--sequence-parallel-size',
+                            '-tp',
+                            type=int,
+                            default=EngineArgs.sequence_parallel_size,
+                            help='Number of sequence parallel replicas.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,

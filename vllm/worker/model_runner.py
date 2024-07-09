@@ -217,7 +217,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.flashinfer_prefill_workspace_buffer = None
         self.flashinfer_prefill_wrapper = None
 
-    def load_model(self) -> None:
+    def load_model(self,only_attention: Optional[int] = 1) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(
                 model_config=self.model_config,
@@ -228,6 +228,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,
+                only_attention=only_attention,
             )
 
         self.model_memory_usage = m.consumed_memory

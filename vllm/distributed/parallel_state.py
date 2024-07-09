@@ -735,6 +735,15 @@ def get_tp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_tensor_model_parallel_group = get_tp_group
 
+_SP: Optional[GroupCoordinator]=None
+
+def get_sp_group() -> GroupCoordinator:
+    assert _SP is not None, ("sequence model parallel group is not initialized")
+    return _SP
+
+#kept for backward compatibility
+get_sequence_model_parallel_group= get_sp_group
+
 _PP: Optional[GroupCoordinator] = None
 
 
@@ -821,6 +830,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    sequence_model_parallel_size: int = 1,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -852,15 +862,15 @@ def initialize_model_parallel(
         get_world_group().device_group)
 
     if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+            tensor_model_parallel_size * pipeline_model_parallel_size * sequence_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
-            f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
+            f"pipeline_model_parallel_size ({pipeline_model_parallel_size}) x "
+            f"sequence_model_parallel_size ({sequence_model_parallel_size})")
 
     # Build the tensor model-parallel groups.
-    num_tensor_model_parallel_groups: int = (world_size //
-                                             tensor_model_parallel_size)
+    num_tensor_model_parallel_groups: int = 1
     global _TP
     assert _TP is None, ("tensor model parallel group is already initialized")
     group_ranks = []
@@ -870,6 +880,18 @@ def initialize_model_parallel(
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
     _TP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank, backend)
+    
+    num_sequence_model_parallel_groups: int = 1
+    global _SP
+    assert _SP is None, ("sequnce model parallel group is already initialized")
+    group_ranks = []
+    for i in range(num_sequence_model_parallel_groups):
+        ranks = list(
+            range(i * sequence_model_parallel_size,
+                  (i + 1) * sequence_model_parallel_size))
+        group_ranks.append(ranks)
+    _SP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank, backend)
 
     # Build the pipeline model-parallel groups.
@@ -889,6 +911,7 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    sequence_model_parallel_size: Optional[int]=1,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -899,7 +922,8 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size,
+                                  sequence_model_parallel_size, backend)
         return
 
     assert (
@@ -912,15 +936,32 @@ def ensure_model_parallel_initialized(
         "pipeline parallel group already initialized, but of unexpected size: "
         f"{pp_world_size=} vs. "
         f"{pipeline_model_parallel_size=}")
+    sp_world_size=get_sp_group().world_size
+    assert (sp_world_size == sequence_model_parallel_size), (
+        "sequence parallel group already initialized, but of unexpected size: "
+        f"{sp_world_size=} vs. "
+        f"{sequence_model_parallel_size=}")
 
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_TP is not None and _PP is not None)
+    return (_TP is not None and _PP is not None and _SP is not None)
 
 
 _TP_STATE_PATCHED = False
 
+@contextmanager
+def patch_sequence_parallel_group(sp_group:GroupCoordinator):
+    global _SP_STATE_PATCHED
+    _SP_STATE_PATCHED= True
+    old_sp_group=get_sp_group()
+    global _SP
+    _SP=sp_group
+    try:
+        yield
+    finally:
+        _SP_STATE_PATCHED=False
+        _SP=old_sp_group
 
 @contextmanager
 def patch_tensor_parallel_group(tp_group: GroupCoordinator):
@@ -946,6 +987,14 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP_STATE_PATCHED = False
         _TP = old_tp_group
 
+def get_sequence_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    return get_sp_group().world_size
+
+
+def get_sequence_model_parallel_rank():
+    """Return my rank for the tensor model parallel group."""
+    return get_sp_group().rank_in_group
 
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
@@ -968,6 +1017,11 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
+
+    global _SP
+    if _SP:
+        _SP.destory()
+    _SP= None
 
 
 def destroy_distributed_environment():

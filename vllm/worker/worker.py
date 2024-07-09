@@ -130,8 +130,8 @@ class Worker(LocalOrDistributedWorkerBase):
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
-    def load_model(self):
-        self.model_runner.load_model()
+    def load_model(self,only_attention: Optional[int]=1):
+        self.model_runner.load_model(only_attention)
 
     def save_sharded_state(
         self,
@@ -274,6 +274,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine.copy(worker_input.blocks_to_copy)
+        ####to do kv cache transfer process
+        if  (worker_input.blocks_to_transfer is not None
+             and worker_input.blocks_to_transfer.numel()>0):
+            self.cache_engine.transfer(worker_input.blocks_to_transfer)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -316,7 +320,8 @@ def init_worker_distributed_environment(
                                  distributed_init_method, local_rank)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+                                      parallel_config.pipeline_parallel_size,
+                                      parallel_config.sequence_parallel_size)
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

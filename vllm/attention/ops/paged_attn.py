@@ -77,7 +77,19 @@ class PagedAttention:
             kv_cache_dtype,
             kv_scale,
         )
-
+    @staticmethod
+    def sequence_block_reducer(
+        tmp_out: torch.Tensor,
+        exp_sum: torch.Tensor,
+        max_logits: torch.Tensor,
+        query: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
+    )->torch.Tensor:
+        output = torch.empty_like(query)
+        ops.sequence_block_reducer(output, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
+        return output
+        
     @staticmethod
     def forward_decode(
         query: torch.Tensor,
@@ -119,7 +131,6 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_seq_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
-
         if use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(
@@ -179,7 +190,101 @@ class PagedAttention:
                 blocksparse_block_size,
                 blocksparse_head_sliding_step,
             )
+
         return output
+    
+    ########modify
+    #return output output_exp_sum output_max_sums
+    @staticmethod
+    def forward_decode_v2(
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
+        kv_cache_dtype: str,
+        num_kv_heads: int,
+        scale: float,
+        alibi_slopes: Optional[torch.Tensor],
+        kv_scale: float,
+        tp_rank: int = 0,
+        blocksparse_local_blocks: int = 0,
+        blocksparse_vert_stride: int = 0,
+        blocksparse_block_size: int = 64,
+        blocksparse_head_sliding_step: int = 0,
+    ) -> torch.Tensor:
+        if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
+            # use blocksparse paged attention
+            block_size = value_cache.size(-1)
+            assert (blocksparse_block_size > 0 and
+                    blocksparse_block_size % block_size == 0), \
+                (f"{blocksparse_block_size=} needs to be a multiple of"
+                 f"{block_size=} used in block_tables.")
+
+        output = torch.empty_like(query)
+        out_exp_sums = torch.empty(
+                size=(num_seqs, num_heads),
+                dtype=torch.float32,
+                device=output.device,
+            )
+        out_max_logits = torch.empty(
+                size=(num_seqs, num_heads),
+                dtype=torch.float32,
+                device=output.device,
+            )
+        block_size = value_cache.shape[3]
+        num_seqs, num_heads, head_size = query.shape
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
+                              _PARTITION_SIZE)
+        # NOTE(woosuk): We use a simple heuristic to decide whether to use
+        # PagedAttention V1 or V2. If the number of partitions is 1, we use
+        # V1 to avoid the overhead of reduction. Also, if the number of
+        # sequences or heads is large, we use V1 since there is enough work
+        # to parallelize.
+        # TODO(woosuk): Tune this heuristic.
+        # For context len > 8192, use V2 kernel to avoid shared memory shortage.
+        
+        # Run PagedAttention V3.
+        assert _PARTITION_SIZE % block_size == 0
+        tmp_output = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
+        exp_sums = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions),
+                dtype=torch.float32,
+                device=output.device,
+            )
+        max_logits = torch.empty_like(exp_sums)
+        ops.paged_attention_v3(
+                output,
+                out_exp_sums,
+                out_max_logits,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                seq_lens,
+                block_size,
+                max_seq_len,
+                alibi_slopes,
+                kv_cache_dtype,
+                kv_scale,
+                tp_rank,
+                blocksparse_local_blocks,
+                blocksparse_vert_stride,
+                blocksparse_block_size,
+                blocksparse_head_sliding_step,
+            )
+
+        return output,out_exp_sums,out_max_logits
 
     @staticmethod
     def forward_prefix(
