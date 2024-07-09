@@ -21,6 +21,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def __init__(self,
                  strategy: str,
                  num_bits: int,
+                 act_order: False,
                  group_size: Optional[int] = None):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
@@ -36,6 +37,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             self.group_size = -1
         else:
             self.group_size = group_size
+
+        if act_order and self.group_size == -1:
+            # In this case, act_order == True is the same as act_order == False
+            # (since we have only one group per output channel)
+            act_order = False
+        self.act_order = act_order
 
         # Verify supported on platform.
         verify_marlin_supported(num_bits=self.num_bits,
@@ -58,8 +65,13 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             input_size=input_size,
             group_size=group_size)
 
+        # By default, no sharding over "input dim"
         weight_scale_dim = None
         scales_and_zp_size = input_size // group_size
+
+        if self.act_order:
+            assert self.group_size == -1
+            is_k_full = input_size_per_partition == input_size
 
         if (input_size != input_size_per_partition
                 and self.group_size is not None):
@@ -113,10 +125,21 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             "ignore_warning": True,
         })
 
+        # Activation order
+        g_idx = Parameter(torch.empty(input_size_per_partition, dtype=torch.int32),
+                          requires_grad=False)
+        layer.register_parameter("weight_g_idx", g_idx)
+        set_weight_attrs(g_idx, {
+            "weight_loader": weight_loader,
+            "input_dim": 0,
+            "ignore_warning": True
+        })
+
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
         layer.group_size = group_size
+        layer.is_k_full = 
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from marlin format. Handle repacking here.
