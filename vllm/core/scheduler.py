@@ -1002,6 +1002,18 @@ class Scheduler:
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
 
+            # Encoder associated with SequenceGroup
+            encoder_seq_data: SequenceData = \
+                seq_group.get_encoder_seq().data \
+                    if seq_group.is_encoder_decoder() else \
+                        None
+            # Block table for cross-attention
+            # Also managed at SequenceGroup level
+            cross_block_table: List[int] = \
+                self.block_manager.get_cross_block_table(seq_group) \
+                    if seq_group.is_encoder_decoder() else \
+                        None
+
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
@@ -1041,6 +1053,8 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
                 state=seq_group.state,
+                encoder_seq_data=encoder_seq_data,
+                cross_block_table=cross_block_table,
                 # `multi_modal_data` will only be present for the 1st comm
                 # between engine and worker.
                 # the subsequent comms can still use delta, but
@@ -1070,10 +1084,13 @@ class Scheduler:
 
     def free_finished_seq_groups(self) -> None:
         for queue in [self.running, self.swapped, self.waiting]:
-            self._finished_requests_ids += [
-                seq_group.request_id for seq_group in queue
-                if seq_group.is_finished()
-            ]
+            new_finished_requests_ids = []
+            for seq_group in queue:
+                if seq_group.is_finished():
+                    new_finished_requests_ids += seq_group.request_id
+                    # Free cross-attention block table, kf it exists
+                    self._free_seq_group(seq_group)
+            self._finished_requests_ids += new_finished_requests_ids
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
 
