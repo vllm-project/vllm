@@ -147,10 +147,13 @@ class BlockTable:
 
         # Update the blocks with the new tokens
         first_block_idx = self._num_full_slots // self._block_size
-        token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
-        for i, token_block in enumerate(token_blocks):
-            self._blocks.append_token_ids(first_block_idx + i, token_block)
+        # don't bother appending anything, if no new token_ids were generated
+        if token_ids:
+            token_blocks = self._chunk_token_blocks_for_append(token_ids)
+
+            for i, token_block in enumerate(token_blocks):
+                self._blocks.append_token_ids(first_block_idx + i, token_block)
 
         self._num_full_slots += len(token_ids)
 

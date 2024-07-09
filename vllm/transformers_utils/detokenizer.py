@@ -124,7 +124,7 @@ class Detokenizer:
          )
 
         # Decode logprobs
-        logprobs = seq.output_logprobs[-1]
+        logprobs = seq.output_logprobs[-1] if seq.output_logprobs else None
         if logprobs:
             previous_tokens = all_input_ids[:-1]
             for token_id, sample_logprob in logprobs.items():

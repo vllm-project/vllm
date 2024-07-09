@@ -186,9 +186,14 @@ class SequenceData:
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
+        seq_len = self.get_len()
         self._num_computed_tokens += num_new_computed_tokens
-        assert self._num_computed_tokens <= self.get_len(), (
-            self._num_computed_tokens, self.get_len())
+        # We can overflow by 1 if previous sampling was updated by
+        # SamplingController to generate an empty sequence of tokens.
+        if self._num_computed_tokens == seq_len + 1:
+            self._num_computed_tokens = seq_len
+        assert self._num_computed_tokens <= seq_len, (
+            self._num_computed_tokens, seq_len)
         # If all tokens are computed, it means it is in decoding phase.
         if self.get_num_uncomputed_tokens() == 0:
             self._stage = SequenceStage.DECODE
