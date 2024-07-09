@@ -61,7 +61,6 @@ class OpenAIServing:
 
         self.served_model_names = served_model_names
 
-        
         self.lora_requests = []
         if lora_modules is not None:
             self.lora_requests = [
