@@ -10,33 +10,14 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.policy import PolicyFactory
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob, SequenceGroup, SequenceStatus
+from vllm.sequence import SequenceGroup, SequenceStatus
 
-from .utils import create_dummy_prompt
-
-
-def get_sequence_groups(scheduler_output):
-    return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
-
-
-def append_new_token(out, token_id: int):
-    seq_groups = get_sequence_groups(out)
-    for seq_group in seq_groups:
-        for seq in seq_group.get_seqs():
-            seq.append_token_id(token_id, {token_id: Logprob(token_id)})
-
-
-def schedule_and_update_computed_tokens(scheduler):
-    metas, out = scheduler.schedule()
-    for s, meta in zip(out.scheduled_seq_groups, metas):
-        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
-    return metas, out
-
-
-def append_new_token_seq_group(token_chunk_size, seq_group, token_id: int):
-    seq_group.update_num_computed_tokens(token_chunk_size)
-    for seq in seq_group.get_seqs():
-        seq.append_token_id(token_id, {token_id: Logprob(token_id)})
+from .utils import (create_dummy_prompt,
+                    get_sequence_groups,
+                    append_new_token,
+                    schedule_and_update_computed_tokens,
+                    append_new_token_seq_group,
+                    )
 
 
 def test_scheduler_add_seq_group():
