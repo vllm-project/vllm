@@ -598,6 +598,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
+        max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
 
         # If cuda graph can be used, pad tensors accordingly.
@@ -738,7 +739,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 num_prefill_tokens=num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
                 seq_lens=seq_lens,
+                seq_lens_tensor=seq_lens_tensor,
                 max_query_len=max_query_len,
+                max_prefill_seq_len=max_prefill_seq_len,
+                max_decode_seq_len=max_decode_seq_len,
                 query_start_loc=query_start_loc,
                 seq_start_loc=seq_start_loc,
                 context_lens_tensor=context_lens_tensor,
@@ -981,6 +985,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                          dtype=torch.int32,
                                          device=self.device)
             seq_lens = [1] * max_batch_size
+            seq_lens_tensor = torch.ones(max_batch_size,
+                                         dtype=torch.int32,
+                                         device=self.device)
 
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
@@ -1050,7 +1057,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             num_decode_tokens=batch_size,
                             slot_mapping=slot_mapping[:batch_size],
                             seq_lens=seq_lens[:batch_size],
-                            seq_lens_tensor=seq_lens[:batch_size],
+                            seq_lens_tensor=seq_lens_tensor[:batch_size],
                             max_query_len=1,
                             max_prefill_seq_len=0,
                             max_decode_seq_len=self.max_seq_len_to_capture,
@@ -1418,6 +1425,10 @@ class CUDAGraphRunner:
                 attn_metadata.query_start_loc, non_blocking=True)
             self.input_buffers["seq_start_loc"].copy_(
                 attn_metadata.seq_start_loc, non_blocking=True)
+
+            self.input_buffers["seq_lens_tensor"].copy_(
+                attn_metadata.seq_lens_tensor, non_blocking=True)
+
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
