@@ -133,7 +133,7 @@ class GroupCoordinator:
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
-        use_mq_broadcaster: bool = False,
+        use_message_queue_broadcaster: bool = False,
     ):
 
         self.rank = torch.distributed.get_rank()
@@ -193,7 +193,7 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
         self.mq_broadcaster: Optional[MessageQueue] = None
-        if use_mq_broadcaster and self.world_size > 1:
+        if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
 
@@ -725,7 +725,7 @@ def init_model_parallel_group(
     local_rank: int,
     backend: str,
     use_custom_allreduce: Optional[bool] = None,
-    use_mq_broadcaster: bool = False,
+    use_message_queue_broadcaster: bool = False,
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
@@ -735,7 +735,7 @@ def init_model_parallel_group(
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
-        use_mq_broadcaster=use_mq_broadcaster,
+        use_message_queue_broadcaster=use_message_queue_broadcaster,
     )
 
 
@@ -889,7 +889,7 @@ def initialize_model_parallel(
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
-                                    use_mq_broadcaster=True)
+                                    use_message_queue_broadcaster=True)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
