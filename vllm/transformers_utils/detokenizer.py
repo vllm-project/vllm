@@ -21,10 +21,10 @@ class Detokenizer:
         """Returns the HF tokenizer to use for a given sequence."""
         return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
-    def decode_prompt_logprobs_inplace(
-            self, seq_group: SequenceGroup,
-            prompt_logprobs: List[Optional[Dict[int, Logprob]]],
-            position_offset: int) -> None:
+    def decode_prompt_logprobs_inplace(self, seq_group: SequenceGroup,
+                                       prompt_logprobs: List[Optional[Dict[
+                                           int, Logprob]]],
+                                       position_offset: int) -> None:
         """Decodes the logprobs for the prompt of a sequence group.
 
         Args:
@@ -52,8 +52,8 @@ class Detokenizer:
 
         for token_position_in_logprob, prompt_logprobs_for_token in enumerate(
                 prompt_logprobs):
-            
-            # Absolute token position equals the index in the logprobs 
+
+            # Absolute token position equals the index in the logprobs
             # list plus the offset of the entire logprobs list relative
             # to the start of the sequence.
             token_position = token_position_in_logprob + position_offset
