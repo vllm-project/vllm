@@ -835,7 +835,7 @@ def _get_prompt_logprob_if_needed(
 
     # Find prompt logprobs
     prompt_logprobs: Optional[PromptLogprobs] = None
-    if is_prompt and sampling_params.prompt_logprobs is not None: 
+    if is_prompt and sampling_params.prompt_logprobs is not None:
         prompt_logprobs = []
         num_logprobs = sampling_params.prompt_logprobs
         next_prompt_tokens = _get_next_prompt_tokens(seq_group)
