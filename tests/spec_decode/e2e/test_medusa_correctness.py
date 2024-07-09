@@ -24,7 +24,9 @@ import pytest
 from .conftest import run_greedy_equality_correctness_test
 
 # main model
-MAIN_MODEL = "lmsys/vicuna-7b-v1.3"
+# lmsys/vicuna-7b-v1.3 was to be used but it's causing
+# OOM in CI pipeline, so using a smaller random model.
+MAIN_MODEL = "JackFram/llama-68m"
 
 # speculative model
 SPEC_MODEL = "abhigoyal/vllm-medusa-vicuna-7b-v1.3"
