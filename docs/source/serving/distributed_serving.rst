@@ -31,7 +31,7 @@ You can also additionally specify :code:`--pipeline-parallel-size` to enable pip
     $     --model gpt2 \
     $     --tensor-parallel-size 4 \
     $     --pipeline-parallel-size 2 \
-    $     --distributed-executor-backend ray \
+    $     --distributed-executor-backend ray
 
 .. note::
     Pipeline parallel is a beta feature. It is only supported for online serving and the ray backend for now, as well as LLaMa and GPT2 style models.
