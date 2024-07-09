@@ -379,7 +379,7 @@ class GroupCoordinator:
         if self.world_size == 1:
             return obj
         if self.mq_broadcaster is not None:
-            assert src == 0, "Shared memory broadcaster only supports src=0"
+            assert src == 0, "Message queue broadcaster only supports src=0"
             return self.mq_broadcaster.broadcast_object(obj)
         if self.rank_in_group == src:
             torch.distributed.broadcast_object_list([obj],
