@@ -1,6 +1,7 @@
 import contextlib
 import gc
 import os
+import sys
 from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
@@ -14,16 +15,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoProcessor, AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
-from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
+from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalData
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.multimodal.utils import fetch_image
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
@@ -45,46 +45,42 @@ def _read_prompts(filename: str) -> List[str]:
 
 @dataclass(frozen=True)
 class ImageAsset:
-    name: Literal["stop_sign", "cherry_blossom"]
-
-    @cached_property
-    def pixel_values(self) -> torch.Tensor:
-        return torch.load(_IMAGE_DIR / f"{self.name}_pixel_values.pt")
-
-    @cached_property
-    def image_features(self) -> torch.Tensor:
-        return torch.load(_IMAGE_DIR / f"{self.name}_image_features.pt")
+    name: Literal["stop_sign", "cherry_blossom", "boardwalk"]
 
     @cached_property
     def pil_image(self) -> Image.Image:
+        if self.name == "boardwalk":
+            return fetch_image(
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+            )
+
         return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
-
-    def for_hf(self) -> Image.Image:
-        return self.pil_image
-
-    def for_vllm(self, vision_config: VisionLanguageConfig) -> MultiModalData:
-        image_input_type = vision_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
-
-        if image_input_type == ImageInputType.IMAGE_FEATURES:
-            return ImageFeatureData(self.image_features)
-        if image_input_type == ImageInputType.PIXEL_VALUES:
-            return ImagePixelData(self.pil_image)
-
-        raise NotImplementedError
 
 
 class _ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
+    boardwalk: str
 
 
-class _ImageAssets(UserList[ImageAsset]):
+if sys.version_info < (3, 9):
+    # UserList cannot be subscripted
+    class _ImageAssetsBase(UserList):
+        pass
+else:
+
+    class _ImageAssetsBase(UserList[ImageAsset]):
+        pass
+
+
+class _ImageAssets(_ImageAssetsBase):
 
     def __init__(self) -> None:
-        super().__init__(
-            [ImageAsset("stop_sign"),
-             ImageAsset("cherry_blossom")])
+        super().__init__([
+            ImageAsset("stop_sign"),
+            ImageAsset("cherry_blossom"),
+            ImageAsset("boardwalk")
+        ])
 
     def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
         """
@@ -93,7 +89,10 @@ class _ImageAssets(UserList[ImageAsset]):
         The order of the returned prompts matches the order of the
         assets when iterating through this object.
         """
-        return [prompts["stop_sign"], prompts["cherry_blossom"]]
+        return [
+            prompts["stop_sign"], prompts["cherry_blossom"],
+            prompts["boardwalk"]
+        ]
 
 
 IMAGE_ASSETS = _ImageAssets()
@@ -216,6 +215,9 @@ class HfRunner:
         )
 
         try:
+            # don't put this import at the top level
+            # it will call torch.cuda.device_count()
+            from transformers import AutoProcessor  # noqa: F401
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
@@ -231,7 +233,7 @@ class HfRunner:
         self,
         prompts: List[str],
         images: Optional[List[Image.Image]] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images:
             assert len(prompts) == len(images)
@@ -266,7 +268,7 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[List[Image.Image]] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
@@ -302,19 +304,30 @@ class HfRunner:
         self,
         prompts: List[str],
         max_tokens: int,
+        images: Optional[List[Image.Image]] = None,
+        **kwargs: Any,
     ) -> List[List[torch.Tensor]]:
-        all_logprobs = []
-        for prompt in prompts:
-            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+        all_logprobs: List[List[torch.Tensor]] = []
+        for i, prompt in enumerate(prompts):
+            processor_kwargs: Dict[str, Any] = {
+                "text": prompt,
+                "return_tensors": "pt",
+            }
+            if images is not None and images[i] is not None:
+                processor_kwargs["images"] = images[i]
+
+            inputs = self.processor(**processor_kwargs)
+
             output = self.model.generate(
-                self.wrap_device(input_ids),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
+                **kwargs,
             )
-            seq_logprobs = []
+            seq_logprobs: List[torch.Tensor] = []
             for hidden_states in output.hidden_states:
                 last_hidden_states = hidden_states[-1][0]
                 logits = torch.matmul(
@@ -334,20 +347,32 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
+        images: Optional[List[Image.Image]] = None,
+        **kwargs: Any,
     ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
         all_logprobs: List[List[Dict[int, float]]] = []
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for prompt in prompts:
-            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+        for i, prompt in enumerate(prompts):
+            processor_kwargs: Dict[str, Any] = {
+                "text": prompt,
+                "return_tensors": "pt",
+            }
+            if images is not None and images[i] is not None:
+                processor_kwargs["images"] = images[i]
+
+            inputs = self.processor(**processor_kwargs)
+            input_ids = inputs.input_ids
+
             output = self.model.generate(
-                self.wrap_device(input_ids),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
+                **kwargs,
             )
 
             seq_logprobs: List[torch.Tensor] = []
@@ -442,7 +467,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -450,7 +475,7 @@ class VllmRunner:
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = image
+                inputs[i]["multi_modal_data"] = {"image": image}
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -463,7 +488,7 @@ class VllmRunner:
             req_sample_output_strs: List[str] = []
             for sample in req_output.outputs:
                 output_str = sample.text
-                output_ids = sample.token_ids
+                output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append(prompt_str + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
@@ -473,10 +498,19 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         assert sampling_params.logprobs is not None
 
-        req_outputs = self.model.generate(prompts,
+        if images is not None:
+            assert len(prompts) == len(images)
+
+        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
+        if images is not None:
+            for i, image in enumerate(images):
+                inputs[i]["multi_modal_data"] = {"image": image}
+
+        req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
         outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
         for req_output in req_outputs:
@@ -491,7 +525,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
@@ -503,11 +537,14 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
                                                 max_tokens=max_tokens,
                                                 logprobs=num_logprobs)
-        outputs = self.generate_w_logprobs(prompts, greedy_logprobs_params)
+        outputs = self.generate_w_logprobs(prompts,
+                                           greedy_logprobs_params,
+                                           images=images)
 
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]

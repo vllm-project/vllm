@@ -102,6 +102,8 @@ class FlashInferMetadata(AttentionMetadata):
     # The data type of the paged kv cache
     data_type: torch.dtype = None
     device: torch.device = torch.device("cuda")
+    # Only used by gemma2 model
+    logits_soft_cap: Optional[float] = None
 
     def __post_init__(self):
         # Refer to
@@ -126,6 +128,7 @@ class FlashInferMetadata(AttentionMetadata):
             self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
             self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
                 self.device)
+            self.prefill_wrapper.end_forward()
             self.prefill_wrapper.begin_forward(
                 self.query_start_loc, self.paged_kv_indptr,
                 self.paged_kv_indices, self.paged_kv_last_page_len,
@@ -142,6 +145,7 @@ class FlashInferMetadata(AttentionMetadata):
                     self.device)
 
             assert self.decode_wrapper is not None
+            self.decode_wrapper.end_forward()
             self.decode_wrapper.begin_forward(
                 self.paged_kv_indptr,
                 self.paged_kv_indices,
@@ -269,9 +273,11 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert prefill_meta is not None
                 assert prefill_meta.prefill_wrapper is not None
-                output = prefill_meta.prefill_wrapper.forward(query,
-                                                              kv_cache,
-                                                              causal=True)
+                output = prefill_meta.prefill_wrapper.forward(
+                    query,
+                    kv_cache,
+                    logits_soft_cap=attn_metadata.logits_soft_cap,
+                    causal=True)
         else:
             assert attn_metadata.decode_metadata is not None
             assert attn_metadata.decode_metadata.decode_wrapper is not None
@@ -279,5 +285,5 @@ class FlashInferImpl(AttentionImpl):
                 query,
                 kv_cache,
                 sm_scale=self.scale,
-            )
+                logits_soft_cap=attn_metadata.logits_soft_cap)
         return output.view(num_tokens, hidden_size)
