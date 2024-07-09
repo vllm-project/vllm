@@ -127,7 +127,7 @@ def get_input(tokenizer, prompt, image, dtype):
         "input_ids":
         input_ids,
         "pixel_values":
-        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 1024, 1024),
+        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 384, 384),
         "num_image_tokens":
         576,
         "images_seq_mask":
