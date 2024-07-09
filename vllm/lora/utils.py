@@ -1,9 +1,9 @@
 import os
 from typing import List, Optional, Set, Tuple, Type
 
-from huggingface_hub import snapshot_download
-from huggingface_hub.utils import (EntryNotFoundError, HFValidationError,
-                                   RepositoryNotFoundError)
+import huggingface_hub
+from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
+                                   HFValidationError, RepositoryNotFoundError)
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -142,8 +142,9 @@ def get_lora_absolute_path(lora_path: str) -> str:
 
     # If the path does not exist locally, assume it's a Hugging Face repo.
     try:
-        local_snapshot_path = snapshot_download(repo_id=lora_path)
-    except (RepositoryNotFoundError, EntryNotFoundError,
+        local_snapshot_path = huggingface_hub.snapshot_download(
+            repo_id=lora_path)
+    except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
             HFValidationError) as e:
         # Handle errors that may occur during the download
         # Return original path instead instead of throwing error here
