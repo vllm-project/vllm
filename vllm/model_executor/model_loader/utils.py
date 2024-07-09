@@ -27,6 +27,9 @@ def get_model_architecture(
             and model_config.quantization != "fp8"
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
+    # FIXME: Special handling for gte-Qwen2
+    if "gte-Qwen2" in model_config.model:
+        architectures = ["Qwen2EmbeddingModel"]
 
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)

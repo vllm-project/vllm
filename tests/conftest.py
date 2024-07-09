@@ -414,8 +414,8 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
-    def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
-        return self.model.encode(prompts)
+    def encode(self, prompts: List[str], **kwargs) -> List[List[torch.Tensor]]:
+        return self.model.encode(prompts, **kwargs)
 
     def __enter__(self):
         return self
