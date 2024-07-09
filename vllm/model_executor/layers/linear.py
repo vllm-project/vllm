@@ -387,7 +387,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                if needs_scalar_to_array is not None and needs_scalar_to_array is not False:
+                if (needs_scalar_to_array is not None and 
+                        needs_scalar_to_array is not False):
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
 
@@ -549,7 +550,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                if needs_scalar_to_array is not None and needs_scalar_to_array is not False:
+                if (needs_scalar_to_array is not None and
+                        needs_scalar_to_array is not False):
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
 
