@@ -114,7 +114,7 @@ def get_input(tokenizer, prompt, image, dtype):
     image_id = 100015
     prompt = prompt[0]
     image = image[0]
-    vl_image = VLMImageProcessor(1024)
+    vl_image = VLMImageProcessor(384)
     prompt = prompt.replace('<image_placeholder>', '<image_placeholder>' * 576)
     input_ids = tokenizer.encode(prompt)
     input_ids = torch.LongTensor(input_ids)
@@ -184,7 +184,7 @@ def run_test(
                                                 images=images)
             for prompts, images in inputs_per_image
         ]
-
+    print(f'vllm_outputs_per_image -> {vllm_outputs_per_image}')
     AutoModelForCausalLM.register(DeepSeekMultiModalityConfig,
                                   MultiModalityCausalLM)
     tokenizer = AutoTokenizer.from_pretrained(model)
