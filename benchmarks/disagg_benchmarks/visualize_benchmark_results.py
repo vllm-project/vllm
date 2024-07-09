@@ -31,7 +31,7 @@ if __name__ == "__main__":
     
     
     # qps vs performance
-    qps_df = df[df["output_len"] == 12].copy()
+    qps_df = df[df["output_len"] == 150].copy()
     qps_df.drop(columns=[
         "chunk_itl",
         "chunk_ttft",
