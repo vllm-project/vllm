@@ -183,11 +183,11 @@ class Fp8RocmLinearMethod(LinearMethodBase):
 
         if layer.weight.dtype == torch.float8_e4m3fnuz:
             layer.activation_scaling_factor = Parameter(
-                layer.activation_scaling_factor * 2.0)
+                layer.activation_scaling_factor * 2.0, requires_grad=False)
             layer.weights_scaling_factor = Parameter(
-                layer.weights_scaling_factor * 2.0)
+                layer.weights_scaling_factor * 2.0, requires_grad=False)
             layer.output_scaling_factor = Parameter(
-                layer.output_scaling_factor / 2.0)
+                layer.output_scaling_factor / 2.0, requires_grad=False)
 
     def scales_shard_indexer(
             self, param: torch.Tensor, loaded_weight: torch.Tensor,
