@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 from transformers import AutoTokenizer
@@ -140,9 +140,10 @@ def create_dummy_logprobs(
 
 
 def create_dummy_prompt_logprobs(
-        complete_sequence_token_ids: List[int]) -> List[Dict[int, Logprob]]:
+        complete_sequence_token_ids: List[int]
+) -> List[Optional[Dict[int, Any]]]:
     # logprob for the first prompt token is None.
-    logprobs = [None]
+    logprobs: List[Optional[Dict[int, Any]]] = [None]
     logprobs.extend(create_dummy_logprobs(complete_sequence_token_ids)[1:])
     return logprobs
 
@@ -198,10 +199,12 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: List[int],
                               sampling_params=sampling_params,
                               arrival_time=0.0)
     dummy_logprobs = create_dummy_prompt_logprobs(complete_sequence_token_ids)
-    detokenizer.decode_prompt_logprobs_inplace(seq_group, dummy_logprobs,
+    detokenizer.decode_prompt_logprobs_inplace(seq_group,
+                                               dummy_logprobs,
                                                position_offset=0)
     # First logprob is None.
-    decoded_prompt_logprobs = dummy_logprobs[1:]
+    decoded_prompt_logprobs: List[Dict[int, Any]] = dummy_logprobs[
+        1:]  # type: ignore
 
     # decoded_prompt_logprobs doesn't contain the first token.
     token_ids = complete_sequence_token_ids
