@@ -461,16 +461,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
 
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
+        # start = torch.cuda.Event(enable_timing=True)
+        # end = torch.cuda.Event(enable_timing=True)
+        # start.record()
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
             proposals,
         )
-        end.record()
-        torch.cuda.synchronize()
-        print("Score Time====================", start.elapsed_time(end))
+        # end.record()
+        # torch.cuda.synchronize()
+        # print("Score Time====================", start.elapsed_time(end))
 
 
         accepted_token_ids, target_logprobs = self._verify_tokens(
