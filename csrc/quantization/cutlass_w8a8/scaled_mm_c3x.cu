@@ -202,7 +202,9 @@ struct ScaledEpilogueBiasAzp
     : private ScaledEpilogueBias<ElementAcc, ElementD, EpilogueDescriptor> {
  private:
   using SUPER = ScaledEpilogueBias<ElementAcc, ElementD, EpilogueDescriptor>;
-  using EVTComputePreAzp = typename SUPER::EVTCompute;
+  using EVTComputePreAzp =
+      typename SUPER::EVTCompute;  // TODO compute type float32, don't
+                                   // downconvert
 
   using Azp = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
       0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,

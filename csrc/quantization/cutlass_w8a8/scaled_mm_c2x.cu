@@ -159,7 +159,7 @@ struct ScaledEpilogue
 template <typename ElementD, typename OutputTileThreadMap>
 struct ScaledEpilogueBias
     : private ScaledEpilogueBase<ElementD, OutputTileThreadMap> {
- private:
+ protected:
   using SUPER = ScaledEpilogueBase<ElementD, OutputTileThreadMap>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::ScaleA;
@@ -215,7 +215,18 @@ struct ScaledEpilogueBiasAzp
     : private ScaledEpilogueBias<ElementD, OutputTileThreadMap> {
  private:
   using SUPER = ScaledEpilogueBias<ElementD, OutputTileThreadMap>;
-  using EVTComputePreAzp = typename SUPER::EVTCompute;
+  using ScaleA = typename SUPER::ScaleA;
+  using ScaleB = typename SUPER::ScaleB;
+  using Bias = typename SUPER::Bias;
+  using EVTCompute0 = typename SUPER::EVTCompute0;
+
+  using Compute1 = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiply_add, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputePreAzp =
+      cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA, EVTCompute0,
+                                              Bias>;
 
   // Per-token azp term, float, already multiplied with scale_a, shape (m,1)
   using Azp = cutlass::epilogue::threadblock::VisitorColBroadcast<
@@ -228,7 +239,7 @@ struct ScaledEpilogueBiasAzp
   // Compute the outer product of Azp and AzpAdj, and add to the scaled & biased
   // output.
   using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
-      cutlass::multiply_add, float, float,
+      cutlass::multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:
@@ -243,7 +254,18 @@ struct ScaledEpilogueBiasAzp
                                    torch::Tensor const& bias,
                                    torch::Tensor const& azp,
                                    torch::Tensor const& azp_adj) {
-    auto base_args = SUPER::prepare_args(a_scales, b_scales, bias);
+    using ScaleAArgs = typename ScaleA::Arguments;
+    using ScaleBArgs = typename ScaleB::Arguments;
+    using BiasArgs = typename Bias::Arguments;
+
+    ScaleAArgs a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
+    ScaleBArgs b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
+    BiasArgs bias_args{static_cast<ElementD*>(bias.data_ptr()), {}};
+
+    typename EVTCompute0::Arguments evt0_compute_args{b_args};
+
+    typename EVTComputePreAzp::Arguments base_args{a_args, evt0_compute_args,
+                                                   bias_args};
 
     typename Azp::Arguments azp_args{azp.data_ptr<float>()};
     typename AzpAdj::Arguments azp_adj_args{azp_adj.data_ptr<float>()};
