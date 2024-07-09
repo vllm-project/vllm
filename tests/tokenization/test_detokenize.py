@@ -1,15 +1,12 @@
 from typing import Any, Dict, List, Optional
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import (Detokenizer,
                                                  detokenize_incrementally)
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
-
-from ..utils import wait_for_gpu_memory_to_clear
 
 TRUTH = [
     "Hello here, this is a simple test",
@@ -236,12 +233,6 @@ def test_decode_prompt_logprobs_chunked_prefill(
     chunked_prefill_token_size: int,
     example_prompts,
 ):
-    wait_for_gpu_memory_to_clear(
-        devices=list(range(torch.cuda.device_count())),
-        threshold_bytes=2 * 2**30,
-        timeout_s=60,
-    )
-
     max_num_seqs = 256
     enable_chunked_prefill = False
     max_num_batched_tokens = None
@@ -253,6 +244,7 @@ def test_decode_prompt_logprobs_chunked_prefill(
     with vllm_runner(model,
                      dtype="half",
                      max_logprobs=5,
+                     gpu_memory_utilization=0.5,
                      enable_chunked_prefill=enable_chunked_prefill,
                      max_num_batched_tokens=max_num_batched_tokens,
                      max_num_seqs=max_num_seqs) as vllm_model:
