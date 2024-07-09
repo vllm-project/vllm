@@ -12,7 +12,7 @@ from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 from ..conftest import HfRunner, VllmRunner, _ImageAssets
 from .utils import check_outputs_equal
 
-models = ["deepseek-ai/deepseek-vl-7b-chat"]
+models = ["deepseek-ai/deepseek-vl-1.3b-chat"]
 IMAGE_TOKEN_ID = 100015
 pytestmark = pytest.mark.vlm
 
