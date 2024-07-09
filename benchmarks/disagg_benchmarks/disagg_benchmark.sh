@@ -166,17 +166,17 @@ main() {
   mkdir results
 
   default_qps=4
-  default_output_len=12
+  default_output_len=150
 
   for target_qps in 2 4 8 16
   do
     benchmark $target_qps $default_output_len
   done
 
-  for target_output_len in 5 10 20 40 80
-  do
-    benchmark $default_qps $target_output_len
-  done
+  # for target_output_len in 5 10 20 40 80
+  # do
+  #   benchmark $default_qps $target_output_len
+  # done
 
 }
 
