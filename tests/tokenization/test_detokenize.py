@@ -139,6 +139,13 @@ def create_dummy_logprobs(
     } for token_id in complete_sequence_token_ids]
 
 
+
+def create_dummy_prompt_logprobs(
+        complete_sequence_token_ids: List[int]) -> List[Dict[int, Logprob]]:
+    # logprob for the first prompt token is not defined.
+    return create_dummy_logprobs(complete_sequence_token_ids)[1:]
+
+
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("skip_special_tokens", [True, False])
@@ -178,8 +185,7 @@ def test_decode_sequence_logprobs(complete_sequence: str,
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("skip_special_tokens", [True])
-def test_decode_prompt_logprobs(complete_sequence: str,
-                                complete_sequence_token_ids: List[int],
+def test_decode_prompt_logprobs(complete_sequence_token_ids: List[int],
                                 detokenizer: Detokenizer,
                                 skip_special_tokens: bool):
     """Verify Detokenizer decodes prompt logprobs correctly."""
@@ -192,19 +198,77 @@ def test_decode_prompt_logprobs(complete_sequence: str,
                               seqs=[seq],
                               sampling_params=sampling_params,
                               arrival_time=0.0)
-    dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
+    dummy_logprobs = create_dummy_prompt_logprobs(complete_sequence_token_ids)
     detokenizer.decode_prompt_logprobs_inplace(seq_group, dummy_logprobs)
     decoded_prompt_logprobs = dummy_logprobs
 
     if skip_special_tokens:
+        # decoded_prompt_logprobs doesn't contain the first token.
+        token_ids = complete_sequence_token_ids[1:]
+        tokenzier = detokenizer.get_tokenizer_for_seq(seq)
+        text = tokenzier.decode(token_ids,
+                                skip_special_tokens=skip_special_tokens)
         # Text for logprobs for the chosen token should be the same as the
         # prompt text. Note that this will only be true if we skip
         # special tokens.
-        assert complete_sequence == "".join([
-            logprobs[token_id].decoded_token for token_id, logprobs in zip(
-                complete_sequence_token_ids, decoded_prompt_logprobs)
+        assert text == "".join([
+            logprobs[token_id].decoded_token
+            for token_id, logprobs in zip(token_ids, decoded_prompt_logprobs)
         ])
-        assert complete_sequence != "".join([
-            logprobs[token_id + 1].decoded_token for token_id, logprobs in zip(
-                complete_sequence_token_ids, decoded_prompt_logprobs)
+        assert text != "".join([
+            logprobs[token_id + 1].decoded_token
+            for token_id, logprobs in zip(token_ids, decoded_prompt_logprobs)
         ])
+
+
+@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+# @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
+@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+def test_decode_logprobs_regression(
+    vllm_runner,
+    model,
+    chunked_prefill_token_size: int,
+    example_prompts,
+):
+    max_num_seqs = 256
+    enable_chunked_prefill = False
+    max_num_batched_tokens = None
+    if chunked_prefill_token_size != -1:
+        enable_chunked_prefill = True
+        max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
+        max_num_batched_tokens = chunked_prefill_token_size
+
+    with vllm_runner(
+        model,
+        dtype="half",
+        max_logprobs=5,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs) as vllm_model:
+
+        vllm_sampling_params = SamplingParams(max_tokens=10,
+                                              logprobs=5,
+                                              prompt_logprobs=5,
+                                              temperature=0.0)
+        vllm_results = vllm_model.model.generate(
+            example_prompts, sampling_params=vllm_sampling_params)
+
+        for idx, result in enumerate(vllm_results):
+            assert result.prompt_logprobs is not None
+            assert result.prompt_logprobs[0] is None
+            
+            # Compared detokenized prompts ids to original prompt.
+            generated_string = ""
+            for (prompt_token, prompt_logprobs) in zip(
+                result.prompt_token_ids[1:], result.prompt_logprobs[1:]):
+                # prompt_logprobs is a dict of the token_id: logprob
+                # We select the token_id corresponding to the actual prompt
+                # Decoded token in the detokenized string corresponding to this
+                # promptt oken.
+                generated_string += prompt_logprobs[prompt_token].decoded_token
+
+            breakpoint()
+            assert generated_string == example_prompts[idx], (
+                "Detokenized prompt logprobs do not match original prompt"
+            )
+                                                             
