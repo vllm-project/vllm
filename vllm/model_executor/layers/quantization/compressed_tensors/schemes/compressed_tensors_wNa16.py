@@ -50,6 +50,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                 group_size=self.group_size,
                                 is_sym=True)
 
+
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
@@ -86,8 +87,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             })
         layer.register_parameter("weight_packed", weight)
 
-        # Original shape of the weights before packing
-        # note: not used in inference
+        # Shape of the weights before packing (not used in inference)
         weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
                                  requires_grad=False)
 
@@ -107,7 +107,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         else:
             # By setting scale_dim == 0, weight_loader will
             # shard the scales in TP>1 case.
-            scale_input_dim = 0
+            scale_input_dim = 1
             scale_input_size = input_size_per_partition // group_size
 
         weight_scale = Parameter(torch.empty(output_size_per_partition,
@@ -138,6 +138,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size = input_size
         layer.group_size = group_size
         layer.is_k_full = marlin_is_k_full(self.act_order, is_row_parallel)
+
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from marlin format. Handle repacking here.
@@ -173,6 +174,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             size_n=layer.output_size_per_partition,
             group_size=layer.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
+
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         return apply_marlin_linear(
