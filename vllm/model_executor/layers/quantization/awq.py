@@ -161,7 +161,36 @@ class AWQLinearMethod(LinearMethodBase):
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
         if not hasattr(layer,"ipex_qlinear") :
-            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], bias=bias, group_size=self.quant_config.group_size)
+            from intel_extension_for_pytorch.quantization import WoqWeightDtype
+            from intel_extension_for_pytorch.utils.weight_only_quantization import (
+                _woq_enable_weight_cache_for_large_batch,
+            )
+
+            weight_dtype = WoqWeightDtype.INT4
+            lowp_mode = ipex.quantization.WoqLowpMode.INT8
+            # lowp_mode = ipex.quantization.WoqLowpMode.NONE
+            # lowp_mode = ipex.quantization.WoqLowpMode.FP16
+            # lowp_mode = ipex.quantization.WoqLowpMode.BF16
+            act_quant_mode_dict = {
+                "PER_TENSOR": ipex.quantization.WoqActQuantMode.PER_TENSOR,
+                "PER_IC_BLOCK": ipex.quantization.WoqActQuantMode.PER_IC_BLOCK,
+                "PER_BATCH": ipex.quantization.WoqActQuantMode.PER_BATCH,
+                "PER_BATCH_IC_BLOCK": ipex.quantization.WoqActQuantMode.PER_BATCH_IC_BLOCK,
+                "PER_TENSOR_SYM": ipex.quantization.WoqActQuantMode.PER_TENSOR_SYM,
+                "PER_IC_BLOCK_SYM": ipex.quantization.WoqActQuantMode.PER_IC_BLOCK_SYM,
+                "PER_BATCH_SYM": ipex.quantization.WoqActQuantMode.PER_BATCH_SYM,
+                "PER_BATCH_IC_BLOCK_SYM": ipex.quantization.WoqActQuantMode.PER_BATCH_IC_BLOCK_SYM,
+            }
+            qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
+                weight_dtype=weight_dtype,
+                lowp_mode=lowp_mode,
+                act_quant_mode=act_quant_mode_dict["PER_IC_BLOCK"],
+                group_size=self.quant_config.group_size,
+            )
+            qconfig = _woq_enable_weight_cache_for_large_batch(
+                qconfig
+            )
+            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size)
         out = layer.ipex_qlinear(reshaped_x)
 
         return out.reshape(out_shape)
