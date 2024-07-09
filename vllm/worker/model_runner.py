@@ -1274,7 +1274,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         )
 
         if ctrl is not None:
-            ctrl.transform_sampler_output(output)
+            output = ctrl.transform_sampler_output(output)
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
