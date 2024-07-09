@@ -134,21 +134,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
         worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
                                                     use_dummy_driver=True)
 
-        node_workers = defaultdict(list)  # node id -> list of worker indices
-        node_gpus = defaultdict(list)  # node id -> list of gpu ids
-
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
-            node_workers[node_id].append(i)
-            # `gpu_ids` can be a list of strings or integers.
-            # convert them to integers for consistency.
-            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
-            # string sorting is not sufficient.
-            # see https://github.com/vllm-project/vllm/issues/5590
-            gpu_ids = [int(x) for x in gpu_ids]
-            node_gpus[node_id].extend(gpu_ids)
-        for node_id, gpu_ids in node_gpus.items():
-            node_gpus[node_id] = sorted(gpu_ids)
-
         # the order in `worker_node_and_gpu_ids` does not necessarily match
         # the machine boundaries. We need to make sure that workers in the
         # same node are assigned consecutive ranks.
@@ -167,7 +152,23 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 if node_id == current_node_id:
                     worker_ranks[i] = current_rank
                     current_rank += 1
-        # with the above example, worker_ranks will be `[0, 4, 5, 6, 7, 1, 2, 3]`
+        # with the above example, worker_ranks will be [0, 4, 5, 6, 7, 1, 2, 3]
+
+        node_workers = defaultdict(list)  # node id -> list of worker ranks
+        node_gpus = defaultdict(list)  # node id -> list of gpu ids
+
+        for worker_rank, (node_id, gpu_ids) in zip(worker_ranks,
+                                                   worker_node_and_gpu_ids):
+            node_workers[node_id].append(worker_rank)
+            # `gpu_ids` can be a list of strings or integers.
+            # convert them to integers for consistency.
+            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # string sorting is not sufficient.
+            # see https://github.com/vllm-project/vllm/issues/5590
+            gpu_ids = [int(x) for x in gpu_ids]
+            node_gpus[node_id].extend(gpu_ids)
+        for node_id, gpu_ids in node_gpus.items():
+            node_gpus[node_id] = sorted(gpu_ids)
 
         VLLM_INSTANCE_ID = get_vllm_instance_id()
 
@@ -201,12 +202,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [
             self._get_worker_kwargs(
-                local_rank=node_workers[node_id].index(worker_index),
+                local_rank=node_workers[node_id].index(rank),
                 rank=rank,
                 distributed_init_method=distributed_init_method,
-            ) for worker_index, (rank, (
-                node_id,
-                _)) in enumerate(zip(worker_ranks, worker_node_and_gpu_ids))
+            ) for rank, (node_id,
+                         _) in zip(worker_ranks, worker_node_and_gpu_ids)
         ]
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
