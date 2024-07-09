@@ -529,6 +529,8 @@ class LLMEngine:
         min_cost_scheduler.add_seq_group(seq_group)
 
     def stop_remote_worker_execution_loop(self) -> None:
+        if ctrl := self.sampling_controller:
+            ctrl.empty_step()
         self.model_executor.stop_remote_worker_execution_loop()
 
     def process_model_inputs(
@@ -863,6 +865,8 @@ class LLMEngine:
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:
+            if ctrl := self.sampling_controller:
+                ctrl.empty_step()
             output = []
 
         request_outputs = self._process_model_outputs(

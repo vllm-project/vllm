@@ -258,6 +258,8 @@ class _AsyncLLMEngine(LLMEngine):
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Stop the remote worker execution loop."""
+        if ctrl := self.sampling_controller:
+            ctrl.empty_step()
         await self.model_executor.stop_remote_worker_execution_loop_async()
 
     async def process_model_inputs_async(

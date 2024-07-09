@@ -942,6 +942,11 @@ class SamplingController:
         """Prepare the sampling controller for the next step."""
         pass
 
+    def empty_step(self):
+        """Called instead of prepare() when the scheduler found no sequences
+        to run."""
+        pass
+
     def transform_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply the sampling controller to the logits."""
         return logits
