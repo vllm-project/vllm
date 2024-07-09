@@ -90,48 +90,18 @@ def marlin_make_workspace(output_size_per_partition: int,
                        device=device,
                        requires_grad=False)
 
-def marlin_is_k_full(
-        act_order: bool, input_size: int, 
-        input_size_per_partition: int) -> bool:
-    
-    is_not_sharded_on_input = input_size_per_partition != input_size
-    return (act_order and is_not_sharded_on_input)
 
-def marlin_needs_scale_sharding(
-        act_order: bool, group_size: int, input_size: int,
-        input_size_per_partition: int) -> bool:
-    
+def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
+    return (act_order and not is_row_parallel)
+
+
+def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
+                                      is_row_parallel: bool) -> bool:
+    # Need to repeat scales on every rank if act_ordering or
+    # channelwise and RowParallelLinear
     is_channelwise = group_size == -1
-    is_sharded_on_input = input_size_per_partition != input_size
-    
-    # Need to repeat scales on every rank if act_ordering
-    if act_order or (is_channelwise and is_sharded_on_input):
-        return False
-    
-    # Need to repeat scales on every rank if 
-    if :
-        reutnr False
+    return act_order or (is_channelwise and is_row_parallel)
 
-    
-    
-    return is_sharded_on_input and 
-
-
-    
-
-    # By default, dont shard scales + zp over the input_dim
-    scales_and_zp_size = input_size // group_size
-    scales_and_zp_input_dim = None
-    
-    # TODO: @alexm-neuralmagic: explain what this is
-    is_k_full = (not is_sharded_on_input_dim) if act_order else True
-        
-    # If RowParallel + TP>1, shard scales / zp
-    if (is_sharded_on_input_dim and not is_channelwise):
-        scales_and_zp_size = input_size_per_partition // group_size
-        scales_and_zp_input_dim = 0
-    
-    return is_k_full, scales_and_zp_size, scales_and_zp_input_dim
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),

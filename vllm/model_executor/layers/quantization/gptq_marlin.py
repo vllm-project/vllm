@@ -275,6 +275,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     # Here, we handle the repacking, including the activation reordering case.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
+
         # Allocate marlin workspace
         layer.workspace = marlin_make_workspace(
             layer.output_size_per_partition, device)
