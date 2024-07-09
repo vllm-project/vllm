@@ -38,7 +38,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
          # Get the model config for the only attn in SP from the input model config.
-        if (self.parallel_config.sequence_parallel_size > 1):
+        if (self.parallel_config.sequence_parallel_size > 0):
             self.only_attn_model_config = copy.deepcopy(self.model_config)
             self.only_attn_model_config.model = "only_attn"
 

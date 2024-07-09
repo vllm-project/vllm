@@ -584,7 +584,7 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        sequence_parallel_size: Number of senquence parallel groups, one master and several workers.
+        sequence_parallel_size: Number of GPUs for SP workers (without master).
         worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
@@ -606,7 +606,7 @@ class ParallelConfig:
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        sequence_parallel_size: int = 1,
+        sequence_parallel_size: int = 0,
         worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
@@ -625,9 +625,9 @@ class ParallelConfig:
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
 
-        # When SP is enable, i.e., SP > 1, the world should contains the master of  
-        # pipeline_parallel_size * self.tensor_parallel_size GPUs and SP-1 GPUs.
-        self.world_size = pipeline_parallel_size * self.tensor_parallel_size + sequence_parallel_size - 1
+        # When SP is enable, i.e., SP > 0, the world should contains 
+        # pipeline_parallel_size * self.tensor_parallel_size GPUs as master and SP GPUs.
+        self.world_size = pipeline_parallel_size * self.tensor_parallel_size + sequence_parallel_size
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
