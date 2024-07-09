@@ -73,7 +73,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
             if seq_group.sampling_params.detokenize and self.detokenizer:
                 self.detokenizer.decode_prompt_logprobs_inplace(
-                    seq_group, prompt_logprobs)
+                    seq_group, prompt_logprobs,
+                    position_offset=len(seq_group.prompt_logprobs))
+            
             seq_group.prompt_logprobs.extend(prompt_logprobs)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,

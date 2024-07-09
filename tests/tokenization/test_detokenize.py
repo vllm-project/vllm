@@ -222,8 +222,7 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: List[int],
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
-# @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
-@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 7, 16, -1])
 def test_decode_logprobs_regression(
     vllm_runner,
     model,
@@ -267,7 +266,6 @@ def test_decode_logprobs_regression(
                 # promptt oken.
                 generated_string += prompt_logprobs[prompt_token].decoded_token
 
-            breakpoint()
             assert generated_string == example_prompts[idx], (
                 "Detokenized prompt logprobs do not match original prompt"
             )
