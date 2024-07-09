@@ -310,8 +310,8 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList(
             [nn.Identity() for _ in range(self.start_layer)] + [
                 LlamaDecoderLayer(config=config,
-                                  first_layer=(idx==idx.start_layer),
-                                  last_layer=(idx==config.end_layer-1),
+                                  first_layer=(idx==self.start_layer),
+                                  last_layer=(idx==self.end_layer-1),
                                   cache_config=cache_config,
                                   quant_config=quant_config)
                 for idx in range(self.start_layer, self.end_layer)
