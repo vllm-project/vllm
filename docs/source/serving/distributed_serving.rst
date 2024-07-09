@@ -19,7 +19,7 @@ To run multi-GPU serving, pass in the :code:`--tensor-parallel-size` argument wh
 
 .. code-block:: console
 
-    $ python -m vllm.entrypoints.api_server \
+    $ python -m vllm.entrypoints.openai.api_server \
     $     --model facebook/opt-13b \
     $     --tensor-parallel-size 4
 

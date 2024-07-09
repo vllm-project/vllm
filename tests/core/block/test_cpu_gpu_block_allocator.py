@@ -8,8 +8,8 @@ from vllm.utils import Device, chunk_list
 @pytest.mark.parametrize("num_gpu_blocks", [1024])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_allocate_mutable(num_cpu_blocks: int, num_gpu_blocks: int,
-                          block_size: int, allocator_type: str):
+def test_allocate_mutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
+                                block_size: int, allocator_type: str):
     allocator = CpuGpuBlockAllocator.create(
         allocator_type=allocator_type,
         num_gpu_blocks=num_gpu_blocks,
@@ -21,14 +21,14 @@ def test_allocate_mutable(num_cpu_blocks: int, num_gpu_blocks: int,
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
 
     cpu_blocks = [
-        allocator.allocate_mutable(prev_block=None, device=Device.CPU)
+        allocator.allocate_mutable_block(prev_block=None, device=Device.CPU)
         for _ in range(num_cpu_blocks)
     ]
     assert allocator.get_num_free_blocks(Device.CPU) == 0
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
 
     gpu_blocks = [
-        allocator.allocate_mutable(prev_block=None, device=Device.GPU)
+        allocator.allocate_mutable_block(prev_block=None, device=Device.GPU)
         for _ in range(num_gpu_blocks)
     ]
     assert allocator.get_num_free_blocks(Device.CPU) == 0
@@ -47,8 +47,8 @@ def test_allocate_mutable(num_cpu_blocks: int, num_gpu_blocks: int,
 @pytest.mark.parametrize("num_gpu_blocks", [1024])
 @pytest.mark.parametrize("block_size", [2])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_allocate_immutable(num_cpu_blocks: int, num_gpu_blocks: int,
-                            block_size: int, allocator_type: str):
+def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
+                                  block_size: int, allocator_type: str):
     allocator = CpuGpuBlockAllocator.create(
         allocator_type=allocator_type,
         num_gpu_blocks=num_gpu_blocks,
@@ -67,18 +67,18 @@ def test_allocate_immutable(num_cpu_blocks: int, num_gpu_blocks: int,
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
 
     cpu_blocks = [
-        allocator.allocate_immutable(prev_block=None,
-                                     token_ids=token_ids,
-                                     device=Device.CPU)
+        allocator.allocate_immutable_block(prev_block=None,
+                                           token_ids=token_ids,
+                                           device=Device.CPU)
         for token_ids in cpu_token_ids
     ]
     assert allocator.get_num_free_blocks(Device.CPU) == 0
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
 
     gpu_blocks = [
-        allocator.allocate_immutable(prev_block=None,
-                                     token_ids=token_ids,
-                                     device=Device.GPU)
+        allocator.allocate_immutable_block(prev_block=None,
+                                           token_ids=token_ids,
+                                           device=Device.GPU)
         for token_ids in gpu_token_ids
     ]
     assert allocator.get_num_free_blocks(Device.CPU) == 0
