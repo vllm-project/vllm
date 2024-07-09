@@ -369,6 +369,17 @@ class Scheduler:
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
 
+                self._free_seq_group(aborted_group)
+
+    def _free_seq_group(self, 
+                       seq_group: SequenceGroup,
+    ) -> None:
+        """
+        Free a sequence group from a cross-attention block table.
+        Has no effect on decoder-only models.
+        """
+        self.block_manager.free_cross(seq_group)
+
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
             self.swapped) != 0
