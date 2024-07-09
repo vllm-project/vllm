@@ -154,7 +154,7 @@ class TPUModelRunner:
         # Dummy run.
         num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
         self.model(token_ids, position_ids, kv_caches, attn_metadata,
-                   input_lens, t, p, num_samples)
+                   input_lens, None, t, p, num_samples)
 
     def warmup_model(
         self,
