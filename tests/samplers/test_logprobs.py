@@ -12,8 +12,7 @@ MODELS = ["facebook/opt-125m"]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-# @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
-@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("num_top_logprobs", [6])  # 32000 == vocab_size
 @pytest.mark.parametrize("detokenize", [True, False])
 def test_get_prompt_logprobs(
@@ -81,11 +80,10 @@ def test_get_prompt_logprobs(
             assert output_text == ''
             assert output_string_from_most_likely_tokens_lst == ([None] *
                                                                  max_tokens)
-        
+
         # The first prompt logprob is always None
         assert result.prompt_logprobs[0] is None
         for prompt_logprobs in result.prompt_logprobs[1:]:
-
             # If the prompt token is not included in the top X
             # logprob, it can return 1 more data
             assert (len(prompt_logprobs) == num_top_logprobs
