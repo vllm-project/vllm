@@ -244,6 +244,7 @@ def test_decode_prompt_logprobs_chunked_prefill(
     with vllm_runner(model,
                      dtype="half",
                      max_logprobs=5,
+                     gpu_memory_utilization=0.7,
                      enable_chunked_prefill=enable_chunked_prefill,
                      max_num_batched_tokens=max_num_batched_tokens,
                      max_num_seqs=max_num_seqs) as vllm_model:
