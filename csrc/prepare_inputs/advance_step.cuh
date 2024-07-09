@@ -12,5 +12,8 @@
 namespace prepare_inputs {
 
 static constexpr int max_threads = 256;
+static constexpr bool logging = true;
+
+constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
 
 }  // namespace prepare_inputs
