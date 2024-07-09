@@ -101,14 +101,13 @@ class OpenAIServing:
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
-        model_cards.extend(lora_cards)
-        
         prompt_adapter_cards = [
             ModelCard(id=prompt_adapter.prompt_adapter_name,
                       root=self.served_model_names[0],
                       permission=[ModelPermission()])
             for prompt_adapter in self.prompt_adapter_requests
         ]
+        model_cards.extend(lora_cards)
         model_cards.extend(prompt_adapter_cards)
         return ModelList(data=model_cards)
 
