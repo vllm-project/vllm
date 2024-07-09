@@ -215,17 +215,12 @@ def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
         # Did not match any schema. Cannot check for mutation
         return None
 
-    # What to do here?
     if len(matched_schemas) != 1:
-        # TODO: FIXME!
-        #print(f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
-        #raise Exception(f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
-        pass
-
-    if False and node_function_target(n).find("linear") != -1:
-        print(f"sig,sche = {matched_schemas}")
+        logger.debug(f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
+        return None
 
     _, s = matched_schemas[0]
+
     return s
 
 
