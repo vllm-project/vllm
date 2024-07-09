@@ -397,9 +397,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             block_aligned_sliding_window = \
                 sliding_window_blocks * self.block_size
 
-        import pdb
-        pdb.set_trace()
-
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             is_prompt = seq_group_metadata.is_prompt

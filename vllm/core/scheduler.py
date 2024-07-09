@@ -270,6 +270,8 @@ class Scheduler:
             version = "v2"
         if self.scheduler_config.embedding_mode:
             version = "embedding"
+        if self.scheduler_config.its_mamba:
+            version = "embedding"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
@@ -758,8 +760,6 @@ class Scheduler:
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
         """
-        import pdb
-        pdb.set_trace()
         # Include running requests to the budget.
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
@@ -1057,7 +1057,6 @@ class Scheduler:
                              if not seq_group.is_finished())
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
-        return #TODO TMS HACK
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
