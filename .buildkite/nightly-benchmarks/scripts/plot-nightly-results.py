@@ -127,7 +127,7 @@ def main(args):
             ax.grid(axis='y')
 
     fig.tight_layout()
-    fig.savefig("nightly_results.png", bbox_inches='tight')
+    fig.savefig("nightly_results.png", bbox_inches='tight', dpi=400)
 
 
 if __name__ == '__main__':
