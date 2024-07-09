@@ -75,7 +75,8 @@ class OpenAIServing:
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
             for i, prompt_adapter in enumerate(prompt_adapters, start=1):
-                with open(f"./{prompt_adapter.local_path}/adapter_config.json") as f:
+                with open(f"./{prompt_adapter.local_path}"
+                          f"/adapter_config.json") as f:
                     adapter_config = json.load(f)
                     num_virtual_tokens = adapter_config["num_virtual_tokens"]
                 self.prompt_adapter_requests.append(
@@ -100,6 +101,8 @@ class OpenAIServing:
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
+        model_cards.extend(lora_cards)
+        
         prompt_adapter_cards = [
             ModelCard(id=prompt_adapter.prompt_adapter_name,
                       root=self.served_model_names[0],
@@ -107,7 +110,6 @@ class OpenAIServing:
             for prompt_adapter in self.prompt_adapter_requests
         ]
         model_cards.extend(prompt_adapter_cards)
-        model_cards.extend(lora_cards)
         return ModelList(data=model_cards)
 
     def create_error_response(
