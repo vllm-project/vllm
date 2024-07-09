@@ -8,7 +8,7 @@ from torch import nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
@@ -81,6 +81,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         *args,
         **kwargs,
@@ -94,6 +95,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.multimodal_config = multimodal_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 
