@@ -4,7 +4,7 @@ import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
@@ -48,6 +48,7 @@ class TP1DraftModelRunner(ModelRunner):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         multimodal_config: Optional[MultiModalConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
     ):
         if return_hidden_states:
@@ -66,6 +67,7 @@ class TP1DraftModelRunner(ModelRunner):
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
             multimodal_config=multimodal_config,
+            prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
         )
 
@@ -135,6 +137,13 @@ class TP1DraftModelRunner(ModelRunner):
             assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
+
+        if self.prompt_adapter_config:
+            assert model_input.prompt_adapter_requests is not None
+            assert model_input.prompt_adapter_mapping is not None
+            self.set_active_prompt_adapters(
+                model_input.prompt_adapter_requests,
+                model_input.prompt_adapter_mapping)
 
         virtual_engine = model_input.virtual_engine
         outputs: List[SamplerOutput] = []
