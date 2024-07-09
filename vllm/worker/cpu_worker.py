@@ -6,14 +6,14 @@ import torch.distributed
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, init_kmp_env
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
@@ -131,7 +131,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
@@ -145,10 +145,13 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
+
+        # try to initialize intel openmp optimized tunings
+        init_kmp_env()
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -162,13 +165,13 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
+            multimodal_config=self.multimodal_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: CPUCacheEngine
-        self.cpu_cache: List[torch.Tensor]
+        self.cache_engine: List[CPUCacheEngine]
+        self.cpu_cache: List[List[torch.Tensor]]
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -242,25 +245,32 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 "initializing the engine.")
 
     def _init_cache_engine(self) -> None:
-        self.cache_engine = CPUCacheEngine(self.cache_config,
-                                           self.model_config,
-                                           self.parallel_config,
-                                           self.device_config)
-        self.cpu_cache = self.cache_engine.cpu_cache
-        self.model_runner.block_size = self.cache_engine.block_size
+        self.cache_engine = [
+            CPUCacheEngine(self.cache_config, self.model_config,
+                           self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.cpu_cache = [
+            self.cache_engine[ve].cpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.model_runner.block_size = self.cache_engine[0].block_size
 
-        assert self.cpu_cache is not None
+        assert all(
+            self.cpu_cache[ve] is not None
+            for ve in range(self.parallel_config.pipeline_parallel_size))
 
         # Populate the cache to warmup the memory
-        for layer_cache in self.cpu_cache:
-            layer_cache.fill_(0)
+        for ve in range(self.parallel_config.pipeline_parallel_size):
+            for layer_cache in self.cpu_cache[ve]:
+                layer_cache.fill_(0)
 
     @property
     def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return self.cpu_cache
 
     def execute_worker(
@@ -269,12 +279,14 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     ) -> None:
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
-            self.cache_engine.copy(worker_input.blocks_to_copy)
+            self.cache_engine[worker_input.virtual_engine].copy(
+                worker_input.blocks_to_copy)
 
     @torch.inference_mode()
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         assert execute_model_req is not None
+        virtual_engine = execute_model_req.virtual_engine
         num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
         blocks_to_copy = execute_model_req.blocks_to_copy
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
@@ -285,6 +297,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_copy=blocks_to_copy,
+            virtual_engine=virtual_engine,
         )
 
     def init_distributed_environment(self) -> None:
