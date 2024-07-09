@@ -177,7 +177,7 @@ class backend_class:
         tag_side_effects(gm.graph)
 
         # Not strictly necessary
-        gm.graph.eliminate_dead_code()
+        #gm.graph.eliminate_dead_code()
 
         # TODO: store these in the root module state dictionary so that code for
         # all sub-modules is shared?  Or should these be globals?

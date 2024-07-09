@@ -194,17 +194,14 @@ class ModuleInputGenerator(torch.fx.passes.fake_tensor_prop.FakeTensorProp):
         return super().call_module(target, args, kwargs)
 
 
-def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
-    mutable_arg_indices = []
-
-    if n.op != 'call_function':
-        return mutable_arg_indices
+def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
+    assert is_call(n)
 
     sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(
         n.target, return_schemas=True)
 
-    if schemas is None or not any([s.is_mutable for s in schemas]):
-        return mutable_arg_indices
+    if schemas is None:
+        return None
 
     matched_schemas = []
     for candidate_signature, schema in zip(sigs, schemas):
@@ -216,14 +213,30 @@ def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
 
     if len(matched_schemas) == 0:
         # Did not match any schema. Cannot check for mutation
-        return mutable_arg_indices
+        return None
 
     # What to do here?
     if len(matched_schemas) != 1:
-        raise Exception("ambiguous sig failure")
+        # TODO: FIXME!
+        #print(f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
+        #raise Exception(f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
+        pass
+
+    if False and node_function_target(n).find("linear") != -1:
+        print(f"sig,sche = {matched_schemas}")
 
     _, s = matched_schemas[0]
-    if not s.is_mutable:
+    return s
+
+
+def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
+    mutable_arg_indices = []
+
+    if not is_call(n):
+        return mutable_arg_indices
+
+    s = get_function_schema(n)
+    if not s or not s.is_mutable:
         return mutable_arg_indices
 
     num_outputs = len([a for a in s.arguments if a.is_out])
@@ -238,6 +251,16 @@ def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
     return mutable_arg_indices
 
 
+#sigs = [<Signature (out: torch.Tensor, a: torch.Tensor, b: torch.Tensor, a_scales: torch.Tensor, b_scales: torch.Tensor, bias: Optional[torch.Tensor]) -> None>]
+#schemas = [_C::cutlass_scaled_mm(Tensor($0! -> ) out, Tensor a, Tensor b, Tensor a_scales, Tensor b_scales, Tensor? bias) -> ()]
+def is_optional_arg(n: torch.fx.Node, arg_num: int) -> bool:
+    s = get_function_schema(n)
+    if not s or arg_num >= len(s.arguments):
+        return False
+    return isinstance(s.arguments[arg_num].real_type, torch._C.OptionalType)
+
+
+# See node.normalized_arguments
 def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
     if isinstance(arg, int):
         if arg >= len(n.args):

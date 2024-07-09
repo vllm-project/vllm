@@ -56,12 +56,6 @@ from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 
-
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
-
 class LlamaMLP(nn.Module):
 
     def __init__(

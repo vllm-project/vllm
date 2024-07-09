@@ -10,7 +10,7 @@ import tempfile
 import torch
 import types
 
-from .utils import extract_node_type, compose, build_extension, mangle_name, argument_type_str, node_function_target
+from .utils import extract_node_type, compose, build_extension, mangle_name, argument_type_str, node_function_target, is_optional_arg
 
 from pathlib import Path
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
@@ -323,10 +323,14 @@ class FusedOpGenerator:
                     first_arg = 1
                 call_str = call_str + f"{self.mangle(fn, '::')}("
                 sep = ''
-                for inp in n.args[first_arg:]:
+                for i, inp in enumerate(n.args[first_arg:]):
                     # bit of a hack for optional/empty tensor arguments
                     if inp is None:
-                        call_str = call_str + sep + "torch::Tensor()"
+                        # {} should work for both default Tensor and optional<Tensor>
+                        if is_optional_arg(n, i):
+                            call_str = call_str + sep + "{}"
+                        else:
+                            call_str = call_str + sep + "torch::Tensor()"
                     elif isinstance(inp, tuple):
                         call_str = call_str + sep + "{" + ','.join(
                             [str(t) for t in inp]) + "}"

@@ -121,8 +121,8 @@ def _(
     return torch.empty_like(decode_query)
 
 
-torch.library.define("vllm::flash_attn_varlen_func", "(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, Tensor cu_seqlens_k, int max_seqlen_q, int max_seqlen_k, float softmax_scale, bool causal, (int, int) window_size, float[]? alibi_slopes) -> Tensor")
-torch.library.define("vllm::flash_attn_with_kvcache", "(Tensor q, Tensor k, Tensor v, Tensor block_table, Tensor cache_seqlens, float softmax_scale, bool causal, float[]? alibi_slopes) -> Tensor")
+torch.library.define("vllm::flash_attn_varlen_func", "(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, Tensor cu_seqlens_k, int max_seqlen_q, int max_seqlen_k, float softmax_scale, bool causal, (int, int) window_size, float[]? alibi_slopes, int[] out_shape) -> Tensor")
+torch.library.define("vllm::flash_attn_with_kvcache", "(Tensor q, Tensor k, Tensor v, Tensor block_table, Tensor cache_seqlens, float softmax_scale, bool causal, float[]? alibi_slopes, int[] out_shape) -> Tensor")
 
 @torch.library.impl("vllm::flash_attn_varlen_func", "cuda")
 def _flash_attn_varlen_func(
@@ -137,6 +137,7 @@ def _flash_attn_varlen_func(
         causal,
         window_size,
         alibi_slopes,
+        out_shape,
 ):
     return flash_attn_varlen_func(
         q=q,
@@ -165,9 +166,10 @@ def _flash_attn_varlen_func_meta(
         causal,
         window_size,
         alibi_slopes,
+        out_shape,
 ):
-    assert False
-    return out
+    # TODO: is this always correct?
+    return torch.empty(out_shape, dtype=q.dtype, layout=q.layout, device=q.device)
 
 @torch.library.impl("vllm::flash_attn_with_kvcache", "cuda")
 def _flash_attn_with_kvcache(
@@ -179,6 +181,7 @@ def _flash_attn_with_kvcache(
         softmax_scale,
         causal,
         alibi_slopes,
+        out_shape,
 ):
     return flash_attn_with_kvcache(
         decode_query,
@@ -201,10 +204,9 @@ def _flash_attn_with_kvcache_meta(
         softmax_scale,
         causal,
         alibi_slopes,
-        out,
+        out_shape,
 ):
-    assert False
-    return out
+    return torch.empty(out_shape, dtype=decode_query.dtype, layout=decode_query.layout, device=decode_query.device)
 
 
 class FlashAttentionBackend(AttentionBackend):
