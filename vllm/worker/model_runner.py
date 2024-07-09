@@ -616,6 +616,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 input_positions.append(0)
                 slot_mapping.append(_PAD_SLOT_ID)
                 seq_lens.append(1)
+                query_lens.append(1)
                 block_tables.append([])
                 lora_index_mapping.append(0)
 
