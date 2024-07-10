@@ -21,15 +21,17 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
 
   if [[ $PR_LABELS == *"perf-benchmarks"* ]]; then
     echo "This PR has the 'perf-benchmarks' label. Proceeding with the performance benchmarks."
-    # append benchmark-pipeline.yaml to the end of final.yaml
-    yq 'load(".buildkite/nightly-benchmarks/benchmark-pipeline.yaml") * load("final.yaml")' > final.yaml
+    yq -n 'load("final.yaml") *+ load(".buildkite/nightly-benchmarks/benchmark-pipeline.yaml")' > final.yaml
   fi
+
+  cat final.yaml
 
   if [[ $PR_LABELS == *"nightly-benchmarks"* ]]; then
     echo "This PR has the 'nightly-benchmark' label. Proceeding with the nightly benchmarks."
-    # append nightly-pipeline.yaml to the end of final.yaml
-    yq 'load(".buildkite/nightly-benchmarks/nightly-pipeline.yaml") * load("final.yaml")' > final.yaml
+    yq -n 'load("final.yaml") *+ load(".buildkite/nightly-benchmarks/nightly-pipeline.yaml")' > final.yaml
   fi
+
+  cat final.yaml
 
   buildkite-agent pipeline upload final.yaml
 
