@@ -4,7 +4,7 @@ from typing import List
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 import json
-from pydantic import BaseModel
+import partial_json_parser
 import re
 from vllm.entrypoints.openai.protocol import DeltaMessage
 logger = init_logger(__name__)
