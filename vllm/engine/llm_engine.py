@@ -589,23 +589,22 @@ class LLMEngine:
             return params
 
         bad_words_ids: List[List[int]] = list()
-
-        # To prohibit words both at the beginning and in the middle of text
-        # (related to add_prefix_space tokenizer parameter)
-        prefixes = ["", " "]
-
         tokenizer = self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
         for bad_word in params.bad_words:
-            for j, prefix in enumerate(prefixes):
+            # To prohibit words both at the beginning and in the middle of text
+            # (related to add_prefix_space tokenizer parameter)
+            for add_prefix_space in [False, True]:
+                prefix = " " if add_prefix_space else ""
                 inputs = {"prompt": prefix + bad_word.lstrip()}
                 prompt_token_ids = tokenizer.encode(text=inputs["prompt"],
                                                     add_special_tokens=False)
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
-                if (j == 0) or (
-                        j > 0 and prompt_token_ids[0] != bad_words_ids[-1][0]
+                if (not add_prefix_space) or (
+                        add_prefix_space
+                        and prompt_token_ids[0] != bad_words_ids[-1][0]
                         and len(prompt_token_ids) == len(bad_words_ids[-1])):
                     bad_words_ids.append(prompt_token_ids)
 
