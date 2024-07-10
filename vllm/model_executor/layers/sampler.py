@@ -113,13 +113,18 @@ class Sampler(nn.Module):
             on_device_tensors = None
 
         # Get the logprobs query results.
-        prompt_logprobs, sample_logprobs = _get_logprobs(
-            logprobs, sampling_metadata, sample_results)
+        if not sampling_metadata.skip_logprobs:
+            prompt_logprobs, sample_logprobs = _get_logprobs(
+                logprobs, sampling_metadata, sample_results)
+        else:
+            prompt_logprobs = None
+            sample_logprobs = None
         return _build_sampler_output(sample_results,
                                      sampling_metadata,
                                      prompt_logprobs,
                                      sample_logprobs,
-                                     on_device_tensors=on_device_tensors)
+                                     on_device_tensors=on_device_tensors,
+                                     skip_logprobs=sampling_metadata.skip_logprobs)
 
     @property
     def _should_modify_greedy_probs_inplace(self) -> bool:
@@ -539,24 +544,28 @@ def _sample_with_torch(
 
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
-    for sampling_type in SamplingType:
-        if sampling_type not in sample_metadata:
-            continue
-        (seq_group_id, seq_groups) = sample_metadata[sampling_type]
-        if sampling_type == SamplingType.GREEDY:
-            sample_results = _greedy_sample(seq_groups, greedy_samples)
-        elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            sample_results = _random_sample(seq_groups,
-                                            multinomial_samples[sampling_type])
-        elif sampling_type == SamplingType.BEAM:
-            sample_results = _beam_search_sample(seq_groups,
-                                                 beam_search_logprobs)
-        sample_results_dict.update(zip(seq_group_id, sample_results))
+    if not sampling_metadata.skip_logprobs:
+        for sampling_type in SamplingType:
+            if sampling_type not in sample_metadata:
+                continue
+            (seq_group_id, seq_groups) = sample_metadata[sampling_type]
+            if sampling_type == SamplingType.GREEDY:
+                sample_results = _greedy_sample(seq_groups, greedy_samples)
+            elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
+                sample_results = _random_sample(seq_groups,
+                                                multinomial_samples[sampling_type])
+            elif sampling_type == SamplingType.BEAM:
+                sample_results = _beam_search_sample(seq_groups,
+                                                    beam_search_logprobs)
+            sample_results_dict.update(zip(seq_group_id, sample_results))
 
-    sample_results = [
-        sample_results_dict.get(i, ([], []))
-        for i in range(len(sampling_metadata.seq_groups))
-    ]
+        sample_results = [
+            sample_results_dict.get(i, ([], []))
+            for i in range(len(sampling_metadata.seq_groups))
+        ]
+    else:
+        sample_results = []
+        
     return sample_results, sampled_token_ids_tensor
 
 
@@ -1008,6 +1017,7 @@ def _build_sampler_output(
     sample_logprobs: List[SampleLogprobs],
     on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor,
                                       torch.Tensor]],
+    skip_logprobs: bool = False,
 ) -> SamplerOutput:
     """Construct Python objects with the output of sampling.
 
@@ -1019,20 +1029,21 @@ def _build_sampler_output(
     """
 
     sampler_output: List[CompletionSequenceGroupOutput] = []
-    for (seq_group, sample_result, group_prompt_logprobs,
-         group_sample_logprobs) in zip(sampling_metadata.seq_groups,
-                                       sample_results, prompt_logprobs,
-                                       sample_logprobs):
-        seq_ids = seq_group.seq_ids
-        next_token_ids, parent_ids = sample_result
-        seq_outputs: List[SequenceOutput] = []
-        for parent_id, next_token_id, logprobs in zip(parent_ids,
-                                                      next_token_ids,
-                                                      group_sample_logprobs):
-            seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
-        sampler_output.append(
-            CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+    if not skip_logprobs:
+        for (seq_group, sample_result, group_prompt_logprobs,
+            group_sample_logprobs) in zip(sampling_metadata.seq_groups,
+                                        sample_results, prompt_logprobs,
+                                        sample_logprobs):
+            seq_ids = seq_group.seq_ids
+            next_token_ids, parent_ids = sample_result
+            seq_outputs: List[SequenceOutput] = []
+            for parent_id, next_token_id, logprobs in zip(parent_ids,
+                                                        next_token_ids,
+                                                        group_sample_logprobs):
+                seq_outputs.append(
+                    SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
+            sampler_output.append(
+                CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:

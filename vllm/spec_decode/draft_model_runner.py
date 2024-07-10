@@ -318,6 +318,8 @@ class TP1DraftModelRunner(ModelRunner):
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata)
 
+            model_input.sampling_metadata.skip_logprobs = True
+
             # Sample the next token.
             outputs.append(
                 self.model.sample(
@@ -396,6 +398,8 @@ class TP1DraftModelRunner(ModelRunner):
             # Compute the logits.
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata)
+
+            model_input.sampling_metadata.skip_logprobs = True
 
             # Sample the next token.
             outputs.append(
