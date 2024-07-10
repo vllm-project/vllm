@@ -41,7 +41,7 @@ start_nodes() {
             fi
         done
         GPU_DEVICES+='"'
-        docker run -d --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE -v /root/.cache/huggingface:/root/.cache/huggingface /bin/bash -c "tail -f /dev/null"
+        docker run -d --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE -v ~/.cache/huggingface:/root/.cache/huggingface /bin/bash -c "tail -f /dev/null"
         if [ $node -eq 0 ]; then
             docker exec node$node /bin/bash -c "ray start --head --port=6379 && ray status"
         else
