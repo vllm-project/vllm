@@ -216,7 +216,7 @@ struct ScaledEpilogueBias
  * term using an outer product. If the term was precomputed, it would require
  * O(m*n) space, and this way it only requires O(m+n) space.
  *
- * This epilogue also supports bias, which remain per-tensor.
+ * This epilogue also supports bias, which remains per-channel.
  */
 template <typename ElementD, typename OutputTileThreadMap>
 struct ScaledEpilogueBiasAzp
@@ -227,37 +227,37 @@ struct ScaledEpilogueBiasAzp
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
   using Bias = typename SUPER::template RowLoad<ElementD>;
-  using Compute0 = cutlass::epilogue::threadblock::VisitorCompute<
+
+  // Per-token azp term, float, already multiplied with scale_a, shape (m,1)
+  using Azp = typename SUPER::template ColLoad<int32_t>;
+
+  // This is the AZP adjustment term, scale_b * J * B, shape (1,n)
+  using AzpAdj = typename SUPER::template RowLoad<int32_t>;
+
+  // Compute (accum + azp * azp_adj), resulting in a float
+  using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiply_add, float, int32_t,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeAzp =
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, Azp, AzpAdj, Accum>;
+
+  using ComputeScaleB = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiplies, float, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
-  using EVTCompute0 =
-      cutlass::epilogue::threadblock::Sm80EVT<Compute0, ScaleB, Accum>;
+  using EVTComputeScaleB =
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeScaleB, ScaleB,
+                                              EVTComputeAzp>;
 
-  using Compute1 = cutlass::epilogue::threadblock::VisitorCompute<
-      cutlass::multiply_add, float, float,
-      cutlass::FloatRoundStyle::round_to_nearest>;
-
-  using EVTComputePreAzp =
-      cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA, EVTCompute0,
-                                              Bias>;
-
-  // Per-token azp term, float, already multiplied with scale_a, shape (m,1)
-  using Azp = typename SUPER::template ColLoad<float>;
-
-  // This is the AZP adjustment term, scale_b * J * B, shape (1,n)
-  using AzpAdj = typename SUPER::template RowLoad<float>;
-
-  // Compute the outer product of Azp and AzpAdj, and add to the scaled & biased
-  // output.
-  using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
+  using ComputeScaleBiasA = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:
   using EVTCompute =
-      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, Azp, AzpAdj,
-                                              EVTComputePreAzp>;
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeScaleBiasA, ScaleA,
+                                              EVTComputeScaleB, Bias>;
 
   using ArgumentType = typename EVTCompute::Arguments;
 
@@ -269,15 +269,13 @@ struct ScaledEpilogueBiasAzp
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
-    auto azp_args = SUPER::template args_from_tensor<Azp, float>(azp);
+    auto azp_args = SUPER::template args_from_tensor<Azp, int32_t>(azp);
     auto azp_adj_args =
-        SUPER::template args_from_tensor<AzpAdj, float>(azp_adj);
+        SUPER::template args_from_tensor<AzpAdj, int32_t>(azp_adj);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    typename EVTComputePreAzp::Arguments pre_azp_args{a_args, evt0_args,
-                                                      bias_args};
-
-    return ArgumentType{azp_args, azp_adj_args, pre_azp_args};
+    typename EVTComputeAzp::Arguments evt_azp_args{azp_args, azp_adj_args};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_azp_args};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args};
   }
 };
 
@@ -606,8 +604,8 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp.dtype() == torch::kFloat32);
-  TORCH_CHECK(azp_adj.dtype() == torch::kFloat32);
+  TORCH_CHECK(azp.dtype() == torch::kInt32);
+  TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
   return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzp>(
       out, a, b, a_scales, b_scales, bias, azp, azp_adj);
@@ -660,8 +658,8 @@ void cutlass_scaled_mm_azp_sm80(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp.dtype() == torch::kFloat32);
-  TORCH_CHECK(azp_adj.dtype() == torch::kFloat32);
+  TORCH_CHECK(azp.dtype() == torch::kInt32);
+  TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
   return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBiasAzp>(
       out, a, b, a_scales, b_scales, bias, azp, azp_adj);
@@ -741,8 +739,8 @@ void cutlass_scaled_mm_azp_sm89(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp.dtype() == torch::kFloat32);
-  TORCH_CHECK(azp_adj.dtype() == torch::kFloat32);
+  TORCH_CHECK(azp.dtype() == torch::kInt32);
+  TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
   return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzp>(
       out, a, b, a_scales, b_scales, bias, azp, azp_adj);
