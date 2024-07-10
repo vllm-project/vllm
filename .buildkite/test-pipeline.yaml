@@ -39,6 +39,15 @@ steps:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
+- label: 2 Node Tests
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  num_nodes: 2
+  commands:
+  - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+  - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+
+
 - label: Distributed Tests (2 GPUs)
   mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
