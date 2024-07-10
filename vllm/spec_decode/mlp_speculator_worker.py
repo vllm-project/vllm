@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -20,6 +20,9 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        # Unused parameter. MLPSpeculatorWorker does not use the KV Cache and
+        # therefore does not need this parameter.
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass to generate sample_len future tokens.
         Returns the list of sampler output, one per layer, along with indicator

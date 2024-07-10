@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -110,13 +110,17 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
         # Do not check _is_dummy, as it's always called by get_spec_proposals
-        return self._worker.sampler_output(execute_model_req, sample_len)
+        return self._worker.sampler_output(
+            execute_model_req, sample_len,
+            seq_ids_with_bonus_token_in_last_step)
 
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
@@ -125,7 +129,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             return SpeculativeProposals(None, None, None)
 
         with self._patch_tensor_parallel_group():
-            return self._worker.get_spec_proposals(execute_model_req)
+            return self._worker.get_spec_proposals(
+                execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
     def execute_model(
         self,
