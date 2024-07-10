@@ -9,8 +9,9 @@ from transformers.models.auto.modeling_auto import (
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             JAISConfig, MLPSpeculatorConfig,
-                                             MPTConfig, RWConfig)
+                                             JAISConfig, MedusaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             RWConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -27,6 +28,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
+    "medusa": MedusaConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
