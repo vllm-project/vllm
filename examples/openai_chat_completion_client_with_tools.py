@@ -64,6 +64,30 @@ chat_completion = client.chat.completions.create(
 
 print("Chat completion results:")
 print(chat_completion)
+print('\n\n')
+
+tool_calls_stream = client.chat.completions.create(
+    messages=messages,
+    model=model,
+    tools=tools,
+    stream=True
+)
+
+chunks = []
+for chunk in tool_calls_stream:
+    chunks.append(chunk)
+arguments = ''
+for chunk in chunks:
+    if chunk.choices[0].delta.tool_calls:
+        if chunk.choices[0].delta.tool_calls[0].id:
+            print(f'streamed tool call id: {chunk.choices[0].delta.tool_calls[0].id}')
+        if chunk.choices[0].delta.tool_calls[0].function:
+            if chunk.choices[0].delta.tool_calls[0].function.name:
+                print(f'streamed tool call name: {chunk.choices[0].delta.tool_calls[0].function.name}')
+            if chunk.choices[0].delta.tool_calls[0].function.arguments:
+                arguments += chunk.choices[0].delta.tool_calls[0].function.arguments
+print(f'streamed tool call arguments: {arguments}\n\n')
+
 messages.append({
     "role": "assistant",
     "tool_calls": chat_completion.choices[0].message.tool_calls
@@ -95,8 +119,10 @@ chat_completion_2 = client.chat.completions.create(
     messages=messages,
     model=model,
     tools=tools,
+    stream=False
 )
 
 print(chat_completion_2)
+print('\n\n')
 
 
