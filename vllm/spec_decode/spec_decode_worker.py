@@ -534,6 +534,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
+        matched_num = torch.sum(torch.where(accepted_token_ids > -0.5, 1, 0)).item() - 1
+        predict_num = proposal_token_ids.shape[-1]
+        print(f"predict tokens: {predict_num}")
+        print(f"matched tokens: {matched_num}")
+
         hidden_states = proposal_scores.hidden_states
         if hidden_states is not None:
             # Contract hidden states based on accepted tokens
