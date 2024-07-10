@@ -231,17 +231,18 @@ class MistralToolParser(ToolParser):
                     prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get('arguments')
                     cur_arguments = current_tool_call.get('arguments')
 
+                    new_text = delta_text.replace('\'', '"')
+
                     if not cur_arguments and not prev_arguments:
-                        logger.info(f'Skipping text {delta_text} (tokens {delta_token_ids}) - no arguments yet')
+                        logger.info(f'Skipping text {new_text} (tokens {delta_token_ids}) - no arguments yet')
                         delta = None
                     elif not cur_arguments and prev_arguments:
                         logger.error('INVARIANT - impossible to have arguments reset mid-arguments')
                         delta = None
                     elif cur_arguments and not prev_arguments:
-                        logger.info('First tokens in arguments received')
                         cur_arguments_json = json.dumps(cur_arguments)
-                        logger.info(f'Finding {delta_text} in |{cur_arguments_json}')
-                        arguments_delta = cur_arguments_json[:cur_arguments_json.index(delta_text) + len(delta_text)]
+                        logger.info(f'Finding {new_text} in |{cur_arguments_json}')
+                        arguments_delta = cur_arguments_json[:cur_arguments_json.index(new_text) + len(new_text)]
                         logger.info(f'First tokens in arguments received: {arguments_delta}')
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(
@@ -252,9 +253,13 @@ class MistralToolParser(ToolParser):
                     elif cur_arguments and prev_arguments:
                         cur_args_json = json.dumps(cur_arguments)
                         prev_args_json = json.dumps(prev_arguments)
+                        logger.info(f'Searching for diff between \n{cur_args_json}\n{prev_args_json}')
                         shared_prefix = find_common_prefix(cur_args_json, prev_args_json)
+                        logger.info(f'Shared prefix: |{shared_prefix}|', )
                         cur_args_json = cur_args_json.replace(shared_prefix, '', 1)
-                        argument_diff = cur_args_json[:cur_args_json.index(delta_text) + len(delta_text)]
+                        logger.info(f'Cur args JSON: {cur_args_json}')
+                        logger.info(f'new text: {new_text}')
+                        argument_diff = cur_args_json[:cur_args_json.index(new_text) + len(new_text)]
                         logger.info(f'got arguments diff: {argument_diff}')
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(
