@@ -1,5 +1,6 @@
 import codecs
 import time
+import json
 from dataclasses import dataclass, field
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
                     List, Optional, Type)
@@ -20,7 +21,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    FunctionCall, ToolCall, UsageInfo)
+    FunctionCall, ToolCall, UsageInfo, DeltaToolCall, DeltaFunctionCall)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.inputs import PromptInputs
@@ -534,6 +535,25 @@ class OpenAIServingChat(OpenAIServing):
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                     else:
+                        logger.info(f'Sending FINISH message with delta {delta_message.model_dump()}')
+                        # check to make sure we haven't missed something on the last function call
+                        if (
+                                delta_message.tool_calls[0].function.arguments == ''
+                                or delta_message.tool_calls[0].function.arguments
+                                and (output.finish_reason == 'stop' or output.finish_reason == 'tool_calls')
+                        ):
+                            expected_call = json.dumps(
+                                tool_parser.prev_tool_call_arr[len(tool_parser.prev_tool_call_arr) - 1].get('arguments', {})
+                            )
+                            logger.info(f'Expected tool call {expected_call}')
+                            actual_call = tool_parser.streamed_args_for_tool[len(tool_parser.prev_tool_call_arr) - 1]
+                            logger.info(f'Actual tool call {actual_call}')
+                            remaining_call = expected_call.replace(actual_call, '', 1)
+                            delta_message = DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=len(tool_parser.prev_tool_call_arr) - 1, function=DeltaFunctionCall(
+                                arguments=remaining_call
+                            ).model_dump(exclude_none=True))
+                        ])
                         # Send the finish response for each request.n only once
                         prompt_tokens = len(res.prompt_token_ids)
                         choice_data = ChatCompletionResponseStreamChoice(

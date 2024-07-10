@@ -74,7 +74,11 @@ def find_all_indices(string, substring):
 class ToolParser:
 
     def __init__(self):
-        pass
+        self.prev_tool_call_arr: List[Dict] = []
+        self.current_tool_id: int = -1
+        self.current_tool_name_sent: bool = False
+        self.current_tool_initial_sent: bool = False
+        self.streamed_args_for_tool: List[str] = []  # map what has been streamed for each tool so far to a list
 
     @staticmethod
     def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
@@ -147,6 +151,7 @@ class MistralToolParser(ToolParser):
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
         self.current_tool_initial_sent: bool = False
+        self.streamed_args_for_tool: List[str] = []  # map what has been streamed for each tool so far to a list
 
     def extract_tool_calls_streaming(self,
                                      previous_text: str,
@@ -190,15 +195,28 @@ class MistralToolParser(ToolParser):
                             )
                 logger.info('parsing: %s', parsable_arr)
                 tool_call_arr: List[Dict] = partial_json_parser.loads(parsable_arr, flags)
+                current_tool_call: Dict = tool_call_arr[self.current_tool_id]
+
                 #print('parsed ', tool_call_arr)
 
                 # case: we are starting a new tool in the array
                 #   -> array has nonzero length AND length has moved past cursor
                 if len(tool_call_arr) > 0 and len(tool_call_arr) > self.current_tool_id + 1:
+                    logger.info('Checking for completeness of previous tool before moving on to next tool')
+                    # if we're moving on to a new call, first make sure we haven't missed anything due to JSON completions
+                    diff: str | None = current_tool_call.get('arguments')
+                    if diff:
+                        diff = diff.replace(self.streamed_args_for_tool[self.current_tool_id], '')
+                        logger.info(f'Found diff between tools: {diff}')
+                        return DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(arguments=diff).model_dump(exclude_none=True))
+                        ])
+
                     # re-set stuff pertaining to progress in the current tool
                     self.current_tool_id = len(tool_call_arr) - 1
                     self.current_tool_name_sent = False
                     self.current_tool_initial_sent = False
+                    self.streamed_args_for_tool.append('')
                     logger.info('starting on new tool %d', self.current_tool_id)
 
                 # case: update an existing tool
@@ -210,9 +228,6 @@ class MistralToolParser(ToolParser):
                 else:
                     logger.info('No tool call detected yet!')
                     return None
-
-                # handle parsing
-                current_tool_call: Dict = tool_call_arr[self.current_tool_id]
 
                 # if the current tool initial data incl. the id, type=function and idx not sent, send that
                 if not self.current_tool_initial_sent:
@@ -259,19 +274,23 @@ class MistralToolParser(ToolParser):
                                 arguments=arguments_delta
                             ).model_dump(exclude_none=True))
                         ])
+                        self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
 
                     elif cur_arguments and prev_arguments:
                         cur_args_json = json.dumps(cur_arguments)
                         prev_args_json = json.dumps(prev_arguments)
                         logger.info(f'Searching for diff between \n{cur_args_json}\n{prev_args_json}')
-                        argument_diff = extract_intermediate_diff(cur_args_json, prev_args_json )
+                        argument_diff = extract_intermediate_diff(cur_args_json, prev_args_json)
                         logger.info(f'got arguments diff: {argument_diff}')
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(
                                 arguments=argument_diff
                             ).model_dump(exclude_none=True))
                         ])
+                        self.streamed_args_for_tool[self.current_tool_id] += argument_diff
                     else:
+                        # try parsing it with regular JSON - if it works we're at the end, and we need to send the
+                        #   difference between tokens streamed so far and the valid JSON
                         delta = None
 
                 # check to see if the name is defined and has been sent. if so, stream the name - otherwise keep waiting
@@ -344,6 +363,11 @@ class Hermes2ProToolParser(ToolParser):
         super().__init__()
         self.current_tool_count: int = 0
         self.current_tool_name_sent: bool = False  # reset each time we encounter a new tool in the array
+        self.prev_tool_call_arr: List[Dict] = []
+        self.current_tool_id: int = -1
+        self.current_tool_name_sent: bool = False
+        self.current_tool_initial_sent: bool = False
+        self.streamed_args_for_tool: List[str] = []  # map what has been streamed for each tool so far to a list
 
     def extract_tool_calls_streaming(self,
                                      previous_text: str,
