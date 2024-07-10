@@ -35,7 +35,7 @@ common: &common
       type: Directory
 
 steps: 
-  - block: ":rocket: Ready for comparing vllm against alternatives?"
+  - block: ":rocket: Ready for comparing vllm against alternatives? This will take 4 hours."
   - label: "A100 trt benchmark"
     priority: 100
     agents:
