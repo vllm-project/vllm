@@ -159,10 +159,10 @@ def sgmv_expand(
             torch.bfloat16,
     ]:
         CAST_TYPE = True
-    grid = [
+    grid = (
         triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         batches,
-    ]
+    )
     _sgmv_expand_kernel[grid](
         inputs,
         lora_b_weights,

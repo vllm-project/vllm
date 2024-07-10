@@ -14,7 +14,8 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA)
-from vllm.lora.punica import add_expand, add_expand_slice, add_shrink
+
+# from vllm.lora.punica import add_expand, add_expand_slice, add_shrink
 
 if TYPE_CHECKING:
     pass
@@ -64,27 +65,12 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             dtype=torch.float32,
             device=x.device,
         )
-        token_num = self.indices_len[0]
-        is_prefill = bool(self.indices_len[5])
-        add_shrink(
-            buffer,
-            x,
-            self.lora_a_stacked,
-            self.indices[:token_num],
-            0,
-            1.0,
-            is_prefill,
-        )
+        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
         buffer = tensor_model_parallel_all_gather(buffer)
-        add_expand(
-            output,
-            buffer,
-            self.lora_b_stacked,
-            self.indices[:token_num],
-            0,
-            is_prefill,
-            add_input=True,
-        )
+        self.punica_wrapper.add_expand(output,
+                                       buffer,
+                                       self.lora_b_stacked,
+                                       add_input=True)
         # now have column partitioned output
         output = output.view(*out_orig_shape)
         return output
@@ -108,7 +94,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         )
 
 
-def _mcp_apply(x, bias, layer):
+def _mcp_apply(x, bias, layer: QKVParallelLinearWithLora):
     """
     MergedColumnParallelLinearWithShardedLoRA and
     QKVParallelLinearWithShardedLora share the same
@@ -129,31 +115,18 @@ def _mcp_apply(x, bias, layer):
         dtype=torch.float32,
         device=x.device,
     )
-    token_num = layer.indices_len[0]
-    is_prefill = bool(layer.indices_len[5])
     for idx in range(n):
-
-        add_shrink(
-            buffers[idx],
-            x,
-            layer.lora_a_stacked[idx],
-            layer.indices[:token_num],
-            0,
-            1.0,
-            is_prefill,
-        )
+        layer.punica_wrapper.add_shrink(buffers[idx], x,
+                                        layer.lora_a_stacked[idx], 1.0)
 
     buffers = tensor_model_parallel_all_gather(buffers)
     left_offset = 0
     for idx in range(n):
         shard_size = layer.lora_b_stacked[idx].shape[2]
-        add_expand_slice(
+        layer.punica_wrapper.add_expand_slice(
             output,
             buffers[idx],
             layer.lora_b_stacked[idx],
-            layer.indices[:token_num],
-            0,
-            is_prefill,
             left_offset,
             shard_size,
             add_input=True,
@@ -237,23 +210,13 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
         buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
                              dtype=torch.float32,
                              device=x.device)
-
-        token_num = self.indices_len[0]
-        is_prefill = bool(self.indices_len[5])
-
-        add_shrink(buffer, x, self.lora_a_stacked, self.indices[:token_num], 0,
-                   1.0, is_prefill)
+        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
         buffer = tensor_model_parallel_all_gather(buffer)
-
-        add_expand(output,
-                   buffer,
-                   self.lora_b_stacked,
-                   self.indices[:token_num],
-                   0,
-                   is_prefill,
-                   add_input=True)
+        self.punica_wrapper.add_expand(output,
+                                       buffer,
+                                       self.lora_b_stacked,
+                                       add_input=True)
         # now have column partitioned output
-
         output = output.view(*out_orig_shape)
         return output
 
@@ -345,17 +308,8 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             dtype=torch.float32,
             device=x.device,
         )
-        token_num = self.indices_len[0]
-        is_prefill = bool(self.indices_len[5])
-        add_shrink(
-            buffer,
-            x,
-            self.lora_a_stacked,
-            self.indices[:token_num],
-            0,
-            1.0,
-            is_prefill,
-        )
+
+        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
         buffer = tensor_model_parallel_all_reduce(buffer)
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce
@@ -366,16 +320,9 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # reduced before being used
         shard_size = self.lora_b_stacked.shape[2]
         start_idx = self.tp_rank * shard_size
-        add_expand_slice(
-            output,
-            buffer,
-            self.lora_b_stacked,
-            self.indices[:self.indices_len[0]],
-            0,
-            is_prefill,
-            start_idx,
-            shard_size,
-        )
+        self.punica_wrapper.add_expand_slice(output, buffer,
+                                             self.lora_b_stacked, start_idx,
+                                             shard_size)
         output = output.view(*out_orig_shape)
         return output
 
