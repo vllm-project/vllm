@@ -16,9 +16,21 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
-MODELS = [("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-           hf_hub_download("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
-                           filename="tinyllama-1.1b-chat-v1.0.Q4_0.gguf"))]
+# FIXME: Move this to confest
+MODELS = [
+    ("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+     hf_hub_download("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+                     filename="tinyllama-1.1b-chat-v1.0.Q4_0.gguf")),
+    ("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+     hf_hub_download("duyntnet/TinyLlama-1.1B-Chat-v1.0-imatrix-GGUF",
+                     filename="TinyLlama-1.1B-Chat-v1.0-IQ4_XS.gguf")),
+    ("Qwen/Qwen2-1.5B-Instruct",
+     hf_hub_download("Qwen/Qwen2-1.5B-Instruct-GGUF",
+                     filename="qwen2-1_5b-instruct-q4_k_m.gguf")),
+    ("Qwen/Qwen2-1.5B-Instruct",
+     hf_hub_download("legraphista/Qwen2-1.5B-Instruct-IMat-GGUF",
+                     filename="Qwen2-1.5B-Instruct.IQ4_XS.gguf")),
+]
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gguf"),
