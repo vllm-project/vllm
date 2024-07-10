@@ -11,7 +11,7 @@ steps:
             - sh
             - .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
   - wait
-  - label: "A100 Benchmark"
+  - label: "A100"
     agents:
       queue: A100
     plugins:
@@ -42,7 +42,7 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - label: "H100: NVIDIA SMI"
+  - label: "H100"
     agents:
       queue: H100
     plugins:
