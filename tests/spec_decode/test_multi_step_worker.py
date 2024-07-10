@@ -13,7 +13,6 @@ from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 
 from .utils import (assert_logprobs_dict_allclose, create_batch,
-                    create_sampler_output_list,
                     create_seq_group_metadata_from_prompts, create_worker,
                     patch_execute_model_with_seeds, zero_kv_cache)
 
@@ -451,7 +450,7 @@ def test_multi_step_with_batch_expansion_incorrect_output():
         block_size,
         continuations=multi_step_continuations,
         final_prompt_lens=final_prompt_lens)
-    
+
     # Run multi-step. In this run INCORRECTLY specify that only the odd number
     # sequences have bonus tokens. Verify that with this setting the third token
     # prediction is accurate only for the odd numbered sequences. Also verify
@@ -643,4 +642,3 @@ def test_draft_proposals_mixed_k():
     assert proposals.proposal_lens.tolist() == [
         k for _ in range(expected_num_proposal_seqs - 1)
     ] + [0 for _ in range(expected_num_no_proposal_seqs)] + [k]
-
