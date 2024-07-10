@@ -40,6 +40,7 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        # Unused parameter.
         seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass to generate sample_len future tokens.
