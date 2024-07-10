@@ -612,7 +612,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             for sequence_index in range(batch_size):
                 # Each sequence may have a different num_logprobs; retrieve it.
                 num_logprobs = num_logprobs_per_seq[sequence_index]
-                seq_id = seq_ids[sequence_index]
                 step_output_token_ids.append(
                     create_sequence_group_output(
                         token_id=accepted_token_ids_by_step[step_index]
@@ -621,7 +620,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                             step_index][sequence_index],
                         token_id_logprob=accepted_token_id_logprobs_by_step[
                             step_index][sequence_index],
-                        seq_id=seq_id,
+                        seq_id=seq_ids[sequence_index],
                         topk_token_ids=topk_indices_by_step[step_index]
                         [sequence_index][:num_logprobs],
                         topk_logprobs=topk_logprobs_by_step[step_index]
