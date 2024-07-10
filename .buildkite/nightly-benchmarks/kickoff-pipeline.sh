@@ -15,13 +15,16 @@ source $HOME/.cargo/env
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
   PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/vllm/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
 
+  if [[ $PR_LABELS == *"nightly-benchmarks"* ]]; then
+    echo "This PR has the 'nightly-benchmark' label. Proceeding with the nightly benchmarks."
+    buildkite-agent pipeline upload .buildkite/nightly-benchmarks/nightly-pipeline.yaml
+  fi
+
+  # Run performance benchmark first by upload it at last
+  # See https://buildkite.com/docs/agent/v3/cli-pipeline
   if [[ $PR_LABELS == *"perf-benchmarks"* ]]; then
     echo "This PR has the 'perf-benchmarks' label. Proceeding with the performance benchmarks."
     buildkite-agent pipeline upload .buildkite/nightly-benchmarks/benchmark-pipeline.yaml
   fi
 
-  if [[ $PR_LABELS == *"nightly-benchmarks"* ]]; then
-    echo "This PR has the 'nightly-benchmark' label. Proceeding with the nightly benchmarks."
-    buildkite-agent pipeline upload .buildkite/nightly-benchmarks/nightly-pipeline.yaml
-  fi
 fi
