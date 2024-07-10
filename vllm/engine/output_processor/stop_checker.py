@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Union
 
 from transformers import PreTrainedTokenizer
 
@@ -27,6 +27,14 @@ class StopChecker:
         else:
             return self._max_model_len
 
+    def token_equal_or_in(self,
+                          eos_token_id: int,
+                          last_token_id: Union[int, List[int]]) -> bool:
+        if isinstance(last_token_id, list):
+            return eos_token_id in last_token_id
+        else:
+            return eos_token_id == last_token_id
+
     def maybe_stop_sequence(
         self,
         seq: Sequence,
@@ -47,7 +55,7 @@ class StopChecker:
 
         # Check if the sequence has generated the EOS token.
         if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
+                and self.token_equal_or_in(seq.eos_token_id, seq.get_last_token_id())):
             # Remove the last EOS token unless explicitly specified
             # This prevents unintended exposure of the EOS token
             if new_char_count and (
@@ -59,7 +67,9 @@ class StopChecker:
         # Check if a stop token was encountered.
         # This assumes a single token produced per step.
         last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
+        has_stop_token = any(self.token_equal_or_in(x, last_token_id)
+                             for x in sampling_params.stop_token_ids)
+        if has_stop_token:
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
                 # Remove last token

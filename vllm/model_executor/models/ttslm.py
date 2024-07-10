@@ -8,6 +8,8 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
+from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.multi_heads_logits_processor import MultiHeadLogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.multi_heads_sampler import MultiheadsSampler
@@ -21,6 +23,17 @@ import lzma
 import numpy as np
 import pybase16384 as b14
 
+def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int):
+
+    from vllm.sequence import SequenceData
+
+
+    dummy_seq_data = SequenceData([[0] * ctx.model_config.hf_config.num_output_head] * seq_len)
+    dummy_multi_modal_data = None
+
+    return dummy_seq_data, dummy_multi_modal_data
+
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_ttsllm)
 class ChatTtsLlm(nn.Module):
     def __init__(self,
                  config: LlamaConfig,
@@ -89,18 +102,6 @@ class ChatTtsLlm(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        # # compute logits for each vq
-        # # hidden: [token_count, model_dim]
-        # # logits: [token_count, num_audio_tokens, num_vq]
-        # logits = torch.zeros(hidden_states.size(0), self.num_audio_tokens, self.num_vq, dtype=hidden_states.dtype)
-        # for num_vq_iter in range(self.num_vq):
-        #     x = self.head_code[num_vq_iter](hidden_states)
-        #     logits[:, :, num_vq_iter] = x
-        
-        # # logits: [num_audio_tokens, num_vq]
-        # logits = logits.narrow(0, -1, 1).squeeze_(0)
-        # logits = logits.permute(1, 0)
-        # return logits
         logits = self.logits_processor(self.head_code, hidden_states, sampling_metadata)
         return logits
     
@@ -131,69 +132,6 @@ class ChatTtsLlm(nn.Module):
             intermediate_tensors=intermediate_tensors
         )
         return model_output
-
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        input_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        
-        temperature: torch.Tensor,
-        max_new_token=2048,
-        min_new_token=0,
-    ) -> torch.Tensor:
-        attentions: List[Optional[Tuple[torch.FloatTensor, ...]]] = []
-        hiddens = []
-        start_idx = input_ids.shape[1]
-        end_idx = torch.zeros(input_ids.shape[0], dtype=torch.long)
-        finish = torch.zeros(input_ids.shape[0], dtype=torch.bool)
-        
-        old_temperature = temperature
-
-        temperature = (
-            temperature.unsqueeze(0)
-            .expand(input_ids.shape[0], -1)
-            .contiguous()
-            .view(-1, 1)
-        )
-        
-        attention_mask_cache = torch.ones(
-            (
-                input_ids.shape[0],
-                input_ids.shape[1] + max_new_token,
-            ),
-            dtype=torch.bool,
-        )
-
-        if attention_mask is not None:
-            attention_mask_cache.narrow(1, 0, attention_mask.shape[1]).copy_(
-                attention_mask
-            )
-
-    def prefill(self,
-                input_ids: torch.Tensor,
-                text_mask: torch.Tensor,
-                spk_emb: str) -> torch.Tensor:
-        emb_text = self.emb_text(input_ids[text_mask].narrow(1, 0, 1).squeeze_(1))
-        text_mask_inv = text_mask.logical_not()
-        masked_input_ids: torch.Tensor = input_ids[text_mask_inv]
-        emb_code = [
-            self.emb_code[i](masked_input_ids[:, i]) for i in range(self.num_vq)
-        ]
-        emb_code = torch.stack(emb_code, 2).sum(2)
-        emb = torch.zeros(
-            (input_ids.shape[:-1]) + (emb_text.shape[-1],),
-            dtype=emb_text.dtype,
-        )
-        emb[text_mask] = emb_text
-        emb[text_mask_inv] = emb_code.to(emb.dtype)
-        if spk_emb:
-            self._apply_spk_emb(emb, spk_emb, input_ids)
-
-        return emb
 
     @staticmethod
     def _decode_spk_emb(spk_emb: str) -> np.ndarray:

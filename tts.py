@@ -36,11 +36,11 @@ import torch
 # # save the model
 # torch.save(tts, '/home/largeniu/ttslm/GPT_merged_emb.pt')
 
-llm = LLM(model='/home/zhn/ttslm')
+llm = LLM(model='/home/largeniu/ttslm', gpu_memory_utilization=0.5)
 prompts = [
     "[Stts][empty_spk][speed_5]your text one[Ptts]",
 ]
-sampling_params = SamplingParams(temperature=1)
+sampling_params = SamplingParams(temperature=1, detokenize=False)
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
     prompt = output.prompt
