@@ -60,13 +60,13 @@ class Sampler(nn.Module):
         assert logits is not None
         _, vocab_size = logits.shape
 
-        logits = _apply_min_tokens_penalty(logits, sampling_metadata)
-
         # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
          do_min_p) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
+        logits = _apply_min_tokens_penalty(logits, sampling_metadata)
+        
         # Apply presence and frequency penalties.
         if do_penalties:
             logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
@@ -565,7 +565,7 @@ def _sample_with_torch(
         ]
     else:
         sample_results = []
-        
+
     return sample_results, sampled_token_ids_tensor
 
 
