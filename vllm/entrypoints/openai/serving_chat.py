@@ -535,7 +535,6 @@ class OpenAIServingChat(OpenAIServing):
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                     else:
-                        logger.info(f'Sending FINISH message with delta {delta_message.model_dump()}')
                         # check to make sure we haven't missed something on the last function call
                         if (
                                 delta_message.tool_calls[0].function.arguments == ''
@@ -547,7 +546,7 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             logger.info(f'Expected tool call {expected_call}')
                             actual_call = tool_parser.streamed_args_for_tool[len(tool_parser.prev_tool_call_arr) - 1]
-                            logger.info(f'Actual tool call {actual_call}')
+                            logger.info(f'Actual tool call {actual_call}, correcting.')
                             remaining_call = expected_call.replace(actual_call, '', 1)
                             delta_message = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=len(tool_parser.prev_tool_call_arr) - 1, function=DeltaFunctionCall(
@@ -560,7 +559,7 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
-                            finish_reason=output.finish_reason,
+                            finish_reason=output.finish_reason if not len(tool_parser.prev_tool_call_arr) else 'tool_calls',
                             stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
