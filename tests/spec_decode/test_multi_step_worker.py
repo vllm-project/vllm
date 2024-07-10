@@ -358,9 +358,8 @@ def test_multi_step_with_batch_expansion_correct_output():
         continuations=multi_step_continuations,
         final_prompt_lens=final_prompt_lens)
 
-    # Run multi-step.. In this run correctly specify that all the sequences
-    # have bonus tokens. With this setup verify that the third token
-    # prediction is accurate for all sequences.
+    # Run multi-step and verify that the third token prediction is accurate
+    # for all sequences.
     zero_kv_cache(multi_step_worker.cache_engine)
     all_seq_ids = {i for i in range(batch_size)}
     multi_step_output, _ = multi_step_worker.sampler_output(
