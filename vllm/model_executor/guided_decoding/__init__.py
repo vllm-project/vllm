@@ -3,11 +3,11 @@ from typing import Optional, Union
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionNamedToolChoiceParam, ChatCompletionRequest,
     CompletionRequest)
+from vllm.logits_process import LogitsProcessor
 from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (
     get_lm_format_enforcer_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_outlines_guided_decoding_logits_processor)
-from vllm.logits_process import LogitsProcessor
 
 
 async def get_guided_decoding_logits_processor(
