@@ -35,8 +35,6 @@ def test_models(
 
 
 @pytest.mark.parametrize("model", MODELS)
-<<<<<<< HEAD
-=======
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [20])
 def test_mamba_cache_cg_padding(
@@ -63,7 +61,6 @@ def test_mamba_cache_cg_padding(
 
 
 @pytest.mark.parametrize("model", MODELS)
->>>>>>> main
 @pytest.mark.parametrize("dtype", ["float"])
 def test_state_cleanup(
     vllm_runner,

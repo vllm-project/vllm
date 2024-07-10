@@ -24,11 +24,7 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models.interfaces import SupportsLoRA
-<<<<<<< HEAD
-from vllm.utils import LRUCache, is_pin_memory_available
-=======
 from vllm.utils import is_pin_memory_available
->>>>>>> main
 
 logger = init_logger(__name__)
 
@@ -449,12 +445,7 @@ class LoRAModelManager(AdapterModelManager):
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices
         self.indices_len: List[Optional[int]] = [None] * 4
-<<<<<<< HEAD
-
-        self.model = model
-=======
         super().__init__(model)
->>>>>>> main
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
@@ -469,11 +460,8 @@ class LoRAModelManager(AdapterModelManager):
         # Dict instead of a Set for compatibility with LRUCache.
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
-<<<<<<< HEAD
-=======
         self.model.lora_manager = self
         self.adapter_type = 'LoRa'
->>>>>>> main
 
     @property
     def capacity(self) -> int:
@@ -815,11 +803,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             return True
         return False
 
-<<<<<<< HEAD
-    def pin_lora(self, lora_id: int) -> bool:
-=======
     def pin_adapter(self, lora_id: int) -> bool:
->>>>>>> main
         """Pin a LoRAModel in the manager cache."""
         self._pin_lora_in_cpu_cache(lora_id)
         self._pin_lora_in_gpu_cache(lora_id)
@@ -827,29 +811,17 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def _pin_lora_in_cpu_cache(self, lora_id: int):
         try:
-<<<<<<< HEAD
-            self._registered_loras.pin(lora_id)
-=======
             self._registered_adapters.pin(lora_id)
->>>>>>> main
         except ValueError as err:
             raise ValueError("Pinning failed. "
                              f"LoRA {lora_id} is not registered.") from err
 
     def _pin_lora_in_gpu_cache(self, lora_id: int):
-<<<<<<< HEAD
-        if lora_id not in self._active_loras:
-            # move lora to gpu if not already active
-            self.activate_lora(lora_id)
-
-        self._active_loras.pin(lora_id)
-=======
         if lora_id not in self._active_adapters:
             # move lora to gpu if not already active
             self.activate_adapter(lora_id)
 
         self._active_adapters.pin(lora_id)
->>>>>>> main
 
 
 def create_lora_manager(

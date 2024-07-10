@@ -149,16 +149,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def remove_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.remove_adapter(adapter_id)
 
-<<<<<<< HEAD
-    def pin_lora(self, lora_id: int) -> bool:
-        return self._lora_manager.pin_lora(lora_id)
-
-    def remove_all_loras(self):
-        self._lora_manager.remove_all_loras()
-=======
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
->>>>>>> main
 
     def list_adapters(self) -> Set[int]:
         return list_adapters_worker(self._adapter_manager.list_adapters)

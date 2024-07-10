@@ -244,14 +244,6 @@ class Sequence:
     """
 
     def __init__(
-<<<<<<< HEAD
-        self,
-        seq_id: int,
-        inputs: "LLMInputs",
-        block_size: int,
-        eos_token_id: Optional[int] = None,
-        lora_request: Optional[LoRARequest] = None,
-=======
             self,
             seq_id: int,
             inputs: "LLMInputs",
@@ -259,7 +251,6 @@ class Sequence:
             eos_token_id: Optional[int] = None,
             lora_request: Optional[LoRARequest] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None
->>>>>>> main
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs

@@ -99,10 +99,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.cache_config = cache_config
-<<<<<<< HEAD
-=======
         self.prompt_adapter_config = prompt_adapter_config
->>>>>>> main
         self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
