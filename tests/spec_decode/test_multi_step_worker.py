@@ -375,12 +375,13 @@ def test_multi_step_with_batch_expansion_correct_output():
 @torch.inference_mode()
 def test_multi_step_with_batch_expansion_incorrect_output():
     """
-    Tests a negative case for batch expansion with bonus tokens. In this
-    test we provide the MultiStepWorker with a batch containing sequences
-    with bonus tokens. However we specify the sequence ids which have bonus
-    token incorrectly. The test verifies that the MultiStepWorker generates
-    the correct tokens for the ones where we have specified the sequence id
-    correctly and incorrect otherwise.
+    Tests the MultiStepWorker's ability to handle batch expansion with bonus
+    tokens in a negative case scenario. This test provides the MultiStepWorker
+    with a batch containing sequences with bonus tokens but specifies the
+    sequence IDs with bonus tokens incorrectly. The test verifies that the
+    MultiStepWorker generates correct tokens for the sequences where the
+    sequence ID is specified correctly and incorrect tokens for those where
+    the sequence ID is specified incorrectly.
     """
     seed = 100
     model_name = 'JackFram/llama-68m'

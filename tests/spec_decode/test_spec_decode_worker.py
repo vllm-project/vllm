@@ -1,4 +1,3 @@
-import copy
 import random
 from collections import defaultdict
 from types import SimpleNamespace
@@ -701,7 +700,6 @@ def test_populate_seq_ids_with_bonus_tokens():
     # Create a mask that is True for indices in seq_indexes_with_bonus_tokens
     mask = torch.ones(batch_size, dtype=torch.bool, device='cuda')
     mask[seq_indexes_with_bonus_tokens] = False
-    # Forward Pass : 0
     # Set the last token ID to -1 for all indices not in
     # seq_indexes_with_bonus_tokens to indicate the lack of bonus token in
     # those indices.
@@ -710,86 +708,32 @@ def test_populate_seq_ids_with_bonus_tokens():
                               target_worker,
                               mock_spec_decode_sampler("rejection_sampler"),
                               metrics_collector=metrics_collector)
-
+    # Initialize _seq_with_bonus_token_in_last_step with a set of sequence IDs.
+    # This set includes all sequence IDs in the batch as well as an additional
+    # `num_extra_sequence_ids` sequence IDs. Note that the sequence IDs are in
+    # the range [0, batch_size + num_extra_sequence_ids).
+    num_extra_sequence_ids = 10
+    worker._seq_with_bonus_token_in_last_step = set(
+        range(batch_size + num_extra_sequence_ids))
     worker._create_output_sampler_list(
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
         target_logprobs=target_token_logprobs,
         k=k)
+    # Verify that _seq_with_bonus_token_in_last_step contains the following:
+    # 1. Sequence IDs that were already present in
+    #    _seq_with_bonus_token_in_last_step but were not part of the current
+    #    batch are retained.
+    # 2. Of the sequence IDs present in the current batch, only those with a
+    #    bonus token are retained in _seq_with_bonus_token_in_last_step.
+    #    Sequence IDs that are present in the current batch but do not have
+    #    bonus tokens are removed from _seq_with_bonus_token_in_last_step.
     expected_seq_ids_with_bonus_tokens = \
-        [assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens]
+        set([assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens])
+    additional_sequence_ids = \
+        set(range(batch_size, batch_size + num_extra_sequence_ids))
     assert worker._seq_with_bonus_token_in_last_step == \
-        set(expected_seq_ids_with_bonus_tokens)
-    assert worker._request_id_seq_id_mapping == \
-        expected_request_id_seq_ids_mapping
-
-    # Forward Pass : 1
-    # In the next iteration, add a new seq_id with a bonus token that did
-    # not have one in the previous iteration. Also, ensure that 2 of the
-    # seq_ids which had bonus tokens in the previous iteration no longer
-    # have bonus tokens in this iteration.
-    while len(seq_indexes_with_bonus_tokens
-              ) < num_sequences_with_bonus_tokens + 1:
-        new_index = random.randint(0, batch_size - 1)
-        if new_index not in seq_indexes_with_bonus_tokens:
-            seq_indexes_with_bonus_tokens.append(new_index)
-    # Generate random accepted token IDs
-    accepted_token_ids = torch.randint(low=0,
-                                       high=vocab_size,
-                                       size=(batch_size, (k + 1)),
-                                       dtype=torch.int64,
-                                       device='cuda')
-    # Create a mask for indices not in seq_indexes_with_bonus_tokens[2:]
-    mask = torch.ones(batch_size, dtype=torch.bool, device='cuda')
-    mask[seq_indexes_with_bonus_tokens[2:]] = False
-    # Set last token_id to -1 to indicate lack of bonus token.
-    accepted_token_ids[mask, -1:] = -1
-    worker._create_output_sampler_list(
-        seq_group_metadata_list=seq_group_metadata_list,
-        accepted_token_ids=accepted_token_ids,
-        target_logprobs=target_token_logprobs,
-        k=k)
-    expected_seq_ids_with_bonus_tokens = \
-        [assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens[2:]]
-    assert worker._seq_with_bonus_token_in_last_step == \
-        set(expected_seq_ids_with_bonus_tokens)
-    assert worker._request_id_seq_id_mapping == \
-        expected_request_id_seq_ids_mapping
-
-    # Forward Pass : 2
-    # In this forward pass remove all the sequences except 1. We keep only
-    # 1 such sequence which had a bonus token in forward pass # 1. However
-    # in this forward pass it will not have the bonus token.
-
-    # Retain only 1 sequence for this forward pass.
-    seq_group_metadata_list_copy = [
-        seq_group_metadata_list[seq_indexes_with_bonus_tokens[-1]]
-    ]
-    target_token_logprobs = torch.rand(1, (k + 1),
-                                       vocab_size,
-                                       dtype=torch.float32,
-                                       device='cuda')
-    accepted_token_ids = torch.randint(low=0,
-                                       high=vocab_size,
-                                       size=(1, (k + 1)),
-                                       dtype=torch.int64,
-                                       device='cuda')
-    # Ensure it does not have a bonus token.
-    accepted_token_ids[-1, -1] = -1
-    worker._create_output_sampler_list(
-        seq_group_metadata_list=seq_group_metadata_list_copy,
-        accepted_token_ids=accepted_token_ids,
-        target_logprobs=target_token_logprobs,
-        k=k)
-    # Verify that seq_with_bonus_token_in_last_step retains all the existing
-    # sequence IDs except the one which did not have a bonus token in
-    # forward pass # 2.
-    expected_seq_ids_with_bonus_tokens_copy = copy.copy(
-        expected_seq_ids_with_bonus_tokens)
-    expected_seq_ids_with_bonus_tokens_copy.remove(
-        seq_indexes_with_bonus_tokens[-1])
-    assert worker._seq_with_bonus_token_in_last_step == \
-        set(expected_seq_ids_with_bonus_tokens_copy)
+        expected_seq_ids_with_bonus_tokens.union(additional_sequence_ids)
     assert worker._request_id_seq_id_mapping == \
         expected_request_id_seq_ids_mapping
 
