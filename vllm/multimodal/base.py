@@ -43,9 +43,6 @@ class MultiModalInputs(_MultiModalInputsBase):
         *,
         device: torch.types.Device,
     ) -> BatchedTensors:
-        # Avoid initializing CUDA too early
-        import torch
-
         unbatched_shape = tensors[0].shape[1:]
 
         for tensor in tensors:
@@ -84,16 +81,21 @@ class MultiModalInputs(_MultiModalInputsBase):
 
 
 class MultiModalDataBuiltins(TypedDict, total=False):
+    """Modality types that are predefined by vLLM."""
+
     image: Image.Image
+    """The input image."""
 
 
 MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]
 """
 A dictionary containing an item for each modality type to input.
 
-The data belonging to each modality is converted into keyword arguments 
-to the model by the corresponding mapper. By default, the mapper of 
-the corresponding plugin with the same modality key is applied.
+Note:
+    This dictionary also accepts modality keys defined outside
+    :class:`MultiModalDataBuiltins` as long as a customized plugin is registered
+    through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
+    Read more on that :ref:`here <adding_multimodal_plugin>`.
 """
 
 MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
@@ -123,6 +125,9 @@ class MultiModalPlugin(ABC):
     process the same data differently). This registry is in turn used by
     :class:`~MultiModalRegistry` which acts at a higher level
     (i.e., the modality of the data).
+
+    See also:
+        :ref:`adding_multimodal_plugin`
     """
 
     def __init__(self) -> None:
@@ -183,8 +188,8 @@ class MultiModalPlugin(ABC):
     def map_input(self, model_config: ModelConfig,
                   data: object) -> MultiModalInputs:
         """
-        Apply an input mapper to a data passed
-        to the model, transforming the data into a dictionary of model inputs.
+        Transform the data into a dictionary of model inputs using the
+        input mapper registered for that model.
 
         The model is identified by ``model_config``.
 
