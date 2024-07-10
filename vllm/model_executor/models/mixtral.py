@@ -88,12 +88,13 @@ class MixtralMoE(nn.Module):
                                 tp_size=tp_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_size = hidden_states.shape
+        # NOTE: hidden_states can have either 1D or 2D shape.
+        orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
-        return final_hidden_states.view(num_tokens, hidden_size)
+        return final_hidden_states.view(orig_shape)
 
 
 class MixtralAttention(nn.Module):
