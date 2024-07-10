@@ -70,7 +70,6 @@ class ChameleonAttention(nn.Module):
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 4096,
-        qk_layernorm: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
@@ -97,7 +96,6 @@ class ChameleonAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        self.qk_layernorm = qk_layernorm
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
@@ -113,7 +111,9 @@ class ChameleonAttention(nn.Module):
             bias=bias,
             quant_config=quant_config,
         )
-
+        self.q_norm = nn.LayerNorm(param_shape=(self.num_heads, self.head_dim))
+        self.k_norm = nn.LayerNorm(param_shape=(self.num_kv_heads,
+                                                self.head_dim))
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -121,10 +121,6 @@ class ChameleonAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-
-        if self.qk_layernorm:
-            self.q_norm = nn.LayerNorm(self.head_dim)
-            self.k_norm = nn.LayerNorm(self.head_dim)
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -153,9 +149,7 @@ class ChameleonAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        if self.qk_layernorm:
-            q, k = self._apply_qk_norm(q, k)
+        q, k = self._apply_qk_norm(q, k)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -190,7 +184,6 @@ class ChameleonDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
-            qk_layernorm=config.qk_layernorm,
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
