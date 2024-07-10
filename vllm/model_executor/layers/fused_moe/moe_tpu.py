@@ -20,8 +20,9 @@ def fused_moe(
         w2: [num_experts, intermediate_size, hidden_size]
         gating_output: [batch_size, seq_len, num_experts]
     """
-    batch_size, seq_len, hidden_size = hidden_states.shape
-    num_tokens = batch_size * seq_len
+    orig_shape = hidden_states.shape
+    hidden_size = hidden_states.shape[-1]
+    num_tokens = hidden_states.shape[:-1].numel()
     num_experts = w1.shape[0]
     intermediate_size = w2.shape[1]
     device = hidden_states.device
@@ -51,7 +52,7 @@ def fused_moe(
 
     x = x * topk_weights.unsqueeze_(dim=-1)
     x = x.sum(dim=-2)
-    x = x.reshape(batch_size, seq_len, hidden_size)
+    x = x.reshape(orig_shape)
     return x
 
 
