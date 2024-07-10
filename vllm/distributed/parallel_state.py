@@ -124,7 +124,11 @@ class GroupCoordinator:
     # communicators are only created for world size > 1
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
+<<<<<<< HEAD
     shm_broadcaster: Optional[Any]  # shared memory broadcaster
+=======
+    mq_broadcaster: Optional[Any]  # shared memory broadcaster
+>>>>>>> main
 
     def __init__(
         self,
@@ -133,6 +137,7 @@ class GroupCoordinator:
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
+        use_message_queue_broadcaster: bool = False,
     ):
 
         self.rank = torch.distributed.get_rank()
@@ -190,10 +195,17 @@ class GroupCoordinator:
             self.ca_comm = None
 
         from vllm.distributed.device_communicators.shm_broadcast import (
+<<<<<<< HEAD
             ShmRingBufferIO)
         self.shm_broadcaster: Optional[ShmRingBufferIO] = None
         if self.world_size > 1 and is_in_the_same_node(self.cpu_group):
             self.shm_broadcaster = ShmRingBufferIO.create_from_process_group(
+=======
+            MessageQueue)
+        self.mq_broadcaster: Optional[MessageQueue] = None
+        if use_message_queue_broadcaster and self.world_size > 1:
+            self.mq_broadcaster = MessageQueue.create_from_process_group(
+>>>>>>> main
                 self.cpu_group, 1 << 22, 6)
 
     @property
@@ -377,9 +389,15 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return obj
+<<<<<<< HEAD
         if self.shm_broadcaster is not None:
             assert src == 0, "Shared memory broadcaster only supports src=0"
             return self.shm_broadcaster.broadcast_object(obj)
+=======
+        if self.mq_broadcaster is not None:
+            assert src == 0, "Message queue broadcaster only supports src=0"
+            return self.mq_broadcaster.broadcast_object(obj)
+>>>>>>> main
         if self.rank_in_group == src:
             torch.distributed.broadcast_object_list([obj],
                                                     src=self.ranks[src],
@@ -696,8 +714,13 @@ class GroupCoordinator:
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+<<<<<<< HEAD
         if self.shm_broadcaster is not None:
             self.shm_broadcaster = None
+=======
+        if self.mq_broadcaster is not None:
+            self.mq_broadcaster = None
+>>>>>>> main
 
 
 _WORLD: Optional[GroupCoordinator] = None
@@ -720,10 +743,19 @@ def init_world_group(ranks: List[int], local_rank: int,
 
 
 def init_model_parallel_group(
+<<<<<<< HEAD
         group_ranks: List[List[int]],
         local_rank: int,
         backend: str,
         use_custom_allreduce: Optional[bool] = None) -> GroupCoordinator:
+=======
+    group_ranks: List[List[int]],
+    local_rank: int,
+    backend: str,
+    use_custom_allreduce: Optional[bool] = None,
+    use_message_queue_broadcaster: bool = False,
+) -> GroupCoordinator:
+>>>>>>> main
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
     return GroupCoordinator(
@@ -732,6 +764,10 @@ def init_model_parallel_group(
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
+<<<<<<< HEAD
+=======
+        use_message_queue_broadcaster=use_message_queue_broadcaster,
+>>>>>>> main
     )
 
 
@@ -880,8 +916,17 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
+<<<<<<< HEAD
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank, backend)
+=======
+
+    # message queue broadcaster is only used in tensor model parallel group
+    _TP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    use_message_queue_broadcaster=True)
+>>>>>>> main
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
@@ -993,15 +1038,15 @@ def destroy_distributed_environment():
         torch.distributed.destroy_process_group()
 
 
-def is_in_the_same_node(pg: ProcessGroup):
+def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
     """
-    This is a collective operation that checks if all processes in the group
-    are in the same node. It tests if all processes are attached to the same
+    This is a collective operation that returns if each rank is in the same node
+    as the source rank. It tests if processes are attached to the same
     memory system (shared access to shared memory).
     """
     assert torch.distributed.get_backend(
         pg) != torch.distributed.Backend.NCCL, (
-            "is_in_the_same_node should be tested with a non-NCCL group.")
+            "in_the_same_node_as should be tested with a non-NCCL group.")
     # local rank inside the group
     rank = torch.distributed.get_rank(group=pg)
     world_size = torch.distributed.get_world_size(group=pg)
@@ -1017,19 +1062,19 @@ def is_in_the_same_node(pg: ProcessGroup):
 
     try:
         with contextlib.suppress(OSError):
-            if rank == 0:
+            if rank == source_rank:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
                 shm.buf[:len(magic_message)] = magic_message
                 torch.distributed.broadcast_object_list([shm.name],
-                                                        src=ranks[0],
+                                                        src=ranks[source_rank],
                                                         group=pg)
-                is_in_the_same_node[0] = 1
+                is_in_the_same_node[rank] = 1
             else:
                 # try to open the shared memory segment
                 recv = [None]
                 torch.distributed.broadcast_object_list(recv,
-                                                        src=ranks[0],
+                                                        src=ranks[source_rank],
                                                         group=pg)
                 name = recv[0]
                 # fix to https://stackoverflow.com/q/62748654/9191338
@@ -1050,8 +1095,8 @@ def is_in_the_same_node(pg: ProcessGroup):
 
     # clean up the shared memory segment
     with contextlib.suppress(OSError):
-        if rank == 0 and shm:
+        if rank == source_rank and shm:
             shm.unlink()
     torch.distributed.all_reduce(is_in_the_same_node, group=pg)
 
-    return is_in_the_same_node.sum().item() == world_size
+    return [x == 1 for x in is_in_the_same_node.tolist()]

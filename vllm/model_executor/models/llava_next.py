@@ -167,7 +167,6 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
 
 
 def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
-    print("[llava_next.input_processor_for_llava_next]")
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs

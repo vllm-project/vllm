@@ -49,7 +49,6 @@ class ImageAsset:
 
     @cached_property
     def pil_image(self) -> Image.Image:
-        return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
         if self.name == "boardwalk":
             return fetch_image(
                 "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
@@ -365,8 +364,6 @@ class HfRunner:
 
             inputs = self.processor(**processor_kwargs)
             input_ids = inputs.input_ids
-            import pudb
-            pudb.set_trace()
             output = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
