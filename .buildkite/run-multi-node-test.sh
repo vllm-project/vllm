@@ -2,16 +2,17 @@
 
 set -euox pipefail
 
-if [[ $# -lt 3 ]]; then
-    echo "Please provide the number of nodes and GPU per node."
+if [[ $# -lt 4 ]]; then
+    echo "Please provide the working directory, number of nodes and GPU per node."
     exit 1
 fi
 
-NUM_NODES=$1
-NUM_GPUS=$2
-DOCKER_IMAGE=$3
+WORKING_DIR=$1
+NUM_NODES=$2
+NUM_GPUS=$3
+DOCKER_IMAGE=$4
 
-shift 3
+shift 4
 COMMANDS=("$@")
 if [ ${#COMMANDS[@]} -ne $NUM_NODES ]; then
     echo "The number of commands must be equal to the number of nodes."
@@ -58,9 +59,9 @@ run_nodes() {
         GPU_DEVICES+='"'
         echo "Running node$node with GPU devices: $GPU_DEVICES"
         if [ $node -lt $(($NUM_NODES - 1)) ]; then
-            docker exec -d node$node /bin/bash -c "${COMMANDS[$node]}"
+            docker exec -d node$node /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         else
-            docker exec node$node /bin/bash -c "${COMMANDS[$node]}"
+            docker exec node$node /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         fi
     done
 }
