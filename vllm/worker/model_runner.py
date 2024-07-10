@@ -673,13 +673,19 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        input_tokens_tensor = torch.tensor(input_tokens,
-                                           dtype=torch.long,
-                                           device=self.device)
         # if self.model_config.hf_config have num_token_lens attribute
         if hasattr(self.model_config.hf_config, "num_token_len"):
-            if self.model_config.hf_config.num_token_len > 1:
-                input_tokens_tensor = input_tokens_tensor.unsqueeze(dim=1).expand(len(input_tokens), self.model_config.hf_config.num_token_len)
+            multi_head_input_tokens = []
+            # duplicate input_tokens n times
+            for i in range(self.model_config.hf_config.num_token_len):
+                multi_head_input_tokens.append(input_tokens)
+            input_tokens_tensor = torch.tensor(multi_head_input_tokens,
+                                        dtype=torch.long,
+                                        device=self.device).permute(1, 0)
+        else:
+            input_tokens_tensor = torch.tensor(input_tokens,
+                                        dtype=torch.long,
+                                        device=self.device)
         input_positions_tensor = torch.tensor(input_positions,
                                               dtype=torch.long,
                                               device=self.device)
@@ -938,7 +944,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+       
+        # if self.model_config.hf_config have num_token_lens attribute
+        if hasattr(self.model_config.hf_config, "num_token_len"):
+            input_tokens = torch.zeros(max_batch_size, self.model_config.hf_config.num_token_len, dtype=torch.long).cuda()
+        else:
+            input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)

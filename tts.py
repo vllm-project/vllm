@@ -36,11 +36,9 @@ import torch
 # # save the model
 # torch.save(tts, '/home/largeniu/ttslm/GPT_merged_emb.pt')
 
-tokenizer = torch.load('/home/largeniu/g/ChatTTS/asset/tokenizer.pt')
-llm = LLM(model='/home/largeniu/ttslm', skip_tokenizer_init=True, dtype=torch.float32)
-llm.set_tokenizer(tokenizer)
+llm = LLM(model='/home/zhn/ttslm')
 prompts = [
-    "Hello, my name is",
+    "[Stts][empty_spk][speed_5]your text one[Ptts]",
 ]
 sampling_params = SamplingParams(temperature=1)
 outputs = llm.generate(prompts, sampling_params)
