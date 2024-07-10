@@ -51,7 +51,8 @@ start_nodes() {
 }
 
 run_nodes() {
-    for node in $(seq 0 $(($NUM_NODES-1))); do
+    # important: iterate in reverse order to start the head node last
+    for node in $(seq $(($NUM_NODES - 1)) -1 0); do
         GPU_DEVICES='"device='
         for node_gpu in $(seq 0 $(($NUM_GPUS - 1))); do
             DEVICE_NUM=$(($node * $NUM_GPUS + $node_gpu))
