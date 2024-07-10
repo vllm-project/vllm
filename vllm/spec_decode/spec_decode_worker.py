@@ -128,7 +128,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
             elif draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "medusa":
-                disable_bonus_tokens = False
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
