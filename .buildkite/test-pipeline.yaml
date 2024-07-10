@@ -39,7 +39,7 @@ steps:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
-- label: 2 Node Tests
+- label: 2 Node Tests (4 GPUs in total)
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
@@ -47,6 +47,7 @@ steps:
   - # the following commands are for the first node, with ip 192.168.10.10
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
     - ray start --head
+    - TP_SIZE=2 PP_SIZE=2 EAGER_MODE=1 CHUNKED_PREFILL=0 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
     - ray start --address=="192.168.10.10:6379"
