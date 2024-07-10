@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Generator, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
@@ -351,19 +351,48 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
+def _parse_metadata_from_safetensors(
+        filepath: str) -> Dict[str, Dict[str, Any]]:
+    # format from https://huggingface.co/docs/safetensors/en/index#format
+    with open(filepath, "rb") as f:
+        size = int.from_bytes(f.read(8), "little")
+        data = json.loads(f.read(size).decode('utf-8'))
+    return data
+
+
 def safetensors_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    st_handles: Dict[str, Any] = {}
+
+    def layz_open_st(filename):
+        # lazily open safetensor files
+        if filename not in st_handles:
+            st_handles[filename] = safe_open(st_file,
+                                             framework="pt").__enter__()
+        return st_handles[filename]
+
+    name_and_tensors = []
     for st_file in hf_weights_files:
-        with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():  # noqa: SIM118
-                # we actually return the DeferredTensor here
-                # but use `torch.Tensor` as the type hint to avoid
-                # changing too many user-side code
-                # users can use this value just like a torch.Tensor,
-                # except that slicing and `narrow` are optimized for I/O
-                yield name, DeferredTensor(f, name)  # type: ignore
+        data = _parse_metadata_from_safetensors(st_file)
+        for k, v in data.items():
+            if k == "__metadata__":
+                continue
+            dtype = v["dtype"]
+            shape = v["shape"]
+            name_and_tensors.append(
+                [k, DeferredTensor(layz_open_st, st_file, k, dtype, shape)])
+    for name, v in name_and_tensors:
+        # we actually return the DeferredTensor here
+        # but use `torch.Tensor` as the type hint to avoid
+        # changing too many user-side code
+        # users can use this value just like a torch.Tensor,
+        # except that slicing and `narrow` are optimized for I/O
+        yield name, v
+
+    for v in st_handles.values():
+        v.__exit__(None, None, None)  # type: ignore
 
 
 def pt_weights_iterator(
