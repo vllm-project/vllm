@@ -78,8 +78,9 @@ class Worker(LocalOrDistributedWorkerBase):
         speculative_args = {} if speculative_config is None \
             or (speculative_config.draft_model_config.model ==
                 model_config.model) \
-              or (speculative_config.draft_model_config.hf_config.model_type !=
-                  "mlp_speculator") else {"return_hidden_states": True}
+            or (speculative_config.draft_model_config.hf_config.model_type
+                not in ["medusa", "mlp_speculator"]) \
+                    else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:

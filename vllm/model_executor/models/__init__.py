@@ -64,6 +64,7 @@ _GENERATION_MODELS = {
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
+    "MedusaModel": ("medusa", "Medusa"),
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM")
 }
