@@ -7,8 +7,8 @@ from transformers import Qwen2Config
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
@@ -31,7 +31,8 @@ class Qwen2EmbeddingModel(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
-        self.model = Qwen2ForCausalLM(config, cache_config, quant_config, lora_config)
+        self.model = Qwen2ForCausalLM(config, cache_config, quant_config,
+                                      lora_config)
 
         self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
@@ -43,7 +44,8 @@ class Qwen2EmbeddingModel(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors)
+        return self.model(input_ids, positions, kv_caches, attn_metadata,
+                          intermediate_tensors)
 
     def pooler(
         self,
