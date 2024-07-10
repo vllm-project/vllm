@@ -7,7 +7,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -33,7 +33,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
-class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
+class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -64,14 +64,30 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
               router_logits: torch.Tensor,
               top_k: int,
               renormalize: bool = True) -> torch.Tensor:
+        return self.forward(x, layer.w13_weight, layer.w2_weight,
+                            router_logits, top_k, renormalize)
 
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
         return fused_moe(x,
-                         layer.w13_weight,
-                         layer.w2_weight,
+                         w1,
+                         w2,
                          router_logits,
                          top_k,
                          renormalize=renormalize,
                          inplace=True)
+
+    def forward_cpu(self, *args, **kwargs):
+        raise NotImplementedError(
+            "The CPU backend currently does not support MoE.")
 
 
 class FusedMoE(torch.nn.Module):
