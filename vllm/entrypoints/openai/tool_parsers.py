@@ -13,6 +13,54 @@ from vllm.entrypoints.openai.protocol import DeltaMessage
 logger = init_logger(__name__)
 
 
+def find_common_prefix(s1: str, s2: str) -> str:
+    prefix = ''
+    min_length = min(len(s1), len(s2))
+    for i in range(0, min_length):
+        if s1[i] == s2[i]:
+            prefix += s1[i]
+        else:
+            break
+    return prefix
+
+
+def find_common_suffix(s1: str, s2: str) -> str:
+    suffix = ''
+    min_length = min(len(s1), len(s2))
+    for i in range(1, min_length + 1):
+        if s1[-i] == s2[-i]:
+            suffix = s1[-i] + suffix
+        else:
+            break
+    return suffix
+
+
+def extract_intermediate_diff(s1: str, s2: str) -> str:
+    """
+    Extract the difference in the middle between two strings that are KNOWN to have a common prefix and OPTIONALLY
+    also a common suffix
+    """
+    prefix = find_common_prefix(s1, s2)
+    suffix = find_common_suffix(s1, s2)
+    diff = s1
+    if len(prefix):
+        diff = diff.replace(prefix, '', 1) # replace the prefix only once in case it's mirrored
+    if len(suffix):
+        diff = diff[::-1].replace(suffix[::-1], '', 1)[::-1]
+    return diff
+
+
+def find_all_indices(string, substring):
+    indices = []
+    index = -1
+    while True:
+        index = string.find(substring, index + 1)
+        if index == -1:
+            break
+        indices.append(index)
+    return indices
+
+
 class ToolParser:
 
     def __init__(self):
@@ -127,8 +175,8 @@ class MistralToolParser(ToolParser):
                 # note this is basically only the way to do this - just make sure your tool arguments will
                 #   never be something containing an apostrophe
                 parsable_arr = (current_text
-                            .replace(self.bot_token, '') # remove BOT token to get valid json
-                            .replace('\'', '"') # replace mistral single quotes with double for JSON parsing
+                            .replace(self.bot_token, '')  # remove BOT token to get valid json
+                            .replace('\'', '"')  # replace mistral single quotes with double for JSON parsing
                             )
                 logger.info('parsing: %s', parsable_arr)
                 tool_call_arr: List[Dict] = partial_json_parser.loads(parsable_arr, flags)
@@ -143,14 +191,15 @@ class MistralToolParser(ToolParser):
                     self.current_tool_initial_sent = False
                     logger.info('starting on new tool %d', self.current_tool_id)
 
-                # case: there is no tool in the array
+                # case: update an existing tool
                 elif len(tool_call_arr) - 1 == self.current_tool_id and self.current_tool_id >= 0:
-                    logger.info('update to tool %d', self.current_tool_id)
+                    # logger.info('update to tool %d', self.current_tool_id)
+                    pass
 
                 # if there is NOTHING in the array
                 else:
                     logger.info('No tool call detected yet!')
-                    return None  # TODO FIX
+                    return None
 
                 # handle parsing
                 current_tool_call: Dict = tool_call_arr[self.current_tool_id]
@@ -167,8 +216,8 @@ class MistralToolParser(ToolParser):
                 # if the current tool name hasn't been sent, send if available - otherwise no chunks
                 elif not self.current_tool_name_sent:
                     function_name = current_tool_call.get('name')
-                    logger.info('Sending DeltaToolCall with function name!')
                     if function_name:
+                        logger.info(f'Sending DeltaToolCall with function name {function_name}!')
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(name=function_name).model_dump(exclude_none=True))
                         ])
@@ -178,36 +227,42 @@ class MistralToolParser(ToolParser):
 
                 # now we know we're on the same tool call and we're streaming arguments
                 else:
-                    # TODO be more clever about this - I think we can grab the raw string for the current tool ONCE
-                    #   the arguments key is defined and stream everything generated after it? Be careful of end of arr tho...
-                    # diff arguments from previous generation against arguments from current generation
+
                     prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get('arguments')
                     cur_arguments = current_tool_call.get('arguments')
 
-                    # if arguments is not defined for the current function yet, skip the chunk
                     if not cur_arguments and not prev_arguments:
-                        logger.info('Skipping chunk - no argument characters received yet!')
+                        logger.info(f'Skipping text {delta_text} (tokens {delta_token_ids}) - no arguments yet')
                         delta = None
-
-                    # INVARIANT - we have previously-defined arguments, but now they're undefined
-                    elif prev_arguments and not cur_arguments:
-                        logger.error('INVARIANT - we have current arguments for the function, but not previous ones!')
+                    elif not cur_arguments and prev_arguments:
+                        logger.error('INVARIANT - impossible to have arguments reset mid-arguments')
                         delta = None
+                    elif cur_arguments and not prev_arguments:
+                        logger.info('First tokens in arguments received')
+                        cur_arguments_json = json.dumps(cur_arguments)
+                        logger.info(f'Finding {delta_text} in |{cur_arguments_json}')
+                        arguments_delta = cur_arguments_json[:cur_arguments_json.index(delta_text) + len(delta_text)]
+                        logger.info(f'First tokens in arguments received: {arguments_delta}')
+                        delta = DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(
+                                arguments=arguments_delta
+                            ).model_dump(exclude_none=True))
+                        ])
 
-                    # we have first values for arguments:
-                    elif not prev_arguments and cur_arguments:
-                        logger.info('We have arguments for the function!')
-                        delta = None  # TODO replace
-
-                    # if the arguments are the same it's prob a structural/control char difference; don't stream a chunk
-                    elif prev_arguments and cur_arguments and prev_arguments == cur_arguments:
-                        # TODO can we be clever and figure out how to stream this by processing the string of
-                        #   only the current tool?
-                        logger.info(f'Skipping - control/structure character received in arguments: {prev_arguments} vs. {cur_arguments}')
+                    elif cur_arguments and prev_arguments:
+                        cur_args_json = json.dumps(cur_arguments)
+                        prev_args_json = json.dumps(prev_arguments)
+                        shared_prefix = find_common_prefix(cur_args_json, prev_args_json)
+                        cur_args_json = cur_args_json.replace(shared_prefix, '', 1)
+                        argument_diff = cur_args_json[:cur_args_json.index(delta_text) + len(delta_text)]
+                        logger.info(f'got arguments diff: {argument_diff}')
+                        delta = DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(
+                                arguments=argument_diff
+                            ).model_dump(exclude_none=True))
+                        ])
+                    else:
                         delta = None
-
-                    elif prev_arguments and cur_arguments and prev_arguments != cur_arguments:
-                        logger.info('We have new values for arguments for the function!')
 
                 # check to see if the name is defined and has been sent. if so, stream the name - otherwise keep waiting
                 # finish by setting old and returning None as base case
