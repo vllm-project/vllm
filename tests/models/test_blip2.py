@@ -27,7 +27,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     """Sanitize vllm output to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
 
-    hf_output_str = output_str + "\n"
+    assert output_str[0] == " "
+    hf_output_str = output_str[1:] + "\n"
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     hf_output_ids = tokenizer.encode(hf_output_str)
