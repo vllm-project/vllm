@@ -17,6 +17,7 @@ from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
+log_advance_input = False
 
 class TP1DraftModelRunner(ModelRunner):
     """Specialized model runner for speculative decoding draft model.
@@ -119,8 +120,9 @@ class TP1DraftModelRunner(ModelRunner):
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)
 
-                print("appended seq_id = {} token_id = {}".format(
-                    seq_output.parent_seq_id, token_id))
+                if log_advance_input:
+                    print("appended seq_id = {} token_id = {}".format(
+                        seq_output.parent_seq_id, token_id))
 
         return self.prepare_model_input(self.cached_seq_group_metadata_list)
 
@@ -138,8 +140,9 @@ class TP1DraftModelRunner(ModelRunner):
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)
 
-                print("appended seq_id = {} token_id = {}".format(
-                    seq_output.parent_seq_id, token_id))
+                if log_advance_input:
+                    print("appended seq_id = {} token_id = {}".format(
+                        seq_output.parent_seq_id, token_id))
 
     def _update_flash_attn_metadata(self, attn_metadata, num_seqs):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
@@ -190,7 +193,8 @@ class TP1DraftModelRunner(ModelRunner):
             self, model_input: ModelInputForGPUWithSamplingMetadata,
             last_output: SamplerOutput
     ) -> ModelInputForGPUWithSamplingMetadata:
-        print("Inside _advance_step")
+        if log_advance_input:
+            print("Inside _advance_step")
 
         # Append output tokens
         self._update_seq_group_metadata(self.cached_seq_group_metadata_list,
@@ -234,15 +238,16 @@ class TP1DraftModelRunner(ModelRunner):
             is_prompt=False,
         )
 
-        print("NEW INPUT: ")
-        print("  input_tokens = {}".format(new_model_input.input_tokens))
-        print("  input_positions = {}".format(new_model_input.input_positions))
-        print("  seq_lens = {}".format(new_model_input.seq_lens))
-        print("  query_lens = {}".format(new_model_input.query_lens))
-        print("  attn_metadata:")
-        print("    seq_lens_tensor: {}".format(attn_metadata.seq_lens_tensor))
-        print("    slot_mapping: {}".format(attn_metadata.slot_mapping))
-        print("    block_tables: {}".format(attn_metadata.block_tables))
+        if log_advance_input:
+            print("NEW INPUT: ")
+            print("  input_tokens = {}".format(new_model_input.input_tokens))
+            print("  input_positions = {}".format(new_model_input.input_positions))
+            print("  seq_lens = {}".format(new_model_input.seq_lens))
+            print("  query_lens = {}".format(new_model_input.query_lens))
+            print("  attn_metadata:")
+            print("    seq_lens_tensor: {}".format(attn_metadata.seq_lens_tensor))
+            print("    slot_mapping: {}".format(attn_metadata.slot_mapping))
+            print("    block_tables: {}".format(attn_metadata.block_tables))
 
         return new_model_input
 

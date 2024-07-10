@@ -106,9 +106,9 @@ class Sampler(nn.Module):
             assert maybe_sampled_tokens_tensor is not None
             on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
 
-            print("  -- maybe_sampled_tokens_tensor: shape = {} vals = {}".format(
-                maybe_sampled_tokens_tensor.shape,
-                maybe_sampled_tokens_tensor))
+            # print("  -- maybe_sampled_tokens_tensor: shape = {} vals = {}".format(
+            #     maybe_sampled_tokens_tensor.shape,
+            #     maybe_sampled_tokens_tensor))
         else:
             on_device_tensors = None
 
@@ -774,8 +774,8 @@ def _get_logprobs(
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_ids_gpu = torch.tensor(next_token_ids, device=logprobs.device)
 
-    print("query_indices_gpu: shape = {}, vals = {}".format(query_indices_gpu.shape, query_indices_gpu))
-    print("next_token_ids_gpu: shape = {}, vals = {}".format(next_token_ids_gpu.shape, next_token_ids_gpu))
+    # print("query_indices_gpu: shape = {}, vals = {}".format(query_indices_gpu.shape, query_indices_gpu))
+    # print("next_token_ids_gpu: shape = {}, vals = {}".format(next_token_ids_gpu.shape, next_token_ids_gpu))
     
     # (num_selected_query_tokens, num_logprobs). Note that query_indices can
     # contain duplicates if beam search is enabled.
