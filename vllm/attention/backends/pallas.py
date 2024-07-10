@@ -6,7 +6,7 @@ import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 import torch_xla.experimental.dynamo_set_buffer_donor
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -28,21 +28,13 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 
-    @torch.compile(backend="openxla")
     @staticmethod
     def swap_blocks(
-        src_kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        dst_kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        src_to_dst: Tuple[torch.Tensor, torch.Tensor],
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
     ) -> None:
-        src_k_cache, src_v_cache = src_kv_cache
-        dst_k_cache, dst_v_cache = dst_kv_cache
-        src_indices, dst_indices = src_to_dst
-        device = dst_k_cache.device
-        torch.ops.xla.dynamo_set_buffer_donor_(dst_k_cache, True)
-        torch.ops.xla.dynamo_set_buffer_donor_(dst_v_cache, True)
-        dst_k_cache[:, dst_indices] = src_k_cache[:, src_indices].to(device)
-        dst_v_cache[:, dst_indices] = src_v_cache[:, src_indices].to(device)
+        raise RuntimeError("swap_blocks is not used for the TPU backend.")
 
     @torch.compile(backend="openxla")
     @staticmethod
@@ -140,6 +132,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
         attn_metadata: PallasMetadata,
         kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
@@ -154,6 +147,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
             shape = [batch_size, seq_len, num_heads * head_size]
         """
         assert kv_scale == 1.0
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "PallasAttentionBackendImpl")
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
