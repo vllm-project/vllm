@@ -13,9 +13,7 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
-from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
-from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
                                                  split_num_cache_blocks_evenly)
 
@@ -720,9 +718,9 @@ def test_populate_seq_ids_with_bonus_tokens():
         k=k)
     expected_seq_ids_with_bonus_tokens = \
         [assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens]
-    assert worker.seq_with_bonus_token_in_last_step == \
+    assert worker._seq_with_bonus_token_in_last_step == \
         set(expected_seq_ids_with_bonus_tokens)
-    assert worker.request_id_seq_id_mapping == \
+    assert worker._request_id_seq_id_mapping == \
         expected_request_id_seq_ids_mapping
 
     # Forward Pass : 1
@@ -753,9 +751,9 @@ def test_populate_seq_ids_with_bonus_tokens():
         k=k)
     expected_seq_ids_with_bonus_tokens = \
         [assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens[2:]]
-    assert worker.seq_with_bonus_token_in_last_step == \
+    assert worker._seq_with_bonus_token_in_last_step == \
         set(expected_seq_ids_with_bonus_tokens)
-    assert worker.request_id_seq_id_mapping == \
+    assert worker._request_id_seq_id_mapping == \
         expected_request_id_seq_ids_mapping
 
     # Forward Pass : 2
@@ -790,85 +788,22 @@ def test_populate_seq_ids_with_bonus_tokens():
         expected_seq_ids_with_bonus_tokens)
     expected_seq_ids_with_bonus_tokens_copy.remove(
         seq_indexes_with_bonus_tokens[-1])
-    assert worker.seq_with_bonus_token_in_last_step == \
+    assert worker._seq_with_bonus_token_in_last_step == \
         set(expected_seq_ids_with_bonus_tokens_copy)
-    assert worker.request_id_seq_id_mapping == \
+    assert worker._request_id_seq_id_mapping == \
         expected_request_id_seq_ids_mapping
 
 
 @torch.inference_mode()
-def test_seq_ids_with_bonus_tokens_not_needed():
-    """
-    Test that `seq_with_bonus_token_in_last_step` is not populated
-    under for MLPSpeculatorWorker and NGramWorker but it is populated
-    for MultiStepWorker
-    """
-    batch_size = 10
-    k = 5
-    vocab_size = 10000
-    target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
-    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
-    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
-    target_worker.device = 'cuda'
-    set_random_seed(1)
-    seq_group_metadata_list, _, _ = create_batch(batch_size,
-                                                 k,
-                                                 prev_output_token_len=10)
-    target_token_logprobs = torch.rand(batch_size, (k + 1),
-                                       vocab_size,
-                                       dtype=torch.float32,
-                                       device='cuda')
-    accepted_token_ids = torch.randint(low=0,
-                                       high=vocab_size,
-                                       size=(batch_size, (k + 1)),
-                                       dtype=torch.int64,
-                                       device='cuda')
-
-    draft_worker = mock_worker(cls=NGramWorker)
-    draft_worker.device = 'cuda'
-    worker = SpecDecodeWorker(draft_worker,
-                              target_worker,
-                              mock_spec_decode_sampler("rejection_sampler"),
-                              metrics_collector=metrics_collector)
-    worker._create_output_sampler_list(
-        seq_group_metadata_list=seq_group_metadata_list,
-        accepted_token_ids=accepted_token_ids,
-        target_logprobs=target_token_logprobs,
-        k=k)
-    # Assert that seq_with_bonus_token_in_last_step is empty
-    assert worker.seq_with_bonus_token_in_last_step == set()
-
-    draft_worker = mock_worker(cls=MLPSpeculatorWorker)
-    draft_worker.device = 'cuda'
-    worker = SpecDecodeWorker(draft_worker,
-                              target_worker,
-                              mock_spec_decode_sampler("rejection_sampler"),
-                              metrics_collector=metrics_collector)
-    worker._create_output_sampler_list(
-        seq_group_metadata_list=seq_group_metadata_list,
-        accepted_token_ids=accepted_token_ids,
-        target_logprobs=target_token_logprobs,
-        k=k)
-    # Assert that seq_with_bonus_token_in_last_step is empty
-    assert worker.seq_with_bonus_token_in_last_step == set()
-
-    draft_worker = mock_worker(cls=MultiStepWorker)
-    draft_worker.device = 'cuda'
-    worker = SpecDecodeWorker(draft_worker,
-                              target_worker,
-                              mock_spec_decode_sampler("rejection_sampler"),
-                              metrics_collector=metrics_collector)
-    worker._create_output_sampler_list(
-        seq_group_metadata_list=seq_group_metadata_list,
-        accepted_token_ids=accepted_token_ids,
-        target_logprobs=target_token_logprobs,
-        k=k)
-    # Assert that seq_with_bonus_token_in_last_step is not empty
-    assert worker.seq_with_bonus_token_in_last_step
-
-
-@torch.inference_mode()
 def test_handle_finished_requests():
+    """
+    Test to verify that finished request IDs are appropriately processed to 
+    update the internal state of the SpecDecodeWorker.
+
+    This test initializes the SpecDecodeWorker with mock data, marks certain 
+    requests as finished, and ensures that the corresponding sequence IDs are 
+    correctly removed from the internal mappings.
+    """
     batch_size = 32
     k = 3
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -877,14 +812,19 @@ def test_handle_finished_requests():
     worker = SpecDecodeWorker(draft_worker, target_worker,
                               mock_spec_decode_sampler("rejection_sampler"),
                               metrics_collector)
-    worker.request_id_seq_id_mapping = \
+    # Initialize the request_id_seq_id_mapping mapping dict with a few fake
+    # request ids and corresponding sequence ids.
+    worker._request_id_seq_id_mapping = \
         {'request-1': {1,2,3}, 'request-2': {4,5,6,7},
         'request-3': {8,9}, 'request-4': {10,11}}
-    worker.seq_with_bonus_token_in_last_step = {1, 4, 5, 8, 9, 10}
+    # Initialize seq_with_bonus_token_in_last_step with a few fake
+    # sequence ids.
+    worker._seq_with_bonus_token_in_last_step = {1, 4, 5, 8, 9, 10}
     exception_secret = 'artificial stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
 
     seq_group_metadata_list, _, _ = create_batch(batch_size, k)
+    # Mark requests with ids request-1 and request-3 as finished.
     execute_model_req = ExecuteModelRequest(
         seq_group_metadata_list=seq_group_metadata_list,
         num_lookahead_slots=k,
@@ -892,7 +832,11 @@ def test_handle_finished_requests():
 
     with pytest.raises(ValueError, match=exception_secret):
         worker.execute_model(execute_model_req=execute_model_req)
-    assert worker.request_id_seq_id_mapping == \
+    # Verify that request-1 and request-3 are removed from
+    # request_id_seq_id_mapping
+    assert worker._request_id_seq_id_mapping == \
         {'request-2': {4,5,6,7}, 'request-4': {10,11}}
-    assert worker.seq_with_bonus_token_in_last_step == \
+    # Verify that all sequence ids corresponding to 'request-1'
+    # and 'request-3' are removed from seq_with_bonus_token_in_last_step.
+    assert worker._seq_with_bonus_token_in_last_step == \
         {4,5,10}

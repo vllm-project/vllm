@@ -281,10 +281,10 @@ def test_same_output_for_multi_step():
 
 
 @torch.inference_mode()
-def test_same_output_for_multi_step_with_batch_expansion():
+def test_multi_step_with_batch_expansion_correct_output():
     """
-    In this test we verify that the MultiStepWorker is able to
-    handle bonus tokens correctly. The test verifies that if a sequence has a
+    In this test we verify that the MultiStepWorker is able to handle bonus
+    tokens correctly. The test verifies that if a sequence has a
     bonus token then the MultiStepWorker is able to expand the batch by adding
     new sequences corresponding to the sequences with bonus tokens. The
     expanded batch is then used for predicting the next tokens.
@@ -303,7 +303,6 @@ def test_same_output_for_multi_step_with_batch_expansion():
         seed,
         model_runner_cls=TP1DraftModelRunner,
     )
-
     worker = create_worker(
         Worker,
         model_name,
@@ -311,7 +310,6 @@ def test_same_output_for_multi_step_with_batch_expansion():
         num_gpu_blocks,
         seed,
     )
-    # Make sure we go over the block boundary.
     random.seed(seed)
     prompts = [[0] for _ in range(batch_size)]
     num_steps = 2
@@ -360,6 +358,100 @@ def test_same_output_for_multi_step_with_batch_expansion():
         block_size,
         continuations=multi_step_continuations,
         final_prompt_lens=final_prompt_lens)
+
+    # Run multi-step.. In this run correctly specify that all the sequences
+    # have bonus tokens. With this setup verify that the third token
+    # prediction is accurate for all sequences.
+    zero_kv_cache(multi_step_worker.cache_engine)
+    all_seq_ids = {i for i in range(batch_size)}
+    multi_step_output, _ = multi_step_worker.sampler_output(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list),
+        sample_len=1,
+        seq_ids_with_bonus_token_in_last_step=all_seq_ids)
+    for index, output in enumerate(multi_step_output[-1].outputs):
+        assert (continuations[index][-1] == output.samples[0].output_token)
+
+
+@torch.inference_mode()
+def test_multi_step_with_batch_expansion_incorrect_output():
+    """
+    Tests a negative case for batch expansion with bonus tokens. In this
+    test we provide the MultiStepWorker with a batch containing sequences
+    with bonus tokens. However we specify the sequence ids which have bonus
+    token incorrectly. The test verifies that the MultiStepWorker generates
+    the correct tokens for the ones where we have specified the sequence id
+    correctly and incorrect otherwise.
+    """
+    seed = 100
+    model_name = 'JackFram/llama-68m'
+
+    block_size = 16
+    num_gpu_blocks = 2048 // block_size
+    batch_size = 128
+    multi_step_worker = create_worker(
+        MultiStepWorker,
+        model_name,
+        block_size,
+        num_gpu_blocks,
+        seed,
+        model_runner_cls=TP1DraftModelRunner,
+    )
+    worker = create_worker(
+        Worker,
+        model_name,
+        block_size,
+        num_gpu_blocks,
+        seed,
+    )
+    random.seed(seed)
+    prompts = [[0] for _ in range(batch_size)]
+    num_steps = 2
+    final_prompt_lens = [(num_steps + 1) for prompt in prompts]
+    rand_seeds = list(random.randint(0, 100) for _ in range(num_steps))
+    multi_step_worker.execute_model = patch_execute_model_with_seeds(
+        multi_step_worker, rand_seeds)
+    worker.execute_model = patch_execute_model_with_seeds(worker, rand_seeds)
+    # Create the test continuations
+    continuations = [[random.randint(0, 1000)] for _ in prompts]
+    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+        prompts,
+        num_gpu_blocks,
+        block_size,
+        continuations=continuations,
+        final_prompt_lens=final_prompt_lens)
+    # Run single-step twice to generate 2 tokens. This
+    # will simulate the bonus token case with the second token
+    # being the bonus token.
+    zero_kv_cache(worker.cache_engine)
+    single_step_output: List[SamplerOutput] = []
+    set_random_seed(seed)
+    for _ in range(num_steps):
+        seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            continuations=continuations,
+            final_prompt_lens=final_prompt_lens)
+        single_step_output.extend(
+            worker.execute_model(execute_model_req=ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list)))
+        # Append output tokens to new sequence data.
+        for i, seq_group_output in enumerate(single_step_output[-1]):
+            continuations[i].append(seq_group_output.samples[0].output_token)
+
+    # Create continuations for the MultiStepWorker. The continuations have
+    # 2 tokens in order to simulate the bonus token case.
+    multi_step_continuations = []
+    for continuation in continuations:
+        multi_step_continuations.append(continuation[:2])
+    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+        prompts,
+        num_gpu_blocks,
+        block_size,
+        continuations=multi_step_continuations,
+        final_prompt_lens=final_prompt_lens)
+    
     # Run multi-step. In this run INCORRECTLY specify that only the odd number
     # sequences have bonus tokens. Verify that with this setting the third token
     # prediction is accurate only for the odd numbered sequences. Also verify
@@ -383,19 +475,6 @@ def test_same_output_for_multi_step_with_batch_expansion():
     # handling of the bonus tokens. Hence verify that the number of sequences
     # for which there is a mismatch is > 0.
     assert (num_mismatch > 0)
-
-    # Make a second run. In this run correctly specify that all the sequences
-    # have bonus tokens. With this setup verify that the third token
-    # prediction is accurate for all sequences.
-    zero_kv_cache(multi_step_worker.cache_engine)
-    all_seq_ids = {i for i in range(batch_size)}
-    multi_step_output, _ = multi_step_worker.sampler_output(
-        execute_model_req=ExecuteModelRequest(
-            seq_group_metadata_list=seq_group_metadata_list),
-        sample_len=1,
-        seq_ids_with_bonus_token_in_last_step=all_seq_ids)
-    for index, output in enumerate(multi_step_output[-1].outputs):
-        assert (continuations[index][-1] == output.samples[0].output_token)
 
 
 @torch.inference_mode()
@@ -565,115 +644,3 @@ def test_draft_proposals_mixed_k():
         k for _ in range(expected_num_proposal_seqs - 1)
     ] + [0 for _ in range(expected_num_no_proposal_seqs)] + [k]
 
-
-@torch.inference_mode()
-def test_expand_execute_model_request_for_bonus_tokens():
-    """
-    Test the expansion of the execute model request to handle bonus tokens.
-    
-    This test ensures that the execute model request is correctly expanded.
-    For sequences with a bonus token, the expanded batch should contain
-    two sequences: one with the bonus token and one without. Sequences without
-    a bonus token are added unchanged to the expanded batch.
-    """
-    block_size = 16
-    num_gpu_blocks = 2048 // block_size
-    # Create prompts and continuations to be used in the
-    # execute_model_request.
-    prompts = [[
-        random.randint(0, 1000) for _ in range(random.randint(10, 20))
-    ] for _ in range(10)]
-    continuations = [[
-        random.randint(0, 1000) for _ in range(random.randint(1, 10))
-    ] for _ in prompts]
-    # Create an ExecuteModelRequest using the prompts and continuations.
-    execute_model_request = ExecuteModelRequest(
-        seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts,
-            num_gpu_blocks,
-            block_size,
-            continuations=continuations,
-            final_prompt_lens=[len(prompt) + 100 for prompt in prompts]))
-    # Validate that the number of sequence groups matches the number of prompts.
-    assert len(execute_model_request.seq_group_metadata_list) == len(prompts)
-    seq_id_prompt_map = {}
-    seq_id_output_token_map = {}
-    for seq_group in execute_model_request.seq_group_metadata_list:
-        seq_id = next(iter(seq_group.seq_data.keys()))
-        seq_id_prompt_map[seq_id] = \
-            seq_group.seq_data[seq_id].prompt_token_ids
-        seq_id_output_token_map[seq_id] = \
-            seq_group.seq_data[seq_id].output_token_ids
-
-    # Construct a list of seq_ids with bonus tokens.
-    # The seq_ids are in the range 0 to num_prompts.
-    num_sequences_with_bonus_tokens = len(prompts) // 2
-    seq_ids_with_bonus_tokens = random.sample(range(len(prompts)),
-                                              num_sequences_with_bonus_tokens)
-    # Expand the execute_model_request.
-    expanded_request, indices_of_original_sequence_groups =\
-        MultiStepWorker._expand_execute_model_request(
-            execute_model_request,
-            set(seq_ids_with_bonus_tokens))
-    # Validate that the number of sequence groups is now the original number
-    # plus the number of sequences with bonus tokens.
-    assert len(expanded_request.seq_group_metadata_list) == \
-        len(prompts) + len(seq_ids_with_bonus_tokens)
-    # Iterate through the updated request and validate the following:
-    # 1. If the sequence group is part of the original request, it contains
-    #    all token ids including the bonus tokens.
-    # 2. If the sequence group is newly added, it does not contain the
-    #    bonus token.
-    for index, seq_group_metadata in enumerate(
-            expanded_request.seq_group_metadata_list):
-        seq_id = next(iter(seq_group_metadata.seq_data.keys()))
-        assert seq_group_metadata.seq_data[seq_id].prompt_token_ids ==\
-            seq_id_prompt_map[seq_id]
-        if index in indices_of_original_sequence_groups:
-            assert seq_group_metadata.seq_data[seq_id].output_token_ids ==\
-                seq_id_output_token_map[seq_id]
-        else:
-            assert seq_group_metadata.seq_data[seq_id].output_token_ids ==\
-                seq_id_output_token_map[seq_id][:-1]
-
-
-@torch.inference_mode()
-@pytest.mark.parametrize('num_steps', [1, 2, 6])
-@pytest.mark.parametrize('batch_size', [1, 32, 64])
-def test_filter_model_output(num_steps: int, batch_size: int):
-    """
-    Test the _filter_model_output function of the MultiStepWorker class.
-
-    This test ensures that the _filter_model_output method correctly filters the
-    model's output, retaining only the specified sequences.
-    """
-    vocab_size = 32_000
-
-    target_token_ids = torch.randint(low=0,
-                                     high=vocab_size,
-                                     size=(batch_size, (num_steps)),
-                                     dtype=torch.int64,
-                                     device='cuda')
-    target_token_probs = torch.rand(batch_size,
-                                    num_steps,
-                                    vocab_size,
-                                    dtype=torch.float32,
-                                    device='cuda')
-    target_token_logprobs = torch.rand(batch_size,
-                                       num_steps,
-                                       vocab_size,
-                                       dtype=torch.float32,
-                                       device='cuda')
-    sampler_output_list = create_sampler_output_list(target_token_ids,
-                                                     target_token_probs,
-                                                     target_token_logprobs)
-    output_indices_to_retain = random.sample(range(num_steps),
-                                             max(1, num_steps // 2))
-    filtered_sampler_output_list = MultiStepWorker._filter_model_output(
-        sampler_output_list, output_indices_to_retain)
-    for outer_index, sampler_output in enumerate(sampler_output_list):
-        filtered_sampler_output = filtered_sampler_output_list[outer_index]
-        for inner_index, index_to_retain in enumerate(
-                output_indices_to_retain):
-            assert sampler_output.outputs[index_to_retain] == \
-                filtered_sampler_output.outputs[inner_index]

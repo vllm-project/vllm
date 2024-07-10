@@ -112,7 +112,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
-        disable_bonus_tokens = False
         if ngram_prompt_lookup_max > 0:
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
@@ -141,10 +140,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
             spec_decode_sampler = RejectionSampler(
-                disable_bonus_tokens=disable_bonus_tokens, )
+                disable_bonus_tokens=False, )
         elif draft_token_acceptance_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
-                disable_bonus_tokens=disable_bonus_tokens,
+                disable_bonus_tokens=False,
                 posterior_threshold=\
                     typical_acceptance_sampler_posterior_threshold,
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,
@@ -195,15 +194,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Tracks the sequence IDs that received a bonus token ID in
         # their last forward pass. Needed only if KV cache is being
         # used for token generation such as in the case of MultiStepWorker.
-        self.seq_with_bonus_token_in_last_step: Set[int] = set()
+        self._seq_with_bonus_token_in_last_step: Set[int] = set()
         # Tracks the currently active request ids and the sequence IDs
         # corresponding to them
-        self.request_id_seq_id_mapping: Dict[str, Set[int]] = defaultdict(set)
+        self._request_id_seq_id_mapping: Dict[str, Set[int]] = defaultdict(set)
         # Tracks if the proposer worker uses the KV cache or not.
-        self.proposer_uses_kv_cache = True
-        if (isinstance(self.proposer_worker,
-                       (MLPSpeculatorWorker, NGramWorker))):
-            self.proposer_uses_kv_cache = False
 
         self.probs_dtype = self.spec_decode_sampler.probs_dtype
         self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
@@ -312,12 +307,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             broadcast_tensor_dict({}, src=0)
             return []
 
-        if self.proposer_uses_kv_cache:
-            for finished_request in execute_model_req.finished_requests_ids:
-                for seq_id in self.request_id_seq_id_mapping[finished_request]:
-                    self.seq_with_bonus_token_in_last_step.discard(seq_id)
-                del self.request_id_seq_id_mapping[finished_request]
-
+        self._track_finished_requests(execute_model_req)
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
@@ -465,7 +455,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(
-            execute_model_req, self.seq_with_bonus_token_in_last_step)
+            execute_model_req, self._seq_with_bonus_token_in_last_step)
 
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
@@ -639,24 +629,45 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     ))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
-        if self.proposer_uses_kv_cache:
-            # The proposer worker uses KV cache. Hence populate the data
-            # structures needed to keep track of bonus tokens.
-            for seq_index, seq_id in enumerate(seq_ids):
-                last_token_id = accepted_token_ids_by_step[-1][seq_index]
-                if last_token_id == -1:
-                    self.seq_with_bonus_token_in_last_step.discard(seq_id)
-                else:
-                    self.seq_with_bonus_token_in_last_step.add(seq_id)
-            for request_id, seq_ids in request_ids_seq_ids_mapping.items():
-                self.request_id_seq_id_mapping[request_id].update(seq_ids)
 
+        # Populate the data structures needed to keep track of sequences with
+        # bonus tokens.
+        self._track_sequences_with_bonus_tokens(seq_ids,
+                                                request_ids_seq_ids_mapping,
+                                                accepted_token_ids_by_step)
         maybe_rejsample_metrics = (
             self._metrics.maybe_collect_rejsample_metrics(k))
         if maybe_rejsample_metrics is not None:
             sampler_output_list[
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics
         return sampler_output_list
+
+    def _track_finished_requests(self, execute_model_req: ExecuteModelRequest):
+        """
+        Removes the finished requests and their associated sequence ids from
+        internal book keeping data structures.
+        """
+        for finished_request in execute_model_req.finished_requests_ids:
+            for seq_id in self._request_id_seq_id_mapping[finished_request]:
+                self._seq_with_bonus_token_in_last_step.discard(seq_id)
+            del self._request_id_seq_id_mapping[finished_request]
+
+    def _track_sequences_with_bonus_tokens(
+            self, seq_ids: List[int],
+            request_ids_seq_ids_mapping: Dict[str, Set[int]],
+            accepted_token_ids_by_step: List[List[int]]):
+        """
+        Updates the internal data structures which keep track of sequences
+        which have been assigned bonus tokens in their last forward pass.
+        """
+        for seq_index, seq_id in enumerate(seq_ids):
+            last_token_id = accepted_token_ids_by_step[-1][seq_index]
+            if last_token_id == -1:
+                self._seq_with_bonus_token_in_last_step.discard(seq_id)
+            else:
+                self._seq_with_bonus_token_in_last_step.add(seq_id)
+        for request_id, sequences in request_ids_seq_ids_mapping.items():
+            self._request_id_seq_id_mapping[request_id].update(sequences)
 
     @cached_property
     def _vocab_size(self) -> int:
