@@ -1,4 +1,3 @@
-import argparse
 from typing import List
 
 import torch
@@ -16,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MarlinWorkspace, marlin_24_quantize, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
+from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = ["meta-llama/Llama-2-7b-hf/TP1"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
@@ -211,7 +211,7 @@ def main(args):
 #   python benchmark_marlin.py --batch-sizes 1 16 32 --limit-k 4096 --limit-n 4096 --limit-group-size 128 --limit-num-bits 4 --limit-act-order 0 --limit-k-full 1 # noqa E501
 #
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark Marlin across specified models/shapes/batches")
     parser.add_argument(
         "--models",

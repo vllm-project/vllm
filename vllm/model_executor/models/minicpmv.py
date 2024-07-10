@@ -22,10 +22,12 @@
 # limitations under the License.
 """Inference-only MiniCPM-V-2 model compatible with HuggingFace weights."""
 import math
+import re
 from functools import partial
 from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
+from PIL import Image
 
 try:
     import timm
@@ -33,24 +35,24 @@ except ImportError:
     raise ImportError('Please install timm==0.9.10') from ImportError
 import torch
 import torch.nn.functional as F
-from PIL import Image
-from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from torch import nn
 from torch.nn.init import trunc_normal_
-from torchvision import transforms
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, MultiModalConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsVision
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
-from vllm.sequence import SamplerOutput
+from vllm.multimodal.image import (cached_get_image_processor,
+                                   cached_get_tokenizer)
+from vllm.sequence import SamplerOutput, SequenceData
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -216,24 +218,85 @@ class Resampler(nn.Module):
         return query.unsqueeze(1).repeat(1, N, 1)
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
-class MiniCPMV(VisionLanguageModelBase):
+def get_max_minicpmv_image_tokens(ctx: InputContext):
+    hf_config = ctx.get_hf_config(PretrainedConfig)
+    return getattr(hf_config, "query_num", 64)
+
+
+def dummy_seq_data_for_minicpmv(seq_len: int):
+    token_ids = [0] * seq_len
+    return SequenceData(token_ids)
+
+
+def dummy_image_for_minicpmv(hf_config):
+    width = height = hf_config.image_size
+    image = Image.new("RGB", (width, height), color=0)
+    return {"image": image}
+
+
+def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
+    hf_config = ctx.get_hf_config(PretrainedConfig)
+
+    # image_feature_size = get_max_minicpmv_image_tokens(ctx)
+
+    seq_data = dummy_seq_data_for_minicpmv(seq_len)
+
+    mm_data = dummy_image_for_minicpmv(hf_config)
+
+    return seq_data, mm_data
+
+
+def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return llm_inputs
+
+    model_config = ctx.model_config
+
+    prompt = llm_inputs.get("prompt")
+    tokenizer = cached_get_tokenizer(model_config.tokenizer,
+                                     trust_remote_code=True)
+    image_processor = cached_get_image_processor(model_config.tokenizer)
+
+    # import pudb; pudb.set_trace()
+    pattern = "(<image>./</image>)"
+    image = multi_modal_data["image"]
+    image_tags = re.findall(pattern, prompt)
+    assert len(image_tags) <= 1
+    text_chunks = prompt.split(pattern)
+    new_prompt = text_chunks[0] \
+        + image_processor.get_slice_image_placeholder(image.size) \
+        + text_chunks[1]
+
+    new_token_ids = tokenizer.encode(new_prompt)
+
+    llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
+                           prompt=new_prompt,
+                           multi_modal_data=multi_modal_data)
+    return llm_inputs
+
+
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_minicpmv)
+class MiniCPMV(nn.Module, SupportsVision):
 
     def __init__(
         self,
         config,
-        vision_language_config: VisionLanguageConfig,
+        multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
     ):
-        super().__init__(vision_language_config)
+        super().__init__()
+
         self.config = config
+        self.multimodal_config = multimodal_config
+
         self.llm = MiniCPMForCausalLM(config,
                                       cache_config=cache_config,
-                                      quant_config=quant_config,
-                                      lora_config=lora_config)
+                                      quant_config=quant_config)
         self.vpm = self.init_vision_module()
         param_dtype = torch.get_default_dtype()
         self.vpm.to(dtype=param_dtype)
@@ -298,13 +361,11 @@ class MiniCPMV(VisionLanguageModelBase):
         valid_image_nums = min(len(image_start_tokens), len(image_end_tokens))
         if valid_image_nums == 0:
             return []
-        image_bound = torch.hstack(
-            [
-                image_start_tokens[:valid_image_nums].unsqueeze(-1),
-                image_end_tokens[:valid_image_nums].unsqueeze(-1),
-            ]
-        )
-        
+        image_bound = torch.hstack([
+            image_start_tokens[:valid_image_nums].unsqueeze(-1),
+            image_end_tokens[:valid_image_nums].unsqueeze(-1),
+        ])
+
         return image_bound
 
     def get_embedding(self, data, im_start_token_id, im_end_token_id):
@@ -315,7 +376,8 @@ class MiniCPMV(VisionLanguageModelBase):
             if pixel_values_list is not None:
                 for pixel_values in pixel_values_list:
                     if pixel_values is not None and len(pixel_values) > 0:
-                        vision_hidden_states.append(self.get_vision_embedding(pixel_values))
+                        vision_hidden_states.append(
+                            self.get_vision_embedding(pixel_values))
             else:
                 vision_hidden_states = torch.tensor([]).to(
                     data['input_ids'].device)
@@ -323,8 +385,7 @@ class MiniCPMV(VisionLanguageModelBase):
             vision_hidden_states = data['vision_hidden_states']
 
         if data['pixel_values'] is not None:
-            image_bound = self.get_image_bound(input_ids, 
-                                               im_start_token_id,
+            image_bound = self.get_image_bound(input_ids, im_start_token_id,
                                                im_end_token_id)
         else:
             image_bound = []
@@ -353,9 +414,10 @@ class MiniCPMV(VisionLanguageModelBase):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        pixel_values: List[torch.Tensor] = None,
         **kwargs: object,
     ):
-        image_input = kwargs.pop("pixel_values", None)
+        image_input = pixel_values
         vlm_embeddings, vision_hidden_states = self.get_embedding(
             {
                 "pixel_values": image_input,
