@@ -282,7 +282,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 # chunked prefill, which is disabled for speculative decoding.
                 # However, to maintain consistency in num_computed_tokens,
                 # we update it here.
-                
                 new_seq_data[seq_id].output_token_ids =\
                     old_seq_data.output_token_ids[:-1]
                 new_seq_data[seq_id].update_num_computed_tokens(-1)
