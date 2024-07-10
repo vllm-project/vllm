@@ -99,6 +99,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
         && export SCCACHE_BUCKET=vllm-build-sccache \
         && export SCCACHE_REGION=us-west-2 \
+        && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist \
         && sccache --show-stats; \
@@ -166,6 +167,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamba \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 

@@ -100,6 +100,7 @@ def repeat_and_pad_image_tokens(
 
 
 class ImagePlugin(MultiModalPlugin):
+    """Plugin for image data."""
 
     def get_data_key(self) -> str:
         return "image"
@@ -115,7 +116,7 @@ class ImagePlugin(MultiModalPlugin):
         if isinstance(data, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
-                raise RuntimeError("No HuggingFace processor is available"
+                raise RuntimeError("No HuggingFace processor is available "
                                    "to process the image object")
             try:
                 batch_data = image_processor \
@@ -130,3 +131,6 @@ class ImagePlugin(MultiModalPlugin):
             raise NotImplementedError("Embeddings input is not supported yet")
 
         raise TypeError(f"Invalid image type: {type(data)}")
+
+    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
+        return 3000

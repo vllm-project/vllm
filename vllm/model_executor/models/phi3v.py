@@ -15,7 +15,7 @@
 # limitations under the License.
 import re
 from functools import lru_cache
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -24,7 +24,7 @@ from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -49,6 +49,13 @@ logger = init_logger(__name__)
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
 }
+
+# Cannot find the following 2 numbers from hf config.
+_IMAGE_TOKEN_ID = 32044
+
+# Result in the max possible feature size (h:w = 16:1)
+MAX_IMAGE_FEATURE_SIZE_HEIGHT = 8000
+MAX_IMAGE_FEATURE_SIZE_WIDTH = 50
 
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      hidden_act="quick_gelu",
@@ -95,13 +102,10 @@ class Phi3ImageEmbeddingBase(nn.Module):
 class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
     """Phi3 Image embedding with HD transform."""
 
-    def __init__(self,
-                 vision_language_config: VisionLanguageConfig,
-                 config: PretrainedConfig,
-                 wte=None) -> None:
+    def __init__(self, config: PretrainedConfig, wte=None) -> None:
         super().__init__(wte)
 
-        self.image_token_id = vision_language_config.image_token_id
+        self.image_token_id = _IMAGE_TOKEN_ID
         # n_embed or hidden_size
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
@@ -259,7 +263,8 @@ class Phi3VImagePixelInputs(TypedDict):
     """
     Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for each batch.
+    Note that `num_patches` may be different for each batch, in which case
+    the data is passed as a list instead of a batched tensor.
     """
 
     image_sizes: torch.Tensor
@@ -321,25 +326,29 @@ def get_phi3v_image_feature_size(
         + (new_height // 336 + 1) * 12
 
 
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
-    # Result in the max possible feature size (h:w = 16:1)
-    dummy_height, dummy_width = 8000, 50
-    image_feature_size = get_phi3v_image_feature_size(
+def get_max_phi3v_image_tokens(ctx: InputContext):
+
+    return get_phi3v_image_feature_size(
         ctx.get_hf_config(PretrainedConfig),
-        input_height=dummy_height,
-        input_width=dummy_width,
+        input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
+
+
+def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+
+    image_feature_size = get_max_phi3v_image_tokens(ctx)
 
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
-        image_token_id=32044,
+        image_token_id=_IMAGE_TOKEN_ID,
         image_feature_size_override=image_feature_size,
     )
     mm_data = dummy_image_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        image_width_override=dummy_width,
-        image_height_override=dummy_height,
+        image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+        image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
 
     return seq_data, mm_data
@@ -370,7 +379,6 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    multimodal_config = ctx.get_multimodal_config()
     hf_config = ctx.get_hf_config(PretrainedConfig)
 
     image_data = multi_modal_data["image"]
@@ -407,7 +415,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     new_token_ids: List[int] = []
     for i in range(len(prompt_token_ids) - len(image_1_token_ids) + 1):
         if prompt_token_ids[i:i + len(image_1_token_ids)] == image_1_token_ids:
-            new_token_ids.append(multimodal_config.image_token_id)
+            new_token_ids.append(_IMAGE_TOKEN_ID)
 
             # No need to further scan the list since we only replace once
             new_token_ids.extend(prompt_token_ids[i + len(image_1_token_ids):])
@@ -424,36 +432,66 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         model_config,
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         llm_inputs,
-        image_token_id=multimodal_config.image_token_id,
+        image_token_id=_IMAGE_TOKEN_ID,
         image_feature_size_override=image_feature_size,
     )
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 vlm_config: VisionLanguageConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.vlm_config = vlm_config
+        self.multimodal_config = multimodal_config
 
         self.model = LlamaModel(config, cache_config, quant_config)
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(
-            vlm_config, config, self.model.embed_tokens)
+            config, self.model.embed_tokens)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+
+    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
+        if list(data.shape[1:]) != [2]:
+            raise ValueError(
+                f"The expected shape of image sizes is batch dimension plus "
+                f"{[2]}. You supplied {tuple(data.shape)}.")
+
+        return data
+
+    def _validate_pixel_values(
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
+        h = w = CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size
+        expected_dims = (3, h, w)
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape[1:])
+
+            if actual_dims != expected_dims:
+                expected_expr = ("num_patches", *map(str, expected_dims))
+                raise ValueError(
+                    "The expected shape of pixel values in each batch element "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
+
+        return data
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Phi3VImagePixelInputs]:
@@ -471,9 +509,10 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
             raise ValueError("Incorrect type of image sizes. "
                              f"Got type: {type(image_sizes)}")
 
-        return Phi3VImagePixelInputs(type="pixel_values",
-                                     data=pixel_values,
-                                     image_sizes=image_sizes)
+        return Phi3VImagePixelInputs(
+            type="pixel_values",
+            data=self._validate_pixel_values(pixel_values),
+            image_sizes=self._validate_image_sizes(image_sizes))
 
     def forward(self,
                 input_ids: torch.Tensor,

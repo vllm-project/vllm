@@ -109,23 +109,12 @@ class OpenAIServingChat(OpenAIServing):
                           "paligemma"):
             # These models do not use image tokens in the prompt
             return None
+        if model_type.startswith("llava"):
+            return self.tokenizer.decode(
+                self.model_config.hf_config.image_token_index)
 
-        # The default behaviour assumes that the image token is
-        # available to the tokenizer.
-        # (Suitable for LLaVA, Idefics2, DeepSeek-VL)
-        vlm_config = self.model_config.multimodal_config
-        if vlm_config is None:
-            raise ValueError(
-                "'image_url' input is not supported as the loaded "
-                "model is not multimodal.")
-
-        image_token_id = vlm_config.image_token_id
-        if vlm_config.image_token_id is None:
-            raise ValueError(
-                "'image_url' input is not supported as the loaded "
-                "model does not specify an image token.")
-
-        return self.tokenizer.decode(image_token_id)
+        else:
+            raise TypeError("Unknown model type: {model_type}")
 
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
@@ -269,7 +258,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt=prompt,
                 add_special_tokens=request.add_special_tokens)
             sampling_params = request.to_sampling_params()
-            lora_request = self._maybe_get_lora(request)
+            _, lora_request = self._maybe_get_adapter(request)
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
