@@ -116,7 +116,7 @@ async def detokenize(request: DetokenizeRequest):
 
 @app.get("/v1/models")
 async def show_available_models():
-    models = await openai_serving_chat.show_available_models()
+    models = await openai_serving_completion.show_available_models()
     return JSONResponse(content=models.model_dump())
 
 
@@ -236,7 +236,8 @@ if __name__ == "__main__":
                                             args.lora_modules,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, args.lora_modules)
+        engine, model_config, served_model_names, args.lora_modules,
+        args.prompt_adapters)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     app.root_path = args.root_path
