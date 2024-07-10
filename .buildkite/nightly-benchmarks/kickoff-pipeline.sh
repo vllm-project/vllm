@@ -19,16 +19,17 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
 
   touch final.yaml
 
-  if [[ $PR_LABELS == *"perf-benchmarks"* ]]; then
-    echo "This PR has the 'perf-benchmarks' label. Proceeding with the performance benchmarks."
-    yq -n 'load("final.yaml") *+ load(".buildkite/nightly-benchmarks/benchmark-pipeline.yaml")' > final.yaml
+  # put blocking step (the nightly benchmark) as the first step
+  if [[ $PR_LABELS == *"nightly-benchmarks"* ]]; then
+    echo "This PR has the 'nightly-benchmark' label. Proceeding with the nightly benchmarks."
+    yq -n 'load("final.yaml") *+ load(".buildkite/nightly-benchmarks/nightly-pipeline.yaml")' > final.yaml
   fi
 
   cat final.yaml
 
-  if [[ $PR_LABELS == *"nightly-benchmarks"* ]]; then
-    echo "This PR has the 'nightly-benchmark' label. Proceeding with the nightly benchmarks."
-    yq -n 'load("final.yaml") *+ load(".buildkite/nightly-benchmarks/nightly-pipeline.yaml")' > final.yaml
+  if [[ $PR_LABELS == *"perf-benchmarks"* ]]; then
+    echo "This PR has the 'perf-benchmarks' label. Proceeding with the performance benchmarks."
+    yq -n 'load("final.yaml") *+ load(".buildkite/nightly-benchmarks/benchmark-pipeline.yaml")' > final.yaml
   fi
 
   cat final.yaml
