@@ -40,14 +40,18 @@ def lazy_string(fn: Callable):
     return lazy(lambda: fn())
 
 
-def trunc(x) -> str:
-    lim = 30
+def trunc(x, lim=30) -> str:
+    """
+    Convert x into a string while making sure that it stays under 'lim'
+    characters.  If x is a tuple/list/dict, the elements will be
+    truncated to 'lim' characters.
+    """
     if isinstance(x, tuple):
-        return tuple(map(trunc, x))
+        return tuple(map(lambda v: trunc(v, lim), x))
     elif isinstance(x, list):
-        return [trunc(y) for y in x]
+        return [trunc(y, lim) for y in x]
     elif isinstance(x, dict):
-        return {trunc(k): trunc(v) for k,v in x.items()}
+        return {trunc(k, lim): trunc(v, lim) for k,v in x.items()}
     xs = str(x)
     return xs if len(xs) <= lim else xs[:lim]
 
@@ -79,17 +83,30 @@ def graph_print_tabular(g: torch.fx.Graph,
 
 def lazy_graph_print_tabular(g: torch.fx.Graph,
                              col: Optional[str] = None,
-                             col_get: Optional[Callable] = None) -> Callable:
+                             col_get: Optional[Callable] = None):
+    """
+    Lazily print a tabular graph. This defers calling graph_print_tabular
+    until the resulting object is converted to a string.  Useful for logging.
+    """
     return lazy_string(lambda: graph_print_tabular(g, col, col_get))
 
 
 def lazy_module_print_readable(gm: torch.fx.GraphModule,
-                               print_outputs: bool = True) -> Callable:
+                               print_outputs: bool = True):
+    """
+    Lazily print a readable graph module. This defers calling print_readable
+    until the resulting object is converted to a string.  Useful for logging.
+    """
     return lazy_string(lambda: gm.print_readable(print_outputs))
 
 
 def is_call(node: torch.fx.Node) -> bool:
-    return node.op == 'call_function' or node.op == 'call_method'
+    """
+    Is the given node a call of some kind?
+    """
+    return (node.op == 'call_function' or
+            node.op == 'call_method' or
+            node.op == 'call_module')
 
 
 def node_function_target(node: torch.fx.Node) -> str:
@@ -100,8 +117,10 @@ def node_function_target(node: torch.fx.Node) -> str:
     return get_node_target(None, node)
 
 
-# Find class for method called by node.
-def call_method_class(node: torch.fx.Node):  # -> Type:
+def call_method_class(node: torch.fx.Node):
+    """
+    Find class for method called by node.
+    """
     assert node.op == 'call_method'
     ex_val = node.args[0].meta.get('example_value')
     assert ex_val is not None
@@ -202,6 +221,9 @@ class ModuleInputGenerator(torch.fx.passes.fake_tensor_prop.FakeTensorProp):
 
 
 def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
+    """
+    Find a function schema (if any) matching the callsite in 'n'.
+    """
     assert is_call(n)
 
     sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(
@@ -232,6 +254,10 @@ def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
 
 
 def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
+    """
+    Return a list of all the mutable argument indices for the callsite
+    in 'n'.
+    """
     mutable_arg_indices = []
 
     if not is_call(n):
@@ -253,11 +279,14 @@ def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
     return mutable_arg_indices
 
 
-# See node.normalized_arguments
 def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
+    """
+    Return the nth argument (or kwarg) of the given callsite.
+    """
+    # TODO: see node.normalized_arguments
     if isinstance(arg, int):
         if arg >= len(n.args):
-            return list(n.kwargs.values())[arg - len(n.args)]  #????
+            return list(n.kwargs.values())[arg - len(n.args)]
         else:
             return n.args[arg]
     else:
@@ -269,6 +298,10 @@ def dump_inputs_users(
     all_input_nodes: Dict[torch.fx.Node, List[torch.fx.Node]],
     all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]]
 ) -> str:
+    """
+    Pretty print inputs/users info for a set of nodes and tag where
+    they differ from node.all_input_nodes and node.users.
+    """
     if not have_tabulate:
         return "dump_inputs_users: tabulate not installed"
 
@@ -285,22 +318,27 @@ def dump_inputs_users(
     return tabulate(entries, headers=headers)
 
 
-# Run a pass over the graph (graph must be topo sorted)
-# 1. keep map of renames
-# 2. if call node has a mutable input
-#    - the call node must record itself as user of the mutable input (modulo renames)
-#    - the output of that call node will be the "rename" of the mutable input until the next use of the original name
-#      (there could be multiple mutable nodes with the same rename)
-#    - only one rename for a node should be active at one point.
-# 3. Use rename maps to track proper input nodes
-#
-# 4. make this return inputs + users for all nodes
-#
-# Note: this will include Node kwargs
 def gather_all_input_nodes(
     nodes: List[torch.fx.Node],
     do_renames: bool = True
 ) -> Tuple[Dict[torch.fx.Node, List[torch.fx.Node]], Dict[torch.fx.Node, Dict[torch.fx.Node, None]]]:
+    """
+    Collect all def/use information for each node in 'nodes'.  This is different
+    than node.all_input_nodes and node.users since it handles in-place functions.
+    It is assumed that any mutable input in an in-place function is also an output.
+
+    Run a pass over the graph (graph must be topo sorted)
+    1. keep map of renames
+    2. if call node has a mutable input
+       - the call node must record itself as user of the mutable input (modulo renames)
+       - the output of that call node will be the "rename" of the mutable input until the next use of the original name
+         (there could be multiple mutable nodes with the same rename)
+       - only one rename for a node should be active at one point.
+    3. Use rename maps to track proper input nodes
+    4. make this return inputs + users for all nodes
+
+    Note: this will include Node kwargs
+    """
     all_input_nodes : Dict[torch.fx.Node, List[torch.fx.Node]] = dict()
     all_node_users : Dict[torch.fx.Node, Dict[torch.fx.Node, None]] = dict()
     renames : Dict[torch.fx.Node, torch.fx.Node] = dict()
@@ -396,8 +434,6 @@ class FlowGraph:
         visited = set()
         q = self.outputs
 
-        #print(f"Graph:\n{graph_print_tabular(self.module.graph,'users',lambda n: list(n.users.keys()))}")
-
         self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
         self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
 
@@ -412,15 +448,9 @@ class FlowGraph:
                 q.append(input)
 
     def inputs(self) -> List[torch.fx.Node]:
-        """
-        The underlying GraphModule inputs.
-        """
         return self.inputs
 
     def outputs(self) -> List[torch.fx.Node]:
-        """
-        The underlying GraphModule outputs.
-        """
         return self.outputs
 
     def successors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
@@ -450,7 +480,9 @@ class FlowGraph:
 
 
 class SubGraph:
-
+    """
+    A class representing a set of nodes somewhat like a virtual GraphModule.
+    """
     def __init__(self,
                  fg: FlowGraph,
                  nodes: Optional[List[torch.fx.Node]] = None):
@@ -466,7 +498,7 @@ class SubGraph:
     def in_subgraph(self, n: torch.fx.Node) -> bool:
         return n in self.nodes
 
-    def collect_inputs_outputs(
+    def _collect_inputs_outputs(
             self) -> Tuple[List[torch.fx.Node], List[torch.fx.Node]]:
         inputs = []
         outputs = []
@@ -518,9 +550,12 @@ class SubGraph:
         self.nodes = order
 
     def build(self, nodes: Optional[List[torch.fx.Node]]):
+        """
+        Construct the SubGraph
+        """
         self.nodes = nodes
         self.topo_sort()
-        self.inputs, self.outputs = self.collect_inputs_outputs()
+        self.inputs, self.outputs = self._collect_inputs_outputs()
 
     def first_in_subgraph(self):
         first = None
@@ -550,25 +585,26 @@ class SubGraph:
 
         return candidates.pop()
 
-    def erase(self):
-        for n in reversed(self.nodes):
-            self.module.graph.erase_node(n)
-
-        # TODO: make a function to get/recompute these on demand
-        # TODO: be smarter with updating just for deleted/new nodes
+    def _refresh_def_use(self):
         self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
         self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
 
-        #try:
-        #    for n in reversed(self.nodes):
-        #        self.module.graph.erase_node(n)
-        #except RuntimeError as ex:
-        #    print(f"\n{ex}: failed to delete: {list(reversed(self.nodes))}")
-        #    print(f"{self.tabular('users', lambda n: list(n.users.keys()))}")
+    def erase(self):
+        """
+        Erase all the nodes in the SubGraph.
+        """
+        for n in reversed(self.nodes):
+            self.module.graph.erase_node(n)
+
+        # TODO: be smarter with updating just for deleted/new nodes
+        self._refresh_def_use()
 
     def tabular(self,
                 col: Optional[str] = None,
                 col_get: Optional[Callable] = None) -> str:
+        """
+        Print a SubGraph in tabular form.
+        """
         if not have_tabulate:
             return "SubGraph::tabular: tabulate not installed"
 

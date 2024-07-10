@@ -4,7 +4,6 @@ import traceback
 
 from .code_cache import CodeCache
 from .fusion import pointwise_fusion
-from .rewrite_quantized_gemms import rewrite_quantized_gemms
 from .utils import lazy_graph_print_tabular, lazy_module_print_readable
 
 from torch._dynamo import lookup_backend
@@ -29,15 +28,11 @@ def optimize(
     example_inputs: List[torch.Tensor],
 ) -> torch.fx.GraphModule:
     """
-    Run optimizer on the given module.
+    Run optimizer on the given module.  Future optimization passes will
+    be called from here.
     """
-    mod = rewrite_quantized_gemms(mod, example_inputs)
     mod = pointwise_fusion(cc, mod, example_inputs)
     return mod
-
-
-def maybe_name(gm: torch.fx.GraphModule) -> Optional[str]:
-    return gm.name if hasattr(gm, 'name') else None
 
 
 def backend_compile(gm: torch.fx.GraphModule,
@@ -48,6 +43,9 @@ def backend_compile(gm: torch.fx.GraphModule,
     """
     if not backend:
         return gm.forward
+
+    def maybe_name(gm: torch.fx.GraphModule) -> Optional[str]:
+        return gm.name if hasattr(gm, 'name') else None
 
     try:
         backend = lookup_backend(backend)
@@ -73,7 +71,8 @@ class backend_class:
     via an optional "final" backend.
     """
 
-    # TODO: this probably needs additional context to avoid collisions, e.g.
+    # This is a global code cache that applies to all models.
+    # TODO: this might need additional context to avoid collisions, e.g.
     # module/model name.
     cc = CodeCache(disable=False)
 
@@ -84,7 +83,6 @@ class backend_class:
                  example_inputs: List[torch.Tensor]) -> Callable:
         gm = copy.copy(gm)
 
-        # See: https://docs.python.org/3/howto/logging.html#using-arbitrary-objects-as-messages
         logger.debug(f"Original module {gm}:")
         logger.debug(lazy_graph_print_tabular(gm.graph, 'users', lambda n: list(n.users.keys())))
         logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")

@@ -8,7 +8,8 @@ import operator
 import torch
 
 from .code_cache import CodeCache
-from .fused_op_generator import FusedOpGenerator, FusionFail
+from .fused_op_generator import FusionFail
+from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
 from .utils import FlowGraph, node_function_target, graph_print_tabular, SubGraph, is_call, call_method_class, lazy_graph_print_tabular
 
@@ -18,6 +19,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     """
     Fuse all the nodes in the given sub-graph into a single function call.
@@ -25,34 +27,21 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     outputs = sub.outputs
     inputs = sub.inputs
 
-    if False and len(outputs) != 1:
-        #raise FusionFail("only single output supported currently.")
-        logger.warning("only single output supported currently.")
-        return
-
     sub.topo_sort()
 
-    # Collect all kwargs for fused ops and all the nodes that
-    # will need to be fused (and erased) later.
+    # Collect all the nodes that will need to be fused (and erased) later.
     nodes_to_fuse = []
     kwargs = dict()
+
     for n in sub.nodes:
         if not is_call(n):
             continue
 
-        if False and n.kwargs is not None and len(n.kwargs) > 0:
-            kwargs[n.name] = n.kwargs
-
         nodes_to_fuse.append(n)
-
-    if kwargs is not None and len(kwargs) > 0:
-        #raise FusionFail(f"kwargs for fused ops not supported. {kwargs}")
-        logger.info(f"kwargs for fused ops not supported. {kwargs}")
-        return
 
     # Lookup or create the fused operation.
     try:
-        fgen = FusedOpGenerator()
+        fgen = NaiveFusedOpGenerator()
 
         fn_key = fgen.make_fused_op(inputs, outputs, nodes_to_fuse, kwargs)
 
@@ -81,7 +70,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     #
 
     insert_point = sub.last_input()
-    sub.module.graph.inserting_after(insert_point)   # TODO: use with 'with'?
+    sub.module.graph.inserting_after(insert_point)
 
     # Note: we do not update the meta info for cf here.  It should
     # not be required after transformation anyway.
@@ -104,7 +93,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     # Erase all the nodes in the subgraph
     sub.erase()
 
-    # Extra build not necessary but nice for debugging
+    # Extra build() not necessary but nice for debugging.
     sub.build(new_sub)
 
 
@@ -118,11 +107,11 @@ def is_fusable(node: torch.fx.Node) -> bool:
 
     op_name = node_function_target(node)
     if node.op == 'call_function':
-        return op_name in FUSABLE and not FUSABLE[op_name]
+        return op_name in FUSABLE and not FUSABLE[op_name].is_compute
     else:
         # TODO: check class type
         class_type = call_method_class(node)
-        return op_name in FUSABLE and not FUSABLE[op_name]
+        return op_name in FUSABLE and not FUSABLE[op_name].is_compute
 
 
 def is_compute(node: torch.fx.Node) -> bool:
@@ -134,19 +123,11 @@ def is_compute(node: torch.fx.Node) -> bool:
 
     op_name = node_function_target(node)
     if node.op == 'call_function':
-        return op_name in FUSABLE and FUSABLE[op_name]
+        return op_name in FUSABLE and FUSABLE[op_name].is_compute
     else:
         # TODO: check class type
         class_type = call_method_class(node)
-        return op_name in FUSABLE and FUSABLE[op_name]
-
-
-def is_getitem(a: torch.fx.Node) -> bool:
-    return is_call(a) and node_function_target(a) == '_operator.getitem'
-
-
-def is_get_attr(a: torch.fx.Node) -> bool:
-    return a.op == 'get_attr'
+        return op_name in FUSABLE and FUSABLE[op_name].is_compute
 
 
 def is_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
@@ -194,12 +175,15 @@ def dump_partitions(node_map: Dict[torch.fx.Node, int]) -> str:
     return part_str
 
 
-# TODO: put trivialness flag in registration
 def non_trivial_op(n: torch.fx.Node) -> bool:
     if not is_call(n):
         return False
     trg = node_function_target(n)
-    return trg not in ['_operator.getitem', 'torch.empty', 'torch.empty_like', 'torch.narrow']
+    return not FUSABLE[trg].is_trivial if trg in FUSABLE else False
+
+
+def is_get_attr(a: torch.fx.Node) -> bool:
+    return a.op == 'get_attr'
 
 
 def pointwise_fusion(cc: CodeCache,
