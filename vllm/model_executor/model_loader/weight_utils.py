@@ -373,7 +373,7 @@ def safetensors_weights_iterator(
     def layz_open_st(filename):
         # lazily open safetensor files
         if filename not in st_handles:
-            st_handles[filename] = safe_open(st_file,
+            st_handles[filename] = safe_open(filename,
                                              framework="pt").__enter__()
         return st_handles[filename]
 
