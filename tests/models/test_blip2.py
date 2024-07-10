@@ -31,6 +31,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     hf_output_ids = tokenizer.encode(hf_output_str)
+    assert hf_output_ids[0] == tokenizer.bos_token_id
+    hf_output_ids = hf_output_ids[1:]
 
     return hf_output_ids, hf_output_str, out_logprobs
 
