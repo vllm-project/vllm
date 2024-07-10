@@ -116,3 +116,5 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
+              
+  - wait
