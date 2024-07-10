@@ -212,18 +212,28 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         if kv_cache_scheme is None:
             return
 
+        type_ = kv_cache_scheme.get("type")
+        num_bits = kv_cache_scheme.get("num_bits")
+
+        if type_ != "float" and num_bits != 8:
+            raise NotImplementedError(
+                "Currently supported kv cache quantization is "
+                "num_bits=8, type=float, however "
+                f"received num_bits={num_bits}, type={type_}")
+
         strategy = kv_cache_scheme.get("strategy")
         if strategy != "tensor":
-            raise ValueError(
+            raise NotImplementedError(
                 "Only support per-tensor scaling factor "
                 "for compressed-tensors KV cache. "
                 f"Expected strategy: tensor, found strategy: {strategy}")
 
         is_symmetric = kv_cache_scheme.get("symmetric")
         if not is_symmetric:
-            raise ValueError("Only support symmetric scaling factor "
-                             "for compressed-tensors KV cache. "
-                             f"However found symmetric: {is_symmetric}")
+            raise NotImplementedError(
+                "Only support symmetric scaling factor "
+                "for compressed-tensors KV cache. "
+                f"However found symmetric: {is_symmetric}")
 
         return
 
