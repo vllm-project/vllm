@@ -363,7 +363,11 @@ def _parse_metadata_from_safetensors(
 def safetensors_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+    NOTE: we read the file as lazily as possible. If this process
+    does not need any weight inside a safetensor file, that file
+    is not opened by safetensors library at all.
+    """
     st_handles: Dict[str, Any] = {}
 
     def layz_open_st(filename):
