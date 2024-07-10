@@ -1,4 +1,5 @@
 from vllm import LLM, SamplingParams
+import os
 
 prompts = [
     "Hello, my name is",
@@ -7,6 +8,7 @@ prompts = [
     "The future of AI is",
 ]
 N = 1
+print(os.getenv("HF_TOKEN"))
 # Currently, top-p sampling is disabled. `top_p` should be 1.0.
 sampling_params = SamplingParams(temperature=0.7,
                                  top_p=1.0,
