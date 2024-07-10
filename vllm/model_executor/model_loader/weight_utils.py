@@ -365,8 +365,8 @@ def safetensors_weights_iterator(
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
     NOTE: we read the file as lazily as possible. If this process
-    does not need any weight inside a safetensor file, that file
-    is not opened by safetensors library at all.
+    does not need any weight inside a safetensor file (e.g. pipeline
+    parallel), that file is not opened by safetensors library at all.
     """
     st_handles: Dict[str, Any] = {}
 
