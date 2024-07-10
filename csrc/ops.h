@@ -57,7 +57,7 @@ torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
                         const torch::Tensor& scales,
                         const torch::Tensor& codebook_partition_sizes,
-                        const std::optional<torch::Tensor>& bias);
+                        const torch::optional<torch::Tensor>& bias);
 
 torch::Tensor aqlm_dequant(const torch::Tensor& codes,
                            const torch::Tensor& codebooks,

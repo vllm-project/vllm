@@ -428,7 +428,7 @@ torch::Tensor code1x16_matmat(const torch::Tensor& input,
                               const torch::Tensor& codebooks,
                               const torch::Tensor& scales,
                               const int4 codebook_a_sizes,
-                              const std::optional<torch::Tensor>& bias) {
+                              const torch::optional<torch::Tensor>& bias) {
   auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
   auto flat_input = input.reshape({-1, input.size(-1)});
@@ -471,7 +471,7 @@ torch::Tensor code2x8_matmat(const torch::Tensor& input,
                              const torch::Tensor& codebooks,
                              const torch::Tensor& scales,
                              const int4 codebook_a_sizes,
-                             const std::optional<torch::Tensor>& bias) {
+                             const torch::optional<torch::Tensor>& bias) {
   auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
   auto flat_input = input.reshape({-1, input.size(-1)});
@@ -522,7 +522,7 @@ torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
                         const torch::Tensor& scales,
                         const torch::Tensor& codebook_partition_sizes,
-                        const std::optional<torch::Tensor>& bias) {
+                        const torch::optional<torch::Tensor>& bias) {
   int4 cumulative_sizes =
       vllm::aqlm::accumulate_sizes(codebook_partition_sizes);
 
