@@ -2,4 +2,3 @@ Meta-Llama-3-8B-Instruct.yaml
 Meta-Llama-3-8B-Instruct-FP8.yaml
 Meta-Llama-3-8B-Instruct-FP8-compressed-tensors.yaml
 Meta-Llama-3-8B-Instruct-INT8-compressed-tensors.yaml
-Meta-Llama-3-8B-Instruct-W4A16-compressed-tensors.yaml
