@@ -119,8 +119,7 @@ def make_arg_parser():
 
     parser.add_argument("--enable-auto-tool-choice",
                         action="store_true",
-                        help='Enable auto tool choice for models that support it. '
-                             'Requires specifying --tool-use-prompt-template.'
+                        help='Enable auto tool choice for models that support it. Requires --tool-call-parser'
                         )
 
     parser.add_argument("--tool-call-parser",
