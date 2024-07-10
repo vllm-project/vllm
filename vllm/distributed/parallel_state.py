@@ -821,6 +821,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    sequence_model_parallel_size: int = 0,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -831,15 +832,20 @@ def initialize_model_parallel(
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
+        sequence_model_parallel_size: number of GPUs used for extra sequence 
+            model parallelism.
 
-    Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
-    use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
-    the model pipeline. The present function will
-    create 4 tensor model-parallel groups and 2 pipeline model-parallel groups:
+    Let's say we have a total of 11 GPUs denoted by g0 ... g10 and we
+    use 2 GPUs to parallelize the model tensor, 4 GPUs to parallelize
+    the model pipeline, and 3 GPUs to parallelizes the sequence parallel. 
+    The present function will create 4 tensor model-parallel groups and 
+    2 pipeline model-parallel groups,
         4 tensor model-parallel groups:
             [g0, g1], [g2, g3], [g4, g5], [g6, g7]
         2 pipeline model-parallel groups:
             [g0, g2, g4, g6], [g1, g3, g5, g7]
+    and three GPUs for SP workers:
+        [g8, g9, g10]    
     Note that for efficiency, the caller should make sure adjacent ranks
     are on the same DGX box. For example if we are using 2 DGX-1 boxes
     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
@@ -847,7 +853,7 @@ def initialize_model_parallel(
     """
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
-    world_size: int = torch.distributed.get_world_size()
+    world_size: int = torch.distributed.get_world_size() - sequence_model_parallel_size
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
@@ -889,6 +895,7 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    sequence_model_parallel_size: int = 0,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -899,7 +906,9 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size, 
+                                  sequence_model_parallel_size,
+                                  backend)
         return
 
     assert (
