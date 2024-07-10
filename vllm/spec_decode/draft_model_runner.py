@@ -17,7 +17,8 @@ from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
-log_advance_input = False
+log_advance_input = True
+
 
 class TP1DraftModelRunner(ModelRunner):
     """Specialized model runner for speculative decoding draft model.
@@ -144,8 +145,13 @@ class TP1DraftModelRunner(ModelRunner):
                     print("appended seq_id = {} token_id = {}".format(
                         seq_output.parent_seq_id, token_id))
 
-    def _update_flash_attn_metadata(self, attn_metadata, num_seqs):
+    def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
+                                    num_queries):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
+
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert attn_metadata.use_cuda_graph
 
         assert attn_metadata.num_prefills == 0
         assert attn_metadata.num_prefill_tokens == 0
@@ -156,31 +162,31 @@ class TP1DraftModelRunner(ModelRunner):
         assert attn_metadata.seq_lens_tensor.shape == (num_seqs, )
         assert attn_metadata.max_query_len == 1
         assert attn_metadata.max_prefill_seq_len == 0
-        assert attn_metadata.max_decode_seq_len == max(
-            attn_metadata.seq_lens), "{} {}".format(
-                attn_metadata.max_decode_seq_len, max(attn_metadata.seq_lens))
+        assert attn_metadata.max_decode_seq_len == max(attn_metadata.seq_lens)
 
-        assert attn_metadata.query_start_loc.shape == (num_seqs + 1, )
+        assert attn_metadata.query_start_loc.shape == (num_queries + 1, )
         assert attn_metadata.seq_start_loc.shape == (num_seqs + 1, )
 
-        assert attn_metadata.context_lens_tensor.shape == (num_seqs, )
+        assert attn_metadata.context_lens_tensor.shape == (num_queries, )
 
         assert attn_metadata.block_tables.shape[0] == num_seqs
-        assert attn_metadata.use_cuda_graph == False
 
-        # Update seq_lens
-        for i in range(num_seqs):
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
             attn_metadata.seq_lens[i] += 1
         attn_metadata.max_decode_seq_len = max(attn_metadata.seq_lens)
 
-    def _update_sampling_metadata(self, sampling_metadata, num_seqs):
+    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
+                                  num_queries):
 
         assert sampling_metadata.num_prompts == 0
-        assert len(sampling_metadata.seq_groups) == num_seqs
-        assert sampling_metadata.selected_token_indices.shape == (num_seqs, )
+        assert len(sampling_metadata.seq_groups) == num_queries
+        assert sampling_metadata.selected_token_indices.shape == (
+            num_queries, )
         # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed
 
-        for i in range(num_seqs):
+        for i in range(num_queries):
             seq_group = sampling_metadata.seq_groups[i]
 
             assert seq_group.is_prompt == False  # No prompt
@@ -196,26 +202,30 @@ class TP1DraftModelRunner(ModelRunner):
         if log_advance_input:
             print("Inside _advance_step")
 
+        # Get num_seqs
+        num_seqs = len(model_input.seq_lens)
+        num_queries = len(model_input.query_lens)
+
         # Append output tokens
-        # TODO: This is not needed, since seq_group is not used below to 
+        # TODO: This is not needed, since seq_group is not used below to
         # update data structures
         # self._update_seq_group_metadata(self.cached_seq_group_metadata_list,
         #                                 last_output)
 
-        # Get num_seqs
-        num_seqs = len(model_input.seq_lens)
-
         # Get output tokens GPU tensor
-        sampled_token_ids = last_output.sampled_token_ids.squeeze(dim=0)
+        sampled_token_ids = last_output.sampled_token_ids
+        assert sampled_token_ids is not None
 
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        self._update_flash_attn_metadata(attn_metadata, num_seqs)
+        self._update_flash_attn_metadata(attn_metadata, num_seqs, num_queries)
 
         # Update GPU tensors
         ops.advance_step(num_seqs=num_seqs,
+                         num_queries=num_queries,
                          block_size=self.block_size,
+                         input_tokens=model_input.input_tokens,
                          sampled_token_ids=sampled_token_ids,
                          input_positions=model_input.input_positions,
                          seq_lens=attn_metadata.seq_lens_tensor,
@@ -224,11 +234,12 @@ class TP1DraftModelRunner(ModelRunner):
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
-        self._update_sampling_metadata(sampling_metadata, num_seqs)
+        self._update_sampling_metadata(sampling_metadata, num_seqs,
+                                       num_queries)
 
         # Create new input
         new_model_input = self._model_input_cls(
-            input_tokens=sampled_token_ids,
+            input_tokens=model_input.input_tokens,
             input_positions=model_input.input_positions,
             attn_metadata=attn_metadata,
             seq_lens=attn_metadata.seq_lens,
@@ -243,20 +254,19 @@ class TP1DraftModelRunner(ModelRunner):
         if log_advance_input:
             print("NEW INPUT: ")
             print("  input_tokens = {}".format(new_model_input.input_tokens))
-            print("  input_positions = {}".format(new_model_input.input_positions))
+            print("  input_positions = {}".format(
+                new_model_input.input_positions))
             print("  seq_lens = {}".format(new_model_input.seq_lens))
             print("  query_lens = {}".format(new_model_input.query_lens))
             print("  attn_metadata:")
-            print("    seq_lens_tensor: {}".format(attn_metadata.seq_lens_tensor))
+            print("    seq_lens_tensor: {}".format(
+                attn_metadata.seq_lens_tensor))
             print("    slot_mapping: {}".format(attn_metadata.slot_mapping))
             print("    block_tables: {}".format(attn_metadata.block_tables))
 
         return new_model_input
 
     def _can_use_advance_step(self):
-        if not self.model_config.enforce_eager:
-            return False
-
         if self.lora_config:
             return False
 

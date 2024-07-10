@@ -129,8 +129,8 @@ class SamplingMetadata:
             for t, seq_ids in categorized_sample_indices.items()
         }
 
-        # print("  selected_token_indices = {}".format(selected_token_indices))
-        # print("  categorized_sample_indices = {}".format(categorized_sample_indices))
+        print("  selected_token_indices = {}".format(selected_token_indices))
+        print("  categorized_sample_indices = {}".format(categorized_sample_indices))
         sampling_metadata = SamplingMetadata(
             seq_groups=seq_groups,
             selected_token_indices=selected_token_indices,
