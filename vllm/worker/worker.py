@@ -254,6 +254,13 @@ class Worker(LocalOrDistributedWorkerBase):
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
+        
+        # `blocks_to_migrate` is a gpu tensor. The src blocks are in the local 
+        # GPU, while the tgt blcoks are in other devices, so `blocks_to_migrate`
+        # must be based on nccl.
+        blocks_to_migrate = torch.tensor(execute_model_req.blocks_to_migrate,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1, 2)
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,

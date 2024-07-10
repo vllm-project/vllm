@@ -617,7 +617,7 @@ class ParallelConfig:
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.tensor_parallel_size = sequence_parallel_size
+        self.sequece_parallel_size = sequence_parallel_size
         self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
@@ -627,7 +627,7 @@ class ParallelConfig:
 
         # When SP is enable, i.e., SP > 0, the world should contains 
         # pipeline_parallel_size * self.tensor_parallel_size GPUs as master and SP GPUs.
-        self.world_size = pipeline_parallel_size * self.tensor_parallel_size + sequence_parallel_size
+        self.world_size = pipeline_parallel_size * tensor_parallel_size + sequence_parallel_size
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"

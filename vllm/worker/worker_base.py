@@ -124,6 +124,7 @@ class WorkerInput:
     blocks_to_swap_in: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
+    blocks_to_migrate: Optional[torch.Tensor] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -213,6 +214,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         if self.is_driver_worker:
+            # TODO: driver should broadcast worker input for all tp x pp workers,
+            # but current vllm does not support pp and it send worker and model 
+            # input together to the worker in its tensor group. It is not correct. 
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
                     # This signals that there's no more requests to process for
@@ -236,6 +240,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     model_input.as_broadcastable_tensor_dict())
                 broadcast_data["num_steps"] = num_steps
                 broadcast_tensor_dict(broadcast_data, src=0)
+            
+            # migrate KV blocks to other GPU, this     
+            # if  self.do_kv_migration:
+            #     kv_data = worker_input.as_kv_dict()
+            #     send_kv_dict(kv_data, src=0)
         else:
             assert self.do_metadata_broadcast
             broadcast_data = broadcast_tensor_dict(src=0)

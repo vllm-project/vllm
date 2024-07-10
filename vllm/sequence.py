@@ -871,6 +871,8 @@ class ExecuteModelRequest:
     blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
+    # Blocks to migrate. list of GPU -> [GPU, rank].
+    blocks_to_migrate: List[Tuple[int, int, int]] = field(default_factory=list)
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
@@ -889,6 +891,7 @@ class ExecuteModelRequest:
             blocks_to_swap_in=self.blocks_to_swap_in.copy(),
             blocks_to_swap_out=self.blocks_to_swap_out.copy(),
             blocks_to_copy=self.blocks_to_copy.copy(),
+            blocks_to_migrate=self.blocks_to_migrate.copy(),
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
