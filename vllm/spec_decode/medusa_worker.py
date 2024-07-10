@@ -1,5 +1,5 @@
 import weakref
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -40,6 +40,8 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        # Unused parameter.
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass to generate sample_len future tokens.
         Returns the list of sampler output, one per layer, along with indicator
@@ -97,12 +99,14 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
 
-        return self._proposer.get_spec_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(
+            execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
     def _raise_if_unsupported(
         self,
