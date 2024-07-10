@@ -12,9 +12,9 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
+from vllm.logits_process import LogitsProcessor
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_outlines_guided_decoding_logits_processor)
-from vllm.logits_process import LogitsProcessor
 
 
 async def get_lm_format_enforcer_guided_decoding_logits_processor(
