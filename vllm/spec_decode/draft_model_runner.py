@@ -197,8 +197,10 @@ class TP1DraftModelRunner(ModelRunner):
             print("Inside _advance_step")
 
         # Append output tokens
-        self._update_seq_group_metadata(self.cached_seq_group_metadata_list,
-                                        last_output)
+        # TODO: This is not needed, since seq_group is not used below to 
+        # update data structures
+        # self._update_seq_group_metadata(self.cached_seq_group_metadata_list,
+        #                                 last_output)
 
         # Get num_seqs
         num_seqs = len(model_input.seq_lens)
