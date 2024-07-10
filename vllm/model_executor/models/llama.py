@@ -31,7 +31,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.ex.ex import backend, make_backend
+from vllm.ex.ex import optimizer
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -84,8 +84,6 @@ class LlamaMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    #@torch.compile(backend=make_backend(backend='inductor'))
-    #@torch.compile(backend=make_backend(backend=None))
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
@@ -171,7 +169,6 @@ class LlamaAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-    # FEED FORWARD
     def forward(
         self,
         positions: torch.Tensor,
@@ -237,7 +234,6 @@ class LlamaDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
-    #@torch.compile(backend=make_backend(backend=None), fullgraph=True)
     def forward(
         self,
         positions: torch.Tensor,
@@ -309,11 +305,7 @@ class LlamaModel(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    #@torch.compile(backend='cudagraphs')
-    #@torch.compile(backend=make_backend(backend='inductor'))
-    #@torch.compile(backend='inductor')
-    #@torch.compile
-    @torch.compile(backend=make_backend(backend=None), fullgraph=True)
+    @optimizer(fullgraph=True)
     def forward(
         self,
         input_ids: Optional[torch.Tensor],

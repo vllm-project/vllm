@@ -10,7 +10,8 @@ import tempfile
 import torch
 import types
 
-from .utils import extract_node_type, compose, build_extension, mangle_name, argument_type_str, node_function_target, is_optional_arg
+from .utils import mangle_name, node_function_target, extract_node_type, argument_type_str
+from .fused_op_generator_utils import compose, build_extension, is_optional_arg
 
 from pathlib import Path
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set

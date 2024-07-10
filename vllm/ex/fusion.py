@@ -10,7 +10,7 @@ import torch
 from .code_cache import CodeCache
 from .fused_op_generator import FusedOpGenerator, FusionFail
 from .register import FUSABLE
-from .utils import extract_node_type, ModuleInputGenerator, FlowGraph, node_function_target, graph_print_tabular, SubGraph, is_call, call_method_class
+from .utils import FlowGraph, node_function_target, graph_print_tabular, SubGraph, is_call, call_method_class, lazy_graph_print_tabular
 
 from torch.fx.passes.shape_prop import ShapeProp
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
@@ -18,14 +18,10 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-"""
-Fuse all the nodes in the given sub-graph into a single function call.
-"""
-def fuse_graph_nodes(
-    cc: CodeCache,
-    global_fgen: FusedOpGenerator,
-    sub: SubGraph,
-):
+def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
+    """
+    Fuse all the nodes in the given sub-graph into a single function call.
+    """
     outputs = sub.outputs
     inputs = sub.inputs
 
@@ -56,10 +52,6 @@ def fuse_graph_nodes(
 
     # Lookup or create the fused operation.
     try:
-        # Note: we are ignoring the global FusedOpGenerator since it appears
-        # it can get called from multiple threads simultaneously.  Since we
-        # aren't planning on building multiple ops at the same time, using a
-        # local generator is fine.
         fgen = FusedOpGenerator()
 
         fn_key = fgen.make_fused_op(inputs, outputs, nodes_to_fuse, kwargs)
@@ -116,11 +108,11 @@ def fuse_graph_nodes(
     sub.build(new_sub)
 
 
-"""
-Determine whether or not node is a fusable operations.
-TODO: Smarter filter for 'getitem'.
-"""
 def is_fusable(node: torch.fx.Node) -> bool:
+    """
+    Determine whether or not node is a fusable operations.
+    TODO: Smarter filter for 'getitem'.
+    """
     if not is_call(node):
         return False
 
@@ -133,10 +125,10 @@ def is_fusable(node: torch.fx.Node) -> bool:
         return op_name in FUSABLE and not FUSABLE[op_name]
 
 
-"""
-Determine whether or not node is a fusable compute operation, e.g. gemm.
-"""
 def is_compute(node: torch.fx.Node) -> bool:
+    """
+    Determine whether or not node is a fusable compute operation, e.g. gemm.
+    """
     if not is_call(node):
         return False
 
@@ -157,27 +149,27 @@ def is_get_attr(a: torch.fx.Node) -> bool:
     return a.op == 'get_attr'
 
 
-"""
-Are nodes a and b fusable together?
-This function assumes 'b' is a direct successor of 'a'.
-"""
 def is_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
+    """
+    Are nodes a and b fusable together?
+    This function assumes 'b' is a direct successor of 'a'.
+    """
     return is_fusable(a) and is_fusable(b)
 
 
-"""
-Are nodes 'a' and 'b' fusable together and is 'a' optionally a compute op?
-This function assumes 'b' is a direct successor of 'a'.
-"""
 def is_compute_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
+    """
+    Are nodes 'a' and 'b' fusable together and is 'a' optionally a compute op?
+    This function assumes 'b' is a direct successor of 'a'.
+    """
     return (is_fusable(a) or is_compute(a)) and is_fusable(b)
 
 
-"""
-Determine if any kwargs associated with 'node' are supported.
-"""
 def supported_kwargs(node: torch.fx.Node,
                      only_const_kwargs: bool = True) -> bool:
+    """
+    Determine if any kwargs associated with 'node' are supported.
+    """
     if only_const_kwargs:
         for arg in node.kwargs.values():
             if not isinstance(arg, torch.fx.node.BaseArgumentTypes):
@@ -210,12 +202,7 @@ def non_trivial_op(n: torch.fx.Node) -> bool:
     return trg not in ['_operator.getitem', 'torch.empty', 'torch.empty_like', 'torch.narrow']
 
 
-"""
-1. create Partition objects from sequences of fusable nodes
-2. use fuse_partitions to recreate the graph torch._inductor.fx_passes.group_batch_fusion
-"""
 def pointwise_fusion(cc: CodeCache,
-                     fgen: FusedOpGenerator,
                      mod: torch.fx.GraphModule,
                      example_inputs: List[torch.Tensor],
                      fuse_inputs: bool = False,
@@ -347,9 +334,8 @@ def pointwise_fusion(cc: CodeCache,
     # Make sure all nodes have been assigned a partition.
     assert (all([n in node_map for n in mod.graph.nodes]))
 
-    logger.debug(
-        f"pre-fusion split mod:\n{graph_print_tabular(mod.graph, 'part', lambda x: node_map[x])}"
-    )
+    logger.debug("pre-fusion split mod:")
+    logger.debug(lazy_graph_print_tabular(mod.graph, 'part', lambda x: node_map[x]))
 
     # Create subgraph for every fusable partition.
     subgraphs = dict()
@@ -368,9 +354,10 @@ def pointwise_fusion(cc: CodeCache,
             logger.debug(f"Reject empty/singleton subgraph:\n{sub.tabular()}")
             continue
         logger.debug(f"Fusing sub-module (last_input={sub.last_input()}):\n{sub.tabular()}")
-        fuse_graph_nodes(cc, fgen, sub)
+        fuse_graph_nodes(cc, sub)
         logger.debug(f"Post fusion sub-module:\n{sub.tabular()}")
 
-    logger.debug(f"Post fusion module:\n{graph_print_tabular(mod.graph)}")
+    logger.debug("Post fusion module:")
+    logger.debug(lazy_graph_print_tabular(mod.graph))
 
     return mod

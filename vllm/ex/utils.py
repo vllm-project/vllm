@@ -6,24 +6,38 @@
 
 import collections
 import copy
-import functools
 import torch
-import torch.utils.cpp_extension
 import types
 
-from contextlib import redirect_stdout
-from io import StringIO
-from pathlib import Path
+try:
+    from tabulate import tabulate
+    have_tabulate = True
+except ImportError:
+    have_tabulate = False
 
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.passes.tools_common import get_node_target
-from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
+from torch._subclasses.fake_tensor import FakeTensorMode
 
-from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set, Union
+from typing import List, Tuple, Any, Dict, Optional, Callable, Set, Union
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def lazy_string(fn: Callable):
+    """
+    Lazily convert the result of fn() to a string.
+    """
+    class lazy:
+        def __init__(self, fn: Callable):
+            self.fn = fn
+
+        def __str__(self):
+            return fn()
+
+    return lazy(lambda: fn())
 
 
 def trunc(x) -> str:
@@ -38,20 +52,15 @@ def trunc(x) -> str:
     return xs if len(xs) <= lim else xs[:lim]
 
 
-"""
-Similar to torch.fx.Graph.print_tabular except it returns a string and
-allows the addition of extra columns.
-"""
 def graph_print_tabular(g: torch.fx.Graph,
                         col: Optional[str] = None,
                         col_get: Optional[Callable] = None) -> str:
-    try:
-        from tabulate import tabulate
-    except ImportError:
-        print("`print_tabular` relies on the library `tabulate`, "
-              "which could not be found on this machine. Run `pip "
-              "install tabulate` to install the library.")
-        raise
+    """
+    Similar to torch.fx.Graph.print_tabular except it returns a string and
+    allows the addition of extra columns.
+    """
+    if not have_tabulate:
+        return str(g)
 
     assert (col and col_get) or (not col and not col_get)
 
@@ -68,23 +77,53 @@ def graph_print_tabular(g: torch.fx.Graph,
     return tabulate(node_specs, headers=headers)
 
 
+def lazy_graph_print_tabular(g: torch.fx.Graph,
+                             col: Optional[str] = None,
+                             col_get: Optional[Callable] = None) -> Callable:
+    return lazy_string(lambda: graph_print_tabular(g, col, col_get))
+
+
+def lazy_module_print_readable(gm: torch.fx.GraphModule,
+                               print_outputs: bool = True) -> Callable:
+    return lazy_string(lambda: gm.print_readable(print_outputs))
+
+
 def is_call(node: torch.fx.Node) -> bool:
     return node.op == 'call_function' or node.op == 'call_method'
 
 
-"""
-Get the name of the function being called in a 'call_function' op.
-"""
 def node_function_target(node: torch.fx.Node) -> str:
+    """
+    Get the name of the function being called in a 'call_function' op.
+    """
     assert is_call(node)
     return get_node_target(None, node)
 
 
-"""
-Return a string representation of the type of the given argument.  This is
-used for name mangling.
-"""
+# Find class for method called by node.
+def call_method_class(node: torch.fx.Node):  # -> Type:
+    assert node.op == 'call_method'
+    ex_val = node.args[0].meta.get('example_value')
+    assert ex_val is not None
+    return type(ex_val)
+
+
+def extract_node_type(n: torch.fx.Node):
+    """
+    Get the data type (float, int, fp16, etc.)  of the tensor associated with
+    the given node.
+    """
+    if 'tensor_meta' in n.meta:
+        return n.meta['tensor_meta'].dtype
+    else:
+        return None
+
+
 def argument_type_str(arg: torch.fx.node.Argument, include_constants: bool = False):
+    """
+    Return a string representation of the type of the given argument.  This is
+    used for name mangling.
+    """
     if isinstance(arg, torch.fx.Node):
         ty = extract_node_type(arg)
         return str(ty) if ty else arg.meta.get('type').__name__
@@ -109,43 +148,11 @@ def argument_type_str(arg: torch.fx.node.Argument, include_constants: bool = Fal
         raise RuntimeError(f"unsupported argument type {arg}")
 
 
-"""
-Get the data type (float, int, fp16, etc.)  of the tensor associated with
-the given node.
-"""
-def extract_node_type(n: torch.fx.Node):
-    if 'tensor_meta' in n.meta:
-        return n.meta['tensor_meta'].dtype
-    else:
-        return None
-
-# Find class for method called by node.
-def call_method_class(node: torch.fx.Node):  # -> Type:
-    assert node.op == 'call_method'
-    ex_val = node.args[0].meta.get('example_value')
-    assert ex_val is not None
-    return type(ex_val)
-
-
-"""
-Compose two functions.
-"""
-def compose2(f: Callable, g: Callable) -> Callable:
-    return lambda *a, **kw: g(f(*a, **kw))
-
-
-"""
-Compose a list of functions.
-"""
-def compose(*fs: List[Callable]) -> Callable:
-    return functools.reduce(compose2, fs)
-
-
-"""
-Generate a mangled name from a list of call_function nodes.
-The mangled name includes the names of all the operators and their types.
-"""
 def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
+    """
+    Generate a mangled name from a list of call_function nodes.
+    The mangled name includes the names of all the operators and their types.
+    """
     name = ""
     sep = ""
     for n in nodes:
@@ -159,18 +166,18 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
     return name.replace(".", rep)
 
 
-"""
-Generate example inputs for all submodules in the given GraphModule.
-After running propagate the 'module_args' property will hold a map of
-module name to list of example inputs.
-
-For now, if a particular submodule is called from more than one location, 'module_args'
-will contain 'None'.  This could be made smarter but is not necessary for now
-since we currently only care about single use submodules.
-
-TODO: can this be combined with ShapeProp somehow?
-"""
 class ModuleInputGenerator(torch.fx.passes.fake_tensor_prop.FakeTensorProp):
+    """
+    Generate example inputs for all submodules in the given GraphModule.
+    After running propagate the 'module_args' property will hold a map of
+    module name to list of example inputs.
+
+    For now, if a particular submodule is called from more than one location, 'module_args'
+    will contain 'None'.  This could be made smarter but is not necessary for now
+    since we currently only care about single use submodules.
+
+    TODO: can this be combined with ShapeProp somehow?
+    """
 
     def __init__(
         self,
@@ -246,15 +253,6 @@ def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
     return mutable_arg_indices
 
 
-#sigs = [<Signature (out: torch.Tensor, a: torch.Tensor, b: torch.Tensor, a_scales: torch.Tensor, b_scales: torch.Tensor, bias: Optional[torch.Tensor]) -> None>]
-#schemas = [_C::cutlass_scaled_mm(Tensor($0! -> ) out, Tensor a, Tensor b, Tensor a_scales, Tensor b_scales, Tensor? bias) -> ()]
-def is_optional_arg(n: torch.fx.Node, arg_num: int) -> bool:
-    s = get_function_schema(n)
-    if not s or arg_num >= len(s.arguments):
-        return False
-    return isinstance(s.arguments[arg_num].real_type, torch._C.OptionalType)
-
-
 # See node.normalized_arguments
 def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
     if isinstance(arg, int):
@@ -271,13 +269,8 @@ def dump_inputs_users(
     all_input_nodes: Dict[torch.fx.Node, List[torch.fx.Node]],
     all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]]
 ) -> str:
-    try:
-        from tabulate import tabulate
-    except ImportError:
-        print("`print_tabular` relies on the library `tabulate`, "
-              "which could not be found on this machine. Run `pip "
-              "install tabulate` to install the library.")
-        raise
+    if not have_tabulate:
+        return "dump_inputs_users: tabulate not installed"
 
     headers = ['name', 'inputs', 'users']
 
@@ -363,19 +356,19 @@ def gather_all_input_nodes(
     return all_input_nodes, all_node_users
 
 
-"""
-The FlowGraph is a dataflow graph for a fx.GraphModule.
-The nodes are fx.Nodes and the edges represent the producers (inputs) and
-consumers (outputs) of each operation.
-
-The FlowGraph is invalidated if the underlying GraphModule is modified.
-It can be regenerated at any time by calling the `build` method.
-
-TODO: turn getitems into "reader views"?
-
-TODO: might be able to use Node.all_input_nodes + Node.users instead (doesn't work with inplace)
-"""
 class FlowGraph:
+    """
+    The FlowGraph is a dataflow graph for a fx.GraphModule.
+    The nodes are fx.Nodes and the edges represent the producers (inputs) and
+    consumers (outputs) of each operation.
+
+    The FlowGraph is invalidated if the underlying GraphModule is modified.
+    It can be regenerated at any time by calling the `build` method.
+
+    TODO: turn getitems into "reader views"?
+
+    TODO: might be able to use Node.all_input_nodes + Node.users instead (doesn't work with inplace)
+    """
 
     def __init__(self, gm: torch.fx.GraphModule):
         self.module = gm
@@ -390,10 +383,10 @@ class FlowGraph:
         self.succs[src].add(dst)
         self.preds[dst].add(src)
 
-    """
-    Construct the FlowGraph.
-    """
     def build(self):
+        """
+        Construct the FlowGraph.
+        """
         self.succs = dict()
         self.preds = dict()
         self.outputs = [n for n in self.module.graph.nodes if n.op == 'output']
@@ -418,16 +411,16 @@ class FlowGraph:
                 self.add_edge(input, n)
                 q.append(input)
 
-    """
-    The underlying GraphModule inputs.
-    """
     def inputs(self) -> List[torch.fx.Node]:
+        """
+        The underlying GraphModule inputs.
+        """
         return self.inputs
 
-    """
-    The underlying GraphModule outputs.
-    """
     def outputs(self) -> List[torch.fx.Node]:
+        """
+        The underlying GraphModule outputs.
+        """
         return self.outputs
 
     def successors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
@@ -435,41 +428,6 @@ class FlowGraph:
 
     def predecessors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
         return self.preds[n] if n in self.preds else set()
-
-    def topo_sort(self):
-        # TBD
-        return
-
-        order = []
-        in_degree = dict()
-        worklist: collections.deque = collections.deque()
-
-        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
-
-        new_g = torch.fx.Graph(self.module, self.module.graph._tracer_cls, self.module.graph._tracer_extras)
-        new_g._codegen = self.module.graph._codegen
-        env: Dict[torch.fx.Node, torch.fx.Node] = {}
-
-        for n in self.module.graph.nodes:
-            count = len(self.all_renamed_input_nodes[n])
-            in_degree[n] = count
-            if count == 0:
-                worklist.append(n)
-        while len(worklist) > 0:
-            n = worklist.popleft()
-            env[n] = new_g.node_copy(n) #, lambda x: env[x])
-
-            for u in self.all_renamed_node_users[n]:
-                in_degree[u] = in_degree[u] - 1
-                if in_degree[u] == 0:
-                    worklist.append(u)
-
-        assert len(new_g.nodes) == len(self.module.graph.nodes), f"cycle found: ({new_g.nodes}) != ({self.module.graph.nodes})"
-
-        self.module.graph = new_g
-
-        print(f"topo'd graph\n {graph_print_tabular(new_g)}")
 
     def visit(self, fn: Callable):
         q = self.inputs
@@ -611,13 +569,8 @@ class SubGraph:
     def tabular(self,
                 col: Optional[str] = None,
                 col_get: Optional[Callable] = None) -> str:
-        try:
-            from tabulate import tabulate
-        except ImportError:
-            print("`print_tabular` relies on the library `tabulate`, "
-                  "which could not be found on this machine. Run `pip "
-                  "install tabulate` to install the library.")
-            raise
+        if not have_tabulate:
+            return "SubGraph::tabular: tabulate not installed"
 
         assert (col and col_get) or (not col and not col_get)
 
@@ -645,110 +598,3 @@ class SubGraph:
         ] for n in self.outputs]
 
         return tabulate(node_specs, headers=headers)
-
-
-"""
-Given a list of cpp and cuda source files, build and load a pytorch extension
-module with the given name.  Loaded ops will appear in the torch.ops.{lib_name}
-namespace.
-"""
-def build_extension(lib_name: str,
-                    sources: List[str],
-                    opt: str = '-O2',
-                    verbose: bool = False):
-    vllm_root = Path(__file__).parent.parent.parent
-    torch.utils.cpp_extension.load(
-        name=lib_name,
-        sources=sources,
-        extra_cflags=[
-            opt, f'-DLIBRARY_NAME={lib_name}', f'-I{vllm_root}/csrc'
-        ],
-        # Note: this is a total hack to get naive C++ fused ops working.
-        extra_ldflags=[
-            f'{vllm_root}/vllm/_C.abi3.so'
-        ],
-        verbose=verbose,
-        is_python_module=False,
-    )
-
-
-# Turn into functionalization?
-def add_uses_for_mutable_inputs(g: torch.fx.Graph):
-    uses = dict()
-    for n in g.nodes:
-        for a in n.args:
-            if isinstance(a, torch.fx.Node) and a in uses:
-                defs = uses[a]
-                for d in defs:
-                    print(f"ADD USE {d}, {n}")
-                    d.users[n] = None
-            elif isinstance(a, tuple) and any(
-                [isinstance(aa, torch.fx.Node) and aa in uses for aa in a]):
-                for aa in a:
-                    defs = uses[aa]
-                    for d in defs:
-                        print(f"ADD USE {d}, {n}")
-                        d.users[n] = None
-
-        if n.op != 'call_function':
-            continue
-        sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(
-            n.target, return_schemas=True)
-        if schemas is None or not any([s.is_mutable for s in schemas]):
-            continue
-
-        matched_schemas = []
-        for candidate_signature, schema in zip(sigs, schemas):
-            try:
-                candidate_signature.bind(*n.args, **n.kwargs)
-                matched_schemas.append((candidate_signature, schema))
-            except TypeError as e:
-                continue
-
-        if len(matched_schemas) == 0:
-            # Did not match any schema. Cannot check for mutation
-            continue
-        elif len(matched_schemas) == 1:
-            _, s = matched_schemas[0]
-            if s.is_mutable:
-                print(f"MUTABLE SIG {s}")
-                for i, a in enumerate(s.arguments):
-                    if a.alias_info and a.alias_info.is_write:
-                        nth_arg = n.args[i]
-                        if isinstance(nth_arg, torch.fx.Node):
-                            print(f"  ARG {a.name}, {a.alias_info}, {nth_arg}")
-                            if not nth_arg in uses:
-                                uses[nth_arg] = set([n])
-                            else:
-                                uses[nth_arg].add(n)
-
-
-# Find all in-place functions in the graph and tag them as "impure" so
-# fx eliminate_dead_code() and other utilities will not delete them.
-def tag_side_effects(g: torch.fx.Graph):
-    for n in g.nodes:
-        if n.op != 'call_function':
-            continue
-
-        sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(
-            n.target, return_schemas=True)
-        if schemas is None or not any([s.is_mutable for s in schemas]):
-            continue
-
-        matched_schemas = []
-        for candidate_signature, schema in zip(sigs, schemas):
-            try:
-                candidate_signature.bind(*n.args, **n.kwargs)
-                matched_schemas.append((candidate_signature, schema))
-            except TypeError as e:
-                continue
-
-        if len(matched_schemas) == 0:
-            # Did not match any schema. Cannot check for mutation
-            continue
-        elif len(matched_schemas) == 1:
-            _, s = matched_schemas[0]
-            if s.is_mutable:
-                torch.fx.node.has_side_effect(n.target)
-                logger.debug(
-                    f"Found mutable or inplace signature {n.target}: {s}")

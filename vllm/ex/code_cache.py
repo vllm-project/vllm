@@ -19,20 +19,21 @@ class CodeCache:
 
     Note: the CodeCache can be initialized with pre-compiled functions.
     """
+
     def __init__(self, disable: bool = False):
         self.cache = dict()
         self.disable = disable
 
-    """
-    Lookup a Callable for a function based on the 'mangled_name'.  If the name
-    is not present in the cache, call the supplied 'generator' to create
-    the Callable to be associated with the 'mangled_name'.  If the
-    generator fails for any reason a None will be stored in the map and
-    returned instead of a Callable.  This will prevent any failed generators
-    from being called repeatedly.
-    """
     def lookup_or_create(self, mangled_name: str,
                          generator: Callable) -> Optional[Callable]:
+        """
+        Lookup a Callable for a function based on the 'mangled_name'.  If the name
+        is not present in the cache, call the supplied 'generator' to create
+        the Callable to be associated with the 'mangled_name'.  If the
+        generator fails for any reason a None will be stored in the map and
+        returned instead of a Callable.  This will prevent any failed generators
+        from being called repeatedly.
+        """
         if self.disable or not mangled_name in self.cache:
             try:
                 logger.debug(f"generating code for {mangled_name}")
@@ -42,13 +43,14 @@ class CodeCache:
                 raise ex
         else:
             logger.debug(f"cache hit for {mangled_name}")
+
         return self.cache[mangled_name]
 
-    """
-    Add a new entry to the cache.  Return False if an entry with the
-    given name already exists.
-    """
     def add(mangled_name: str, fn: Optional[Callable]) -> bool:
+        """
+        Add a new entry to the cache.  Return False if an entry with the
+        given name already exists.
+        """
         if mangled_name in self.cache:
             return False
         self.cache[mangled_name] = fn

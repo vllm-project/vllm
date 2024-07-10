@@ -2,7 +2,7 @@ import copy
 import torch
 import unittest.mock
 
-from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class
+from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class, lazy_graph_print_tabular
 
 from torch.fx.passes.tools_common import get_node_target
 from torch.fx.passes.shape_prop import ShapeProp
@@ -259,9 +259,8 @@ def rewrite_quantized_gemms(
     print(f"root MATCHES {rep_matches}")
 
     if len(rep_matches) > 0:
-        logger.debug(
-            f"Rewritten module {mod}:\n{graph_print_tabular(mod.graph)}")
-        print(f"Rewritten module {mod}:\n{graph_print_tabular(mod.graph)}")
+        logger.debug(f"Rewritten module {mod}:")
+        logger.debug(lazy_graph_print_tabular(mod.graph))
 
     #llama_mlp_pattern_graph = symbolic_trace(llama_mlp_pattern)
     #matcher = SubgraphMatcher(llama_mlp_pattern_graph, ignore_literals=True)

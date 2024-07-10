@@ -32,6 +32,7 @@ class SiluAndMul(CustomOp):
         from vllm import _custom_ops as ops
 
         d = x.shape[-1] // 2
+        # TODO: get rid of this and add silu_and_mul support?
         if torch._utils.is_compiling():
             return F.silu(x[..., :d]) * x[..., d:]
         else:
