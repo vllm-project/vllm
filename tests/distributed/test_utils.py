@@ -2,7 +2,9 @@ import ray
 import torch
 
 import vllm.envs as envs
-from vllm.utils import (DeferredTensor, cuda_device_count_stateless, is_hip,
+from vllm.model_executor.model_loader.weight_utils import (
+    safetensors_weights_iterator)
+from vllm.utils import (cuda_device_count_stateless, is_hip,
                         update_environment_variables)
 
 
@@ -50,16 +52,16 @@ def test_deferred_tensor():
     }
     save_file(tensors, "model.safetensors")
 
-    with safe_open("model.safetensors", framework="pt") as f:  # type: ignore
-        for k in f.keys():  # noqa: SIM118
-            dt = DeferredTensor(f, k)
-            real_tensor = dt.materialize()
+    for name, dt in safetensors_weights_iterator(["model.safetensors"]):
+        with safe_open("model.safetensors",
+                       framework="pt") as f:  # type: ignore
+            real_tensor = f.get_tensor(name)
             real_tensor.copy_(dt)  # test we can use `copy_`
             stacked = torch.stack([real_tensor, real_tensor])
             stacked[0] = dt  # test we can use `__setitem__` to assign
-            if k != "scalar":
+            if name != "scalar":
                 real_tensor[1:] = dt[1:]  # test we can assign slices
-            if k in ["matrix", "tensor"]:
+            if name in ["matrix", "tensor"]:
                 real_norm = torch.nn.functional.normalize(real_tensor)
                 dt_norm = torch.nn.functional.normalize(dt)
                 assert torch.allclose(real_norm,
@@ -80,6 +82,6 @@ def test_deferred_tensor():
             assert torch.allclose(torch.reshape(real_tensor, (-1, )),
                                   torch.reshape(
                                       dt, (-1, )))  # test we can use `reshape`
-            if k != "tensor":
+            if name != "tensor":
                 assert torch.allclose(real_tensor.t(),
                                       dt.t())  # test we can use `t()`

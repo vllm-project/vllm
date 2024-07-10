@@ -997,7 +997,7 @@ class DeferredTensor:
         # a materialized tensor
         slices = [slice(None, None, None) for x in input._meta_tensor.shape]
         slices[dim] = slice(start, start + length)
-        return input._slice_view[tuple(slices)]
+        return input[tuple(slices)]
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
