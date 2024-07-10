@@ -40,13 +40,23 @@ def extract_intermediate_diff(s1: str, s2: str) -> str:
     Extract the difference in the middle between two strings that are KNOWN to have a common prefix and OPTIONALLY
     also a common suffix
     """
-    prefix = find_common_prefix(s1, s2)
     suffix = find_common_suffix(s1, s2)
+    logger.info(f'Found suffix {suffix}')
+
+    # prevent double-counting
+    s2_old = s2
+    s2 = s2[::-1].replace(suffix[::-1], '', 1)[::-1]
+    logger.info(f'Updated search term s2 from {s2_old} to {s2}')
+    prefix = find_common_prefix(s1, s2)
     diff = s1
-    if len(prefix):
-        diff = diff.replace(prefix, '', 1) # replace the prefix only once in case it's mirrored
     if len(suffix):
+        logger.info(f'Nuking suffix {suffix}')
         diff = diff[::-1].replace(suffix[::-1], '', 1)[::-1]
+
+    if len(prefix):
+        logger.info(f'Nuking prefix {prefix}')
+        diff = diff.replace(prefix, '', 1) # replace the prefix only once in case it's mirrored
+
     return diff
 
 
@@ -254,12 +264,7 @@ class MistralToolParser(ToolParser):
                         cur_args_json = json.dumps(cur_arguments)
                         prev_args_json = json.dumps(prev_arguments)
                         logger.info(f'Searching for diff between \n{cur_args_json}\n{prev_args_json}')
-                        shared_prefix = find_common_prefix(cur_args_json, prev_args_json)
-                        logger.info(f'Shared prefix: |{shared_prefix}|', )
-                        cur_args_json = cur_args_json.replace(shared_prefix, '', 1)
-                        logger.info(f'Cur args JSON: {cur_args_json}')
-                        logger.info(f'new text: {new_text}')
-                        argument_diff = cur_args_json[:cur_args_json.index(new_text) + len(new_text)]
+                        argument_diff = extract_intermediate_diff(cur_args_json, prev_args_json )
                         logger.info(f'got arguments diff: {argument_diff}')
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id, function=DeltaFunctionCall(
