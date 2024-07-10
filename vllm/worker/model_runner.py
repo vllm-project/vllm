@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # TODO: Remove
-log_runner = True
+log_runner = False
 
 _PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8

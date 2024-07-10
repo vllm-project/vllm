@@ -106,9 +106,9 @@ class Sampler(nn.Module):
             assert maybe_sampled_tokens_tensor is not None
             on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
 
-            print("  -- maybe_sampled_tokens_tensor: shape = {} vals = {}".format(
-                maybe_sampled_tokens_tensor.shape,
-                maybe_sampled_tokens_tensor))
+            # print("  -- maybe_sampled_tokens_tensor: shape = {} vals = {}".format(
+            #     maybe_sampled_tokens_tensor.shape,
+            #     maybe_sampled_tokens_tensor))
         else:
             on_device_tensors = None
 

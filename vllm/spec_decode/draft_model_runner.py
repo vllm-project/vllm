@@ -17,7 +17,7 @@ from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
-log_advance_input = True
+log_advance_input = False
 
 
 class TP1DraftModelRunner(ModelRunner):
@@ -267,20 +267,42 @@ class TP1DraftModelRunner(ModelRunner):
         return new_model_input
 
     def _can_use_advance_step(self):
+        # TODO: Add support for other attn backends
+        if self.attn_backend.get_name() != "flash-attn":
+            return False
+
+        # TODO: Understand what is needed for LORA support
         if self.lora_config:
             return False
 
         return True
+
+    def _get_model(self, model_input):
+        # TODO: Expand to more backends
+        assert model_input.attn_metadata is not None
+        assert isinstance(model_input.attn_metadata, FlashAttentionMetadata)
+
+        # Currently cuda graph is only supported by the decode phase.
+        is_decode = (model_input.attn_metadata.num_prefills == 0
+                     and model_input.attn_metadata.use_cuda_graph)
+        if is_decode:
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners[graph_batch_size]
+        else:
+            model_executable = self.model
+
+        return model_executable
 
     @torch.inference_mode()
     def _execute_model_with_advance_step(
             self, model_input: ModelInputForGPUWithSamplingMetadata,
             kv_caches: List[torch.Tensor],
             num_steps: int) -> Optional[List[SamplerOutput]]:
+
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
-            assert model_input.attn_metadata is not None
-            model_executable = self.model
+            model_executable = self._get_model(model_input)
 
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
