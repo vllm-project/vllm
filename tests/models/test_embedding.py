@@ -7,8 +7,8 @@ import torch
 import torch.nn.functional as F
 
 MODELS = [
-    # "intfloat/e5-mistral-7b-instruct",
-    # "ssmits/Qwen2-7B-Instruct-embed-base",
+    "intfloat/e5-mistral-7b-instruct",
+    "ssmits/Qwen2-7B-Instruct-embed-base",
     "Alibaba-NLP/gte-Qwen2-7B-instruct",
 ]
 
