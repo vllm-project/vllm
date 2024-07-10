@@ -454,7 +454,8 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
 
                     i = output.index
-                    print(f'[{i}]:', output)
+                    # prints the full completion so far including text and tokens
+                    #print(f'[{i}]:', output)
 
                     if finish_reason_sent[i]:
                         continue
@@ -482,7 +483,6 @@ class OpenAIServingChat(OpenAIServing):
                     if request.tool_choice and type(
                             request.tool_choice
                     ) is ChatCompletionNamedToolChoiceParam:
-                        print('handling streaming for tools with tool choice!')
                         delta_message = DeltaMessage(tool_calls=[
                             ToolCall(function=FunctionCall(
                                 name=request.tool_choice.function.name,
@@ -493,7 +493,6 @@ class OpenAIServingChat(OpenAIServing):
                     elif (request.tools and (request.tool_choice is None or request.tool_choice == 'auto')
                           and self.enable_auto_tools):
 
-                        print('handling streaming for tools with no tool choice!')
                         delta_message = tool_parser.extract_tool_calls_streaming(
                             previous_text=previous_texts[i],
                             current_text=output.text,
@@ -503,7 +502,6 @@ class OpenAIServingChat(OpenAIServing):
                             delta_token_ids=delta_token_ids
                         )
                     else:
-                        print('handling streaming for normal message')
                         delta_message = DeltaMessage(content=delta_text)
 
                     # handle setting the previous values for the next iteration

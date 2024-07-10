@@ -647,6 +647,7 @@ class FunctionCall(OpenAIBaseModel):
             "arguments": self.arguments
         }
 
+
 class ToolCall(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
     type: Literal["function"] = "function"
@@ -658,6 +659,24 @@ class ToolCall(OpenAIBaseModel):
             "type": self.type,
             "function": self.function.to_dict()
         }
+
+
+class DeltaFunctionCall(FunctionCall):
+    name: Optional[str] = None
+    arguments: Optional[str] = None
+
+
+# a tool call delta where everything is optional
+class DeltaToolCall(ToolCall):
+    index: int  # this is always required, the index of the tool call in the tool_calls array.
+    function: Optional[DeltaFunctionCall] = None
+
+
+# the initial delta that gets sent once a new tool call is started; differs in that it includes an auto-set id and type
+class InitialDeltaToolCall(DeltaToolCall):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    index: int
 
 
 class ExtractedToolCallInformation(BaseModel):
@@ -712,7 +731,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
-    tool_calls: List[ToolCall] = Field(default_factory=list)
+    tool_calls: List[DeltaToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
