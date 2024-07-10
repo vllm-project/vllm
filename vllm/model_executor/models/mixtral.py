@@ -88,7 +88,7 @@ class MixtralMoE(nn.Module):
                                 tp_size=tp_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Save orig_shape to support both 1D and 2D input shapes.
+        # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
