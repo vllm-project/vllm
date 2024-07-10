@@ -124,7 +124,24 @@ class TP1DraftModelRunner(ModelRunner):
 
         return self.prepare_model_input(self.cached_seq_group_metadata_list)
 
-    def _flash_attn_update_metadata(self, attn_metadata, num_seqs):
+    def _update_seq_group_metadata(self, seq_group_metadata_list, last_output):
+        for seq_group_metadata, sequence_group_outputs in zip(
+                seq_group_metadata_list, last_output.outputs):
+            seq_group_metadata.is_prompt = False
+
+            for seq_output in sequence_group_outputs.samples:
+                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
+
+                token_id = seq_output.output_token
+                token_logprob = seq_output.logprobs[token_id]
+
+                seq.append_token_id(token_id, token_logprob.logprob)
+                seq.update_num_computed_tokens(1)
+
+                print("appended seq_id = {} token_id = {}".format(
+                    seq_output.parent_seq_id, token_id))
+
+    def _update_flash_attn_metadata(self, attn_metadata, num_seqs):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
 
         assert attn_metadata.num_prefills == 0
@@ -149,7 +166,6 @@ class TP1DraftModelRunner(ModelRunner):
         assert attn_metadata.use_cuda_graph == False
 
         # Update seq_lens
-        # TODO: Remove, not needed for flash_attn
         for i in range(num_seqs):
             attn_metadata.seq_lens[i] += 1
         attn_metadata.max_decode_seq_len = max(attn_metadata.seq_lens)
@@ -175,23 +191,10 @@ class TP1DraftModelRunner(ModelRunner):
             last_output: SamplerOutput
     ) -> ModelInputForGPUWithSamplingMetadata:
         print("Inside _advance_step")
+
         # Append output tokens
-        assert self.cached_seq_group_metadata_list is not None
-        for seq_group_metadata, sequence_group_outputs in zip(
-                self.cached_seq_group_metadata_list, last_output.outputs):
-            seq_group_metadata.is_prompt = False
-
-            for seq_output in sequence_group_outputs.samples:
-                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
-
-                token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
-
-                seq.append_token_id(token_id, token_logprob.logprob)
-                seq.update_num_computed_tokens(1)
-
-                print("appended seq_id = {} token_id = {}".format(
-                    seq_output.parent_seq_id, token_id))
+        self._update_seq_group_metadata(self.cached_seq_group_metadata_list,
+                                        last_output)
 
         # Get num_seqs
         num_seqs = len(model_input.seq_lens)
@@ -202,7 +205,7 @@ class TP1DraftModelRunner(ModelRunner):
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        self._flash_attn_update_metadata(attn_metadata, num_seqs)
+        self._update_flash_attn_metadata(attn_metadata, num_seqs)
 
         # Update GPU tensors
         ops.advance_step(num_seqs=num_seqs,
@@ -216,13 +219,6 @@ class TP1DraftModelRunner(ModelRunner):
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
         self._update_sampling_metadata(sampling_metadata, num_seqs)
-
-        # Update seq/query lens (CPU)
-        # seq_lens = model_input.seq_lens
-        # query_lens = model_input.query_lens
-        # for i in range(num_seqs):
-        #     seq_lens[i] += 1
-        #     query_lens[i] = 1
 
         # Create new input
         new_model_input = self._model_input_cls(
