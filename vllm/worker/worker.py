@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
@@ -17,8 +17,11 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.utils import (is_embedding_model_config,
+                        is_encoder_decoder_model_config)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
 
@@ -70,8 +73,23 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        ModelRunnerClass = (EmbeddingModelRunner if
-                            self.model_config.embedding_mode else ModelRunner)
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+              or (speculative_config.draft_model_config.hf_config.model_type !=
+                  "mlp_speculator") else {"return_hidden_states": True}
+
+        ModelRunnerClass: Union[Type[EmbeddingModelRunner],
+                                Type[EncoderDecoderModelRunner],
+                                Type[ModelRunner]] = ModelRunner
+
+        if is_embedding_model_config(self.model_config):
+            ModelRunnerClass = EmbeddingModelRunner
+        elif is_encoder_decoder_model_config(self.model_config):
+            ModelRunnerClass = EncoderDecoderModelRunner
+
         self.model_runner = ModelRunnerClass(
             model_config,
             parallel_config,
@@ -83,12 +101,19 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CacheEngine
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[torch.tensor]] = None
+
+    def _is_encoder_decoder_model(self) -> bool:
+        return is_encoder_decoder_model_config(self.model_config)
+
+    def _is_embedding_model(self) -> bool:
+        return is_embedding_model_config(self.model_config)
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -323,6 +348,9 @@ class Worker(WorkerBase):
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()

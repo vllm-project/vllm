@@ -24,7 +24,8 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
+from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype,
+                        is_encoder_decoder_model_config, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
 logger = init_logger(__name__)
@@ -38,6 +39,10 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
 _NUM_WARMUP_ITERS = 2
+
+# Error message if ModelRunner is used with an encoder/decoder model
+STR_MR_ENCODER_DECODER_UNSUPPORTED = \
+    "Encoder/decoder model must be executed using EncoderDecoderModelRunner"
 
 
 class ModelInput(NamedTuple):
@@ -86,6 +91,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        return_hidden_states: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -96,6 +102,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -116,15 +123,17 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
+            num_attn_heads,
             self.model_config.get_head_size(),
             self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        )
+        ) if num_attn_heads else None
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:
@@ -142,6 +151,14 @@ class ModelRunner:
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+        if (not self._am_child()) and self._is_encoder_decoder_model():
+            # Fail if ModelRunner is constructed for an
+            # encoder/decoder model
+            #
+            # Bypass this check if this constructor is being invoked by a child
+            # class (i.e. type(self) is not ModelRunner)
+            raise AttributeError(STR_MR_ENCODER_DECODER_UNSUPPORTED)
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -237,6 +254,246 @@ class ModelRunner:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
+    def _prepare_seq_model_input(
+            self,
+            is_prompt: bool,
+            decode_only: bool,
+            num_prefills: int,
+            num_prefill_tokens: int,
+            num_decode_tokens: int,
+            block_tables: List[List[int]],
+            seq_lens: List[int],
+            slot_mapping: List[int],
+            context_lens: List[int],
+            query_lens: List[int],
+            input_tokens: List[int],
+            input_positions: List[int],
+            prefill_seq_lens: List[int],
+            decode_seq_lens: List[int],
+            seq_group_metadata: SequenceGroupMetadata,
+            seq_data: SequenceData,
+            computed_block_nums: Optional[List[int]],
+            original_block_table: Optional[List[int]],
+            paged_kv_indices: Optional[List[int]],
+            paged_kv_indptr: Optional[List[int]],
+            paged_kv_last_page_len: Optional[List[int]],
+            sliding_window_blocks: int = 0,
+            block_aligned_sliding_window: int = 0,
+            lora_index_mapping: Optional[List[int]] = None,
+            lora_prompt_mapping: Optional[List[int]] = None,
+            lora_requests: Optional[Set[LoRARequest]] = None,
+            multi_modal_kwargs_list: Optional[Dict[str, List[torch.Tensor]]] \
+                                        = None,
+            is_encoder_seq: bool = False) -> Tuple[bool, int, int, int]:
+
+        if lora_index_mapping is None:
+            lora_index_mapping = []
+
+        if lora_prompt_mapping is None:
+            lora_prompt_mapping = []
+
+        if lora_requests is None:
+            lora_requests = set()
+
+        if multi_modal_kwargs_list is None:
+            multi_modal_kwargs_list = defaultdict(list)
+
+        if is_prompt:
+            context_len = seq_data.get_num_computed_tokens()
+        else:
+            if is_encoder_seq:
+                # In decode phase, no new *encoder* tokens are
+                # introduced, so the context is always the full
+                # encoder sequence
+                context_len = seq_data.get_len()
+            else:
+                # get_num_computed_tokens is incorrect for spec decoding.
+                # So, we should have a special logic here.
+                # TODO(sang): Fix it.
+                context_len = seq_data.get_len() - 1
+
+        if is_encoder_seq:
+            seq_len = seq_data.get_len()
+        else:
+            seq_len = min(seq_data.get_len(),
+                          context_len + seq_group_metadata.token_chunk_size)
+
+        if is_prompt:
+            tokens = seq_data.get_token_ids()[context_len:seq_len]
+        else:
+            # Optimization. get_token_ids requires the entire copy of
+            # tokens.
+            tokens = [seq_data.get_last_token_id()]
+
+        # Prefix cache was hit.
+        # Prefix is not supported with sliding_window
+        prefix_cache_hit = (computed_block_nums is not None
+                            and len(computed_block_nums) > 0
+                            and self.sliding_window is None and is_prompt)
+
+        # These are seq_len/context_len capped to the sliding window.
+        # They are passed to decode kernel.
+        # We still need original seq_len/context_len to compute slot
+        # mapping (and input position) below.
+        curr_sliding_window_blocks = None
+        sliding_seq_len = seq_len
+        sliding_context_len = context_len
+
+        # TODO(sang): This is a hack to make sliding window work with
+        # paged attn. We can remove it if we make paged attn kernel
+        # to properly handle slinding window attn.
+        if (self.sliding_window is not None and not is_prompt):
+            curr_sliding_window_blocks = sliding_window_blocks
+            if self.scheduler_config.use_v2_block_manager:
+                # number of elements in last block
+                suff_len = seq_len % self.block_size
+                sliding_seq_len = min(seq_len,
+                                      block_aligned_sliding_window + suff_len)
+                if suff_len > 0:
+                    curr_sliding_window_blocks += 1
+            else:
+                sliding_seq_len = min(seq_len, self.sliding_window)
+            sliding_context_len = sliding_seq_len - 1
+
+        # TODO(sang): Combine chunked prefill and prefix caching by
+        # only allowing multiple of block_size chunk size.
+        # NOTE: This only works for oooooooxxx style attention.
+        if prefix_cache_hit:
+            assert computed_block_nums is not None
+            context_len = len(computed_block_nums) * self.block_size
+            tokens = tokens[context_len:]
+
+            # need to think what to set it to when we have both sliding
+            # window and prefix caching...
+            assert self.sliding_window is None, \
+                "Prefix caching is not supported with sliding window"
+            sliding_context_len = context_len
+
+            if self.attn_backend.get_name() == "flash-attn":
+                # NOTE(woosuk): For flash-attn, the block table should
+                # include the entries for the incoming prefill tokens.
+                # TODO(woosuk): This is a temporary fix. We should
+                # provide a unified interface for different backends.
+                block_table = original_block_table
+            else:
+                block_table = computed_block_nums
+
+        elif (self.scheduler_config.chunked_prefill_enabled or not is_prompt):
+            if original_block_table is not None:
+                # chunked prefill or decode
+                block_table = original_block_table
+                assert block_table is not None
+                if curr_sliding_window_blocks is not None:
+                    block_table = block_table[-curr_sliding_window_blocks:]
+                if self.attn_backend.get_name() == "flashinfer":
+                    assert paged_kv_indices is not None
+                    assert paged_kv_indptr is not None
+                    assert paged_kv_last_page_len is not None
+                    paged_kv_indices.extend(block_table)
+                    paged_kv_indptr.append(paged_kv_indptr[-1] +
+                                           len(block_table))
+                    last_page_len = seq_data.get_len() % self.block_size
+                    if last_page_len == 0:
+                        last_page_len = self.block_size
+                    paged_kv_last_page_len.append(last_page_len)
+            else:
+                # Only happens when memory profiling runs.
+                block_table = []
+        else:
+            # Prefill without chunked prefill or memory profiling.
+            block_table = []
+
+        assert block_table is not None
+        block_tables.append(block_table)
+
+        seq_lens.append(sliding_seq_len)
+        context_lens.append(sliding_context_len)
+        query_len = sliding_seq_len - sliding_context_len
+        query_lens.append(query_len)
+        input_tokens.extend(tokens)
+        input_positions.extend(list(range(context_len, seq_len)))
+        lora_id = seq_group_metadata.lora_int_id
+
+        if is_prompt:
+            num_prefills += 1
+            num_prefill_tokens += len(tokens)
+            decode_only = False
+            prefill_seq_lens.append(seq_len)
+        else:
+            # Except in encoder/decoder scenario, decode-phase
+            # query_len must be 1
+            assert is_encoder_seq or query_len == 1, (
+                "seq_len: {}, context_len: {}, query_len: {}".format(
+                    seq_len, context_len, query_len))
+            num_decode_tokens += query_len
+            decode_seq_lens.append(sliding_seq_len)
+
+        if lora_id > 0:
+            lora_requests.add(seq_group_metadata.lora_request)
+
+        lora_index_mapping += [lora_id] * query_len
+        lora_prompt_mapping.extend(
+            [lora_id] *
+            (query_len if seq_group_metadata.sampling_params
+             and seq_group_metadata.sampling_params.prompt_logprobs is not None
+             else 1))
+
+        mm_data = seq_group_metadata.multi_modal_data
+        if mm_data is not None:
+            # Process multi-modal data
+            if self.multi_modal_input_processor is None:
+                raise ValueError("Multi-modal inputs are only supported by "
+                                 "vision language models.")
+
+            mm_kwargs = self.multi_modal_input_processor(mm_data)
+            for k, v in mm_kwargs.items():
+                multi_modal_kwargs_list[k].append(v)
+
+        if _is_block_tables_empty(original_block_table):
+            # During memory profiling, the block tables are not
+            # initialized yet. In this case, we just use a dummy
+            # slot mapping.
+            # In embeddings, the block tables are {seq_id: None}.
+            slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+            return decode_only, \
+                   num_prefills, \
+                   num_prefill_tokens, \
+                   num_decode_tokens
+
+        # Compute the slot mapping.
+        block_table = original_block_table
+        assert block_table is not None
+
+        # Mask the [0, start_idx) tokens of the prompt with
+        # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
+        # sliding_window). For example, if the prompt len is 10,
+        # sliding window is 8, and block size is 4, the first two
+        # tokens are masked and the slot mapping will be
+        # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+        start_idx = 0
+        if self.sliding_window is not None:
+            if is_prompt:
+                assert self.scheduler_config.use_v2_block_manager \
+                    or context_len == 0, (
+                    "Prefix caching is currently not supported with "
+                    "sliding window attention in V1 block manager")
+            # It is an optimization. When it is decoding, it is always
+            # 0. When prefill, we use it to not write slots to kv cache
+            # to save memory.
+            start_idx = max(0, query_len - self.sliding_window)
+
+        for i in range(context_len, seq_len):
+            if i < start_idx:
+                slot_mapping.append(_PAD_SLOT_ID)
+                continue
+
+            block_number = block_table[i // self.block_size]
+            block_offset = i % self.block_size
+            slot = block_number * self.block_size + block_offset
+            slot_mapping.append(slot)
+
+        return decode_only, num_prefills, num_prefill_tokens, num_decode_tokens
+
     def _prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -272,6 +529,9 @@ class ModelRunner:
         num_prefills = 0
         num_prefill_tokens = 0
         num_decode_tokens = 0
+
+        sliding_window_blocks = 0
+        block_aligned_sliding_window = 0
 
         # The following fields are only for flashinfer
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
@@ -315,183 +575,21 @@ class ModelRunner:
                         "now.")
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                if is_prompt:
-                    context_len = seq_data.get_num_computed_tokens()
-                else:
-                    # get_num_computed_tokens is incorrect for spec decoding.
-                    # So, we should have a special logic here.
-                    # TODO(sang): Fix it.
-                    context_len = seq_data.get_len() - 1
-
-                seq_len = min(
-                    seq_data.get_len(),
-                    context_len + seq_group_metadata.token_chunk_size)
-                if is_prompt:
-                    tokens = seq_data.get_token_ids()[context_len:seq_len]
-                else:
-                    # Optimization. get_token_ids requires the entire copy of
-                    # tokens.
-                    tokens = [seq_data.get_last_token_id()]
-
-                # Prefix cache was hit.
-                # Prefix is not supported with sliding_window
-                prefix_cache_hit = (computed_block_nums is not None
-                                    and len(computed_block_nums) > 0
-                                    and self.sliding_window is None
-                                    and is_prompt)
-
-                # These are seq_len/context_len capped to the sliding window.
-                # They are passed to decode kernel.
-                # We still need original seq_len/context_len to compute slot
-                # mapping (and input position) below.
-                curr_sliding_window_blocks = None
-                sliding_seq_len = seq_len
-                sliding_context_len = context_len
-
-                # TODO(sang): This is a hack to make sliding window work with
-                # paged attn. We can remove it if we make paged attn kernel
-                # to properly handle slinding window attn.
-                if (self.sliding_window is not None and not is_prompt):
-                    curr_sliding_window_blocks = sliding_window_blocks
-                    if self.scheduler_config.use_v2_block_manager:
-                        # number of elements in last block
-                        suff_len = seq_len % self.block_size
-                        sliding_seq_len = min(
-                            seq_len, block_aligned_sliding_window + suff_len)
-                        if suff_len > 0:
-                            curr_sliding_window_blocks += 1
-                    else:
-                        sliding_seq_len = min(seq_len, self.sliding_window)
-                    sliding_context_len = sliding_seq_len - 1
-
-                # TODO(sang): Combine chunked prefill and prefix caching by
-                # only allowing multiple of block_size chunk size.
-                # NOTE: This only works for oooooooxxx style attention.
-                if prefix_cache_hit:
-                    assert computed_block_nums is not None
-                    context_len = len(computed_block_nums) * self.block_size
-                    tokens = tokens[context_len:]
-
-                    # need to think what to set it to when we have both sliding
-                    # window and prefix caching...
-                    assert self.sliding_window is None, \
-                        "Prefix caching is not supported with sliding window"
-                    sliding_context_len = context_len
-
-                    if self.attn_backend.get_name() == "flash-attn":
-                        # NOTE(woosuk): For flash-attn, the block table should
-                        # include the entries for the incoming prefill tokens.
-                        # TODO(woosuk): This is a temporary fix. We should
-                        # provide a unified interface for different backends.
-                        block_table = seq_group_metadata.block_tables[seq_id]
-                    else:
-                        block_table = computed_block_nums
-                elif (self.scheduler_config.chunked_prefill_enabled
-                      or not is_prompt):
-                    if seq_group_metadata.block_tables is not None:
-                        # chunked prefill or decode
-                        block_table = seq_group_metadata.block_tables[seq_id]
-                        if curr_sliding_window_blocks is not None:
-                            block_table = block_table[
-                                -curr_sliding_window_blocks:]
-                        if self.attn_backend.get_name() == "flashinfer":
-                            paged_kv_indices.extend(block_table)
-                            paged_kv_indptr.append(paged_kv_indptr[-1] +
-                                                   len(block_table))
-                            last_page_len = seq_data.get_len(
-                            ) % self.block_size
-                            if last_page_len == 0:
-                                last_page_len = self.block_size
-                            paged_kv_last_page_len.append(last_page_len)
-                    else:
-                        # Only happens when memory profiling runs.
-                        block_table = []
-                else:
-                    # Prefill without chunked prefill or memory profiling.
-                    block_table = []
-                block_tables.append(block_table)
-
-                seq_lens.append(sliding_seq_len)
-                context_lens.append(sliding_context_len)
-                query_len = sliding_seq_len - sliding_context_len
-                query_lens.append(query_len)
-                input_tokens.extend(tokens)
-                input_positions.extend(list(range(context_len, seq_len)))
-                lora_id = seq_group_metadata.lora_int_id
-
-                if is_prompt:
-                    assert len(seq_ids) == 1
-                    num_prefills += 1
-                    num_prefill_tokens += len(tokens)
-                    decode_only = False
-                    prefill_seq_lens.append(seq_len)
-                else:
-                    assert query_len == 1, (
-                        "seq_len: {}, context_len: {}, query_len: {}".format(
-                            seq_len, context_len, query_len))
-                    num_decode_tokens += query_len
-                    decode_seq_lens.append(sliding_seq_len)
-
-                if lora_id > 0:
-                    lora_requests.add(seq_group_metadata.lora_request)
-
-                lora_index_mapping += [lora_id] * query_len
-                lora_prompt_mapping.extend(
-                    [lora_id] *
-                    (query_len if seq_group_metadata.sampling_params
-                     and seq_group_metadata.sampling_params.prompt_logprobs
-                     is not None else 1))
-
-                mm_data = seq_group_metadata.multi_modal_data
-                if mm_data is not None:
-                    # Process multi-modal data
-                    if self.multi_modal_input_processor is None:
-                        raise ValueError(
-                            "Multi-modal inputs are only supported by "
-                            "vision language models.")
-
-                    mm_kwargs = self.multi_modal_input_processor(mm_data)
-                    for k, v in mm_kwargs.items():
-                        multi_modal_kwargs_list[k].append(v)
-
-                if _is_block_tables_empty(seq_group_metadata.block_tables):
-                    # During memory profiling, the block tables are not
-                    # initialized yet. In this case, we just use a dummy
-                    # slot mapping.
-                    # In embeddings, the block tables are {seq_id: None}.
-                    slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
-                    continue
-
-                # Compute the slot mapping.
-                block_table = seq_group_metadata.block_tables[seq_id]
-
-                # Mask the [0, start_idx) tokens of the prompt with
-                # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
-                # sliding_window). For example, if the prompt len is 10,
-                # sliding window is 8, and block size is 4, the first two
-                # tokens are masked and the slot mapping will be
-                # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-                start_idx = 0
-                if self.sliding_window is not None:
-                    if is_prompt:
-                        assert self.scheduler_config.use_v2_block_manager \
-                            or context_len == 0, (
-                            "Prefix caching is currently not supported with "
-                            "sliding window attention in V1 block manager")
-                    # It is an optimization. When it is decoding, it is always
-                    # 0. When prefill, we use it to not write slots to kv cache
-                    # to save memory.
-                    start_idx = max(0, query_len - self.sliding_window)
-
-                for i in range(context_len, seq_len):
-                    if i < start_idx:
-                        slot_mapping.append(_PAD_SLOT_ID)
-                        continue
-
-                    block_number = block_table[i // self.block_size]
-                    block_offset = i % self.block_size
-                    slot = block_number * self.block_size + block_offset
-                    slot_mapping.append(slot)
+                block_table = None if seq_group_metadata.block_tables is None \
+                                else seq_group_metadata.block_tables[seq_id]
+                decode_only, \
+                num_prefills, \
+                num_prefill_tokens, \
+                num_decode_tokens = self._prepare_seq_model_input(
+                    is_prompt, decode_only, num_prefills, num_prefill_tokens,
+                    num_decode_tokens, block_tables, seq_lens, slot_mapping,
+                    context_lens, query_lens, input_tokens, input_positions,
+                    prefill_seq_lens, decode_seq_lens, seq_group_metadata,
+                    seq_data, computed_block_nums, block_table,
+                    paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
+                    sliding_window_blocks, block_aligned_sliding_window,
+                    lora_index_mapping, lora_prompt_mapping, lora_requests,
+                    multi_modal_kwargs_list)
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
@@ -762,10 +860,18 @@ class ModelRunner:
             return None
 
         # Sample the next token.
-        output = self.model.sample(
+        output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            assert seq_group_metadata_list is not None
+            if seq_group_metadata_list[0].is_prompt:
+                hidden_states = hidden_states.index_select(
+                    0, sampling_metadata.selected_token_indices)
+            output.hidden_states = hidden_states
 
         return output
 
@@ -866,10 +972,30 @@ class ModelRunner:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.remove_lora(lora_id)
 
+    def pin_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.pin_lora(lora_id)
+
     def list_loras(self) -> Set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
+
+    def _is_encoder_decoder_model(self):
+        '''
+        Identify encoder/decoder models using the is_encoder_decoder
+        field of the HF config, if this field is present; otherwise
+        return False.
+        '''
+        return is_encoder_decoder_model_config(self.model_config)
+
+    def _am_child(self):
+        '''
+        True if self is an instance of the ModelRunner
+        base class, False otherwise (i.e. child class)
+        '''
+        return type(self) is not ModelRunner
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
@@ -1086,13 +1212,17 @@ def _get_graph_batch_size(batch_size: int) -> int:
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
-def _is_block_tables_empty(block_tables: Union[None, Dict]):
+def _is_block_tables_empty(block_tables: Union[None, Dict, List]):
     """
     Check if block_tables is None or a dictionary with all None values.
     """
     if block_tables is None:
         return True
+    if isinstance(block_tables, List):
+        # A single block table passed in as a List
+        return False
     if isinstance(block_tables, dict) and all(
             value is None for value in block_tables.values()):
+        # Block tables dict where all block tables are None
         return True
     return False

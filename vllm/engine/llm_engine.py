@@ -1,14 +1,14 @@
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
+from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
@@ -20,7 +20,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import LLMInputs, PromptInputs
+from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, LLMInputsOptions,
+                         PromptInputs)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
@@ -31,12 +32,15 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
+from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
+                          init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter
+from vllm.utils import (Counter, is_embedding_model_config,
+                        is_encoder_decoder_model_config)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -154,6 +158,7 @@ class LLMEngine:
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
+        observability_config: Optional[ObservabilityConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -168,7 +173,8 @@ class LLMEngine:
             "disable_custom_all_reduce=%s, quantization=%s, "
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
-            "decoding_config=%r, seed=%d, served_model_name=%s)",
+            "decoding_config=%r, observability_config=%r, "
+            "seed=%d, served_model_name=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -192,6 +198,7 @@ class LLMEngine:
             model_config.quantization_param_path,
             device_config.device,
             decoding_config,
+            observability_config,
             model_config.seed,
             model_config.served_model_name,
         )
@@ -207,6 +214,8 @@ class LLMEngine:
         self.speculative_config = speculative_config
         self.load_config = load_config
         self.decoding_config = decoding_config or DecodingConfig()
+        self.observability_config = observability_config or ObservabilityConfig(
+        )
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
@@ -232,7 +241,7 @@ class LLMEngine:
             load_config=load_config,
         )
 
-        if not self.model_config.embedding_mode:
+        if not self._is_embedding_model():
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
@@ -288,6 +297,12 @@ class LLMEngine:
                 max_model_len=self.model_config.max_model_len)
             self.stat_logger.info("cache_config", self.cache_config)
 
+        self.tracer = None
+        if self.observability_config.otlp_traces_endpoint:
+            self.tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -302,6 +317,12 @@ class LLMEngine:
                     self.get_tokenizer_for_seq,
                 ),
             ))
+
+    def _is_encoder_decoder_model(self):
+        return is_encoder_decoder_model_config(self.model_config)
+
+    def _is_embedding_model(self):
+        return is_embedding_model_config(self.model_config)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -440,65 +461,164 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: LLMInputs,
+        processed_inputs: LLMInputsOptions,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         eos_token_id = self._get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
-                       lora_request)
+        if self._is_encoder_decoder_model():
+            # Add encoder/decoder model request
+            encoder_seq_id = 0  # Encoder sequence id is not used
 
-        # Create a SequenceGroup based on SamplingParams or PoolingParams
-        if isinstance(params, SamplingParams):
-            seq_group = self._create_sequence_group_with_sampling(
-                request_id,
-                seq,
-                params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-            )
-        elif isinstance(params, PoolingParams):
-            seq_group = self._create_sequence_group_with_pooling(
-                request_id,
-                seq,
-                params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-            )
+            processed_encoder_inputs = {
+                "prompt":
+                processed_inputs.get("encoder_prompt"),
+                "prompt_token_ids":
+                processed_inputs.get("encoder_prompt_token_ids")
+            }
+
+            encoder_seq = Sequence(encoder_seq_id, processed_encoder_inputs,
+                                   block_size, eos_token_id, lora_request)
+
+            decoder_seq = Sequence(seq_id, processed_inputs, block_size,
+                                   eos_token_id, lora_request)
+
+            # Create a SequenceGroup based on SamplingParams or PoolingParams
+            if isinstance(params, SamplingParams):
+                seq_group = self._create_sequence_group_with_sampling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    encoder_seq=encoder_seq)
+            elif isinstance(params, PoolingParams):
+                seq_group = self._create_sequence_group_with_pooling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    encoder_seq=encoder_seq)
+            else:
+                raise ValueError(
+                    "Either SamplingParams or PoolingParams must be provided.")
+
+            # Add the sequence group to the scheduler.
+            self.scheduler.add_seq_group(seq_group)
         else:
-            raise ValueError(
-                "Either SamplingParams or PoolingParams must be provided.")
+            # Add decoder-only model request
+            decoder_seq = Sequence(seq_id, processed_inputs, block_size,
+                                   eos_token_id, lora_request)
 
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+            # Create a SequenceGroup based on SamplingParams or PoolingParams
+            if isinstance(params, SamplingParams):
+                seq_group = self._create_sequence_group_with_sampling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
+            elif isinstance(params, PoolingParams):
+                seq_group = self._create_sequence_group_with_pooling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                )
+            else:
+                raise ValueError(
+                    "Either SamplingParams or PoolingParams must be provided.")
+
+            # Add the sequence group to the scheduler.
+            self.scheduler.add_seq_group(seq_group)
 
     def process_model_inputs(
         self,
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
-    ) -> LLMInputs:
-        if isinstance(inputs, str):
-            inputs = {"prompt": inputs}
+    ) -> LLMInputsOptions:
 
-        if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
+        if self._is_encoder_decoder_model():
+            # Encoder/decoder model input
 
-            prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                                prompt=inputs["prompt"],
-                                                lora_request=lora_request)
+            if isinstance(inputs, str):
+                # Interpret a single input prompt as a single encoder input
+                # (leave decoder input to default)
+                inputs = {"encoder_prompt": inputs}
+
+            if isinstance(inputs, tuple) and len(inputs) == 2:
+                # Detect input which is EncoderDecoderStringPrompts
+                # (i.e. Tuple[str,str])
+                # Interpret a tuple of input string prompts as a single
+                # encoder input and a single decoder input, respectively
+                inputs = {
+                    "encoder_prompt": inputs[0],
+                    "decoder_prompt": inputs[1]
+                }
+
+            input_has_decoder_token_ids = "decoder_prompt_token_ids" in inputs
+            input_has_encoder_token_ids = "encoder_prompt_token_ids" in inputs
+
+            if not (input_has_decoder_token_ids and \
+                    input_has_encoder_token_ids):
+                tokenizer = self.get_tokenizer_group(
+                    "prompts must be None if "
+                    "skip_tokenizer_init is True")
+
+                if not input_has_decoder_token_ids:
+                    decoder_prompt_token_ids = tokenizer.encode(
+                        request_id=request_id,
+                        prompt=inputs["decoder_prompt"],
+                        lora_request=lora_request)
+
+                    encoder_prompt_token_ids = tokenizer.encode(
+                        request_id=request_id,
+                        prompt=inputs["encoder_prompt"],
+                        lora_request=lora_request)
+
+            else:
+                decoder_prompt_token_ids = inputs["decoder_prompt_token_ids"]
+                encoder_prompt_token_ids = inputs["encoder_prompt_token_ids"]
+
+            return EncoderDecoderLLMInputs(
+                decoder_prompt_token_ids=decoder_prompt_token_ids,
+                decoder_prompt=inputs.get("decoder_prompt"),
+                encoder_prompt_token_ids=encoder_prompt_token_ids,
+                encoder_prompt=inputs.get("encoder_prompt"),
+                multi_modal_data=inputs.get("multi_modal_data"))
+
         else:
-            prompt_token_ids = inputs["prompt_token_ids"]
+            # Decoder-only model input
 
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=inputs.get("prompt"),
-                         multi_modal_data=inputs.get("multi_modal_data"))
+            if isinstance(inputs, str):
+                inputs = {"prompt": inputs}
+
+            if "prompt_token_ids" not in inputs:
+                tokenizer = self.get_tokenizer_group(
+                    "prompts must be None if "
+                    "skip_tokenizer_init is True")
+
+                prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                    prompt=inputs["prompt"],
+                                                    lora_request=lora_request)
+            else:
+                prompt_token_ids = inputs["prompt_token_ids"]
+
+            return LLMInputs(prompt_token_ids=prompt_token_ids,
+                             prompt=inputs.get("prompt"),
+                             multi_modal_data=inputs.get("multi_modal_data"))
 
     def add_request(
         self,
@@ -507,6 +627,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -524,6 +645,7 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            trace_headers: OpenTelemetry trace headers.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -565,16 +687,18 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_headers=trace_headers,
         )
 
     def _create_sequence_group_with_sampling(
-        self,
-        request_id: str,
-        seq: Sequence,
-        sampling_params: SamplingParams,
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-    ) -> SequenceGroup:
+            self,
+            request_id: str,
+            seq: Sequence,
+            sampling_params: SamplingParams,
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            trace_headers: Optional[Dict[str, str]] = None,
+            encoder_seq: Optional[Sequence] = None) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
         if (sampling_params.logprobs
@@ -599,18 +723,20 @@ class LLMEngine:
                                   seqs=[seq],
                                   arrival_time=arrival_time,
                                   sampling_params=sampling_params,
-                                  lora_request=lora_request)
+                                  lora_request=lora_request,
+                                  trace_headers=trace_headers,
+                                  encoder_seq=encoder_seq)
 
         return seq_group
 
     def _create_sequence_group_with_pooling(
-        self,
-        request_id: str,
-        seq: Sequence,
-        pooling_params: PoolingParams,
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-    ) -> SequenceGroup:
+            self,
+            request_id: str,
+            seq: Sequence,
+            pooling_params: PoolingParams,
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            encoder_seq: Optional[Sequence] = None) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
         pooling_params = pooling_params.clone()
@@ -619,7 +745,8 @@ class LLMEngine:
                                   seqs=[seq],
                                   arrival_time=arrival_time,
                                   lora_request=lora_request,
-                                  pooling_params=pooling_params)
+                                  pooling_params=pooling_params,
+                                  encoder_seq=encoder_seq)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -695,7 +822,7 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            if self.model_config.embedding_mode:
+            if self._is_embedding_model():
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue
 
@@ -792,6 +919,9 @@ class LLMEngine:
 
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
+
+        # Tracing
+        self.do_tracing(scheduler_outputs)
 
         if not request_outputs:
             # Stop the execute model loop in parallel workers until there are
@@ -984,5 +1114,69 @@ class LLMEngine:
     def list_loras(self) -> Set[int]:
         return self.model_executor.list_loras()
 
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_executor.pin_lora(lora_id)
+
     def check_health(self) -> None:
+        if self.tokenizer:
+            self.tokenizer.check_health()
         self.model_executor.check_health()
+
+    def is_tracing_enabled(self) -> bool:
+        return self.tracer is not None
+
+    def do_tracing(self, scheduler_outputs: SchedulerOutputs) -> None:
+        if self.tracer is None:
+            return
+
+        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
+            if seq_group.is_finished():
+                self.create_trace_span(seq_group)
+
+    def create_trace_span(self, seq_group: SequenceGroup) -> None:
+        if self.tracer is None or seq_group.sampling_params is None:
+            return
+        arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
+
+        trace_context = extract_trace_context(seq_group.trace_headers)
+
+        with self.tracer.start_as_current_span(
+                "llm_request",
+                kind=SpanKind.SERVER,
+                context=trace_context,
+                start_time=arrival_time_nano_seconds) as seq_span:
+            metrics = seq_group.metrics
+            ttft = metrics.first_token_time - metrics.arrival_time
+            e2e_time = metrics.finished_time - metrics.arrival_time
+            # attribute names are based on
+            # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/llm-spans.md
+            seq_span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL,
+                                   self.model_config.model)
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_ID,
+                                   seq_group.request_id)
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TEMPERATURE,
+                                   seq_group.sampling_params.temperature)
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TOP_P,
+                                   seq_group.sampling_params.top_p)
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS,
+                                   seq_group.sampling_params.max_tokens)
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_BEST_OF,
+                                   seq_group.sampling_params.best_of)
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_N,
+                                   seq_group.sampling_params.n)
+            seq_span.set_attribute(SpanAttributes.LLM_USAGE_NUM_SEQUENCES,
+                                   seq_group.num_seqs())
+            seq_span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS,
+                                   len(seq_group.prompt_token_ids))
+            seq_span.set_attribute(
+                SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
+                sum([
+                    seq.get_output_len()
+                    for seq in seq_group.get_finished_seqs()
+                ]))
+            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE,
+                                   metrics.time_in_queue)
+            seq_span.set_attribute(
+                SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)

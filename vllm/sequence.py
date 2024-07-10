@@ -3,12 +3,12 @@ import copy
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 
 from vllm.block import LogicalTokenBlock
-from vllm.inputs import LLMInputs
+from vllm.inputs import LLMInputsOptions
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -212,7 +212,9 @@ class Sequence:
 
     Args:
         seq_id: The ID of the sequence.
-        inputs: The inputs of the sequence.
+        inputs: The inputs of the sequence. Note that for encoder/decoder 
+                inputs, Sequence makes no use of the encoder prompt (which is
+                tracked at the level of the SequenceGroup)
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
         lora_request: LoRA request.
@@ -221,7 +223,7 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        inputs: LLMInputs,
+        inputs: LLMInputsOptions,
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -250,11 +252,27 @@ class Sequence:
 
     @property
     def prompt(self) -> Optional[str]:
-        return self.inputs.get("prompt")
+        if "prompt" in self.inputs:
+            # Decoder-only prompt
+            return cast(Optional[str], self.inputs.get("prompt"))
+        elif "decoder_prompt" in self.inputs:
+            # In encoder/decoder scenario, self.prompt()
+            # returns the decoder prompt
+            return cast(Optional[str], self.inputs.get("decoder_prompt"))
+        else:
+            raise AttributeError("Invalid Sequence.inputs: {self.inputs}")
 
     @property
     def prompt_token_ids(self) -> List[int]:
-        return self.inputs["prompt_token_ids"]
+        if "prompt_token_ids" in self.inputs:
+            # Decoder-only prompt
+            return cast(List[int], self.inputs.get("prompt_token_ids"))
+        elif "decoder_prompt_token_ids" in self.inputs:
+            # In encoder/decoder scenario, self.prompt_token_ids()
+            # returns the decoder prompt
+            return cast(List[int], self.inputs.get("decoder_prompt_token_ids"))
+        else:
+            raise AttributeError("Invalid Sequence.inputs: {self.inputs}")
 
     @property
     def multi_modal_data(self) -> Optional["MultiModalData"]:
@@ -414,6 +432,7 @@ class SequenceGroup:
             for an embedding model.
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
+        trace_headers: OpenTelemetry trace headers.
     """
 
     def __init__(
@@ -426,6 +445,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -441,6 +461,7 @@ class SequenceGroup:
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.encoder_seq = encoder_seq
+        self.trace_headers = trace_headers
 
     @property
     def prompt(self) -> Optional[str]:
@@ -791,6 +812,9 @@ class SamplerOutput:
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
+    # Optional last hidden states from the model.
+    hidden_states: Optional[torch.Tensor] = None
+
     def __getitem__(self, idx: int):
         return self.outputs[idx]
 
@@ -839,6 +863,46 @@ class PoolerOutput:
                           self.__class__) and self.outputs == other.outputs
 
 
+def get_all_seq_ids(
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
+    """Given a list of SequenceGroupMetadata, create a list of all
+    sequence ids.
+    """
+    return [seq_id for sg in seq_group_metadata_list for seq_id in sg.seq_data]
+
+
+class HiddenStates:
+    """Hidden states corresponding to in-progress sequences.
+    Used in speculative decoding to pass hidden states from
+    the target model to the proposer model in the subsequent step.
+
+    seq_ids are the sequence ids of each entry of the batch
+    dimension of the hidden_states tensor"""
+
+    def __init__(self, seq_group_metadata_list: List[SequenceGroupMetadata],
+                 hidden_states: torch.Tensor):
+        assert len(seq_group_metadata_list) == len(hidden_states)
+        self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
+        self.hidden_states: torch.Tensor = hidden_states
+
+    def update(self, seq_group_metadata_list: List[SequenceGroupMetadata],
+               hidden_states: torch.Tensor) -> None:
+        """Update hidden states from target model invocation."""
+        assert len(seq_group_metadata_list) == len(hidden_states)
+        self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
+        self.hidden_states = torch.cat([self.hidden_states, hidden_states])
+
+    def prune(self,
+              seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+        """Prune to provided list of sequence ids."""
+        seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        if seq_ids != self.seq_ids:
+            # Batch contents changed - prune removed sequences.
+            index = [self.seq_ids.index(seq_id) for seq_id in seq_ids]
+            self.hidden_states = self.hidden_states[index]
+            self.seq_ids = seq_ids
+
+
 @dataclass
 class ExecuteModelRequest:
     """The model execution request."""
@@ -854,6 +918,8 @@ class ExecuteModelRequest:
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
     running_queue_size: int = 0
+    # Optional hidden states from prior step.
+    previous_hidden_states: Optional[HiddenStates] = None
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -866,4 +932,5 @@ class ExecuteModelRequest:
             blocks_to_copy=self.blocks_to_copy.copy(),
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
+            previous_hidden_states=self.previous_hidden_states,
         )

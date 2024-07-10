@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import datetime
 import enum
@@ -14,7 +15,7 @@ from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
+                    Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
                     Union)
 
 import numpy as np
@@ -29,6 +30,45 @@ from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
 
+# Exception strings for non-implemented encoder/decoder scenarios
+
+STR_NOT_IMPL_ENC_DEC_SWA = \
+    "Sliding window attention for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
+    "Prefix caching for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
+    "Chunked prefill for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_CUDAGRAPH = \
+    "Currently CUDAGraph is not supported for encoder/decoder models"
+
+STR_NOT_IMPL_ENC_DEC_BACKEND = \
+    "This backend is currently unsupported for encoder/decoder models:"
+
+# Constants related to forcing the attention backend selection
+
+# String name of register which may be set in order to
+# force auto-selection of attention backend by Attention
+# wrapper
+STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
+
+# Possible string values of STR_BACKEND_ENV_VAR
+# register, corresponding to possible backends
+STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
+STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
+STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
+STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
+STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_INVALID_VAL: str = "INVALID"
+
+# List of support backends for encoder/decoder models
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [STR_XFORMERS_ATTN_VAL]
+
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
@@ -41,6 +81,13 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 P = ParamSpec('P')
 K = TypeVar("K")
 T = TypeVar("T")
+
+
+class _Sentinel:
+    ...
+
+
+ALL_PINNED_SENTINEL = _Sentinel()
 
 
 class Device(enum.Enum):
@@ -66,6 +113,7 @@ class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
         self.cache: OrderedDict[Hashable, T] = OrderedDict()
+        self.pinned_items: Set[Hashable] = set()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
@@ -101,14 +149,36 @@ class LRUCache(Generic[T]):
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
+    def pin(self, key: Hashable) -> None:
+        """
+        Pins a key in the cache preventing it from being
+        evicted in the LRU order.
+        """
+        if key not in self.cache:
+            raise ValueError(f"Cannot pin key: {key} not in cache.")
+        self.pinned_items.add(key)
+
+    def _unpin(self, key: Hashable) -> None:
+        self.pinned_items.remove(key)
+
     def _on_remove(self, key: Hashable, value: Optional[T]):
         pass
 
-    def remove_oldest(self):
+    def remove_oldest(self, remove_pinned=False):
         if not self.cache:
             return
-        key, value = self.cache.popitem(last=False)
-        self._on_remove(key, value)
+
+        if not remove_pinned:
+            # pop the oldest item in the cache that is not pinned
+            lru_key = next(
+                (key for key in self.cache if key not in self.pinned_items),
+                ALL_PINNED_SENTINEL)
+            if lru_key is ALL_PINNED_SENTINEL:
+                raise RuntimeError("All items are pinned, "
+                                   "cannot remove oldest from the cache.")
+        else:
+            lru_key = next(iter(self.cache))
+        self.pop(lru_key)
 
     def _remove_old_if_needed(self) -> None:
         while len(self.cache) > self.capacity:
@@ -119,13 +189,16 @@ class LRUCache(Generic[T]):
             default_value: Optional[T] = None) -> Optional[T]:
         run_on_remove = key in self.cache
         value: Optional[T] = self.cache.pop(key, default_value)
+        # remove from pinned items
+        if key in self.pinned_items:
+            self._unpin(key)
         if run_on_remove:
             self._on_remove(key, value)
         return value
 
     def clear(self):
         while len(self.cache) > 0:
-            self.remove_oldest()
+            self.remove_oldest(remove_pinned=True)
         self.cache.clear()
 
 
@@ -541,16 +614,6 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
-
-
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -568,6 +631,16 @@ def make_tensor_with_pad(
         assert len(blocktb) <= max_len
         padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
+
+
+def str_to_int_tuple(s: str) -> Tuple[int, ...]:
+    """Convert a string to a tuple of integers."""
+    try:
+        return tuple(map(int, s.split(",")))
+    except ValueError as e:
+        raise ValueError(
+            "String must be a series of integers separated by commas "
+            f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
 def async_tensor_h2d(
@@ -763,3 +836,61 @@ def cuda_device_count_stateless() -> int:
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
 
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+#From: https://stackoverflow.com/a/4104188/2749989
+def run_once(f):
+
+    def wrapper(*args, **kwargs) -> Any:
+        if not wrapper.has_run:  # type: ignore[attr-defined]
+            wrapper.has_run = True  # type: ignore[attr-defined]
+            return f(*args, **kwargs)
+
+    wrapper.has_run = False  # type: ignore[attr-defined]
+    return wrapper
+
+
+class FlexibleArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that allows both underscore and dash in names."""
+
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+
+        # Convert underscores to dashes and vice versa in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('_', '-'))
+            else:
+                processed_args.append(arg)
+
+        return super().parse_args(processed_args, namespace)
+
+
+def is_encoder_decoder_model_config(model_config) -> bool:
+    '''
+    Extract the HF encoder/decoder model flag from the ModelConfig instance.
+
+    Return False if model_config is None.
+    '''
+    return False if model_config is None else \
+                getattr(model_config.hf_config,
+                        "is_encoder_decoder",
+                        False)
+
+
+def is_embedding_model_config(model_config) -> bool:
+    '''
+    Extract the embedding model flag from the ModelConfig instance.
+
+    Return False if model_config is None.
+    '''
+    return False if model_config is None else \
+                model_config.embedding_mode

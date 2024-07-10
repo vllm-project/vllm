@@ -6,7 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -259,14 +259,14 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                                     head_dim))
 
     def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: ROCmFlashAttentionMetadata,
-        kv_scale: float = 1.0,
-    ) -> torch.Tensor:
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            kv_cache: torch.Tensor,
+            attn_metadata: ROCmFlashAttentionMetadata,
+            kv_scale: float = 1.0,
+            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
         Args:
@@ -278,6 +278,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and " + \
+                                      "encoder/decoder cross-attention " + \
+                                      "are not implemented for " + \
+                                      "ROCmFlashAttentionImpl")
+
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)

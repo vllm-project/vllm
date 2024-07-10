@@ -60,6 +60,7 @@ _GENERATION_MODELS = {
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
+    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
 _EMBEDDING_MODELS = {
@@ -67,7 +68,16 @@ _EMBEDDING_MODELS = {
     "BertForMaskedLM": ("bert_embedding", "BertEmbeddingModel"),
 }
 
-_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
+_CONDITIONAL_GENERATION_MODELS = {
+    "BartModel": ("bart", "BartForConditionalGeneration"),
+    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+}
+
+_MODELS = {
+    **_GENERATION_MODELS,
+    **_EMBEDDING_MODELS,
+    **_CONDITIONAL_GENERATION_MODELS
+}
 
 # Architecture -> type.
 # out of tree models
