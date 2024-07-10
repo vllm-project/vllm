@@ -41,8 +41,12 @@ start_nodes() {
             fi
         done
         GPU_DEVICES+='"'
+        if [ $node -eq 0 ]; then
+            docker run -d --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "ray start --head && tail -f /dev/null"
+        else
+            docker run -d --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "ray start --address=192.168.10.10:6379 && tail -f /dev/null"
+        fi
         # echo "Starting node$node with GPU devices: $GPU_DEVICES"
-        docker run -d --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE tail -f /dev/null
     done
 }
 
@@ -58,7 +62,7 @@ run_nodes() {
         done
         GPU_DEVICES+='"'
         echo "Running node$node with GPU devices: $GPU_DEVICES"
-        if [ $node -lt $(($NUM_NODES - 1)) ]; then
+        if [ $node -ne 0 ]; then
             docker exec -d node$node /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         else
             docker exec node$node /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
