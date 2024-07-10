@@ -77,19 +77,43 @@ struct enable_sm89_to_sm90 : Kernel {
 };
 
 /*
- * This class provides the common ScaleA and ScaleB descriptors for the
- * ScaledEpilogue and ScaledEpilogueBias classes.
+ * This class provides the common load descriptors for the
+ * ScaledEpilogue[...] classes
  */
 template <typename ElementD, typename OutputTileThreadMap>
 struct ScaledEpilogueBase {
  protected:
   using Accum = cutlass::epilogue::threadblock::VisitorAccFetch;
 
-  using ScaleA = cutlass::epilogue::threadblock::VisitorColOrScalarBroadcast<
-      OutputTileThreadMap, float, Stride<Int<1>, Int<0>, Int<0>>>;
+  template <typename T>
+  using ColOrScalarLoad =
+      cutlass::epilogue::threadblock::VisitorColOrScalarBroadcast<
+          OutputTileThreadMap, T, Stride<Int<1>, Int<0>, Int<0>>>;
 
-  using ScaleB = cutlass::epilogue::threadblock::VisitorRowOrScalarBroadcast<
-      OutputTileThreadMap, float, Stride<Int<0>, Int<1>, Int<0>>>;
+  template <typename T>
+  using RowOrScalarLoad =
+      cutlass::epilogue::threadblock::VisitorRowOrScalarBroadcast<
+          OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
+
+  template <typename T>
+  using ColLoad = cutlass::epilogue::threadblock::VisitorColBroadcast<
+      OutputTileThreadMap, T, Stride<Int<1>, Int<0>, Int<0>>>;
+
+  template <typename T>
+  using RowLoad = cutlass::epilogue::threadblock::VisitorRowBroadcast<
+      OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
+
+  template <typename Descriptor, typename T>
+  static auto args_from_tensor(torch::Tensor const& tensor) {
+    using Arguments = typename Descriptor::Arguments;
+    auto* data_ptr = static_cast<T*>(tensor.data_ptr());
+    if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<float>> ||
+                  std::is_same_v<Descriptor, RowOrScalarLoad<float>>) {
+      return Arguments{data_ptr, tensor.numel() != 1, {}};
+    } else {
+      return Arguments{data_ptr, {}};
+    }
+  }
 };
 
 /*
@@ -114,8 +138,8 @@ struct ScaledEpilogue
  private:
   using SUPER = ScaledEpilogueBase<ElementD, OutputTileThreadMap>;
   using Accum = typename SUPER::Accum;
-  using ScaleA = typename SUPER::ScaleA;
-  using ScaleB = typename SUPER::ScaleB;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
 
   using Compute0 = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiplies, float, float,
@@ -135,16 +159,11 @@ struct ScaledEpilogue
 
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales) {
-    using ScaleAArgs = typename ScaleA::Arguments;
-    using ScaleBArgs = typename ScaleB::Arguments;
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
 
-    ScaleBArgs b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
-    ScaleAArgs a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
-
-    typename EVTCompute0::Arguments evt0_compute_args{b_args};
-
-    typename EVTCompute::Arguments evt_compute_args{a_args, evt0_compute_args};
-    return evt_compute_args;
+    typename EVTCompute0::Arguments evt0_args{b_args};
+    return ArgumentType{a_args, evt0_args};
   }
 };
 
@@ -158,13 +177,13 @@ struct ScaledEpilogue
  */
 template <typename ElementD, typename OutputTileThreadMap>
 struct ScaledEpilogueBias
-    : private ScaledEpilogueBase<ElementD, OutputTileThreadMap> {
+    : protected ScaledEpilogueBase<ElementD, OutputTileThreadMap> {
  protected:
   using SUPER = ScaledEpilogueBase<ElementD, OutputTileThreadMap>;
   using Accum = typename SUPER::Accum;
-  using ScaleA = typename SUPER::ScaleA;
-  using ScaleB = typename SUPER::ScaleB;
-
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using Bias = typename SUPER::template RowLoad<ElementD>;
   using Compute0 = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiplies, float, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
@@ -176,30 +195,19 @@ struct ScaledEpilogueBias
       cutlass::multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
-  using Bias = cutlass::epilogue::threadblock::VisitorRowBroadcast<
-      OutputTileThreadMap, ElementD, Stride<Int<0>, Int<1>, Int<0>>>;
-
  public:
   using EVTCompute = cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA,
                                                              EVTCompute0, Bias>;
   using ArgumentType = typename EVTCompute::Arguments;
-
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
                                    torch::Tensor const& bias) {
-    using ScaleAArgs = typename ScaleA::Arguments;
-    using ScaleBArgs = typename ScaleB::Arguments;
-    using BiasArgs = typename Bias::Arguments;
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
 
-    ScaleBArgs b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
-    ScaleAArgs a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
-    BiasArgs bias_args{static_cast<ElementD*>(bias.data_ptr()), {}};
-
-    typename EVTCompute0::Arguments evt0_compute_args{b_args};
-
-    typename EVTCompute::Arguments evt_compute_args{a_args, evt0_compute_args,
-                                                    bias_args};
-    return evt_compute_args;
+    typename EVTCompute0::Arguments evt0_args{b_args};
+    return ArgumentType{a_args, evt0_args, bias_args};
   }
 };
 
@@ -212,13 +220,19 @@ struct ScaledEpilogueBias
  */
 template <typename ElementD, typename OutputTileThreadMap>
 struct ScaledEpilogueBiasAzp
-    : private ScaledEpilogueBias<ElementD, OutputTileThreadMap> {
+    : protected ScaledEpilogueBase<ElementD, OutputTileThreadMap> {
  private:
-  using SUPER = ScaledEpilogueBias<ElementD, OutputTileThreadMap>;
-  using ScaleA = typename SUPER::ScaleA;
-  using ScaleB = typename SUPER::ScaleB;
-  using Bias = typename SUPER::Bias;
-  using EVTCompute0 = typename SUPER::EVTCompute0;
+  using SUPER = ScaledEpilogueBase<ElementD, OutputTileThreadMap>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using Bias = typename SUPER::template RowLoad<ElementD>;
+  using Compute0 = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::threadblock::Sm80EVT<Compute0, ScaleB, Accum>;
 
   using Compute1 = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiply_add, float, float,
@@ -229,12 +243,10 @@ struct ScaledEpilogueBiasAzp
                                               Bias>;
 
   // Per-token azp term, float, already multiplied with scale_a, shape (m,1)
-  using Azp = cutlass::epilogue::threadblock::VisitorColBroadcast<
-      OutputTileThreadMap, float, Stride<Int<1>, Int<0>, Int<0>>>;
+  using Azp = typename SUPER::template ColLoad<float>;
 
   // This is the AZP adjustment term, scale_b * J * B, shape (1,n)
-  using AzpAdj = cutlass::epilogue::threadblock::VisitorRowBroadcast<
-      OutputTileThreadMap, float, Stride<Int<0>, Int<1>, Int<0>>>;
+  using AzpAdj = typename SUPER::template RowLoad<float>;
 
   // Compute the outer product of Azp and AzpAdj, and add to the scaled & biased
   // output.
@@ -254,24 +266,18 @@ struct ScaledEpilogueBiasAzp
                                    torch::Tensor const& bias,
                                    torch::Tensor const& azp,
                                    torch::Tensor const& azp_adj) {
-    using ScaleAArgs = typename ScaleA::Arguments;
-    using ScaleBArgs = typename ScaleB::Arguments;
-    using BiasArgs = typename Bias::Arguments;
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
+    auto azp_args = SUPER::template args_from_tensor<Azp, float>(azp);
+    auto azp_adj_args =
+        SUPER::template args_from_tensor<AzpAdj, float>(azp_adj);
 
-    ScaleAArgs a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
-    ScaleBArgs b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
-    BiasArgs bias_args{static_cast<ElementD*>(bias.data_ptr()), {}};
+    typename EVTCompute0::Arguments evt0_args{b_args};
+    typename EVTComputePreAzp::Arguments pre_azp_args{a_args, evt0_args,
+                                                      bias_args};
 
-    typename EVTCompute0::Arguments evt0_compute_args{b_args};
-
-    typename EVTComputePreAzp::Arguments base_args{a_args, evt0_compute_args,
-                                                   bias_args};
-
-    typename Azp::Arguments azp_args{azp.data_ptr<float>()};
-    typename AzpAdj::Arguments azp_adj_args{azp_adj.data_ptr<float>()};
-
-    ArgumentType evt_compute_args{azp_args, azp_adj_args, base_args};
-    return evt_compute_args;
+    return ArgumentType{azp_args, azp_adj_args, pre_azp_args};
   }
 };
 
