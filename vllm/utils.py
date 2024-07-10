@@ -982,10 +982,10 @@ class DeferredTensor:
         raise AttributeError(f"Attribute {name} not found")
 
     def __getitem__(self, key) -> torch.Tensor:
-        return self.layz_open_st(self.st_file).get_slice[self.name][key]
+        return self.layz_open_st(self.st_file).get_slice(self.name)[key]
 
     def materialize(self) -> torch.Tensor:
-        return self.layz_open_st(self.st_file).get_tensor[self.name]
+        return self.layz_open_st(self.st_file).get_tensor(self.name)
 
     def narrow(input, dim, start, length) -> torch.Tensor:
         # `input` is a `DeferredTensor` object
