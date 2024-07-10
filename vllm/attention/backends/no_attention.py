@@ -89,7 +89,7 @@ class NoAttentionMetadata(AttentionMetadata):
     use_cuda_graph: bool
 
     _cached_prefill_metadata: Optional["NoAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
+    _cached_decode_metadata: Optional["NoAttentionMetadata"] = None
 
     @property
     def prefill_metadata(self) -> Optional["NoAttentionMetadata"]:
@@ -125,7 +125,7 @@ class NoAttentionMetadata(AttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["FlashAttentionMetadata"]:
+    def decode_metadata(self) -> Optional["NoAttentionMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -134,7 +134,7 @@ class NoAttentionMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.seq_lens_tensor is not None
 
-        self._cached_decode_metadata = FlashAttentionMetadata(
+        self._cached_decode_metadata = NoAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,

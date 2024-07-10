@@ -443,6 +443,7 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
+        cache_grows: bool,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
@@ -452,6 +453,7 @@ class CacheConfig:
         self.swap_space_bytes = swap_space * _GB
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
+        self.cache_grows = cache_grows
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
         self._verify_args()

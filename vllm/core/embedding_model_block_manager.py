@@ -37,7 +37,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         seq: Sequence,
         num_lookahead_slots: int,
     ) -> List[Tuple[int, int]]:
-        return None  # type: ignore
+        return []
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass

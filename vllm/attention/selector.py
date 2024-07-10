@@ -35,8 +35,6 @@ def get_attn_backend(
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-    import pdb
-    pdb.set_trace()
 
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")

@@ -252,10 +252,9 @@ class LLMEngine:
             load_config=load_config,
         )
 
-        if self.model_config.get_num_attention_layers(parallel_config) == 0:
-            self.cache_config.num_gpu_blocks = 0
-            self.cache_config.num_cpu_blocks = 0 
-        elif not self.model_config.embedding_mode:
+        if not self.model_config.embedding_mode:
+            # TODO: Even for mamba, we must initialize the KV caches,
+            # Because model warmup and CUDA graphs are created here.
             self._initialize_kv_caches()
 
 
@@ -852,7 +851,7 @@ class LLMEngine:
             0].schedule()
         finished_requests_ids = self.scheduler[
             0].get_and_reset_finished_requests_ids()
-
+        
         if not scheduler_outputs.is_empty():
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,

@@ -933,7 +933,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "You can also reduce the `max_num_seqs` as needed "
                     "to decrease memory usage.")
         start_time = time.perf_counter()
-
+    
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
@@ -1410,8 +1410,9 @@ class CUDAGraphRunner:
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
-        self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
-                                                 non_blocking=True)
+        if self.backend_name != "No attention":
+            self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
+                                                     non_blocking=True)
         if self.backend_name != "flashinfer":
             self.input_buffers["seq_lens_tensor"].copy_(
                 attn_metadata.decode_metadata.seq_lens_tensor,

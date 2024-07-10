@@ -422,15 +422,19 @@ class MambaForCausalLM(nn.Module):
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
-        )
+
+        #TODO: this ends up all 0s -- we don't put anything in here when loading weights.
+        #TODO: Does mamba share weights between the lm head and embeddings?
+#        self.lm_head = ParallelLMHead(
+#            self.unpadded_vocab_size,
+#            config.hidden_size,
+#            org_num_embeddings=config.vocab_size,
+#            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+#            # We need bigger padding if using lora for kernel
+#            # compatibility
+#            if not lora_config else lora_config.lora_vocab_padding_size,
+#        )
+        self.lm_head = self.backbone.embeddings
         # Current step used indices
         self.current_indices: List[int] = []
         # Used to track and store by the Mamba cache between steps.
@@ -451,6 +455,7 @@ class MambaForCausalLM(nn.Module):
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs):
+
         if not self.mamba_cache:
             self._prepare_mamba_cache()
 
