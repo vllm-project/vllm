@@ -23,7 +23,8 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               TokenizeResponse, UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
-                                                    OpenAIServing)
+                                                    OpenAIServing,
+                                                    PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -68,11 +69,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+                 lora_modules: Optional[List[LoRAModulePath]],
+                 prompt_adapters: Optional[List[PromptAdapterPath]]):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         prompt_adapters=prompt_adapters)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -101,7 +104,12 @@ class OpenAIServingCompletion(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: List[AsyncIterator[RequestOutput]] = []
         try:
-            lora_request = self._maybe_get_lora(request)
+            adapter_type, adapter_request = self._maybe_get_adapter(request)
+            lora_request, prompt_adapter_request = None, None
+            if adapter_type == 'LoRA':
+                lora_request, prompt_adapter_request = adapter_request, None
+            elif adapter_type == 'PromptAdapter':
+                lora_request, prompt_adapter_request = None, adapter_request
             tokenizer = await self.engine.get_tokenizer(lora_request)
 
             sampling_params = request.to_sampling_params()
@@ -145,6 +153,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params,
                     f"{request_id}-{i}",
                     lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
                     trace_headers=trace_headers,
                 )
 
@@ -460,7 +469,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        lora_request = self._maybe_get_lora(request)
+        _, lora_request = self._maybe_get_adapter(request)
         tokenizer = await self.engine.get_tokenizer(lora_request)
         (input_ids, input_text) = await self._validate_prompt_and_tokenize(
             request,
@@ -478,7 +487,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        lora_request = self._maybe_get_lora(request)
+        _, lora_request = self._maybe_get_adapter(request)
         tokenizer = await self.engine.get_tokenizer(lora_request)
         (input_ids, input_text) = await self._validate_prompt_and_tokenize(
             request, tokenizer, prompt_ids=request.tokens)

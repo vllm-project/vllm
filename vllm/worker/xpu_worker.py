@@ -10,7 +10,8 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -47,6 +48,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         lora_config: Optional[LoRAConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         assert device_config.device_type == "xpu"
@@ -63,6 +65,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."

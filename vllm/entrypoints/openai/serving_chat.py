@@ -212,7 +212,7 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         try:
-            lora_request = self._maybe_get_lora(request)
+            _, lora_request = self._maybe_get_adapter(request)
             tokenizer = await self.engine.get_tokenizer(lora_request)
 
             conversation: List[ConversationMessage] = []
