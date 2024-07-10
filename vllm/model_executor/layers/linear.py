@@ -114,10 +114,37 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
+        offload_to_cpu = False
+        cpu_offload_trigger_percent = extra_weight_attrs.get(
+            'cpu_offload_trigger_percent', 1)
+
+        if cpu_offload_trigger_percent < 1:
+            device = f'cuda:{torch.cuda.current_device()}'
+            total_memory = torch.cuda.get_device_properties(
+                device).total_memory
+            allocated_memory = torch.cuda.memory_allocated(device)
+            if params_dtype.is_floating_point:
+                dtype_size = torch.finfo(params_dtype).bits // 8
+            else:
+                dtype_size = torch.iinfo(params_dtype).bits // 8
+
+            new_memory = dtype_size * sum(
+                output_partition_sizes) * input_size_per_partition
+            if (allocated_memory +
+                    new_memory) / total_memory > cpu_offload_trigger_percent:
+                offload_to_cpu = True
+
+        if offload_to_cpu:
+            weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                           input_size_per_partition,
+                                           dtype=params_dtype,
+                                           device='cpu'),
+                               requires_grad=False)
+        else:
+            weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                           input_size_per_partition,
+                                           dtype=params_dtype),
+                               requires_grad=False)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
@@ -127,10 +154,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = layer.weight
+
+        if weight.device != x.device:
+            weight = weight.to(x.device)
+
         if self.separate_bias_add:
             if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
+
         return F.linear(x, weight, bias)
 
 
@@ -153,6 +185,7 @@ class LinearBase(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        cpu_offload_trigger_percent: float = 1,
     ):
         super().__init__()
 
@@ -168,6 +201,8 @@ class LinearBase(torch.nn.Module):
                 QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self)
+
+        self.cpu_offload_trigger_percent = cpu_offload_trigger_percent
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -252,9 +287,10 @@ class ColumnParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 output_sizes: Optional[List[int]] = None):
+                 output_sizes: Optional[List[int]] = None,
+                 cpu_offload_trigger_percent: float = 1):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, cpu_offload_trigger_percent)
 
         self.gather_output = gather_output
 
@@ -279,7 +315,8 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=self.weight_loader)
+            weight_loader=self.weight_loader,
+            cpu_offload_trigger_percent=self.cpu_offload_trigger_percent)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -360,17 +397,20 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                  gather_output: bool = False,
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 cpu_offload_trigger_percent: float = 1):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
-        super().__init__(input_size=input_size,
-                         output_size=sum(output_sizes),
-                         bias=bias,
-                         gather_output=gather_output,
-                         skip_bias_add=skip_bias_add,
-                         params_dtype=params_dtype,
-                         quant_config=quant_config)
+        super().__init__(
+            input_size=input_size,
+            output_size=sum(output_sizes),
+            bias=bias,
+            gather_output=gather_output,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            cpu_offload_trigger_percent=cpu_offload_trigger_percent)
 
     def weight_loader(self,
                       param: Parameter,
@@ -500,7 +540,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                  bias: bool = True,
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 cpu_offload_trigger_percent: float = 1):
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -526,13 +567,15 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * self.head_size * tp_size,  # v_proj 
         ]
 
-        super().__init__(input_size=input_size,
-                         output_size=output_size,
-                         bias=bias,
-                         gather_output=False,
-                         skip_bias_add=skip_bias_add,
-                         params_dtype=params_dtype,
-                         quant_config=quant_config)
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            gather_output=False,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            cpu_offload_trigger_percent=cpu_offload_trigger_percent)
 
     def weight_loader(self,
                       param: Parameter,
@@ -691,9 +734,10 @@ class RowParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  reduce_results: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 cpu_offload_trigger_percent: float = 1):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, cpu_offload_trigger_percent)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
@@ -709,7 +753,8 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=self.weight_loader)
+            weight_loader=self.weight_loader,
+            cpu_offload_trigger_percent=self.cpu_offload_trigger_percent)
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")

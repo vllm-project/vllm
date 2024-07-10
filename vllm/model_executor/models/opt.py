@@ -75,18 +75,24 @@ class OPTAttention(nn.Module):
         self.head_dim = embed_dim // total_num_heads
         self.scaling = self.head_dim**-0.5
 
+        cpu_offload_trigger_percent = (
+            1 if cache_config is None else
+            cache_config.cpu_offload_trigger_percent)
+
         self.qkv_proj = QKVParallelLinear(
             embed_dim,
             self.head_dim,
             total_num_heads,
             bias=bias,
             quant_config=quant_config,
+            cpu_offload_trigger_percent=cpu_offload_trigger_percent,
         )
         self.out_proj = RowParallelLinear(
             embed_dim,
             embed_dim,
             bias=bias,
             quant_config=quant_config,
+            cpu_offload_trigger_percent=cpu_offload_trigger_percent,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,

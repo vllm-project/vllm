@@ -99,6 +99,7 @@ class EngineArgs:
     qlora_adapter_name_or_path: Optional[str] = None
 
     otlp_traces_endpoint: Optional[str] = None
+    cpu_offload_trigger_percent: float = 1
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -606,6 +607,14 @@ class EngineArgs:
             default=None,
             help='Target URL to which OpenTelemetry traces will be sent.')
 
+        parser.add_argument(
+            '--cpu-offload-trigger-percent',
+            type=float,
+            default=1,
+            help='the percentage limit of GPU memory for weights. Extra'
+            'weights are offloaded to CPU. Must be in the range [0, 1]. '
+            'Default is 1, meaning all weights are on GPU.')
+
         return parser
 
     @classmethod
@@ -633,6 +642,16 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        if not (0 <= self.cpu_offload_trigger_percent <= 1):
+            raise ValueError(
+                "cpu_offload_trigger_percent must be in the range [0, 1]")
+
+        if (self.cpu_offload_trigger_percent < 1
+                and self.quantization is not None):
+            raise ValueError("cpu_offload_trigger_percent < 1 is not "
+                             "supported with quantization.")
+
         multimodal_config = MultiModalConfig()
 
         device_config = DeviceConfig(device=self.device)
@@ -666,7 +685,8 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching)
+            enable_prefix_caching=self.enable_prefix_caching,
+            cpu_offload_trigger_percent=self.cpu_offload_trigger_percent)
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,

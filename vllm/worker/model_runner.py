@@ -185,6 +185,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
+        cpu_offload_trigger_percent: float = 1,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -197,6 +198,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
+        self.cpu_offload_trigger_percent = cpu_offload_trigger_percent
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -1325,7 +1327,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
-        if prefill_meta is None and decode_meta.use_cuda_graph:
+
+        all_weight_in_gpu = True
+        for name, param in self.model.named_parameters():
+            if not param.is_cuda:
+                all_weight_in_gpu = False
+                break
+
+        if (prefill_meta is None and decode_meta.use_cuda_graph
+                and all_weight_in_gpu):
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][

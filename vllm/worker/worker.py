@@ -50,6 +50,7 @@ class Worker(LocalOrDistributedWorkerBase):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        cpu_offload_trigger_percent: float = 1,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -217,7 +218,15 @@ class Worker(LocalOrDistributedWorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         self._init_cache_engine()
-        self._warm_up_model()
+
+        all_weight_in_gpu = True
+        for name, param in self.model_runner.model.named_parameters():
+            if not param.is_cuda:
+                all_weight_in_gpu = False
+                break
+
+        if all_weight_in_gpu:
+            self._warm_up_model()
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
