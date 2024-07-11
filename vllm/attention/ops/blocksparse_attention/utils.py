@@ -4,9 +4,9 @@
 
 from functools import lru_cache
 
+import numpy as np
 import torch
 import triton
-import numpy as np
 
 
 class csr_matrix:
