@@ -8,22 +8,32 @@ import torch
 import triton
 import numpy as np
 
-def csr_matrix(x):
+
+class csr_matrix:
     """Simple implementation of CSR matrix conversion without scipy.
     This replaced scipy.sparse.csr_matrix() previously used."""
-    rows, cols = x.shape
-    data = []
-    indices = []
-    indptr = [0]
-    
-    for i in range(rows):
-        for j in range(cols):
-            if x[i, j]:
-                data.append(1)
-                indices.append(j)
-        indptr.append(len(indices))
-    
-    return data, indices, indptr
+
+    def __init__(self, input_array):
+        if not isinstance(input_array, np.ndarray):
+            raise ValueError("Input must be a NumPy array")
+
+        self.shape = input_array.shape
+        rows, cols = self.shape
+        data = []
+        indices = []
+        indptr = [0]
+
+        for i in range(rows):
+            for j in range(cols):
+                if input_array[i, j]:
+                    data.append(input_array[i, j])
+                    indices.append(j)
+            indptr.append(len(indices))
+
+        self.data = np.array(data)
+        self.indices = np.array(indices)
+        self.indptr = np.array(indptr)
+
 
 def dense_to_crow_col(x: torch.Tensor):
     """Turning a 2D/3D torch tensor (x) to CSR rows/cols indexing.
