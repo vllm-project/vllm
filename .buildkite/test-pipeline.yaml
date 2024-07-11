@@ -89,6 +89,7 @@ steps:
   mirror_hardwares: [amd]
   commands: 
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
 - label: Entrypoints Test
