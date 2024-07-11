@@ -109,8 +109,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
         self.kv_cache_dtype = kv_cache_dtype
         self.block_size = cache_config.block_size
-        self.max_context_len_to_capture = (None if self.model_config
-                                           is not None else 0)
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
