@@ -258,6 +258,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
+
+  ops.def("rms_norm_quant(Tensor! out, Tensor input, Tensor! tmp, Tensor weight, "
+          "Tensor! scale, float epsilon) -> ()");
+  ops.impl("rms_norm_quant", torch::kCUDA, &rms_norm_quant);
+
+  ops.def("add_residual_rms_norm_quant(Tensor! out, Tensor input, Tensor! residual, "
+          "Tensor! tmp, Tensor weight, Tensor! scale, float epsilon) -> ()");
+  ops.impl("add_residual_rms_norm_quant", torch::kCUDA, &add_residual_rms_norm_quant);
+
+  ops.def("silu_and_mul_quant(Tensor! out, Tensor input, Tensor! scale, "
+          "Tensor! tmp) -> ()");
+  ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

@@ -7,6 +7,8 @@ from .fusion import pointwise_fusion
 from .utils import lazy_graph_print_tabular, lazy_module_print_readable
 
 from torch._dynamo import lookup_backend
+from .fused_rms_quant import setup_fused_rms_norm
+from .silu_mul_quant import setup_silu_mul_quant
 from torch.fx.passes.shape_prop import ShapeProp
 from typing import List, Tuple, Optional, Callable
 
@@ -78,6 +80,8 @@ class backend_class:
 
     def __init__(self, backend: Optional[str] = 'inductor'):
         self.backend = backend
+        # setup_fused_rms_norm(backend_class.cc)
+        setup_silu_mul_quant(backend_class.cc)
 
     def __call__(self, gm: torch.fx.GraphModule,
                  example_inputs: List[torch.Tensor]) -> Callable:
