@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 import torch
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
@@ -14,7 +13,7 @@ from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
-                        print_warning_once, update_environment_variables)
+                        print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup

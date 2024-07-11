@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
-from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
+from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 

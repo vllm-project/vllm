@@ -1,7 +1,7 @@
 import ray
 
 import vllm.envs as envs
-from vllm.utils import (cuda_device_count_stateless, is_hip,
+from vllm.utils import (cuda_device_count_stateless,
                         update_environment_variables)
 
 
