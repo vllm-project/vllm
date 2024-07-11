@@ -41,8 +41,10 @@ class NoBadWordsLogitsProcessor:
             last_token_id = bad_word_ids[-1]
             actual_prefix = past_tokens_ids[-prefix_length:]
             expected_prefix = bad_word_ids[:prefix_length]
-            is_match = actual_prefix == expected_prefix
 
+            assert len(actual_prefix) == len(expected_prefix)
+
+            is_match = tuple(actual_prefix) == tuple(expected_prefix)
             last_token_bias[last_token_id] += (self._SMALLEST_LOGIT if is_match
                                                else self._NEUTRAL_LOGIT)
 
