@@ -7,18 +7,6 @@
 
 
 steps:
-- label: Regression, Basic Correctness, Entrypoints test
-  fast_check: true
-  commands:
-  - pytest -v -s test_regression.py # Regression
-  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py # Basic Correctness
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
-  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
-  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-  - pytest -v -s entrypoints/llm # Entrypoints
-  - pytest -v -s entrypoints/openai
-
 - label: Async Engine, Inputs, Utils, Worker test
   fast_check: true
   commands:
@@ -54,6 +42,7 @@ steps:
 
 - label: Regression Test
   mirror_hardwares: [amd]
+  fast_check: true
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -63,6 +52,7 @@ steps:
 
 - label: Basic Correctness Test
   mirror_hardwares: [amd]
+  fast_check: true
   commands:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
@@ -138,6 +128,7 @@ steps:
   - pytest -v -s tokenization
 
 - label: Entrypoints Test
+  fast_check: true
   mirror_hardwares: [amd]
 
   commands:
