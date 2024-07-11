@@ -81,7 +81,7 @@ class backend_class:
     def __init__(self, backend: Optional[str] = 'inductor'):
         self.backend = backend
         # setup_fused_rms_norm(backend_class.cc)
-        setup_silu_mul_quant(backend_class.cc)
+        # setup_silu_mul_quant(backend_class.cc)
 
     def __call__(self, gm: torch.fx.GraphModule,
                  example_inputs: List[torch.Tensor]) -> Callable:
