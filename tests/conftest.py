@@ -363,7 +363,7 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            input_ids = inputs.input_ids
+            # input_ids = inputs.input_ids
             output = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
