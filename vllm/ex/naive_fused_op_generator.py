@@ -16,7 +16,7 @@ from .fused_op_generator_utils import compose, build_extension, is_optional_arg,
 
 from pathlib import Path
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
-from vllm.logger import init_logger  #, _default_handler
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -26,26 +26,20 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
     The NaiveFusedOpGenerator is a class that is responsible for generating a fused CUDA/C++
     operation for sequences of gx graph nodes.
 
-    Use of the class is broken up into two steps: 'make_fused_op' and 'build_ops'.
+    Use of the class is broken up into two steps: 'make_fused_op' and 'build_op'.
 
     'make_fused_op' generates the C++/CUDA code for a list of fx graph nodes and
     adds it to the current "library".  Multiple fused operations can be added to
-    the current "library" using 'make_fused_op'.  'make_fused_op' returns the
-    mangled name of the new fused operation.
+    the current "library" using 'make_fused_op'.  'make_fused_op' then calls
+    'build_op' to generate the code for the new operation.
 
-    In order to build the code for a "library", the 'build_ops' function is called.
-    'build_ops' invokes the compiler on all the code for the current "library".
+    In order to build the code for a "library", the 'build_op' function is called.
+    'build_op' invokes the compiler on all the code for the current "library".
     This code will be associated with a torch library named 'fused_ops{N}' (where
-    N is the id provided by the NaiveFusedOpGenerator class). 'build_ops' returns a map
-    of mangled op name to Callable.  Each call to 'build_ops' will generate a new
-    torch library.
+    N is the id provided by the NaiveFusedOpGenerator class). 'build_op' returns a
+    Callable.  Each call to 'build_op' will generate a new torch library.
 
     All generated code will appear in the 'torch.ops.fused_ops{N}' python namespace.
-
-    The reason this is broken up into two steps is that that the compilation costs
-    can be reduced by compiling all the operations in a single file rather than
-    multiple small files. Although currently, each operation is compiled individually
-    as it is fused.
 
     In addition to generating the CUDA/C++ code, the NaiveFusedOpGenerator also needs
     to register the schemas and meta functions for torch.compile support.
@@ -60,8 +54,11 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         self.reset_fused_op()
         self.N = NaiveFusedOpGenerator.N
 
-    # Set up the pre-amble for each "library"
     def reset_fused_op(self):
+        """
+        Set up the preamble for each "library".
+        """
+
         self.fused_op = []
         self.fused_op.append(f'#include <torch/extension.h>')
         ops_header = Path(__file__).parent.parent.parent / "csrc" / "ops.h"
@@ -79,13 +76,17 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         )
         #self.fused_op.append('namespace py = pybind11;')
 
-    # 'mangle' a python name so it can be used with C++.
-    def mangle(self, s: str, rep: str = '_P_') -> str:
+    def sanitize(self, s: str, rep: str = '_') -> str:
+        """
+        'sanitize' a python name so it can be used with C++.
+        """
         s = s.replace('.', rep)
         return s
 
-    # Perform any renames on python symbols so they can be compiled with C++
     def rename(self, s: str) -> str:
+        """
+        Perform any renames on python symbols so they can be compiled with C++
+        """
         if s == 'torch._C._nn.linear':
             # Hack to map vllm ops to the standard torch linear op.
             return 'torch::nn::functional::linear'
@@ -108,12 +109,14 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         else:
             return s.replace("_operator.", "_operator_")
 
-    # Translate getitem arguments to C++/Python ABI
     def convert_getitem_arg(self, arg: torch.fx.node.Argument) -> str:
+        """
+        Translate getitem arguments to C++/Python ABI
+        """
         if isinstance(arg, types.EllipsisType):
             return "py::ellipsis()"
         elif isinstance(arg, types.NoneType):
-            return "std::nullopt"  #"Py_None"
+            return "std::nullopt"
         elif isinstance(arg, int):
             return f"{arg}"
         elif isinstance(arg, slice):
@@ -135,8 +138,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             idx].step is not None else ""
         return f"{idx}, {start}, {stop}{step}"
 
-    # Detect simple 2d slices along a single dimension.
     def is_simple_slice(self, arg: torch.fx.node.Argument) -> str:
+        """
+        Detect simple 2d slices along a single dimension.
+        """
         if not isinstance(arg, tuple) or len(arg) != 2:
             return False
         if not ((isinstance(arg[0], types.EllipsisType)
@@ -158,13 +163,13 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             raise FusionFail(f"unsupported slice: {idx}")
 
         if self.is_simple_slice(idx):
-            call_str = f"  auto {self.mangle(n.name, '_')} = {self.mangle(str(tensor), '_')}.slice({self.convert_slice_args(idx)});"
+            call_str = f"  auto {self.sanitize(n.name)} = {self.sanitize(str(tensor))}.slice({self.convert_slice_args(idx)});"
         elif isinstance(idx, int):
-            call_str = f"  auto {self.mangle(n.name, '_')} = {self.mangle(str(tensor), '_')}[{idx}];"
+            call_str = f"  auto {self.sanitize(n.name)} = {self.sanitize(str(tensor))}[{idx}];"
         else:
             # Note: this code works but requires pybind which we don't want to use.
-            call_str = f"  auto {self.mangle(n.name, '_')} = to_tensor("
-            call_str = call_str + f"py::reinterpret_steal<py::object>(THPVariable_Wrap({self.mangle(str(tensor), '_')}))["
+            call_str = f"  auto {self.sanitize(n.name)} = to_tensor("
+            call_str = call_str + f"py::reinterpret_steal<py::object>(THPVariable_Wrap({self.sanitize(str(tensor))}))["
             call_str = call_str + f"py::make_tuple("
 
             sep = ""
@@ -176,8 +181,6 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         return call_str
 
-    # Find last use sites of all Tensor values so they can be cleaned up as
-    # early as possible.
     def last_uses(
         self, nodes: List[torch.fx.Node]
     ) -> Dict[torch.fx.Node, List[torch.fx.Node]]:
@@ -200,14 +203,13 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         return user_to_last_uses
 
-    # Generate code to delete any Tensors that are no longer needed.
     def delete_unused_values(self, user_to_last_uses,
                              user: torch.fx.Node,
                              outputs: List[torch.fx.Node]) -> str:
         """
-        Delete values after their last use. This ensures that values that are
-        not used in the remainder of the code are freed and the memory usage
-        of the code is optimal.
+        Generate code to delete values after their last use. This ensures that
+        values that are not used in the remainder of the code are freed and the
+        memory usage of the code is as good as the original python code.
         """
         if user.op == 'placeholder':
             return ''
@@ -219,21 +221,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         for n in nodes_to_delete:
             if n in outputs:
                 continue
-            to_delete_str = to_delete_str + sep + self.mangle(
-                n.name, '_') + " = torch::Tensor();"
+            to_delete_str = to_delete_str + sep + self.sanitize(
+                n.name) + " = torch::Tensor();"
         return to_delete_str
 
-    # Generate naive C++/CUDA code for a stack of fused ops.
-    #
-    # TODO
-    # - handle kwargs
-    #
-    # See https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit?pli=1#heading=h.rmcmku6fe6ug
-    #
-    # Notes:
-    # - node.meta['tensor_meta'] will have shape and dtype fields
-    # - Can be called from multiple threads/workers.
-    #
     def make_fused_op(
         self,
         op: str,
@@ -242,6 +233,19 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         nodes: List[torch.fx.Node],
         kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
     ) -> Callable:
+        """
+        Generate naive C++/CUDA code for a stack of fused ops.
+
+        TODO
+        - handle general kwargs
+
+        See https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit?pli=1#heading=h.rmcmku6fe6ug
+
+        Notes:
+        - node.meta['tensor_meta'] will have shape and dtype fields
+        - Can be called from multiple threads/workers.
+        """
+
         fns = [n.target for n in nodes]
         logger.debug(f"make_fused_op: {fns}")
 
@@ -258,8 +262,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         logger.debug(f"fused op argument types: {arg_types}")
         for i, n in enumerate(inputs):
             # Don't use const refs here so inputs can be deleted when no longer needed.
-            #cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]} const& {n}"
-            cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {n}"
+            if arg_types[i] == 'torch::Tensor':
+                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {n}"
+            else:
+                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]} const& {n}"
             sep = ", "
 
         arg_sig = generate_op_schema(inputs, outputs, nodes, kwargs)
@@ -292,12 +298,12 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 if return_type is None:
                     call_str = "  "
                 else:
-                    call_str = f"  auto {self.mangle(n.name, '_')} = "
+                    call_str = f"  auto {self.sanitize(n.name)} = "
                 first_arg = 0
                 if n.op == 'call_method':
-                    call_str = call_str + f"{self.mangle(n.args[0].name, '::')}."
+                    call_str = call_str + f"{self.sanitize(n.args[0].name, '::')}."
                     first_arg = 1
-                call_str = call_str + f"{self.mangle(fn, '::')}("
+                call_str = call_str + f"{self.sanitize(fn, '::')}("
                 sep = ''
                 for i, inp in enumerate(n.args[first_arg:]):
                     # bit of a hack for optional/empty tensor arguments
@@ -312,7 +318,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                             [str(t) for t in inp]) + "}"
                     else:
                         call_str = call_str + sep + self.rename(
-                            self.mangle(str(inp), '::'))
+                            self.sanitize(str(inp), '::'))
                     sep = ', '
 
                 # Only handle 'empty' kwargs for now
@@ -335,7 +341,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     call_str = call_str + sep + 'torch::TensorOptions()'
 
                     if dtype:
-                        call_str = call_str + f'.dtype({self.rename(self.mangle(str(dtype), "::"))})'
+                        call_str = call_str + f'.dtype({self.rename(self.sanitize(str(dtype), "::"))})'
 
                     if device:
                         if device.index:
@@ -351,9 +357,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         self.fused_op.append(f"  // {', '.join([str(extract_node_type(output)) for output in outputs])}")
         if len(outputs) == 1:
-            self.fused_op.append(f"  return {self.mangle(outputs[0].name, '_')};")
+            self.fused_op.append(f"  return {self.sanitize(outputs[0].name)};")
         else:
-            self.fused_op.append(f"  return {oc}{', '.join([self.mangle(output.name, '_') for output in outputs])}{cc};")
+            self.fused_op.append(f"  return {oc}{', '.join([self.sanitize(output.name) for output in outputs])}{cc};")
 
         self.fused_op.append('}')
         self.fused_op.append(
@@ -377,9 +383,11 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             generate_meta_function(inputs, outputs, nodes, kwargs)
         )
 
-    # Compile the code for the current "library".
-    # Note: this could fail and throw a FusionFail exception.
     def build_op(self, op: str, torch_op_name: str, sig: str, meta_fn: Callable) -> Callable:
+        """
+        Compile the code for the current "library".
+        Note: this could fail and throw a FusionFail exception.
+        """
         # prevent multiple libraries with the same name
         NaiveFusedOpGenerator.N = NaiveFusedOpGenerator.N + 1
 

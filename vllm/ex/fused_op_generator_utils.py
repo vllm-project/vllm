@@ -73,6 +73,11 @@ def arg_schema_type(n: torch.fx.Node, add_prefix: bool = False) -> str:
         # this default is a bit sketchy
         ty = "Tensor"
 
+    builtin_types = {"int":"int64_t", "float":"double"}
+
+    if add_prefix and ty in builtin_types:
+        return builtin_types[ty]
+
     return ty if not add_prefix else f"torch::{ty}"
 
 
