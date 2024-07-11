@@ -219,7 +219,7 @@ struct ScaledEpilogueBias
  * This epilogue also supports bias, which remains per-channel.
  */
 template <typename ElementD, typename OutputTileThreadMap>
-struct ScaledEpilogueBiasAzp
+struct ScaledEpilogueBiasAzpToken
     : protected ScaledEpilogueBase<ElementD, OutputTileThreadMap> {
  private:
   using SUPER = ScaledEpilogueBase<ElementD, OutputTileThreadMap>;
@@ -228,10 +228,10 @@ struct ScaledEpilogueBiasAzp
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
   using Bias = typename SUPER::template RowLoad<ElementD>;
 
-  // Per-token azp term, float, already multiplied with scale_a, shape (m,1)
+  // Per-token azp term, shape (m,1)
   using Azp = typename SUPER::template ColLoad<int32_t>;
 
-  // This is the AZP adjustment term, scale_b * J * B, shape (1,n)
+  // This is the AZP adjustment term, J @ B, shape (1,n)
   using AzpAdj = typename SUPER::template RowLoad<int32_t>;
 
   // Compute (accum + azp * azp_adj), resulting in a float
@@ -607,7 +607,7 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(azp.dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
-  return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzp>(
+  return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzpToken>(
       out, a, b, a_scales, b_scales, bias, azp, azp_adj);
 }
 
@@ -661,7 +661,7 @@ void cutlass_scaled_mm_azp_sm80(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(azp.dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
-  return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBiasAzp>(
+  return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBiasAzpToken>(
       out, a, b, a_scales, b_scales, bias, azp, azp_adj);
 }
 
@@ -742,6 +742,6 @@ void cutlass_scaled_mm_azp_sm89(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(azp.dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
-  return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzp>(
+  return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzpToken>(
       out, a, b, a_scales, b_scales, bias, azp, azp_adj);
 }
