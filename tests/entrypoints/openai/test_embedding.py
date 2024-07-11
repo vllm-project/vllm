@@ -3,22 +3,14 @@ import base64
 import numpy as np
 import openai
 import pytest
-import ray
 
-from ...utils import VLLM_PATH, RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
 
 EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def embedding_server(ray_ctx):
+def embedding_server():
     return RemoteOpenAIServer([
         "--model",
         EMBEDDING_MODEL_NAME,

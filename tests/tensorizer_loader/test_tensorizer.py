@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import openai
 import pytest
-import ray
 import torch
 from tensorizer import EncryptionParams
 
@@ -22,7 +21,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          tensorize_vllm_model)
 
 from ..conftest import VllmRunner, cleanup
-from ..utils import VLLM_PATH, RemoteOpenAIServer
+from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
 
@@ -220,8 +219,6 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
         json.dumps(model_loader_extra_config),
     ]
 
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-
     server = RemoteOpenAIServer(openai_args)
     print("Server ready.")
 
@@ -282,7 +279,6 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     base_model.model.llm_engine.model_executor.shutdown()
     del base_model
     cleanup()
-    ray.shutdown()
 
     # load model with two shards and serialize with encryption
     model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
@@ -305,7 +301,6 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
     assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
     cleanup()
-    ray.shutdown()
 
     loaded_vllm_model = vllm_runner(
         model_ref,

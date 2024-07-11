@@ -6,15 +6,12 @@ from typing import List
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import ray
 import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
 
-from ...utils import VLLM_PATH, RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -76,14 +73,7 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(zephyr_lora_files, ray_ctx):
+def server(zephyr_lora_files):
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,

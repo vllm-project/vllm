@@ -2,11 +2,8 @@ import os
 
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import ray
 
-from ..utils import VLLM_PATH, RemoteOpenAIServer
+from ..utils import RemoteOpenAIServer
 
 # downloading lora to test lora requests
 
@@ -18,6 +15,7 @@ TP_SIZE = int(os.getenv("TP_SIZE", 1))
 PP_SIZE = int(os.getenv("PP_SIZE", 1))
 
 pytestmark = pytest.mark.asyncio
+
 
 @pytest.fixture(scope="module")
 def server():
