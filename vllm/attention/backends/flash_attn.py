@@ -219,17 +219,17 @@ class FlashAttentionMetadataBuilder(
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                       token_lens: List[int], seq_lens: List[int],
-                      sliding_seq_lens: List[int], query_lens: List[int],
+                      decode_seq_lens: List[int], query_lens: List[int],
                       context_lens: List[int],
                       curr_sliding_window_blocks: List[int], prefix_cache_hit,
                       chunked_prefill_enabled):
         is_prompt = seq_group_metadata.is_prompt
         block_tables = seq_group_metadata.block_tables
 
-        for (seq_id, token_len, seq_len, sliding_seq_len, query_len,
+        for (seq_id, token_len, seq_len, decode_seq_len, query_len,
              context_len, curr_sliding_window_block) in zip(
                  seq_group_metadata.seq_data.keys(), token_lens, seq_lens,
-                 sliding_seq_lens, query_lens, context_lens,
+                 decode_seq_lens, query_lens, context_lens,
                  curr_sliding_window_blocks):
             self.context_lens.append(context_len)
 
@@ -242,7 +242,7 @@ class FlashAttentionMetadataBuilder(
                     "seq_len: {}, context_len: {}, query_len: {}".format(
                         seq_len, context_len, query_len))
                 self.num_decode_tokens += query_len
-                self.decode_seq_lens.append(sliding_seq_len)
+                self.decode_seq_lens.append(decode_seq_len)
 
             # Compute block table.
             # TODO(sang): Combine chunked prefill and prefix caching by

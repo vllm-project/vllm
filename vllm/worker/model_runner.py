@@ -252,7 +252,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         self.request_ids_to_seq_ids[seq_group_metadata.request_id] = []
         token_lens = []
-        sliding_seq_lens = []
+        decode_seq_lens = []
         context_lens = []
         curr_sliding_window_blocks = []
         orig_seq_lens = []
@@ -320,12 +320,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # the attention metadata.
             token_lens.append(len(tokens))
             context_lens.append(context_len)
-            sliding_seq_lens.append(sliding_seq_len)
+            decode_seq_lens.append(sliding_seq_len)
             curr_sliding_window_blocks.append(curr_sliding_window_block)
             orig_seq_lens.append(seq_len)
 
         self.attn_metadata_builder.add_seq_group(
-            seq_group_metadata, token_lens, orig_seq_lens, sliding_seq_lens,
+            seq_group_metadata, token_lens, orig_seq_lens, decode_seq_lens,
             self.query_lens[-n_seqs:], context_lens,
             curr_sliding_window_blocks, prefix_cache_hit,
             self.chunked_prefill_enabled)

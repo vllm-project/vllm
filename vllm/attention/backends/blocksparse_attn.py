@@ -1,24 +1,16 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataBuilder,
-                                              AttentionType)
-from vllm.attention.backends.utils import (
-    metadata_builder_add_seq_group_common, metadata_builder_build_common)
+                                              AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonMetadataBuilder
 from vllm.attention.ops.blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.sequence import SequenceGroupMetadata
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import (GPUModelRunnerBase,
-                                          ModelInputForGPUBuilder)
 
 
 @dataclass
@@ -258,40 +250,9 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
 
 
 class BlocksparseFlashAttentionMetadataBuilder(
-        AttentionMetadataBuilder[BlocksparseFlashAttentionMetadata]):
+        CommonMetadataBuilder[BlocksparseFlashAttentionMetadata]):
 
-    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
-        self.slot_mapping: List[int] = []
-        self.prefill_seq_lens: List[int] = []
-        self.context_lens: List[int] = []
-        self.block_tables: List[List[int]] = []
-        self.decode_seq_lens: List[int] = []
-        self.num_prefills = 0
-        self.num_prefill_tokens = 0
-        self.num_decode_tokens = 0
-
-        self.sliding_window = input_builder.sliding_window
-        self.block_size = input_builder.block_size
-        self.use_v2_block_manager = (
-            input_builder.scheduler_config.use_v2_block_manager)
-
-    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
-                      token_lens: List[int], seq_lens: List[int],
-                      sliding_seq_lens: List[int], query_lens: List[int],
-                      context_lens: List[int],
-                      curr_sliding_window_blocks: List[int], prefix_cache_hit,
-                      chunked_prefill_enabled):
-        metadata_builder_add_seq_group_common(
-            self, seq_group_metadata, token_lens, seq_lens, sliding_seq_lens,
-            query_lens, context_lens, curr_sliding_window_blocks,
-            prefix_cache_hit, chunked_prefill_enabled)
-
-    def build(self, runner: "GPUModelRunnerBase", seq_lens, query_lens,
-              use_captured_graph: bool, cuda_graph_pad_size: int,
-              batch_size: int):
-        return metadata_builder_build_common(
-            self, BlocksparseFlashAttentionMetadata, runner, seq_lens,
-            query_lens, use_captured_graph, cuda_graph_pad_size, batch_size)
+    _metadata_cls = BlocksparseFlashAttentionMetadata
 
 
 class BlocksparseFlashAttentionImpl(AttentionImpl):
