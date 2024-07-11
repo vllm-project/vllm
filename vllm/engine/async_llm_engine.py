@@ -293,6 +293,44 @@ class _AsyncLLMEngine(LLMEngine):
 
         return self.input_processor(llm_inputs)
 
+    async def process_model_params_async(
+        self,
+        request_id: str,
+        params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[LoRARequest] = None,
+    ) -> Union[SamplingParams, PoolingParams]:
+        if isinstance(params, PoolingParams):
+            return params
+        elif not isinstance(params, SamplingParams):
+            raise ValueError(self.INCORRECT_PARAMS_TYPE_MSG)
+
+        if params.bad_words is None:
+            return params
+
+        bad_words_ids: List[List[int]] = list()
+        tokenizer = self.get_tokenizer_group().get_lora_tokenizer(lora_request)
+
+        for bad_word in params.bad_words:
+            # To prohibit words both at the beginning and in the middle of text
+            # (related to add_prefix_space tokenizer parameter)
+            for add_prefix_space in [False, True]:
+                prefix = " " if add_prefix_space else ""
+                inputs = {"prompt": prefix + bad_word.lstrip()}
+                prompt_token_ids = await tokenizer.encode_async(
+                    text=inputs["prompt"], add_special_tokens=False)
+
+                # If no space at the beginning
+                # or if prefix space produces a new word token
+                if (not add_prefix_space) or (
+                        add_prefix_space
+                        and prompt_token_ids[0] != bad_words_ids[-1][0]
+                        and len(prompt_token_ids) == len(bad_words_ids[-1])):
+                    bad_words_ids.append(prompt_token_ids)
+
+        params._init_bad_words_logits_processor(bad_words_ids)
+
+        return params
+
     async def add_request_async(
             self,
             request_id: str,
@@ -314,11 +352,13 @@ class _AsyncLLMEngine(LLMEngine):
             inputs=inputs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request)
+        processed_params = await self.process_model_params_async(
+            request_id=request_id, params=params, lora_request=lora_request)
 
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
-            params=params,
+            params=processed_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
