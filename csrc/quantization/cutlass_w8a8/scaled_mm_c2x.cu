@@ -212,6 +212,69 @@ struct ScaledEpilogueBias
 };
 
 /*
+ * This epilogue directly supports per-tensor azp in int32 form.
+ * As opposed to the per-token epilogue below, this epilogue only has an azp_adj
+ * term, which should already be multiplied with the scalar azp.
+ *
+ * This epilogue also supports bias, which remains per-channel.
+ */
+template <typename ElementD, typename OutputTileThreadMap>
+struct ScaledEpilogueBiasAzp
+    : protected ScaledEpilogueBase<ElementD, OutputTileThreadMap> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementD, OutputTileThreadMap>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using Bias = typename SUPER::template RowLoad<ElementD>;
+
+  // This is the full AZP term, azp * J @ B, shape (1,n)
+  using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
+
+  // Compute (accum + azp_adj), resulting in a float
+  using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::plus, float, int32_t,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeAzp =
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, AzpWithAdj, Accum>;
+
+  using ComputeScaleB = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeScaleB =
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeScaleB, ScaleB,
+                                              EVTComputeAzp>;
+
+  using ComputeScaleBiasA = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiply_add, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeScaleBiasA, ScaleA,
+                                              EVTComputeScaleB, Bias>;
+
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& bias,
+                                   torch::Tensor const& azp_adj) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
+    auto azp_adj_args =
+        SUPER::template args_from_tensor<AzpWithAdj, int32_t>(azp_adj);
+
+    typename EVTComputeAzp::Arguments evt_azp_args{azp_adj_args};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_azp_args};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args};
+  }
+};
+
+/*
  * This epilogue directly supports per-token azp by materializing the correction
  * term using an outer product. If the term was precomputed, it would require
  * O(m*n) space, and this way it only requires O(m+n) space.
@@ -598,17 +661,17 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& bias,
-                                torch::Tensor const& azp,
+                                c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp.dtype() == torch::kInt32);
+  TORCH_CHECK(azp->dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
   return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzpToken>(
-      out, a, b, a_scales, b_scales, bias, azp, azp_adj);
+      out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
 }
 
 template <template <typename, typename> typename Epilogue,
@@ -652,17 +715,22 @@ void cutlass_scaled_mm_azp_sm80(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& bias,
-                                torch::Tensor const& azp,
+                                c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp.dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
-  return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBiasAzpToken>(
-      out, a, b, a_scales, b_scales, bias, azp, azp_adj);
+  if (azp) {
+    TORCH_CHECK(azp->dtype() == torch::kInt32);
+    return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBiasAzpToken>(
+        out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
+  } else {
+    return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBiasAzp>(
+        out, a, b, a_scales, b_scales, bias, azp_adj);
+  }
 }
 
 template <template <typename, typename> typename Epilogue,
@@ -733,15 +801,15 @@ void cutlass_scaled_mm_azp_sm89(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& bias,
-                                torch::Tensor const& azp,
+                                c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp.dtype() == torch::kInt32);
+  TORCH_CHECK(azp->dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
   return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzpToken>(
-      out, a, b, a_scales, b_scales, bias, azp, azp_adj);
+      out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
 }

@@ -34,7 +34,7 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& bias,
-                                torch::Tensor const& azp,
+                                c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj);
 
 void cutlass_scaled_mm_azp_sm80(torch::Tensor& c, torch::Tensor const& a,
@@ -42,7 +42,7 @@ void cutlass_scaled_mm_azp_sm80(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& bias,
-                                torch::Tensor const& azp,
+                                c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj);
 
 void cutlass_scaled_mm_azp_sm89(torch::Tensor& c, torch::Tensor const& a,
@@ -50,7 +50,7 @@ void cutlass_scaled_mm_azp_sm89(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& bias,
-                                torch::Tensor const& azp,
+                                c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj);
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
@@ -140,7 +140,8 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,
                            torch::Tensor const& b_scales,
-                           torch::Tensor const& bias, torch::Tensor const& azp,
+                           torch::Tensor const& bias,
+                           c10::optional<torch::Tensor> const& azp,
                            torch::Tensor const& azp_adj) {
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
@@ -160,11 +161,12 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
   // bias and azp_adj have n elements, azp has m elements
   TORCH_CHECK(bias.numel() == b.size(1) && bias.is_contiguous() &&
               bias.dim() == 1);
-  TORCH_CHECK(azp.numel() == a.size(0) && azp.is_contiguous() &&
-              azp.dim() == 1);
+  if (azp) {
+    TORCH_CHECK(azp->numel() == a.size(0) && azp->is_contiguous() &&
+                azp->dim() == 1);
+  }
   TORCH_CHECK(azp_adj.numel() == b.size(1) && azp_adj.is_contiguous() &&
               azp_adj.dim() == 1);
-
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
   int32_t version_num = get_sm_version_num();
   if (version_num >= 90) {
@@ -172,7 +174,8 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
 
     // Guard against compilation issues for sm90 kernels
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
-    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
+    // TODO
+    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, bias, *azp, azp_adj);
 #else
     cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
 #endif

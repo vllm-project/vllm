@@ -245,7 +245,7 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
                           scale_a: torch.Tensor,
                           scale_b: torch.Tensor,
                           out_dtype: Type[torch.dtype],
-                          azp: torch.Tensor,
+                          azp: Optional[torch.Tensor],
                           azp_adj: torch.Tensor,
                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
