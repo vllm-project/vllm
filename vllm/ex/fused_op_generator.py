@@ -20,21 +20,17 @@ class FusionFail(Exception):
 
 class FusedOpGenerator(ABC):
     """
-    The FusedOpGenerator is a class that is responsible for generating a fused CUDA/C++
+    The FusedOpGenerator is a class that is responsible for generating a fused
     operation for sequences of gx graph nodes.
-
-    Use of the class is broken up into two steps: 'make_fused_op' and 'build_ops'.
     """
 
     @abstractmethod
     def make_fused_op(
-        self, inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node], kwargs: Dict[str,
-                                                 Dict[str,
-                                                      torch.fx.node.Argument]]
-    ) -> torch.fx.node.Target:
-        raise FusionFail("no generator")
-
-    @abstractmethod
-    def build_ops(self) -> Dict[torch.fx.node.Target, Callable]:
+        self,
+        op_name: str,
+        inputs: List[torch.fx.Node],
+        outputs: List[torch.fx.Node],
+        nodes: List[torch.fx.Node],
+        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
+    ) -> Callable:
         raise FusionFail("no generator")

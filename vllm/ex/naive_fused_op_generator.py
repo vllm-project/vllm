@@ -12,7 +12,7 @@ import types
 
 from .utils import mangle_name, node_function_target, extract_node_type, argument_type_str
 from .fused_op_generator import FusionFail, FusedOpGenerator
-from .fused_op_generator_utils import compose, build_extension, is_optional_arg
+from .fused_op_generator_utils import compose, build_extension, is_optional_arg, arg_schema_type, generate_op_schema, generate_meta_function, register_op_schema, register_meta_function
 
 from pathlib import Path
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
@@ -60,13 +60,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         self.reset_fused_op()
         self.N = NaiveFusedOpGenerator.N
 
-    # Set up the pre-amble for each "library" and clear out the callables dict.
+    # Set up the pre-amble for each "library"
     def reset_fused_op(self):
-        # 'callables' is a map of mangled function name to a tuple of:
-        # (fully qualified op name, type schema, meta function)
-        # The type schema and meta function fields are used for registering
-        # with pytorch for torch.compile support.
-        self.callables = dict()
         self.fused_op = []
         self.fused_op.append(f'#include <torch/extension.h>')
         ops_header = Path(__file__).parent.parent.parent / "csrc" / "ops.h"
@@ -193,7 +188,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         user_to_last_uses: Dict[torch.fx.Node, List[torch.fx.Node]] = {}
 
         def register_last_uses(n: torch.fx.Node, user: torch.fx.Node):
-            if n not in node_to_last_use and self.arg_schema_type(n) == 'Tensor':
+            if n not in node_to_last_use and arg_schema_type(n) == 'Tensor':
                 node_to_last_use[n] = user
                 user_to_last_uses.setdefault(user, []).append(n)
 
@@ -228,20 +223,6 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 n.name, '_') + " = torch::Tensor();"
         return to_delete_str
 
-    # Get the schema or C++ type for a fused op argument.
-    def arg_schema_type(self, n: torch.fx.Node, add_prefix: bool = False) -> str:
-        if n.type is not None:
-            ty = n.type.__name__
-        elif n.meta.get('type') and n.meta.get('type').__name__ != 'FakeTensor':
-            ty = n.meta.get('type').__name__
-            if ty == 'Size':
-                return 'std::vector<int64_t> const' if add_prefix else 'int[]'
-        else:
-            # this default is a bit sketchy
-            ty = "Tensor"
-
-        return ty if not add_prefix else f"torch::{ty}"
-
     # Generate naive C++/CUDA code for a stack of fused ops.
     #
     # TODO
@@ -254,11 +235,13 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
     # - Can be called from multiple threads/workers.
     #
     def make_fused_op(
-        self, inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node], kwargs: Dict[str,
-                                                 Dict[str,
-                                                      torch.fx.node.Argument]]
-    ) -> torch.fx.node.Target:
+        self,
+        op: str,
+        inputs: List[torch.fx.Node],
+        outputs: List[torch.fx.Node],
+        nodes: List[torch.fx.Node],
+        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
+    ) -> Callable:
         fns = [n.target for n in nodes]
         logger.debug(f"make_fused_op: {fns}")
 
@@ -269,11 +252,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         user_to_last_uses = self.last_uses(inputs + nodes)
 
-        op = f"{mangle_name(nodes)}_fused"
-
         cxx_arg_sig = ''
         sep = ''
-        arg_types = [f"{self.arg_schema_type(inp, True)}" for inp in inputs]
+        arg_types = [f"{arg_schema_type(inp, True)}" for inp in inputs]
         logger.debug(f"fused op argument types: {arg_types}")
         for i, n in enumerate(inputs):
             # Don't use const refs here so inputs can be deleted when no longer needed.
@@ -281,7 +262,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {n}"
             sep = ", "
 
-        arg_sig = self.generate_op_schema(inputs, outputs, nodes, kwargs)
+        arg_sig = generate_op_schema(inputs, outputs, nodes, kwargs)
 
         oc = '{'
         cc = '}'
@@ -389,76 +370,16 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         # more robust.
         #self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) {oc} m.impl("{op}", &{op}); {cc}')
 
-        self.callables[op] = (f"torch.ops.fused_ops{self.N}.{op}", arg_sig,
-                              self.generate_meta_function(
-                                  inputs, outputs, nodes, kwargs))
-
-        return op
-
-    # The schema is (mostly) derivable from types annotations on input/output nodes.
-    def generate_op_schema(
-        self,
-        inputs: List[torch.fx.Node],
-        outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-    ):
-        sep = f"("
-        arg_sig = ""
-        for i, n in enumerate(inputs):
-            arg_type = self.mangle(self.arg_schema_type(n), '::')
-            arg_name = self.mangle(n.name, '_')
-            arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
-            sep = ", "
-
-        # TODO kwargs
-        assert len(kwargs) == 0
-
-        arg_sig = arg_sig + ") -> "
-
-        sep = "(" if len(outputs) != 1 else ""
-
-        for i, n in enumerate(outputs):
-            arg_type = self.mangle(self.arg_schema_type(n), '::')
-            arg_sig = arg_sig + sep + arg_type
-            sep = ", "
-
-        if len(outputs) != 1:
-            arg_sig = arg_sig + ")"
-
-        return arg_sig
-
-    # Generate a meta function for a fused op by composing the individual
-    # operations.
-    # TODO: this only works when the fused op is a nice "funnel", i.e. the first
-    # op takes all the inputs and chains the rest to subsequent ops.
-    # See functools.partial and inspect.signature().parameters
-    def generate_meta_function(
-        self,
-        inputs: List[torch.fx.Node],
-        outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-    ) -> Callable:
-        fns = [n.target for n in nodes]
-        return compose(*fns)
-
-    # Register schema for the given 'op' in the given 'lib'.
-    def register_op_schema(self, library: str, op: str, sig: str):
-        op = self.mangle(op, '::').replace("torch::ops::", "")
-        logger.debug(f"Registering schema for {op}: {sig}")
-        torch.library.define(f"{op}", sig)
-
-    # Register meta function the given 'op' in the given 'lib'.
-    def register_meta_function(self, library: str, op: str, meta_fn: Callable):
-        # See also: torch.library.impl_abstract(qualname, func=None, *, lib=None, _stacklevel=1)
-        op = self.mangle(op, '::').replace("torch::ops::", "")
-        logger.debug(f"Registering meta function for {op}: {str(meta_fn)}")
-        torch.library.impl(f"{op}", "Meta", func=meta_fn)
+        return self.build_op(
+            op,
+            f"torch.ops.fused_ops{self.N}.{op}",
+            arg_sig,
+            generate_meta_function(inputs, outputs, nodes, kwargs)
+        )
 
     # Compile the code for the current "library".
     # Note: this could fail and throw a FusionFail exception.
-    def build_ops(self) -> Dict[torch.fx.node.Target, Callable]:
+    def build_op(self, op: str, torch_op_name: str, sig: str, meta_fn: Callable) -> Callable:
         # prevent multiple libraries with the same name
         NaiveFusedOpGenerator.N = NaiveFusedOpGenerator.N + 1
 
@@ -469,8 +390,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             # is no way to unregister it if the build fails, so
             # we let the C++ code register it for now.
             #
-            #for k, v in self.callables.items():
-            #    self.register_op_schema(op_lib, v[0], v[1])
+            # register_op_schema(op_lib, op, sig)
 
             with tempfile.NamedTemporaryFile(
                     prefix=self.filename,
@@ -495,17 +415,13 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
             self.N = NaiveFusedOpGenerator.N
 
-            callables = dict()
-
-            for k, v in self.callables.items():
-                # TODO: there has to be a better way than eval?
-                fn = eval(v[0])
-                self.register_meta_function(op_lib, v[0], v[2])
-                callables[k] = fn
+            # TODO: there has to be a better way than eval?
+            fn = eval(torch_op_name)
+            register_meta_function(op_lib, torch_op_name, meta_fn)
 
             self.reset_fused_op()
 
-            return callables
+            return fn
 
         except Exception as ex:
             self.reset_fused_op()

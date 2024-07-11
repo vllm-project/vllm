@@ -11,7 +11,7 @@ from .code_cache import CodeCache
 from .fused_op_generator import FusionFail
 from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
-from .utils import FlowGraph, node_function_target, graph_print_tabular, SubGraph, is_call, call_method_class, lazy_graph_print_tabular
+from .utils import FlowGraph, node_function_target, graph_print_tabular, SubGraph, is_call, call_method_class, lazy_graph_print_tabular, mangle_name
 
 from torch.fx.passes.shape_prop import ShapeProp
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
@@ -41,14 +41,11 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
 
     # Lookup or create the fused operation.
     try:
-        fgen = NaiveFusedOpGenerator()
-
-        fn_key = fgen.make_fused_op(inputs, outputs, nodes_to_fuse, kwargs)
+        fn_key = f"{mangle_name(nodes_to_fuse)}_fused"
 
         def generate() -> Optional[Callable]:
-            fn_dict = fgen.build_ops()
-            assert fn_key in fn_dict
-            return fn_dict[fn_key]
+            fgen = NaiveFusedOpGenerator()
+            return fgen.make_fused_op(fn_key, inputs, outputs, nodes_to_fuse, kwargs)
 
         fn = cc.lookup_or_create(fn_key, generate)
 
@@ -57,7 +54,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
         return
 
     if fn is None:
-        logger.info(f"fusion failed previously for subgraph.")
+        logger.debug(f"fusion failed previously for subgraph.")
         return
 
     logger.debug(f"fused fn = {fn}")
