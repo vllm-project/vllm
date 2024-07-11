@@ -60,14 +60,23 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(outputs) == 1, ("Single step should only has 1 output.")
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs
+
+        # If this is the first (or only) "chunk" of the prefill, we need
+        # to prepend None to the list of prompt logprobs. The reason for this
+        # is that for N prompt tokens, the Sampler will generate N-1 total
+        # prompt logprobs during prefill since the token at idx 0 will not
+        # have a logprob associated with it.
         if prompt_logprobs is not None:
+            if not seq_group.prompt_logprobs:
+                prompt_logprobs = [None] + prompt_logprobs
+                seq_group.prompt_logprobs = []
+
             if seq_group.sampling_params.detokenize and self.detokenizer:
                 self.detokenizer.decode_prompt_logprobs_inplace(
-                    seq_group, prompt_logprobs)
-            if not seq_group.prompt_logprobs:
-                # The first prompt token's logprob is None because it doesn't
-                # have tokens that are precedent.
-                seq_group.prompt_logprobs = [None]
+                    seq_group,
+                    prompt_logprobs,
+                    position_offset=len(seq_group.prompt_logprobs))
+
             seq_group.prompt_logprobs.extend(prompt_logprobs)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
