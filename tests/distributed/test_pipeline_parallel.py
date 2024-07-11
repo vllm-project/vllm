@@ -19,16 +19,8 @@ PP_SIZE = int(os.getenv("PP_SIZE", 1))
 
 pytestmark = pytest.mark.asyncio
 
-
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(ray_ctx):
+def server():
     args = [
         "--model",
         MODEL_NAME,
