@@ -137,10 +137,11 @@ steps:
   {% endfor %}
 
   - block: "Run AMD tests"
+    key: block-amd-tests
     depends_on: ~
 
   - group: "AMD Tests"
-    depends_on: ~
+    depends_on: block-amd-tests
     steps:
     {% for step in steps %}
     {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
