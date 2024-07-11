@@ -695,12 +695,6 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
-        # If CUDA_VISIBLE_DEVICES is set on ROCm prior to vLLM init,
-        # propagate changes to HIP_VISIBLE_DEVICES (conversion handled by
-        # the update_environment_variables function)
-        if is_hip() and envs.CUDA_VISIBLE_DEVICES:
-            update_environment_variables(
-                {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
         self.rank = 0
