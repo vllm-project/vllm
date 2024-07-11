@@ -790,8 +790,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             )
 
         if self.lora_config:
-            lora_mapping = LoRAMapping(lora_index_mapping, lora_prompt_mapping,
-                                       is_prompt)
+            lora_mapping = LoRAMapping(
+                **dict(index_mapping=lora_index_mapping,
+                       prompt_mapping=lora_prompt_mapping,
+                       is_prefill=is_prompt))
         else:
             lora_mapping = None
 
@@ -1138,8 +1140,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         )
 
                     if self.lora_config:
-                        lora_mapping = LoRAMapping([0] * batch_size,
-                                                   [0] * batch_size, False)
+                        lora_mapping = LoRAMapping(
+                            **dict(index_mapping=[0] * batch_size,
+                                   prompt_mapping=[0] * batch_size,
+                                   is_prefill=False))
                         self.set_active_loras(set(), lora_mapping)
 
                     if self.prompt_adapter_config:
