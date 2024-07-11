@@ -274,6 +274,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
         # Handle sorting for activation reordering if needed.
         if self.quant_config.desc_act:
+            breakpoint()
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "g_idx", g_idx)

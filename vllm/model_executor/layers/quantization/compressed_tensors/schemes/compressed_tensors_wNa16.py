@@ -136,7 +136,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
-        layer.group_size = group_size
         layer.is_k_full = marlin_is_k_full(self.act_order, is_row_parallel)
 
 
@@ -150,7 +149,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             layer.output_size_per_partition, device)
 
         # Handle sorting for activation reordering if needed.
+        self.act_order = False
         if self.act_order:
+            breakpoint()
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.weight_g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "weight_g_idx", g_idx)
@@ -170,9 +171,10 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         # Permute scales from compressed-tensors format to marlin format.
         marlin_scales = marlin_permute_scales(
             layer.weight_scale.squeeze().t().contiguous(),
-            size_k=layer.input_size_per_partition,
+            size_k=(layer.input_size if self.act_order else
+                    layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
-            group_size=layer.group_size)
+            group_size=self.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
 
 
