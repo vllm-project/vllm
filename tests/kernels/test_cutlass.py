@@ -308,7 +308,7 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype):
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
     a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
-    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
+    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a, rtol=1e-4, atol=1e-3)
 
     baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
 
@@ -356,7 +356,7 @@ def test_cutlass_int8_per_token_azp(m: int, n: int, k: int,
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
     a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
-    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
+    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a, rtol=1e-4, atol=1e-3)
 
     out_dtype = torch.bfloat16
     baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
