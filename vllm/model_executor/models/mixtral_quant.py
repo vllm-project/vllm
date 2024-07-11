@@ -473,6 +473,7 @@ class MixtralForCausalLM(nn.Module):
             if attn_metadata.is_prompt:
                 if self.trace_first is None:
                     self.enable_jit(input_ids, positions, kv_caches, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens)
+                    print("RUNTIME INFO: Optimization is enabled for first token!")
                 hidden_states = self.trace_first(
                     input_ids,
                     positions,
@@ -482,6 +483,7 @@ class MixtralForCausalLM(nn.Module):
             else:
                 if self.trace_next is None:
                     self.enable_jit(input_ids, positions, kv_caches, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len)
+                    print("RUNTIME INFO: Optimization is enabled for next token!")
                 hidden_states = self.trace_next(
                     input_ids,
                     positions,
