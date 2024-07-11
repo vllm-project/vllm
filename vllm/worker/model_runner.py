@@ -251,11 +251,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.flashinfer_prefill_workspace_buffer = None
         self.flashinfer_prefill_wrapper = None
 
-        self.flashinfer_decode_workspace_buffer = None
-        self.flashinfer_decode_wrapper = None
-        self.flashinfer_prefill_workspace_buffer = None
-        self.flashinfer_prefill_wrapper = None
-
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(model_config=self.model_config,
@@ -954,11 +949,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
-
-    def pin_lora(self, lora_id: int) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         if not self.lora_manager:

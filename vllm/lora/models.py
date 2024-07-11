@@ -536,12 +536,6 @@ class LoRAModelManager(AdapterModelManager):
             "Pinning is not supported in LoRAModelManager."
             "Use LRUCacheLoRAModelManager for pinning")  # type: ignore
 
-    def pin_lora(self, lora_id: int) -> bool:
-        """Pin a LoRAModel in the manager cache."""
-        raise NotImplementedError(
-            "Pinning is not supported in LoRAModelManager."
-            "Use LRUCacheLoRAModelManager for pinning")  # type: ignore
-
     # TODO see if this can be vectorized
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         (base_indices, sampler_indices, sampler_indices_padded,
