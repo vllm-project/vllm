@@ -7,8 +7,8 @@ from prometheus_client import REGISTRY
 from vllm import EngineArgs, LLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.sampling_params import SamplingParams
 from vllm.engine.metrics import RayPrometheusStatLogger
+from vllm.sampling_params import SamplingParams
 
 MODELS = [
     "facebook/opt-125m",
