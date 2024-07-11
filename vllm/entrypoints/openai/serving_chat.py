@@ -96,7 +96,8 @@ class OpenAIServingChat(OpenAIServing):
         return resolved_chat_template
 
     @lru_cache(maxsize=32)  # noqa: B019
-    def image_token_str(self, tokenizer: PreTrainedTokenizer) -> Optional[str]:
+    def get_image_token_str(self,
+                            tokenizer: PreTrainedTokenizer) -> Optional[str]:
         # TODO: Let user specify how to insert image tokens into prompt
         # (similar to chat template)
         model_type = self.model_config.hf_config.model_type
@@ -111,8 +112,7 @@ class OpenAIServingChat(OpenAIServing):
             return tokenizer.decode(
                 self.model_config.hf_config.image_token_index)
 
-        else:
-            raise TypeError("Unknown model type: {model_type}")
+        raise TypeError("Unknown model type: {model_type}")
 
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
@@ -160,7 +160,7 @@ class OpenAIServingChat(OpenAIServing):
         text_prompt = "\n".join(texts)
 
         if mm_futures:
-            image_token_str = self.image_token_str(tokenizer)
+            image_token_str = self.get_image_token_str(tokenizer)
             if image_token_str is not None:
                 if image_token_str in text_prompt:
                     logger.warning(
@@ -229,15 +229,13 @@ class OpenAIServingChat(OpenAIServing):
                 tool.model_dump() for tool in request.tools
             ]
 
-            if self.chat_template is not None:
-                tokenizer.chat_template = self.chat_template
             prompt = tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
                 tools=tool_dicts,
                 documents=request.documents,
-                chat_template=request.chat_template,
+                chat_template=request.chat_template or self.chat_template,
                 **(request.chat_template_kwargs or {}),
             )
         except Exception as e:

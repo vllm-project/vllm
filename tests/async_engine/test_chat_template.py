@@ -1,6 +1,5 @@
 import os
 import pathlib
-from dataclasses import dataclass
 
 import pytest
 
@@ -50,16 +49,6 @@ TEST_MESSAGES = [
 ]
 
 
-@dataclass
-class MockTokenizer:
-    chat_template = None
-
-
-@dataclass
-class MockServingChat:
-    tokenizer: MockTokenizer
-
-
 def test_load_chat_template():
     # Testing chatml template
     template_content = OpenAIServingChat._load_chat_template(
@@ -107,12 +96,11 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         add_generation_prompt=add_generation_prompt)
 
     # Call the function and get the result
-    if template_content is not None:
-        tokenizer.chat_template = template_content
     result = tokenizer.apply_chat_template(
         conversation=mock_request.messages,
         tokenize=False,
-        add_generation_prompt=mock_request.add_generation_prompt)
+        add_generation_prompt=mock_request.add_generation_prompt,
+        chat_template=mock_request.chat_template or template_content)
 
     # Test assertion
     assert result == expected_output, (
