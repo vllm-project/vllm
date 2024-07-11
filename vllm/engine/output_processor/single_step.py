@@ -117,7 +117,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             last_child_sample = child_samples[-1]
 
             # if output_tokens more than one, it's has multi-head output
-            if len(child_sample.output_tokens) > 1:
+            if len(last_child_sample.output_tokens) > 1:
                 parent.append_token_id(last_child_sample.output_tokens,
                                        last_child_sample.logprobs)
             else:

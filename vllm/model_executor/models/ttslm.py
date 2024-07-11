@@ -16,6 +16,8 @@ from vllm.model_executor.layers.multi_heads_sampler import MultiheadsSampler
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.speech import SpeechPlugin
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
@@ -29,10 +31,11 @@ def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int):
 
 
     dummy_seq_data = SequenceData([[0] * ctx.model_config.hf_config.num_output_head] * seq_len)
-    dummy_multi_modal_data = None
+    dummy_multi_modal_data = {"speech": SpeechPlugin.sample_random_speaker()}
 
     return dummy_seq_data, dummy_multi_modal_data
 
+@MULTIMODAL_REGISTRY.register_speech_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_ttsllm)
 class ChatTtsLlm(nn.Module):
     def __init__(self,
@@ -47,6 +50,7 @@ class ChatTtsLlm(nn.Module):
         self.num_audio_tokens = 626
         self.num_text_tokens = 21178
         self.num_vq = 4
+        self.spk_emb_token_id = 21143
 
         self.gpt = LlamaModel(config)
         self.model_dim = self.gpt.config.hidden_size
@@ -111,6 +115,15 @@ class ChatTtsLlm(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
+        for output in next_tokens.outputs:
+            for sample in output.samples:
+                sample.output_token += self.num_text_tokens
+                for i in range(self.num_vq):
+                    sample.output_tokens[i] += self.num_text_tokens
+                dic = {}
+                for k,v in sample.logprobs.items():
+                    dic[k + self.num_text_tokens] = v
+                sample.logprobs = dic
         return next_tokens
 
     def forward(
@@ -121,8 +134,12 @@ class ChatTtsLlm(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.get_input_embeddings(input_ids)
+        spk_emb = kwargs.pop("speech", None)
+        if spk_emb is not None:
+            self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
         model_output = self.gpt(
             input_ids=input_ids,
             inputs_embeds=hidden_states,
@@ -133,39 +150,13 @@ class ChatTtsLlm(nn.Module):
         )
         return model_output
 
-    @staticmethod
-    def _decode_spk_emb(spk_emb: str) -> np.ndarray:
-        return np.frombuffer(
-            lzma.decompress(
-                b14.decode_from_string(spk_emb),
-                format=lzma.FORMAT_RAW,
-                filters=[{"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME}],
-            ),
-            dtype=np.float16,
-        ).copy()
-
-    def _apply_spk_emb(
+    def apply_spk_emb(
         self,
         emb: torch.Tensor,
-        spk_emb: str,
+        spk_emb: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         input_ids: torch.Tensor,
     ):
-        n = (
-            F.normalize(
-                torch.from_numpy(
-                    self._decode_spk_emb(spk_emb),
-                ),
-                p=2.0,
-                dim=0,
-                eps=1e-12,
-            )
-            .unsqueeze_(0)
-            .expand(emb.size(0), -1)
-            .unsqueeze_(1)
-            .expand(emb.shape)
-        )
-        cond = (
-            input_ids.narrow(-1, 0, 1).eq(self.tokenizer_spk_emb_ids).expand(emb.shape)
-        )
-        torch.where(cond, n, emb, out=emb)
-        del cond, n
+        assert emb.size(1) == spk_emb.size(1)
+        assert attn_metadata.seq_lens_tensor.size(0) == spk_emb.size(0)
+        pass

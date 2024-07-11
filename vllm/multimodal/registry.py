@@ -5,6 +5,7 @@ import torch
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
+from vllm.multimodal.speech import SpeechPlugin
 
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
                    MultiModalPlugin, MultiModalTokensCalc)
@@ -21,7 +22,7 @@ class MultiModalRegistry:
     The registry handles both external and internal data input.
     """
 
-    DEFAULT_PLUGINS = (ImagePlugin(), )
+    DEFAULT_PLUGINS = (ImagePlugin(), SpeechPlugin())
 
     def __init__(
             self,
@@ -70,6 +71,17 @@ class MultiModalRegistry:
         See :meth:`MultiModalPlugin.register_input_mapper` for more details.
         """
         return self.register_input_mapper("image", mapper)
+    
+    def register_speech_input_mapper(
+        self,
+        mapper: Optional[MultiModalInputMapper] = None,
+    ):
+        """
+        Register an input mapper for image data to a model class.
+
+        See :meth:`MultiModalPlugin.register_input_mapper` for more details.
+        """
+        return self.register_input_mapper("speech", mapper)
 
     def map_input(self, model_config: ModelConfig,
                   data: MultiModalDataDict) -> MultiModalInputs:
