@@ -80,6 +80,7 @@ class CudaRTLibrary:
             assert torch.version.cuda is not None
             major_version = torch.version.cuda.split(".")[0]
             so_file = f"libcudart.so.{major_version}"
+            so_file = so_file + ".0" if major_version == "11" else so_file
         if so_file not in CudaRTLibrary.path_to_library_cache:
             lib = ctypes.CDLL(so_file)
             CudaRTLibrary.path_to_library_cache[so_file] = lib
