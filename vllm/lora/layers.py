@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.adapter_commons.layers import AdapterMapping
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -135,8 +134,15 @@ def _apply_lora_packed_nslice(
 
 
 @dataclass
-class LoRAMapping(AdapterMapping):
-    pass
+class LoRAMapping:
+    # Per every token in input_ids:
+    index_mapping: Tuple[int, ...]
+    # Per sampled token:
+    prompt_mapping: Tuple[int, ...]
+
+    def __post_init__(self):
+        self.index_mapping = tuple(self.index_mapping)
+        self.prompt_mapping = tuple(self.prompt_mapping)
 
 
 class BaseLayerWithLoRA(nn.Module):

@@ -126,9 +126,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                                                   bias=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # NOTE: hidden_states can have either 1D or 2D shape.
-        orig_shape = hidden_states.shape
-        hidden_dim = hidden_states.shape[-1]
+        num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         shared_output = None
         if self.shared_expert is not None:
@@ -147,7 +145,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        return final_hidden_states.view(orig_shape)
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class Qwen2MoeAttention(nn.Module):

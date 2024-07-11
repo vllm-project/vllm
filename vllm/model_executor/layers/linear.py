@@ -387,7 +387,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                if needs_scalar_to_array:
+                if needs_scalar_to_array is not None:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
 
@@ -549,7 +549,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                if needs_scalar_to_array:
+                if needs_scalar_to_array is not None:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
 
@@ -743,6 +743,7 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
+        # Set up backprop all-reduce.
         if self.input_is_parallel:
             input_parallel = input_
         else:

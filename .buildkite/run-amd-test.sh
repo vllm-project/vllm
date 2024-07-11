@@ -3,7 +3,7 @@ set -ex
 
 # Print ROCm version
 echo "--- ROCm info"
-# rocminfo
+rocminfo
 
 # cleanup older docker images
 cleanup_docker() {
