@@ -22,7 +22,7 @@ class NoBadWordsLogitsProcessor:
 
     def __call__(
         self,
-        past_tokens_ids: Tuple[int],
+        past_tokens_ids: Union[List[int], Tuple[int]],
         logits: torch.FloatTensor,
     ) -> torch.Tensor:
         if self.word_bias is None:
