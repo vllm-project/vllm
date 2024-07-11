@@ -364,6 +364,7 @@ class HabanaModelRunner:
 
         # Profiler stats
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
+        self.seen_configs = set()
 
         self._setup_buckets()
 
@@ -897,6 +898,14 @@ class HabanaModelRunner:
         import habana_quantization_toolkit
         habana_quantization_toolkit.finish_measurements(self.model.model)
 
+    def _check_config(self, batch_size, seq_len, is_prompt, warmup_mode):
+        cfg = (batch_size, seq_len, is_prompt)
+        seen = cfg in self.seen_configs
+        self.seen_configs.add(cfg)
+        if not seen and not warmup_mode:
+            phase = 'prompt' if is_prompt else 'decode'
+            logger.warning(f'Configuration: ({phase}, {batch_size}, {seq_len}) was not warmed-up!')
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -928,6 +937,7 @@ class HabanaModelRunner:
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
+        self._check_config(batch_size, seq_len, is_prompt, warmup_mode)
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
@@ -937,7 +947,7 @@ class HabanaModelRunner:
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
         if htorch.utils.internal.is_lazy():
-            execute_model_kwargs.update({"bypass_hpu_graphs":not use_graphs, "warmup_mode":warmup_mode})
+            execute_model_kwargs.update({"bypass_hpu_graphs":not use_graphs})
         htorch.core.mark_step()
         # Sample the next token based on previous logits if any.
         if self.scheduler_config.enable_delayed_sampling and not is_prompt:
@@ -1109,7 +1119,7 @@ class HabanaModelRunner:
             profiler.start()
         self.profiler.start('internal', scenario_name)
         for _ in range(times):
-            self.execute_model(seqs, kv_caches, warmup_mode=False)
+            self.execute_model(seqs, kv_caches, warmup_mode=True)
             torch.hpu.synchronize()
             if profiler:
                 profiler.step()
