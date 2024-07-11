@@ -8,7 +8,7 @@ import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         MultiModalConfig, ParallelConfig, SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -31,7 +31,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -39,11 +39,12 @@ class TPUWorker(LoraNotSupportedWorkerBase):
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -62,7 +63,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
                                            device_config,
                                            cache_config,
                                            load_config,
-                                           vision_language_config,
+                                           multimodal_config,
                                            is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:
