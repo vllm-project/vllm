@@ -214,8 +214,11 @@ class RayXPUExecutor(DistributedGPUExecutor):
             max_parallel_loading_workers,
         )
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         draft_num_gpu_blocks=None,
+                         draft_num_cpu_blocks=None) -> None:
         """Initialize the KV cache in all workers.
         """
 
