@@ -3,13 +3,12 @@ from PIL import Image
 from vllm import LLM, SamplingParams
 
 IMAGES = [
-    "/data1/hezhihui/vllm/examples/images/example.png",
-    "/data1/hezhihui/vllm/examples/images/375.jpg"
+    "./example.png",
 ]
 
-MODEL_NAME = "/data1/hezhihui/projects/MiniCPM-V-2_eval"
+MODEL_NAME = "openbmb/MiniCPM-V-2"
 
-image = Image.open(IMAGES[1]).convert("RGB")
+image = Image.open(IMAGES[0]).convert("RGB")
 
 llm = LLM(model=MODEL_NAME,
           gpu_memory_utilization=0.75,

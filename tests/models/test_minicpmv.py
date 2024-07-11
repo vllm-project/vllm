@@ -22,7 +22,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<用户>(<image>./</image>)What's in this image?<AI>"
 })
 
-models = ["/data1/hezhihui/openbmb/MiniCPM-V-2"]
+models = ["openbmb/MiniCPM-V-2"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
