@@ -753,18 +753,23 @@ class RowParallelLinear(LinearBase):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_parallel)
+        bias_ = None if (self.tp_size > 1 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
         if self.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
 
-        if not self.skip_bias_add:
-            output = output_ + self.bias if self.bias is not None else output_
-            output_bias = None
+        if (not self.skip_bias_add and self.bias is not None
+                and self.tp_size > 1):
+            output = output_ + self.bias
         else:
             output = output_
-            output_bias = self.bias
+
+        output_bias = self.bias if not self.skip_bias_add else None
+
         return output, output_bias
 
     def extra_repr(self) -> str:
