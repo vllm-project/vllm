@@ -7,7 +7,8 @@ import torch.distributed
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SpeculativeConfig, PromptAdapterConfig, SchedulerConfig)
+                         SpeculativeConfig, PromptAdapterConfig,
+                         SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
