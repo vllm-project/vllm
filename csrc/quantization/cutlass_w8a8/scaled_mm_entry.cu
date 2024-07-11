@@ -175,7 +175,8 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
     // Guard against compilation issues for sm90 kernels
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
     // TODO
-    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, bias, *azp, azp_adj);
+    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, bias, *azp,
+                               azp_adj);
 #else
     cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
 #endif
