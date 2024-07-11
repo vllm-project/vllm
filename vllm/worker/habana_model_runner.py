@@ -681,7 +681,7 @@ class HabanaModelRunner:
         block_mapping = [[i] * bu for i, bu in enumerate(blocks_used)]
         block_mapping = list(itertools.chain(*block_mapping))
 
-        last_block = [sl % self.block_size for sl in itertools.chain(*slot_mapping)]
+        last_block = [sl % self.block_size + 1 for sl in itertools.chain(*slot_mapping)]
         block_usage = [[self.block_size] * (bu - 1) + [lb] for bu, lb in zip(blocks_used, last_block)]
         block_usage = list(itertools.chain(*block_usage))
 
