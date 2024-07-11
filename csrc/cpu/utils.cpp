@@ -28,10 +28,8 @@ void init_cpu_threads_env(const std::string& cpu_ids) {
   // Memory node binding
   if (numa_available() != -1) {
     int mem_node_id = numa_node_of_cpu(omp_cpu_ids.front());
-
     bitmask* mask = numa_parse_nodestring(std::to_string(mem_node_id).c_str());
     bitmask* src_mask = numa_get_membind();
-    TORCH_CHECK_LE(numa_max_node(), 64);
 
     int pid = getpid();
 
@@ -46,36 +44,22 @@ void init_cpu_threads_env(const std::string& cpu_ids) {
     // restrict memory allocation node.
     numa_set_membind(mask);
     numa_set_strict(1);
-
-    bitmask* cpu_mask = numa_allocate_cpumask();
-    if (0 != numa_node_to_cpus(mem_node_id, cpu_mask)) {
-      TORCH_CHECK(false,
-                  "numa_node_to_cpus failed. errno: " + std::to_string(errno));
-    }
-
-    // bind all threads to cpu cores of specified node
-    if (0 != numa_sched_setaffinity(pid, cpu_mask)) {
-      TORCH_CHECK(false, "numa_sched_setaffinity failed. errno: " +
-                             std::to_string(errno));
-    }
-
-    numa_free_nodemask(mask);
-    numa_free_nodemask(src_mask);
-    numa_free_nodemask(cpu_mask);
   }
 
   // OMP threads binding
-  at::set_num_threads((int)omp_cpu_ids.size());
-  omp_set_num_threads((int)omp_cpu_ids.size());
-#pragma omp parallel for schedule(static, 1)
-  for (size_t i = 0; i < omp_cpu_ids.size(); ++i) {
-    cpu_set_t* mask = CPU_ALLOC(omp_cpu_mask->size);
-    size_t size = CPU_ALLOC_SIZE(omp_cpu_mask->size);
-    CPU_ZERO_S(size, mask);
-    CPU_SET_S(omp_cpu_ids[i], size, mask);
-    sched_setaffinity(0, sizeof(cpu_set_t), mask);
-    CPU_FREE(mask);
-  }
+    omp_set_num_threads((int)omp_cpu_ids.size());
+    torch::set_num_threads((int)omp_cpu_ids.size());
+    TORCH_CHECK_EQ(omp_cpu_ids.size(), torch::get_num_threads());
+    TORCH_CHECK_EQ(omp_cpu_ids.size(), omp_get_max_threads());
+  #pragma omp parallel for schedule(static, 1)
+    for (size_t i = 0; i < omp_cpu_ids.size(); ++i) {
+      cpu_set_t* mask = CPU_ALLOC(omp_cpu_mask->size);
+      size_t size = CPU_ALLOC_SIZE(omp_cpu_mask->size);
+      CPU_ZERO_S(size, mask);
+      CPU_SET_S(omp_cpu_ids[i], size, mask);
+      sched_setaffinity(0, sizeof(cpu_set_t), mask);
+      CPU_FREE(mask);
+    }
 
   numa_free_nodemask(omp_cpu_mask);
 }
