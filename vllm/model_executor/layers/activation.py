@@ -23,17 +23,10 @@ class SiluAndMul(nn.Module):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        ops.silu_and_mul(out, x)
-        return out
 
 
 class GeluAndMul(nn.Module):
