@@ -289,17 +289,10 @@ __global__ void Marlin_24(
   }
 
   int s_sh_wr = threadIdx.x;
-  int s_sh_rd;
-  // We use a different scale layout for grouped and column-wise quantization as
-  // we scale a `half2` tile in column-major layout in the former and in
-  // row-major in the latter case.
-  if (group_blocks != -1) {
-    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+
+  // Sparse marlin computes grouped and column-wise quantization the same way
+  int s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
               (threadIdx.x % 32) / 4;
-  } else {
-    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
-              (threadIdx.x % 32) / 4;
-  }
 
   // Precompute which thread should not read memory in which iterations; this is
   // needed if there are more threads than required for a certain tilesize or
