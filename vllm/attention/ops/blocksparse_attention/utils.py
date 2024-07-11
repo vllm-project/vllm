@@ -6,15 +6,24 @@ from functools import lru_cache
 
 import torch
 import triton
+import numpy as np
 
-try:
-    from scipy import sparse
-except ImportError as err:
-    raise ImportError("Please install scipy via "
-                      "`pip install scipy` to use "
-                      "BlockSparseAttention in "
-                      "models such as Phi-3.") from err
-
+def csr_matrix(x):
+    """Simple implementation of CSR matrix conversion without scipy.
+    This replaced scipy.sparse.csr_matrix() previously used."""
+    rows, cols = x.shape
+    data = []
+    indices = []
+    indptr = [0]
+    
+    for i in range(rows):
+        for j in range(cols):
+            if x[i, j]:
+                data.append(1)
+                indices.append(j)
+        indptr.append(len(indices))
+    
+    return data, indices, indptr
 
 def dense_to_crow_col(x: torch.Tensor):
     """Turning a 2D/3D torch tensor (x) to CSR rows/cols indexing.
@@ -26,7 +35,7 @@ def dense_to_crow_col(x: torch.Tensor):
     assert x.dim() in (2, 3)
     if x.dim() == 2:
         x = x[None]
-    x = [sparse.csr_matrix(xi.bool().cpu().numpy()) for xi in x]
+    x = [csr_matrix(xi.bool().cpu().numpy()) for xi in x]
     crows = torch.vstack([torch.from_numpy(xi.indptr) for xi in x])
     cols = [torch.from_numpy(xi.indices) for xi in x]
     max_cols = max(len(xi) for xi in cols)
