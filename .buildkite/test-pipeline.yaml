@@ -87,7 +87,9 @@ steps:
 
 - label: Engine Test
   mirror_hardwares: [amd]
-  command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
+  commands: 
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  - pytest -v -s tokenization
 
 - label: Entrypoints Test
   mirror_hardwares: [amd]
