@@ -39,7 +39,7 @@ class MultiheadsSampler(nn.Module):
         head_logits = logits.permute(1, 0, 2)
         output0 = self.heads[0](head_logits[0], sampling_metadata)
         for i in range(self.num_heads - 1):
-            output = self.heads[i + 1](head_logits[i], sampling_metadata)
+            output = self.heads[i + 1](head_logits[i + 1], sampling_metadata)
             self.merge_sample_results(output0, output)
 
         return output0
