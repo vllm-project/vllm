@@ -203,5 +203,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
+# https://docs.docker.com/reference/dockerfile/#healthcheck
+# https://hub.docker.com/r/willfarrell/autoheal/
+HEALTHCHECK --interval=5m --timeout=10s \
+ CMD curl -f http://localhost/health || exit 1
+
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
