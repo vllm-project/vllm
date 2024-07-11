@@ -330,6 +330,7 @@ class GPTJForCausalLM(nn.Module):
                 self.trace_first(*example_input)
                 self.trace_first(*example_input)
         else:
+                self.transformer(input_ids, positions, kv_caches, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len)
                 example_input = (
                     input_ids,
                     positions,

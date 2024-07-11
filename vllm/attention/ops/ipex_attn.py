@@ -4,6 +4,32 @@ import intel_extension_for_pytorch.llm.modules as ipex_modules
 import torch
 
 from vllm import _custom_ops as ops
+@torch.library.impl("myops::_single_query_cached_kv_attention", "cpu")
+def _single_query_cached_kv_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    head_mapping: torch.Tensor,
+    scale: float,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_size: int,
+    max_context_len: torch.Tensor,
+    alibi_slopes: Optional[torch.Tensor]):
+
+    ipex_modules.PagedAttention.single_query_cached_kv_attention(
+        output, query, key_cache, value_cache, head_mapping,
+        scale, block_tables, context_lens, block_size, max_context_len.contiguous().item(),
+        alibi_slopes)
+
+    return output
+
+torch.library.define(
+    "myops::_single_query_cached_kv_attention",
+    "(Tensor output, Tensor query, Tensor key_cache, Tensor value_cache, "
+    + " Tensor head_mapping, float scale, Tensor block_tables, Tensor context_lens, int block_size, Tensor max_context_len, Tensor? alibi_slopes) -> (Tensor)",
+)
 
 
 class PagedAttention:
@@ -76,9 +102,10 @@ class PagedAttention:
             dtype=torch.int32,
         ).view(num_kv_heads,
                1).repeat_interleave(query.size(1) // num_kv_heads).flatten()
-        ipex_modules.PagedAttention.single_query_cached_kv_attention(
+        # ipex_modules.PagedAttention.single_query_cached_kv_attention(
+        torch.ops.myops._single_query_cached_kv_attention(
             output, query.contiguous(), key_cache, value_cache, head_mapping,
-            scale, block_tables, context_lens, block_size, max_context_len,
+            scale, block_tables, context_lens, block_size, max_context_len.contiguous(),
             alibi_slopes)
 
         return output
