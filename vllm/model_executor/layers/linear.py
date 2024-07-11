@@ -743,7 +743,6 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
-        # Set up backprop all-reduce.
         if self.input_is_parallel:
             input_parallel = input_
         else:
