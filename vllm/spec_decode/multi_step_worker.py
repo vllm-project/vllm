@@ -171,7 +171,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 outputs=[
                     expanded_batch_output.outputs[i]
                     for i in output_indices_to_retain
-                ],
+                ] if len(expanded_batch_output.outputs) > 0 else [],
                 sampled_token_probs=(
                     expanded_batch_output.
                     sampled_token_probs[output_indices_to_retain]
