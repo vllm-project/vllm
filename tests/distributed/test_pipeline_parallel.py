@@ -50,7 +50,10 @@ def server(ray_ctx):
         args += [
             "--enforce-eager",
         ]
-    return RemoteOpenAIServer(args, num_gpus=PP_SIZE * TP_SIZE)
+    # NOTE: ray cannot allocate one actor with multiple GPUs across nodes.
+    # we just tell ray to use 0 GPUs here, so that the actor can be launched.
+    # the process itself will launch the server with the correct number of GPUs.
+    return RemoteOpenAIServer(args, num_gpus=0)
 
 
 @pytest.fixture(scope="module")
