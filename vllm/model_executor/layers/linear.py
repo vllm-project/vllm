@@ -768,7 +768,7 @@ class RowParallelLinear(LinearBase):
         else:
             output = output_
 
-        output_bias = self.bias if not self.skip_bias_add else None
+        output_bias = self.bias if self.skip_bias_add else None
 
         return output, output_bias
 
