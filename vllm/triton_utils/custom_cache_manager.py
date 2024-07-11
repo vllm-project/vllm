@@ -23,6 +23,10 @@ class CustomCacheManager(FileCacheManager):
     unique cache directory is created for each process. This is
     needed to avoid collisions when running with tp>1 and
     using multi-processing as the distributed backend.
+
+    Note this issue was fixed by triton-lang/triton/pull/4295,
+    but the fix is not yet included in triton==v3.0.0. However,
+    it should be included in the subsequent version.
     """
 
     def __init__(self, key, override=False, dump=False):
