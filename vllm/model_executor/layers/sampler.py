@@ -47,6 +47,23 @@ class Sampler(nn.Module):
         # speculative decoding.
         self.include_gpu_probs_tensor = False
 
+    def _init_sampling_tensors(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ):
+        assert logits is not None
+        _, vocab_size = logits.shape
+
+        (sampling_tensors, do_penalties, do_top_p_top_k,
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
+
+        self._sampling_tensors = sampling_tensors
+        self._do_penalties = do_penalties
+        self._do_top_p_top_k = do_top_p_top_k
+        self._do_min_p = do_min_p
+
     def forward(
         self,
         logits: torch.Tensor,
@@ -61,12 +78,21 @@ class Sampler(nn.Module):
         _, vocab_size = logits.shape
 
         # Prepare sampling tensors with pinned memory to avoid blocking.
-        (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p) = SamplingTensors.from_sampling_metadata(
-             sampling_metadata, vocab_size, logits.device, logits.dtype)
+        if not sampling_metadata.reuse_sampling_tensors:
+            self._init_sampling_tensors(logits, sampling_metadata)
+        else:
+            if self._do_penalties:
+                # In this case, we depend on the output tokens
+                # TODO: Check with Cade if this is needed for spec tokens
+                self._init_sampling_tensors(logits, sampling_metadata)
+            
+        sampling_tensors = self._sampling_tensors
+        do_penalties = self._do_penalties
+        do_top_p_top_k = self._do_top_p_top_k
+        do_min_p = self._do_min_p
 
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
-        
+
         # Apply presence and frequency penalties.
         if do_penalties:
             logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
@@ -77,8 +103,8 @@ class Sampler(nn.Module):
 
         # Apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
-        logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
-
+        logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
+        
         if do_top_p_top_k:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
@@ -113,18 +139,19 @@ class Sampler(nn.Module):
             on_device_tensors = None
 
         # Get the logprobs query results.
-        if not sampling_metadata.skip_logprobs:
+        prompt_logprobs = None
+        sample_logprobs = None
+        if not sampling_metadata.skip_cpu_samples:
             prompt_logprobs, sample_logprobs = _get_logprobs(
                 logprobs, sampling_metadata, sample_results)
-        else:
-            prompt_logprobs = None
-            sample_logprobs = None
-        return _build_sampler_output(sample_results,
-                                     sampling_metadata,
-                                     prompt_logprobs,
-                                     sample_logprobs,
-                                     on_device_tensors=on_device_tensors,
-                                     skip_logprobs=sampling_metadata.skip_logprobs)
+
+        return _build_sampler_output(
+            sample_results,
+            sampling_metadata,
+            prompt_logprobs,
+            sample_logprobs,
+            on_device_tensors=on_device_tensors,
+            skip_cpu_samples=sampling_metadata.skip_cpu_samples)
 
     @property
     def _should_modify_greedy_probs_inplace(self) -> bool:
@@ -544,19 +571,20 @@ def _sample_with_torch(
 
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
-    if not sampling_metadata.skip_logprobs:
+    if not sampling_metadata.skip_cpu_samples:
         for sampling_type in SamplingType:
             if sampling_type not in sample_metadata:
                 continue
             (seq_group_id, seq_groups) = sample_metadata[sampling_type]
             if sampling_type == SamplingType.GREEDY:
                 sample_results = _greedy_sample(seq_groups, greedy_samples)
-            elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-                sample_results = _random_sample(seq_groups,
-                                                multinomial_samples[sampling_type])
+            elif sampling_type in (SamplingType.RANDOM,
+                                   SamplingType.RANDOM_SEED):
+                sample_results = _random_sample(
+                    seq_groups, multinomial_samples[sampling_type])
             elif sampling_type == SamplingType.BEAM:
                 sample_results = _beam_search_sample(seq_groups,
-                                                    beam_search_logprobs)
+                                                     beam_search_logprobs)
             sample_results_dict.update(zip(seq_group_id, sample_results))
 
         sample_results = [
@@ -785,7 +813,7 @@ def _get_logprobs(
 
     # print("query_indices_gpu: shape = {}, vals = {}".format(query_indices_gpu.shape, query_indices_gpu))
     # print("next_token_ids_gpu: shape = {}, vals = {}".format(next_token_ids_gpu.shape, next_token_ids_gpu))
-    
+
     # (num_selected_query_tokens, num_logprobs). Note that query_indices can
     # contain duplicates if beam search is enabled.
     selected_logprobs = logprobs[[
@@ -1013,11 +1041,11 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
 def _build_sampler_output(
     sample_results: SampleResultType,
     sampling_metadata: SamplingMetadata,
-    prompt_logprobs: List[Optional[PromptLogprobs]],
-    sample_logprobs: List[SampleLogprobs],
+    prompt_logprobs: Optional[List[Optional[PromptLogprobs]]],
+    sample_logprobs: Optional[List[SampleLogprobs]],
     on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor,
                                       torch.Tensor]],
-    skip_logprobs: bool = False,
+    skip_cpu_samples: bool = False,
 ) -> SamplerOutput:
     """Construct Python objects with the output of sampling.
 
@@ -1027,23 +1055,23 @@ def _build_sampler_output(
             allows post-processing without copies to CPU/serialization, e.g. in
             speculative decoding rejection sampling.
     """
-
     sampler_output: List[CompletionSequenceGroupOutput] = []
-    if not skip_logprobs:
+    if not skip_cpu_samples:
         for (seq_group, sample_result, group_prompt_logprobs,
-            group_sample_logprobs) in zip(sampling_metadata.seq_groups,
-                                        sample_results, prompt_logprobs,
-                                        sample_logprobs):
+             group_sample_logprobs) in zip(sampling_metadata.seq_groups,
+                                           sample_results, prompt_logprobs,
+                                           sample_logprobs):
             seq_ids = seq_group.seq_ids
             next_token_ids, parent_ids = sample_result
             seq_outputs: List[SequenceOutput] = []
-            for parent_id, next_token_id, logprobs in zip(parent_ids,
-                                                        next_token_ids,
-                                                        group_sample_logprobs):
+            for parent_id, next_token_id, logprobs in zip(
+                    parent_ids, next_token_ids, group_sample_logprobs):
                 seq_outputs.append(
-                    SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
+                    SequenceOutput(seq_ids[parent_id], next_token_id,
+                                   logprobs))
             sampler_output.append(
-                CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+                CompletionSequenceGroupOutput(seq_outputs,
+                                              group_prompt_logprobs))
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:

@@ -18,7 +18,7 @@ from vllm import _custom_ops as ops
 logger = init_logger(__name__)
 
 log_advance_input = False
-
+enable_advance_step = True
 
 class TP1DraftModelRunner(ModelRunner):
     """Specialized model runner for speculative decoding draft model.
@@ -267,6 +267,9 @@ class TP1DraftModelRunner(ModelRunner):
         return new_model_input
 
     def _can_use_advance_step(self):
+        if not enable_advance_step:
+            return False
+        
         # TODO: Add support for other attn backends
         if self.attn_backend.get_name() != "flash-attn":
             return False
@@ -318,8 +321,8 @@ class TP1DraftModelRunner(ModelRunner):
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata)
 
-            model_input.sampling_metadata.skip_logprobs = True
-
+            model_input.sampling_metadata.skip_cpu_samples = True
+            
             # Sample the next token.
             outputs.append(
                 self.model.sample(
@@ -335,6 +338,8 @@ class TP1DraftModelRunner(ModelRunner):
                 else:
                     assert not model_input.is_prompt
                     model_input = self._advance_step(model_input, outputs[-1])
+                    
+                    model_input.sampling_metadata.reuse_sampling_tensors = True
 
         return outputs
 
@@ -399,7 +404,7 @@ class TP1DraftModelRunner(ModelRunner):
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata)
 
-            model_input.sampling_metadata.skip_logprobs = True
+            model_input.sampling_metadata.skip_cpu_samples = True
 
             # Sample the next token.
             outputs.append(
@@ -411,5 +416,6 @@ class TP1DraftModelRunner(ModelRunner):
             # Prepare the inputs for the next step.
             if step != num_steps - 1:
                 model_input = self.update_model_input(model_input, outputs[-1])
+                model_input.sampling_metadata.reuse_sampling_tensors = True
 
         return outputs

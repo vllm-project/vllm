@@ -95,13 +95,17 @@ class SamplingMetadata:
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         num_prompts: int,
-        skip_logprobs: bool = False,
+        skip_cpu_samples: bool = False,
+        reuse_sampling_tensors: bool = False,
     ) -> None:
         self.seq_groups = seq_groups
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
         self.num_prompts = num_prompts
-        self.skip_logprobs = skip_logprobs
+        
+        # TODO: Add docs
+        self.skip_cpu_samples = skip_cpu_samples
+        self.reuse_sampling_tensors = reuse_sampling_tensors
 
     @staticmethod
     def prepare(
