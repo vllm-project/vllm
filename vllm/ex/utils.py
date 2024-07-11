@@ -160,9 +160,11 @@ def argument_type_str(arg: torch.fx.node.Argument, include_constants: bool = Fal
           or isinstance(arg, types.NoneType)):
         return str(arg)
     elif isinstance(arg, tuple):
-        return "T_" + "_".join([argument_type_str(a) for a in arg])
+        return "T_" + "_".join([argument_type_str(a, include_constants) for a in arg])
     elif isinstance(arg, slice):
         return f"S_{arg.start}_{arg.stop}_{arg.step}"
+    elif isinstance(arg, torch.device):
+        return f"D_{arg.type}_{arg.index}"
     else:
         raise RuntimeError(f"unsupported argument type {arg}")
 
@@ -179,7 +181,10 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
         types = [
             argument_type_str(arg, True).replace("torch.", "") for arg in n.args
         ]
-        name = name + sep + f"{fn}_{'_'.join(types)}"
+        ktypes = [
+            f"K_{name}_{argument_type_str(kwarg, True).replace('torch.', '')}" for name, kwarg in n.kwargs.items()
+        ]
+        name = name + sep + f"{fn}_{'_'.join(types)}{'_'.join(ktypes)}"
         sep = "_"
 
     return name.replace(".", rep)

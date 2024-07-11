@@ -72,7 +72,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     # Note: we do not update the meta info for cf here.  It should
     # not be required after transformation anyway.
     cf = sub.module.graph.call_function(fn, args=tuple(inputs), kwargs=kwargs)
-    logger.debug(f"fused op: {cf.format_node()}")
+    logger.debug(f"fused op: {cf.format_node()}, num_outputs={len(outputs)}")
 
     new_sub = [cf]
 
