@@ -102,7 +102,7 @@ class SamplingMetadata:
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
         self.num_prompts = num_prompts
-        
+
         # TODO: Add docs
         self.skip_cpu_samples = skip_cpu_samples
         self.reuse_sampling_tensors = reuse_sampling_tensors
@@ -135,8 +135,6 @@ class SamplingMetadata:
             for t, seq_ids in categorized_sample_indices.items()
         }
 
-        # print("  selected_token_indices = {}".format(selected_token_indices))
-        # print("  categorized_sample_indices = {}".format(categorized_sample_indices))
         sampling_metadata = SamplingMetadata(
             seq_groups=seq_groups,
             selected_token_indices=selected_token_indices,

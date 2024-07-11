@@ -158,7 +158,7 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
     "common_llm_kwargs",
     [{
         # Skip cuda graph recording for fast test.
-        "enforce_eager": False,
+        "enforce_eager": True,
 
         # Required for spec decode.
         "use_v2_block_manager": True,

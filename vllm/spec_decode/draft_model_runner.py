@@ -2,6 +2,8 @@ from typing import List, Optional
 
 import torch
 
+from vllm import _custom_ops as ops
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -11,14 +13,11 @@ from vllm.sequence import (IntermediateTensors, SamplerOutput,
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-
-from vllm import _custom_ops as ops
-
 logger = init_logger(__name__)
 
 log_advance_input = False
-enable_advance_step = True
+enable_advance_step = False
+
 
 class TP1DraftModelRunner(ModelRunner):
     """Specialized model runner for speculative decoding draft model.
@@ -184,16 +183,16 @@ class TP1DraftModelRunner(ModelRunner):
         assert len(sampling_metadata.seq_groups) == num_queries
         assert sampling_metadata.selected_token_indices.shape == (
             num_queries, )
-        # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed
+        # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed # noqa: E501
 
         for i in range(num_queries):
             seq_group = sampling_metadata.seq_groups[i]
 
-            assert seq_group.is_prompt == False  # No prompt
+            assert seq_group.is_prompt is False  # No prompt
             assert seq_group.prompt_logprob_indices == []  # No prompt
             assert seq_group.sample_indices == [i]  # Simple
-            assert seq_group.seq_len == None  # Decode
-            assert seq_group.query_len == None  # Decode
+            assert seq_group.seq_len is None  # Decode
+            assert seq_group.query_len is None  # Decode
 
     def _advance_step(
             self, model_input: ModelInputForGPUWithSamplingMetadata,
@@ -269,7 +268,7 @@ class TP1DraftModelRunner(ModelRunner):
     def _can_use_advance_step(self):
         if not enable_advance_step:
             return False
-        
+
         # TODO: Add support for other attn backends
         if self.attn_backend.get_name() != "flash-attn":
             return False
@@ -322,7 +321,7 @@ class TP1DraftModelRunner(ModelRunner):
                                                model_input.sampling_metadata)
 
             model_input.sampling_metadata.skip_cpu_samples = True
-            
+
             # Sample the next token.
             outputs.append(
                 self.model.sample(
@@ -338,7 +337,7 @@ class TP1DraftModelRunner(ModelRunner):
                 else:
                     assert not model_input.is_prompt
                     model_input = self._advance_step(model_input, outputs[-1])
-                    
+
                     model_input.sampling_metadata.reuse_sampling_tensors = True
 
         return outputs

@@ -85,7 +85,7 @@ class Sampler(nn.Module):
                 # In this case, we depend on the output tokens
                 # TODO: Check with Cade if this is needed for spec tokens
                 self._init_sampling_tensors(logits, sampling_metadata)
-            
+
         sampling_tensors = self._sampling_tensors
         do_penalties = self._do_penalties
         do_top_p_top_k = self._do_top_p_top_k
@@ -104,7 +104,7 @@ class Sampler(nn.Module):
         # Apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
         logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
-        
+
         if do_top_p_top_k:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
@@ -131,10 +131,6 @@ class Sampler(nn.Module):
         if self.include_gpu_probs_tensor:
             assert maybe_sampled_tokens_tensor is not None
             on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
-
-            # print("  -- maybe_sampled_tokens_tensor: shape = {} vals = {}".format(
-            #     maybe_sampled_tokens_tensor.shape,
-            #     maybe_sampled_tokens_tensor))
         else:
             on_device_tensors = None
 
@@ -811,9 +807,6 @@ def _get_logprobs(
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_ids_gpu = torch.tensor(next_token_ids, device=logprobs.device)
 
-    # print("query_indices_gpu: shape = {}, vals = {}".format(query_indices_gpu.shape, query_indices_gpu))
-    # print("next_token_ids_gpu: shape = {}, vals = {}".format(next_token_ids_gpu.shape, next_token_ids_gpu))
-
     # (num_selected_query_tokens, num_logprobs). Note that query_indices can
     # contain duplicates if beam search is enabled.
     selected_logprobs = logprobs[[
@@ -1057,6 +1050,9 @@ def _build_sampler_output(
     """
     sampler_output: List[CompletionSequenceGroupOutput] = []
     if not skip_cpu_samples:
+        assert prompt_logprobs is not None
+        assert sample_logprobs is not None
+
         for (seq_group, sample_result, group_prompt_logprobs,
              group_sample_logprobs) in zip(sampling_metadata.seq_groups,
                                            sample_results, prompt_logprobs,
