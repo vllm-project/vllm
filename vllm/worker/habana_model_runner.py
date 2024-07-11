@@ -367,6 +367,7 @@ class HabanaModelRunner:
         self.seen_configs = set()
 
         self._setup_buckets()
+        self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP', 'false').lower() == 'true'
 
     def load_model(self) -> None:
         with HabanaMemoryProfiler() as m:
@@ -422,6 +423,8 @@ class HabanaModelRunner:
     def _use_graphs(self, batch_size, seq_len, is_prompt):
         if self.enforce_eager:
             return False
+        if self.skip_warmup:
+            return True
         return (batch_size, seq_len, is_prompt) in self.graphed_buckets
 
     def _setup_buckets(self) -> None:
@@ -1183,7 +1186,7 @@ class HabanaModelRunner:
                 self.graphed_buckets.add((bs, seq_len, is_prompt))
             self.warmup_scenario(bs, seq_len, is_prompt, kv_caches, True)
             assert False
-        if os.environ.get('VLLM_SKIP_WARMUP', 'false').lower() == 'true':
+        if self.skip_warmup:
             logger.info("Skipping warmup...")
             return
         self.profiler.start('internal', 'warmup')
