@@ -404,7 +404,8 @@ class HfRunner:
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
-            output_len = seq_ids.shape[0] - input_ids.shape[1]
+            output_len = len(seq_logprobs_lst)
+            # output_len = seq_ids.shape[0] - input_ids.shape[1]
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
