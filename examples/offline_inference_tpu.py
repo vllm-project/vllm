@@ -11,7 +11,7 @@ N = 1
 sampling_params = SamplingParams(temperature=0.7,
                                  top_p=1.0,
                                  n=N,
-                                 max_tokens=128)
+                                 max_tokens=16)
 
 # Set `enforce_eager=True` to avoid ahead-of-time compilation.
 # In real workloads, `enforace_eager` should be `False`.
