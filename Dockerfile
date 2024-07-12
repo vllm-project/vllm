@@ -43,6 +43,10 @@ COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
 
+COPY requirements-mamba.txt requirements-mamba.txt
+RUN python3 -m pip install packaging
+RUN python3 -m pip install -r requirements-mamba.txt
+
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
@@ -95,6 +99,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
         && export SCCACHE_BUCKET=vllm-build-sccache \
         && export SCCACHE_REGION=us-west-2 \
+        && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist \
         && sccache --show-stats; \
@@ -123,6 +128,21 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
 
 #################### DEV IMAGE ####################
+#################### MAMBA Build IMAGE ####################
+FROM dev as mamba-builder
+# max jobs used for build
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
+WORKDIR /usr/src/mamba
+
+COPY requirements-mamba.txt requirements-mamba.txt
+
+# Download the wheel or build it if a pre-compiled release doesn't exist
+RUN pip --verbose wheel -r requirements-mamba.txt \
+    --no-build-isolation --no-deps --no-cache-dir
+
+#################### MAMBA Build IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
@@ -143,6 +163,13 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
+
+RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamba \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 

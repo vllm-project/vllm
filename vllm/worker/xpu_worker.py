@@ -9,8 +9,9 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -45,8 +46,9 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         assert device_config.device_type == "xpu"
@@ -54,6 +56,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
 
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
@@ -62,14 +65,12 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
-        self.vision_language_config = vision_language_config
-        if self.vision_language_config:
-            assert not self.lora_config, (
-                "To be tested: vision language model with LoRA settings.")
+        self.multimodal_config = multimodal_config
 
         self.model_runner = XPUModelRunner(  # type: ignore
             model_config,
@@ -81,12 +82,12 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            vision_language_config=vision_language_config,
+            multimodal_config=multimodal_config,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: CacheEngine
-        self.gpu_cache: List[torch.Tensor]
+        self.cache_engine: List[CacheEngine]
+        self.gpu_cache: Optional[List[List[torch.Tensor]]]
 
     def init_device(self) -> None:
         if self.device_config.device.type == "xpu" and is_xpu():
