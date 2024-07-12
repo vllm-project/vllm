@@ -1,6 +1,6 @@
 name: Add label on auto-merge enabled
 on:
-    pull_request:
+    pull_request_target:
         types:
             - auto_merge_enabled
 jobs:
