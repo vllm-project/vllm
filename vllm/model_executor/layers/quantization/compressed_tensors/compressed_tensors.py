@@ -180,7 +180,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
-                    act_order=weight_quant.actorder)
+                    group_size=weight_quant.group_size)
 
         if (self.quant_format == CompressionFormat.int_quantized.value or
                 self.quant_format == CompressionFormat.float_quantized.value):
