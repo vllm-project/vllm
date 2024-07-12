@@ -69,8 +69,8 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
-    azp = torch.zeros((m, ), device="cuda", dtype=torch.float32)
-    azp_adj = torch.zeros((n, ), device="cuda", dtype=torch.float32)
+    azp = torch.zeros((m, ), device="cuda", dtype=torch.int32)
+    azp_adj = torch.zeros((n, ), device="cuda", dtype=torch.int32)
 
     timers = []
     # pytorch impl
@@ -91,9 +91,27 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
                  ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.bfloat16,
                  bias))
 
-    # cutlass with bias and azp
+    # cutlass with azp per-tensor
     timers.append(
-        bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_bias_azp",
+        bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp",
+                 ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
+                 torch.bfloat16, None, azp_adj))
+
+    # cutlass with azp per-tensor + bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp_bias",
+                 ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
+                 torch.bfloat16, None, azp_adj, bias))
+
+    # cutlass with azp per-token
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp_pt",
+                 ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
+                 torch.bfloat16, azp, azp_adj))
+
+    # cutlass with azp per-token + bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp_pt_bias",
                  ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
                  torch.bfloat16, azp, azp_adj, bias))
 
