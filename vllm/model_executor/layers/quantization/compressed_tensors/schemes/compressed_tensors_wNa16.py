@@ -26,7 +26,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                  group_size: Optional[int] = None):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
-        self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
 
         self.group_size: int
