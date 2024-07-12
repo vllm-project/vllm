@@ -6,7 +6,7 @@ numpy < 2.0.0
 requests
 tqdm
 py-cpuinfo
-transformers >= 4.42.0  # Required for Gemma 2 and for additional chat template parameters.
+transformers >= 4.42.4  # Required for Gemma 2 and for additional chat template parameters.
 tokenizers >= 0.19.1  # Required for Llama 3.
 fastapi
 aiohttp
