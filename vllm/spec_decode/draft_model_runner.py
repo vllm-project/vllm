@@ -208,9 +208,6 @@ class TP1DraftModelRunner(ModelRunner):
         if self.prompt_adapter_config:
             return False
 
-        # TODO: Ask Cade/Cody what is this
-        if self.model_input.multi_modal_kwargs:
-            return False
         return True
 
     @torch.inference_mode()
@@ -231,7 +228,6 @@ class TP1DraftModelRunner(ModelRunner):
         # Sanity
         assert self.lora_config is None
         assert self.prompt_adapter_config is None
-        assert model_input.multi_modal_kwargs is {}
         assert model_input.attn_metadata is not None
 
         # Detect exec mode
@@ -256,6 +252,9 @@ class TP1DraftModelRunner(ModelRunner):
 
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
+            # TODO: Ask Cade/Cody when this can be used
+            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+
             # Run model
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
