@@ -167,6 +167,8 @@ class TP1DraftModelRunner(ModelRunner):
             is_prompt=False,
         )
 
+        model_input.sampling_metadata.reuse_sampling_tensors = True
+
         if debug_advance_input:
             print("NEW INPUT: ")
             print("  input_tokens = {}".format(new_model_input.input_tokens))
@@ -220,21 +222,27 @@ class TP1DraftModelRunner(ModelRunner):
         if not self.is_driver_worker:
             raise ValueError("TP1DraftModelRunner only supports TP=1.")
 
+        # Sanity
         assert self.lora_config is None
         assert self.prompt_adapter_config is None
+        assert model_input.attn_metadata is not None
+
+        # Detect exec mode
+        use_cuda_graph = False
+        if model_input.attn_metadata.num_prefills > 0:
+            # In this case, execute_model(..) was called directly
+            assert num_steps == 1, (
+                "execute_model(..) of draft_model_runner can be called "
+                "directly only with a single-step prefill")
+        else:
+            use_cuda_graph = model_input.attn_metadata.use_cuda_graph
+            # We can skip CPU samples for spec token generation
+            model_input.sampling_metadata.skip_sampler_cpu_output = True
 
         virtual_engine = model_input.virtual_engine
-
-        # Currently cuda graph is only supported by the decode phase.
-        assert model_input.attn_metadata is not None
-        use_cuda_graph = model_input.attn_metadata.use_cuda_graph
-        if model_input.attn_metadata.num_prefills > 0:
-            assert num_steps == 1, (
-                "execute_model(..) of draft_model_runner can be called directly only with a single-step prefill"  # noqa: E501
-            )
-
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
+            # Get model
             if use_cuda_graph:
                 graph_batch_size = model_input.input_tokens.shape[0]
                 model_executable = (
@@ -244,6 +252,7 @@ class TP1DraftModelRunner(ModelRunner):
 
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
+            # Run model
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -257,9 +266,6 @@ class TP1DraftModelRunner(ModelRunner):
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata)
 
-            # We can skip CPU samples for spec token generation
-            model_input.sampling_metadata.skip_sampler_cpu_output = True
-
             # Sample the next token.
             outputs.append(
                 self.model.sample(
@@ -270,6 +276,5 @@ class TP1DraftModelRunner(ModelRunner):
             # Prepare the inputs for the next step on GPU.
             if step != num_steps - 1:
                 model_input = self._gpu_advance_step(model_input, outputs[-1])
-                model_input.sampling_metadata.reuse_sampling_tensors = True
 
         return outputs
