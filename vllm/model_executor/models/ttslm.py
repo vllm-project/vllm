@@ -10,9 +10,10 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.inputs import INPUT_REGISTRY
 from vllm.inputs.registry import InputContext
-from vllm.model_executor.layers.multi_heads_logits_processor import MultiHeadLogitsProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.multi_heads_sampler import MultiheadsSampler
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -62,8 +63,8 @@ class ChatTtsLlm(nn.Module):
         self.head_code = nn.ModuleList([
             weight_norm(nn.Linear(self.model_dim, self.num_audio_tokens, bias=False), name='weight') for _ in range(self.num_vq)
         ])
-        self.logits_processor = MultiHeadLogitsProcessor(self.num_audio_tokens, self.num_vq)
-        self.sampler = MultiheadsSampler(self.num_vq)
+        self.logits_processor = LogitsProcessor(self.num_audio_tokens)
+        self.sampler = Sampler()
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -106,7 +107,11 @@ class ChatTtsLlm(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.head_code, hidden_states, sampling_metadata)
+        logits = [
+            self.logits_processor(self.head_code[i], hidden_states, sampling_metadata)
+            for i in range(self.num_vq)
+        ]
+        logits = torch.stack(logits, 0).permute(1, 0, 2)
         return logits
     
     def sample(
@@ -114,7 +119,12 @@ class ChatTtsLlm(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
+        head_logits = logits.permute(1, 0, 2)
+        next_tokens = self.sampler(head_logits[0], sampling_metadata)
+        for i in range(self.num_vq - 1):
+            output = self.sampler(head_logits[i + 1], sampling_metadata)
+            self.merge_sample_results(next_tokens, output)
+
         for output in next_tokens.outputs:
             for sample in output.samples:
                 sample.output_token += self.num_text_tokens
@@ -160,3 +170,12 @@ class ChatTtsLlm(nn.Module):
         assert emb.size(1) == spk_emb.size(1)
         assert attn_metadata.seq_lens_tensor.size(0) == spk_emb.size(0)
         pass
+
+    def merge_sample_results(
+        self,
+        source: SamplerOutput,
+        target: SamplerOutput,
+    ):
+        for o_a, o_b in zip(source.outputs, target.outputs):
+            for s_a, s_b in zip(o_a.samples, o_b.samples):
+                s_a.output_tokens.append(s_b.output_token)

@@ -1,6 +1,6 @@
 from vllm import LLM, SamplingParams
 
-llm = LLM(model='/home/largeniu/triton/llama3/Meta-Llama-3-8B-Instruct')
+llm = LLM(model='/home/zhn/g/Meta-Llama-3-8B-Instruct')
 prompts = [
     "Hi my name is",
     # "The capital of France is",
