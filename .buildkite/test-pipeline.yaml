@@ -7,8 +7,33 @@
 
 
 steps:
+- label: Async Engine, Inputs, Utils, Worker Test
+  fast_check: true
+  fast_check_only: true
+  commands:
+  - pytest -v -s async_engine # Async Engine
+  - bash ../.buildkite/download-images.sh # Inputs 
+  - pytest -v -s test_inputs.py
+  - pytest -v -s multimodal
+  - pytest -v -s test_utils.py # Utils
+  - pytest -v -s worker # Worker
+
+- label: Tensorizer, Metrics, Tracing Test
+  fast_check: true
+  fast_check_only: true
+  commands:
+  - apt-get install curl libsodium23 && pytest -v -s tensorizer_loader # Tensorizer
+  - pytest -v -s metrics # Metrics
+  - "pip install \
+      opentelemetry-sdk \
+      opentelemetry-api \
+      opentelemetry-exporter-otlp \
+      opentelemetry-semantic-conventions-ai" # Tracing
+  - pytest -v -s tracing
+
 - label: Regression Test
   mirror_hardwares: [amd]
+  fast_check: true
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -18,6 +43,7 @@ steps:
 
 - label: Basic Correctness Test
   mirror_hardwares: [amd]
+  fast_check: true
   commands:
   - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
@@ -29,6 +55,7 @@ steps:
 
 - label: Core Test
   mirror_hardwares: [amd]
+  fast_check: true
   commands: 
   - pytest -v -s core
   - pytest -v -s distributed/test_parallel_state.py
@@ -68,6 +95,7 @@ steps:
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  fast_check: true
   commands:
   - pytest -v -s distributed/test_pynccl.py
   # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
@@ -95,6 +123,7 @@ steps:
   - pytest -v -s tokenization
 
 - label: Entrypoints Test
+  fast_check: true
   mirror_hardwares: [amd]
 
   commands:
@@ -228,6 +257,7 @@ steps:
 
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
+  fast_check: true
   no_gpu: True
   commands:
   - pip install -r requirements-docs.txt
