@@ -37,7 +37,7 @@ class CPUExecutor(ExecutorBase):
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-        
+
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")
         if "libiomp5.so" in ld_prealod_str:
@@ -50,6 +50,10 @@ class CPUExecutor(ExecutorBase):
             os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
             os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
             os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+
+        # To hint IPEX uses shared memory based AllReduce
+        os.environ["LOCAL_WORLD_SIZE"] = str(
+            self.parallel_config.tensor_parallel_size)
 
         self.model_config = _verify_and_get_model_config(self.model_config)
         self.cache_config = _verify_and_get_cache_config(self.cache_config)
@@ -252,16 +256,28 @@ class CPUExecutor(ExecutorBase):
 
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        return self.driver_worker.add_prompt_adapter(prompt_adapter_request)
+        return all(
+            self._run_workers(
+                "add_prompt_adapter",
+                prompt_adapter_request,
+            ))
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.driver_worker.remove_prompt_adapter(prompt_adapter_id)
+        return all(
+            self._run_workers(
+                "remove_prompt_adapter",
+                prompt_adapter_id,
+            ))
 
     def list_prompt_adapters(self) -> Set[int]:
-        return self.driver_worker.list_prompt_adapters()
+        return self.driver_method_invoker(self.driver_worker,
+                                          "list_prompt_adapters")
 
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
+        return all(self._run_workers(
+            "pin_prompt_adapter",
+            prompt_adapter_id,
+        ))
 
     def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""

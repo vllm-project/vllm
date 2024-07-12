@@ -13,10 +13,9 @@ RUN pip install intel-openmp
 
 ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so:$LD_PRELOAD"
 
-
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
-RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.3.100%2Bgit0eb3473-cp310-cp310-linux_x86_64.whl
+RUN pip install --proxy http://child-prc.intel.com:913 http://mlpc.intel.com/downloads/cpu/ipex-2.4/rc0/intel_extension_for_pytorch-2.4.0-cp310-cp310-manylinux2014_x86_64.whl
 
 RUN pip install --upgrade pip \
     && pip install wheel packaging ninja "setuptools>=49.4.0" numpy
@@ -27,7 +26,7 @@ COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
-RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/test/cpu
 
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512

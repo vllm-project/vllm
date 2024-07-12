@@ -47,19 +47,19 @@ void init_cpu_threads_env(const std::string& cpu_ids) {
   }
 
   // OMP threads binding
-    omp_set_num_threads((int)omp_cpu_ids.size());
-    torch::set_num_threads((int)omp_cpu_ids.size());
-    TORCH_CHECK_EQ(omp_cpu_ids.size(), torch::get_num_threads());
-    TORCH_CHECK_EQ(omp_cpu_ids.size(), omp_get_max_threads());
-  #pragma omp parallel for schedule(static, 1)
-    for (size_t i = 0; i < omp_cpu_ids.size(); ++i) {
-      cpu_set_t* mask = CPU_ALLOC(omp_cpu_mask->size);
-      size_t size = CPU_ALLOC_SIZE(omp_cpu_mask->size);
-      CPU_ZERO_S(size, mask);
-      CPU_SET_S(omp_cpu_ids[i], size, mask);
-      sched_setaffinity(0, sizeof(cpu_set_t), mask);
-      CPU_FREE(mask);
-    }
+  omp_set_num_threads((int)omp_cpu_ids.size());
+  torch::set_num_threads((int)omp_cpu_ids.size());
+  TORCH_CHECK_EQ(omp_cpu_ids.size(), torch::get_num_threads());
+  TORCH_CHECK_EQ(omp_cpu_ids.size(), omp_get_max_threads());
+#pragma omp parallel for schedule(static, 1)
+  for (size_t i = 0; i < omp_cpu_ids.size(); ++i) {
+    cpu_set_t* mask = CPU_ALLOC(omp_cpu_mask->size);
+    size_t size = CPU_ALLOC_SIZE(omp_cpu_mask->size);
+    CPU_ZERO_S(size, mask);
+    CPU_SET_S(omp_cpu_ids[i], size, mask);
+    sched_setaffinity(0, sizeof(cpu_set_t), mask);
+    CPU_FREE(mask);
+  }
 
   numa_free_nodemask(omp_cpu_mask);
 }

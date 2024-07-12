@@ -1,6 +1,5 @@
 """A CPU worker class."""
 from typing import Dict, List, Optional, Tuple
-import os
 
 import torch
 import torch.distributed
@@ -182,7 +181,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # initialize_cache.
         self.cache_engine: List[CPUCacheEngine]
         self.cpu_cache: List[List[torch.Tensor]]
-
 
     def init_device(self) -> None:
         if self.local_omp_cpuid != "all":
