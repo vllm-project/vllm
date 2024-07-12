@@ -1,22 +1,22 @@
-from typing import List, Optional, Tuple, Type
 from dataclasses import dataclass
+from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
-from transformers import AutoTokenizer, LlamaForCausalLM, AutoModelForVision2Seq
-from transformers import LlamaTokenizerFast
+from transformers import (AutoModelForVision2Seq, AutoTokenizer,
+                          LlamaForCausalLM, LlamaTokenizerFast)
 from transformers.processing_utils import ProcessorMixin
 
 from vllm.model_executor.models.deepseek_vl import (
     MultiModalityPreTrainedModel, VLMImageProcessor, model_name_to_cls)
-from vllm.sequence import SampleLogprobs
 from vllm.multimodal.utils import rescale_image_size
+from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 
 from ..conftest import HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
 
-models = ["/deepseek-ai/deepseek-vl-1.3b-chat"]
+models = ["deepseek-ai/deepseek-vl-1.3b-chat"]
 IMAGE_TOKEN_ID = 100015
 pytestmark = pytest.mark.vlm
 
@@ -47,12 +47,10 @@ class DictOutput(object):
 
 @dataclass
 class VLChatProcessorOutput(DictOutput):
-    sft_format: List[str]
     input_ids: torch.Tensor
     pixel_values: torch.Tensor
     attention_mask: torch.Tensor
     images_seq_mask: torch.BoolTensor
-    images_emb_mask: torch.BoolTensor
 
     def __len__(self):
         return len(self.input_ids)
@@ -61,7 +59,6 @@ class VLChatProcessorOutput(DictOutput):
         self.input_ids = self.input_ids.to(device)
         self.attention_mask = self.attention_mask.to(device)
         self.images_seq_mask = self.images_seq_mask.to(device)
-        self.images_emb_mask = self.images_emb_mask.to(device)
         self.pixel_values = self.pixel_values.to(device=device)
         return self
 
@@ -126,10 +123,8 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
     def generate(self, *args, **kwargs):
 
-        sft_format = kwargs.pop('sft_format')
         pixel_values = kwargs.pop('pixel_values')
         images_seq_mask = kwargs.pop('images_seq_mask')
-        images_emb_mask = kwargs.pop('images_emb_mask')
         input_ids = kwargs.pop('input_ids')
         inputs_embeds = self.prepare_inputs_embeds(input_ids, pixel_values,
                                                    images_seq_mask)
@@ -143,7 +138,6 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             bos_token_id=tokenizer.bos_token_id,
             eos_token_id=tokenizer.eos_token_id,
             **kwargs)
-        # output.sequences[0] = torch.concat([input_ids[0], output.sequences[0]])
         return output
 
     def get_output_embeddings(self):
@@ -220,11 +214,8 @@ class VLChatProcessor(ProcessorMixin):
         input_ids = torch.LongTensor(input_ids)
         image_token_mask = input_ids == self.image_id
         images_outputs = self.image_processor(image, return_tensors="pt")
-        images_emb_mask = torch.ones(1, 1, self.num_image_tokens) == 1
         image_size = self.image_processor.image_size
         prepare = {
-            "sft_format":
-            prompt,
             "input_ids":
             input_ids.reshape(1, -1),
             "pixel_values":
@@ -232,8 +223,6 @@ class VLChatProcessor(ProcessorMixin):
                                                 image_size),
             "images_seq_mask":
             image_token_mask.reshape(1, -1),
-            "images_emb_mask":
-            images_emb_mask,
             "attention_mask":
             torch.ones(1, len(input_ids)),
         }

@@ -6,10 +6,10 @@ from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             DeepSeekMultiModalityConfig,
                                              JAISConfig, MedusaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
-                                             RWConfig,
-                                             DeepSeekMultiModalityConfig)
+                                             RWConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -106,4 +106,3 @@ def try_get_generation_config(
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
-
