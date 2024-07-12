@@ -30,7 +30,10 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               QuantizationConfigOverride,
+                                               RowParallelLinear,
+                                               UnquantizedLinearMethod,
+                                               WeightTieLinearMethod)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -268,6 +271,12 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
+        if quant_config is not None:
+            linear_method = quant_config.get_quant_method(self)
+            assert linear_method is None or isinstance(
+                linear_method, UnquantizedLinearMethod)
+
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
@@ -276,10 +285,10 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
-            quant_config=quant_config,
+            quant_config=QuantizationConfigOverride(WeightTieLinearMethod),
             params_dtype=torch.float16,
         )
-        self.lm_head.weight = self.transformer.wte.weight
+        self.lm_head.register_parameter("weight", self.transformer.wte.weight)
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
