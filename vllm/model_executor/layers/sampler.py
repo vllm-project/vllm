@@ -52,7 +52,6 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ):
-        assert logits is not None
         _, vocab_size = logits.shape
 
         (sampling_tensors, do_penalties, do_top_p_top_k,
@@ -137,7 +136,7 @@ class Sampler(nn.Module):
         # Get the logprobs query results.
         prompt_logprobs = None
         sample_logprobs = None
-        if not sampling_metadata.skip_cpu_samples:
+        if not sampling_metadata.skip_sampler_cpu_output:
             prompt_logprobs, sample_logprobs = _get_logprobs(
                 logprobs, sampling_metadata, sample_results)
 
@@ -147,7 +146,7 @@ class Sampler(nn.Module):
             prompt_logprobs,
             sample_logprobs,
             on_device_tensors=on_device_tensors,
-            skip_cpu_samples=sampling_metadata.skip_cpu_samples)
+            skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output)
 
     @property
     def _should_modify_greedy_probs_inplace(self) -> bool:
@@ -567,7 +566,7 @@ def _sample_with_torch(
 
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
-    if not sampling_metadata.skip_cpu_samples:
+    if not sampling_metadata.skip_sampler_cpu_output:
         for sampling_type in SamplingType:
             if sampling_type not in sample_metadata:
                 continue
@@ -1038,7 +1037,7 @@ def _build_sampler_output(
     sample_logprobs: Optional[List[SampleLogprobs]],
     on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor,
                                       torch.Tensor]],
-    skip_cpu_samples: bool = False,
+    skip_sampler_cpu_output: bool = False,
 ) -> SamplerOutput:
     """Construct Python objects with the output of sampling.
 
@@ -1049,7 +1048,7 @@ def _build_sampler_output(
             speculative decoding rejection sampling.
     """
     sampler_output: List[CompletionSequenceGroupOutput] = []
-    if not skip_cpu_samples:
+    if not skip_sampler_cpu_output:
         assert prompt_logprobs is not None
         assert sample_logprobs is not None
 

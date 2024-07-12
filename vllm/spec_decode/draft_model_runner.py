@@ -9,13 +9,13 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+                           SequenceGroupMetadata, ExecuteModelRequest)
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
 logger = init_logger(__name__)
 
-log_advance_input = False
+debug_advance_input = False
 enable_gpu_advance_step = True
 
 
@@ -26,18 +26,9 @@ class TP1DraftModelRunner(ModelRunner):
     we could get rid of most CPU-GPU synchronization and data transfer
     overheads by keeping model input and output tensors on GPU all the time.
 
-    This runner is still under development so there's no performance gain
-    at this moment. Currently we adopt a temporary solution that caches the
-    seq_group_metadata_list for multi-step execution, so that we can
-    leverage existing prepare_model_input to be compatible with the current
-    execution flow, but we plan to remove this cache and avoid calling
-    prepare_model_input in execute_model at all.
-    
-    The detail development plan includes:
-    1. Use "update_model_input" to update existing model_input without
-       creating a new one.
-    2. Improve the performance of "update_model_input" with a GPU kernel.
-    3. Support TP > 1 (this requires some designs because we do not expect
+    TODOs:
+    1. Currently supports only flash-attn, add support for other attn_backends.
+    2. Support TP > 1 (this requires some designs because we do not expect
        any broadcasting inside execute_model).
     """
 
@@ -75,74 +66,6 @@ class TP1DraftModelRunner(ModelRunner):
             prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
         )
-
-        # TODO: Remove this cache when we are able to update model_input
-        # directly in advance_step.
-        self.cached_seq_group_metadata_list: Optional[
-            List[SequenceGroupMetadata]] = None
-
-    def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
-    ) -> ModelInputForGPUWithSamplingMetadata:
-        """A temporary solution that caches the seq_group_metadata_list
-        for multi-step execution.
-        TODO: In-place update model_input and remove this function.
-        """
-        self.cached_seq_group_metadata_list = seq_group_metadata_list
-        return super().prepare_model_input(
-            seq_group_metadata_list,
-            finished_requests_ids=finished_requests_ids)
-
-    def update_model_input(
-            self, model_input: ModelInputForGPUWithSamplingMetadata,
-            last_output: SamplerOutput
-    ) -> ModelInputForGPUWithSamplingMetadata:
-        """Prepare the model inputs for the next step.
-        TODO: In-place update model_input instead of calling
-        prepare_model_input.
-        """
-
-        # Append the output token to the sequence data.
-        assert self.cached_seq_group_metadata_list is not None
-        for seq_group_metadata, sequence_group_outputs in zip(
-                self.cached_seq_group_metadata_list, last_output.outputs):
-            seq_group_metadata.is_prompt = False
-
-            for seq_output in sequence_group_outputs.samples:
-                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
-
-                token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
-
-                seq.append_token_id(token_id, token_logprob.logprob)
-                seq.update_num_computed_tokens(1)
-
-                if log_advance_input:
-                    print("appended seq_id = {} token_id = {}".format(
-                        seq_output.parent_seq_id, token_id))
-
-        return self.prepare_model_input(self.cached_seq_group_metadata_list)
-
-    def _update_seq_group_metadata(self, seq_group_metadata_list, last_output):
-        for seq_group_metadata, sequence_group_outputs in zip(
-                seq_group_metadata_list, last_output.outputs):
-            seq_group_metadata.is_prompt = False
-
-            for seq_output in sequence_group_outputs.samples:
-                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
-
-                token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
-
-                seq.append_token_id(token_id, token_logprob.logprob)
-                seq.update_num_computed_tokens(1)
-
-                if log_advance_input:
-                    print("appended seq_id = {} token_id = {}".format(
-                        seq_output.parent_seq_id, token_id))
 
     def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
                                     num_queries):
@@ -198,20 +121,12 @@ class TP1DraftModelRunner(ModelRunner):
             self, model_input: ModelInputForGPUWithSamplingMetadata,
             last_output: SamplerOutput
     ) -> ModelInputForGPUWithSamplingMetadata:
+        # Currently, we expect "decode mode" only
         assert not model_input.is_prompt
-
-        if log_advance_input:
-            print("Inside _advance_step")
 
         # Get num_seqs
         num_seqs = len(model_input.seq_lens)
         num_queries = len(model_input.query_lens)
-
-        # Append output tokens
-        # TODO: This is not needed, since seq_group is not used below to
-        # update data structures
-        # self._update_seq_group_metadata(self.cached_seq_group_metadata_list,
-        #                                 last_output)
 
         # Get output tokens GPU tensor
         sampled_token_ids = last_output.sampled_token_ids
@@ -252,7 +167,7 @@ class TP1DraftModelRunner(ModelRunner):
             is_prompt=False,
         )
 
-        if log_advance_input:
+        if debug_advance_input:
             print("NEW INPUT: ")
             print("  input_tokens = {}".format(new_model_input.input_tokens))
             print("  input_positions = {}".format(
@@ -267,9 +182,14 @@ class TP1DraftModelRunner(ModelRunner):
 
         return new_model_input
 
-    def _can_use_gpu_advance_step(self):
+    def supports_gpu_multi_step(self, execute_model_req: ExecuteModelRequest):
         if not enable_gpu_advance_step:
             return False
+
+        # We allow multi-step GPU only in decode mode
+        for seq_group in execute_model_req.seq_group_metadata_list:
+            if seq_group.is_prompt:
+                return False
 
         # TODO: Add support for other attn backends
         if self.attn_backend.get_name() != "flash-attn":
@@ -300,29 +220,22 @@ class TP1DraftModelRunner(ModelRunner):
         if not self.is_driver_worker:
             raise ValueError("TP1DraftModelRunner only supports TP=1.")
 
-        use_gpu_advance_step = self._can_use_gpu_advance_step()
-
-        if self.lora_config:
-            assert model_input.lora_requests is not None
-            assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
-
-        if self.prompt_adapter_config:
-            assert model_input.prompt_adapter_requests is not None
-            assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(
-                model_input.prompt_adapter_requests,
-                model_input.prompt_adapter_mapping)
+        assert self.lora_config is None
+        assert self.prompt_adapter_config is None
 
         virtual_engine = model_input.virtual_engine
+
+        # Currently cuda graph is only supported by the decode phase.
+        assert model_input.attn_metadata is not None
+        use_cuda_graph = model_input.attn_metadata.use_cuda_graph
+        if model_input.attn_metadata.num_prefills > 0:
+            assert num_steps == 1, (
+                "execute_model(..) of draft_model_runner can be called directly only with a single-step prefill"  # noqa: E501
+            )
+
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
-            # Currently cuda graph is only supported by the decode phase.
-            assert model_input.attn_metadata is not None
-            if (model_input.attn_metadata.num_prefills == 0
-                    and model_input.attn_metadata.use_cuda_graph):
-                assert model_input.input_tokens is not None
+            if use_cuda_graph:
                 graph_batch_size = model_input.input_tokens.shape[0]
                 model_executable = (
                     self.graph_runners[virtual_engine][graph_batch_size])
@@ -330,6 +243,7 @@ class TP1DraftModelRunner(ModelRunner):
                 model_executable = self.model
 
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -344,7 +258,7 @@ class TP1DraftModelRunner(ModelRunner):
                                                model_input.sampling_metadata)
 
             # We can skip CPU samples for spec token generation
-            model_input.sampling_metadata.skip_cpu_samples = True
+            model_input.sampling_metadata.skip_sampler_cpu_output = True
 
             # Sample the next token.
             outputs.append(
@@ -353,22 +267,9 @@ class TP1DraftModelRunner(ModelRunner):
                     sampling_metadata=model_input.sampling_metadata,
                 ))
 
-            # Prepare the inputs for the next step.
+            # Prepare the inputs for the next step on GPU.
             if step != num_steps - 1:
-                # When GPU advance step is enabled, if the first step here
-                # was prompt, then we need to do another step on the CPU,
-                # so that the tensors will be reshaped to "decode mode"
-                # (which does not change between decode runs)
-                first_step_is_prompt = step == 0 and model_input.is_prompt
-                if use_gpu_advance_step and not first_step_is_prompt:
-                    model_input = self._gpu_advance_step(
-                        model_input, outputs[-1])
-                else:
-                    model_input = self.update_model_input(
-                        model_input, outputs[-1])
-
-                # Enable reusing sampling tensors (if we are in decode mode)
-                if not first_step_is_prompt:
-                    model_input.sampling_metadata.reuse_sampling_tensors = True
+                model_input = self._gpu_advance_step(model_input, outputs[-1])
+                model_input.sampling_metadata.reuse_sampling_tensors = True
 
         return outputs
