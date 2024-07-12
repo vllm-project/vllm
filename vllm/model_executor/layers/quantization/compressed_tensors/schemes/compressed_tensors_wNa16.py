@@ -72,7 +72,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             torch.empty(
                 output_size_per_partition,
                 input_size_per_partition // self.pack_factor,
-                input_size_per_partition // self.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
