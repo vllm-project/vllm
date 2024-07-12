@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -88,6 +88,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         *args,
         **kwargs,
@@ -98,6 +99,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.cache_config = cache_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
@@ -107,9 +109,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
         self.kv_cache_dtype = kv_cache_dtype
         self.block_size = cache_config.block_size
-        self.max_context_len_to_capture = (
-            self.model_config.max_context_len_to_capture
-            if self.model_config is not None else 0)
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
