@@ -10,10 +10,10 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_marlin_linear, marlin_is_k_full, marlin_make_empty_g_idx,
-    marlin_make_workspace, marlin_permute_scales,
+    apply_marlin_linear, check_marlin_supported, marlin_is_k_full,
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx, replace_tensor,
-    verify_marlin_supported, verify_marlin_supports_shape, check_marlin_supported)
+    verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
@@ -161,8 +161,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             group_size=group_size)
 
         # Determine sharding
-        if marlin_repeat_scales_on_all_ranks(self.quant_config.desc_act, 
-                                             self.quant_config.group_size, 
+        if marlin_repeat_scales_on_all_ranks(self.quant_config.desc_act,
+                                             self.quant_config.group_size,
                                              is_row_parallel):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
@@ -257,9 +257,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
-        layer.is_k_full = marlin_is_k_full(self.quant_config.desc_act, 
+        layer.is_k_full = marlin_is_k_full(self.quant_config.desc_act,
                                            is_row_parallel)
-
 
     # Checkpoints are serialized in AutoGPTQ format, which is different from the
     # marlin format. This function is called after the weights are loaded.
