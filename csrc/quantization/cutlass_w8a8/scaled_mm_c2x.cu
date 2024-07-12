@@ -667,11 +667,16 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp->dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
-  return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzpToken>(
-      out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
+  if (azp) {
+    TORCH_CHECK(azp->dtype() == torch::kInt32);
+    return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzpToken>(
+        out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
+  } else {
+    return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBiasAzp>(
+        out, a, b, a_scales, b_scales, bias, azp_adj);
+  }
 }
 
 template <template <typename, typename> typename Epilogue,
@@ -807,9 +812,14 @@ void cutlass_scaled_mm_azp_sm89(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(bias.dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp->dtype() == torch::kInt32);
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
-  return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzpToken>(
-      out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
+  if (azp) {
+    TORCH_CHECK(azp->dtype() == torch::kInt32);
+    return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzpToken>(
+        out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
+  } else {
+    return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBiasAzp>(
+        out, a, b, a_scales, b_scales, bias, azp_adj);
+  }
 }
