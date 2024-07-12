@@ -19,7 +19,7 @@ from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_tokenizer
-from vllm.sequence import SamplerOutput, SequenceData
+from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
 from .utils import merge_vision_embeddings
@@ -241,6 +241,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs: object) -> SamplerOutput:
 
         parsed_image_input = self._parse_and_validate_image_input(**kwargs)
@@ -265,6 +266,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
+                                            None,
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
