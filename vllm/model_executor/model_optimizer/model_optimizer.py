@@ -85,9 +85,9 @@ class backend_class:
 
     def __call__(self, gm: torch.fx.GraphModule,
                  example_inputs: List[torch.Tensor]) -> Callable:
-        gm = copy.copy(gm)
+        logger.info("Graph optimizer start")
 
-        logger.debug(f"Original module {gm}:")
+        logger.debug("Original module:")
         logger.debug(lazy_graph_print_tabular(gm.graph, 'users', lambda n: list(n.users.keys())))
         logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
 
@@ -103,7 +103,11 @@ class backend_class:
         logger.debug(lazy_module_print_readable(gm, False))
 
         # Forward optimized graph onto "final" backend (if any).
-        return backend_compile(gm, example_inputs, backend=self.backend)
+        fn = backend_compile(gm, example_inputs, backend=self.backend)
+
+        logger.info("Graph optimizer end")
+
+        return fn
 
 
 def backend(gm: torch.fx.GraphModule,
