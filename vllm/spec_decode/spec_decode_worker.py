@@ -467,10 +467,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposals = self.proposer_worker.get_spec_proposals(
             execute_model_req, self._seq_with_bonus_token_in_last_step)
 
-        if not self.allow_no_draft_tokens and sum(proposals.proposal_lens) == 0:
+        if not self.allow_no_draft_tokens and sum(
+                proposals.proposal_lens) == 0:
             #TODO: Fix it #5814
             raise RuntimeError("Distributed draft worker cannot handle when "
-                                "there's no draft tokens")
+                               "there's no draft tokens")
 
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
