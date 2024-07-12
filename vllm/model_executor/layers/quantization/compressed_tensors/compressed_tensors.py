@@ -267,10 +267,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
         """
 
-        if bias is not None:
-            raise ValueError("bias is not supported for this linear method")
-
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x)
+        return scheme.apply_weights(layer, x, bias=bias)

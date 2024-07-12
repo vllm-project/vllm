@@ -148,9 +148,6 @@ def apply_int8_linear(
     input_scale: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
 ):
-    if bias is not None:
-        raise NotImplementedError("W8A8 with int8 does not yet support bias.")
-
     # ops.scaled_int8_quant supports both dynamic and static quant.
     # * dynamic, layer.input_scale is None and x_scale computed from x.
     # * static, layer.input_scale is scalar and x_scale is input_scale.
@@ -160,4 +157,5 @@ def apply_int8_linear(
                                  weight,
                                  scale_a=x_scale,
                                  scale_b=weight_scale,
-                                 out_dtype=input.dtype)
+                                 out_dtype=input.dtype,
+                                 bias=bias)

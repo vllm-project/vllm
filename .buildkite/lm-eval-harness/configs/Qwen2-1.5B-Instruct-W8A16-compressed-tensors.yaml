@@ -1,0 +1,11 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m nm-testing/Qwen2-1.5B-Instruct-W8A16-Channelwise -b "auto" -l 1000 -f 5 -t 1
+model_name: "nm-testing/Qwen2-1.5B-Instruct-W8A16-Channelwise"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.595
+  - name: "exact_match,flexible-extract"
+    value: 0.582
+limit: 1000
+num_fewshot: 5
