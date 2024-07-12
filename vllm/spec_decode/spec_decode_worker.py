@@ -158,11 +158,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         logger.info("Configuring SpecDecodeWorker with sampler=%s",
                     type(spec_decode_sampler))
 
-        return SpecDecodeWorker(proposer_worker,
-                                scorer_worker,
-                                disable_by_batch_size=disable_by_batch_size,
-                                spec_decode_sampler=spec_decode_sampler,
-                                allow_zero_draft_token_step=allow_zero_draft_token_step)
+        return SpecDecodeWorker(
+            proposer_worker,
+            scorer_worker,
+            disable_by_batch_size=disable_by_batch_size,
+            spec_decode_sampler=spec_decode_sampler,
+            allow_zero_draft_token_step=allow_zero_draft_token_step)
 
     def __init__(
         self,
