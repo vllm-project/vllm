@@ -290,7 +290,9 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int,
 @pytest.mark.parametrize("n", [16, 32, 64])
 @pytest.mark.parametrize("k", [64, 128, 256])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype):
+@pytest.mark.parametrize("use_bias", [True, False])
+def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
+                          use_bias: bool):
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
 
@@ -312,19 +314,27 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype):
     a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
     assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a, rtol=1e-4, atol=1e-3)
 
-    baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
+    if use_bias:
+        bias = torch.rand((n, ), device="cuda", dtype=out_dtype) * 10 + 2.5
+    else:
+        bias = torch.zeros((n, ), device="cuda", dtype=out_dtype)
+
+    baseline_dq = (torch.mm(a_dq, b_dq) + bias).to(out_dtype)
 
     # Hadamard is just the sum of the cols
     azp_adj_i32 = bq_i32.sum(dim=0, keepdim=True).to(dtype=torch.int32)
     azp_i32 = azp_aq_i8.to(dtype=torch.int32)
     azp_with_adj_i32 = azp_i32 * azp_adj_i32
 
-    baseline_q = (scale_a.to(device='cpu') * scale_b.to(device='cpu') * (
-        (aq_i32 + azp_aq_i8).to(device='cpu') @ bq_i32.to(device='cpu'))).to(
-            dtype=out_dtype, device='cuda')
+    a_noazp_i32_cpu = (aq_i32 + azp_aq_i8).to(device='cpu')
+    baseline_q = (
+        scale_a * scale_b *
+        (a_noazp_i32_cpu @ bq_i32.to(device='cpu')).to(device='cuda') +
+        bias).to(dtype=out_dtype)
 
     out = ops.cutlass_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b, out_dtype,
-                                    None, azp_with_adj_i32[0, :])
+                                    None, azp_with_adj_i32[0, :],
+                                    bias if use_bias else None)
     assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
     assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
 
