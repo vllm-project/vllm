@@ -3,6 +3,7 @@ import torch
 
 from vllm.model_executor.layers.layernorm import RMSNorm
 import vllm._custom_ops as ops
+
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [3, 7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [2048, 768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192,
@@ -117,6 +118,7 @@ def test_rms_norm_quant(
     if add_residual:
         assert torch.allclose(residual1, residual2, atol=1e-3)
 
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
@@ -177,4 +179,3 @@ def test_rms_norm_quant2(
     assert torch.allclose(out1, out2, atol=2.0)
     if add_residual:
         assert torch.allclose(residual1, residual2, atol=1e-3)
-

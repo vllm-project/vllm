@@ -7,7 +7,7 @@
 import torch
 import types
 
-from typing import Callable, Optional, Union, Dict, Set, Tuple
+from typing import Callable, Optional, Union, Dict, Set, Tuple, Type
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -22,6 +22,7 @@ class OpSupport:
     - is_trivial - is this op "trivial"?  stacks of only trivial fusable ops
                    will not be fused.
     """
+
     def __init__(self,
                  op_name: Union[str, Callable],
                  is_fusable: bool = False,
@@ -35,15 +36,16 @@ class OpSupport:
 
 # Set of supported operations. These will be partitioned into separate
 # submodules by the backend.
-SUPPORTED: Dict[str, Optional[Set[str]]] = dict()
+SUPPORTED: Dict[str, Set[str]] = dict()
 
 # Dictionary of fusable operations. The key is the operation name and
 # the value is an OpSupport instance.
-FUSABLE : Dict[str, OpSupport] = dict()
+FUSABLE: Dict[str, OpSupport] = dict()
 
 
 def operator_name(
-        op: Union[str, Callable]) -> Tuple[Optional[str], Optional[str]]:
+    op: Union[str,
+              Callable]) -> Tuple[Optional[Union[str, Type]], Optional[str]]:
     """
     Extract a string operator name from a Callable (or string).
     """
@@ -69,15 +71,15 @@ def register_supported(op: Union[str, Callable]):
     if op_name is None:
         raise RuntimeError(f"{op} has unsupported type.")
     logger.debug(f"register supported {class_name}/{op_name}")
+    if not op_name in SUPPORTED:
+        SUPPORTED[op_name] = set()
     if class_name:
-        if not op_name in SUPPORTED:
-            SUPPORTED[op_name] = set()
-        SUPPORTED[op_name].add(class_name)
-    else:
-        SUPPORTED[op_name] = None
+        SUPPORTED[op_name].add(str(class_name))
 
 
-def register_fusable(op: Union[str, Callable], is_compute: bool = False, is_trivial: bool = False):
+def register_fusable(op: Union[str, Callable],
+                     is_compute: bool = False,
+                     is_trivial: bool = False):
     """
     Register 'op' as an operation that can be fused with other fusable ops.
     Can be used as a function decorator.
@@ -123,14 +125,3 @@ def register_defaults():
 
 
 register_defaults()
-
-
-
-
-
-
-
-
-
-
-

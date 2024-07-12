@@ -25,12 +25,17 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+EllipsisType = type(...)
+NoneType = type(None)
+
 
 def lazy_string(fn: Callable):
     """
     Lazily convert the result of fn() to a string.
     """
+
     class lazy:
+
         def __init__(self, fn: Callable):
             self.fn = fn
 
@@ -40,7 +45,7 @@ def lazy_string(fn: Callable):
     return lazy(lambda: fn())
 
 
-def trunc(x, lim=30) -> str:
+def trunc(x, lim=30) -> Any:
     """
     Convert x into a string while making sure that it stays under 'lim'
     characters.  If x is a tuple/list/dict, the elements will be
@@ -51,7 +56,7 @@ def trunc(x, lim=30) -> str:
     elif isinstance(x, list):
         return [trunc(y, lim) for y in x]
     elif isinstance(x, dict):
-        return {trunc(k, lim): trunc(v, lim) for k,v in x.items()}
+        return {trunc(k, lim): trunc(v, lim) for k, v in x.items()}
     xs = str(x)
     return xs if len(xs) <= lim else xs[:lim]
 
@@ -71,12 +76,18 @@ def graph_print_tabular(g: torch.fx.Graph,
     headers = ['opcode', 'name', 'target', 'args', 'kwargs']
 
     if col_get:
-        headers.append(col)
-        node_specs = [[n.op, trunc(n.name), trunc(n.target), n.args, n.kwargs,
-                       col_get(n)] for n in g.nodes]
+        assert col
+        headers.append(str(col))
+        node_specs = [[
+            n.op,
+            trunc(n.name),
+            trunc(n.target), n.args, n.kwargs,
+            col_get(n)
+        ] for n in g.nodes]
     else:
-        node_specs = [[n.op, trunc(n.name), trunc(n.target), n.args, n.kwargs]
-                      for n in g.nodes]
+        node_specs = [[n.op,
+                       trunc(n.name),
+                       trunc(n.target), n.args, n.kwargs] for n in g.nodes]
 
     return tabulate(node_specs, headers=headers)
 
@@ -104,9 +115,8 @@ def is_call(node: torch.fx.Node) -> bool:
     """
     Is the given node a call of some kind?
     """
-    return (node.op == 'call_function' or
-            node.op == 'call_method' or
-            node.op == 'call_module')
+    return (node.op == 'call_function' or node.op == 'call_method'
+            or node.op == 'call_module')
 
 
 def node_function_target(node: torch.fx.Node) -> str:
@@ -138,7 +148,8 @@ def extract_node_type(n: torch.fx.Node):
         return None
 
 
-def argument_type_str(arg: torch.fx.node.Argument, include_constants: bool = False):
+def argument_type_str(arg: torch.fx.node.Argument,
+                      include_constants: bool = False):
     """
     Return a string representation of the type of the given argument.  This is
     used for name mangling.
@@ -156,11 +167,11 @@ def argument_type_str(arg: torch.fx.node.Argument, include_constants: bool = Fal
             return f"{type(arg).__name__}_{str(arg).replace('-','_').replace('.','_')}"
         else:
             return type(arg).__name__
-    elif (isinstance(arg, types.EllipsisType)
-          or isinstance(arg, types.NoneType)):
+    elif (isinstance(arg, EllipsisType) or isinstance(arg, NoneType)):
         return str(arg)
     elif isinstance(arg, tuple):
-        return "T_" + "_".join([argument_type_str(a, include_constants) for a in arg])
+        return "T_" + "_".join(
+            [argument_type_str(a, include_constants) for a in arg])
     elif isinstance(arg, slice):
         return f"S_{arg.start}_{arg.stop}_{arg.step}"
     elif isinstance(arg, torch.device):
@@ -179,10 +190,12 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
     for n in nodes:
         fn = node_function_target(n)
         types = [
-            argument_type_str(arg, True).replace("torch.", "") for arg in n.args
+            argument_type_str(arg, True).replace("torch.", "")
+            for arg in n.args
         ]
         ktypes = [
-            f"K_{name}_{argument_type_str(kwarg, True).replace('torch.', '')}" for name, kwarg in n.kwargs.items()
+            f"K_{name}_{argument_type_str(kwarg, True).replace('torch.', '')}"
+            for name, kwarg in n.kwargs.items()
         ]
         name = name + sep + f"{fn}_{'_'.join(types)}{'_'.join(ktypes)}"
         sep = "_"
@@ -209,7 +222,10 @@ class ModuleInputGenerator(torch.fx.passes.fake_tensor_prop.FakeTensorProp):
         mode: Optional[FakeTensorMode] = None,
     ):
         super().__init__(module, mode)
-        self.module_args = {}
+        self.module_args: Dict[torch.fx.node.Target,
+                               Tuple[Optional[Tuple[torch.fx.node.Argument,
+                                                    ...]],
+                                     Optional[Dict[str, Any]]]] = {}
 
     def call_module(self, target: torch.fx.node.Target,
                     args: Tuple[torch.fx.node.Argument,
@@ -250,7 +266,8 @@ def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
         return None
 
     if len(matched_schemas) != 1:
-        logger.debug(f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
+        logger.debug(
+            f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
         return None
 
     _, s = matched_schemas[0]
@@ -263,7 +280,7 @@ def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
     Return a list of all the mutable argument indices for the callsite
     in 'n'.
     """
-    mutable_arg_indices = []
+    mutable_arg_indices: List[Union[int, str]] = []
 
     if not is_call(n):
         return mutable_arg_indices
@@ -299,10 +316,9 @@ def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
 
 
 def dump_inputs_users(
-    nodes: List[torch.fx.Node],
-    all_input_nodes: Dict[torch.fx.Node, List[torch.fx.Node]],
-    all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]]
-) -> str:
+        nodes: List[torch.fx.Node], all_input_nodes: Dict[torch.fx.Node,
+                                                          List[torch.fx.Node]],
+        all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]]) -> str:
     """
     Pretty print inputs/users info for a set of nodes and tag where
     they differ from node.all_input_nodes and node.users.
@@ -312,13 +328,11 @@ def dump_inputs_users(
 
     headers = ['name', 'inputs', 'users']
 
-    entries = [
-        [
-            trunc(n.name),
-            f"{trunc(all_input_nodes[n])}{'***' if n.all_input_nodes != all_input_nodes[n] else ''}",
-            f"{trunc(all_node_users[n])}{'***' if n.users != all_node_users[n] else ''}",
-        ] for n in nodes
-    ]
+    entries = [[
+        trunc(n.name),
+        f"{trunc(all_input_nodes[n])}{'***' if n.all_input_nodes != all_input_nodes[n] else ''}",
+        f"{trunc(all_node_users[n])}{'***' if n.users != all_node_users[n] else ''}",
+    ] for n in nodes]
 
     return tabulate(entries, headers=headers)
 
@@ -326,7 +340,8 @@ def dump_inputs_users(
 def gather_all_input_nodes(
     nodes: List[torch.fx.Node],
     do_renames: bool = True
-) -> Tuple[Dict[torch.fx.Node, List[torch.fx.Node]], Dict[torch.fx.Node, Dict[torch.fx.Node, None]]]:
+) -> Tuple[Dict[torch.fx.Node, List[torch.fx.Node]], Dict[torch.fx.Node, Dict[
+        torch.fx.Node, None]]]:
     """
     Collect all def/use information for each node in 'nodes'.  This is different
     than node.all_input_nodes and node.users since it handles in-place functions.
@@ -344,9 +359,9 @@ def gather_all_input_nodes(
 
     Note: this will include Node kwargs
     """
-    all_input_nodes : Dict[torch.fx.Node, List[torch.fx.Node]] = dict()
-    all_node_users : Dict[torch.fx.Node, Dict[torch.fx.Node, None]] = dict()
-    renames : Dict[torch.fx.Node, torch.fx.Node] = dict()
+    all_input_nodes: Dict[torch.fx.Node, List[torch.fx.Node]] = dict()
+    all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]] = dict()
+    renames: Dict[torch.fx.Node, torch.fx.Node] = dict()
 
     def process_arg(n: torch.fx.Node, arg: torch.fx.node.Argument):
         if isinstance(arg, tuple):
@@ -366,7 +381,7 @@ def gather_all_input_nodes(
     def rename_users(n: torch.fx.Node):
         for user in all_node_users[n].keys():
             if user in renames:
-                all_node_users[n].erase(user)
+                del all_node_users[n][user]
                 all_node_users[n][user] = None
 
     #
@@ -439,8 +454,10 @@ class FlowGraph:
         visited = set()
         q = self.outputs
 
-        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
+        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(
+            self.module.graph.nodes, True)
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
+            self.module.graph.nodes, False)
 
         while len(q) > 0:
             n = q.pop()
@@ -451,12 +468,6 @@ class FlowGraph:
             for input in self.all_renamed_input_nodes[n]:
                 self.add_edge(input, n)
                 q.append(input)
-
-    def inputs(self) -> List[torch.fx.Node]:
-        return self.inputs
-
-    def outputs(self) -> List[torch.fx.Node]:
-        return self.outputs
 
     def successors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
         return self.succs[n] if n in self.succs else set()
@@ -488,12 +499,12 @@ class SubGraph:
     """
     A class representing a set of nodes somewhat like a virtual GraphModule.
     """
-    def __init__(self,
-                 fg: FlowGraph,
-                 nodes: Optional[List[torch.fx.Node]] = None):
+
+    def __init__(self, fg: FlowGraph, nodes: List[torch.fx.Node]):
         self.module = fg.module
-        self.inputs = []
-        self.outputs = []
+        self.inputs: List[torch.fx.Node] = []
+        self.outputs: List[torch.fx.Node] = []
+        self.nodes: List[torch.fx.Node] = []
         self.all_input_nodes = fg.all_input_nodes
         self.all_node_users = fg.all_node_users
         self.all_renamed_input_nodes = fg.all_renamed_input_nodes
@@ -518,8 +529,10 @@ class SubGraph:
                 if inp not in inputs:
                     inputs.append(inp)
 
-            if any([user for user in all_node_users[n] if not self.in_subgraph(user)
-                    ]) and n not in outputs:
+            if any([
+                    user
+                    for user in all_node_users[n] if not self.in_subgraph(user)
+            ]) and n not in outputs:
                 outputs.append(n)
 
         return inputs, outputs
@@ -550,11 +563,12 @@ class SubGraph:
                     worklist.append(u)
 
         # Check for cycles (should not be any).
-        assert len(order) == len(self.nodes), f"cycle found: ({order}) != ({self.nodes})"
+        assert len(order) == len(
+            self.nodes), f"cycle found: ({order}) != ({self.nodes})"
 
         self.nodes = order
 
-    def build(self, nodes: Optional[List[torch.fx.Node]]):
+    def build(self, nodes: List[torch.fx.Node]):
         """
         Construct the SubGraph
         """
@@ -591,8 +605,10 @@ class SubGraph:
         return candidates.pop()
 
     def _refresh_def_use(self):
-        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
+        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(
+            self.module.graph.nodes, True)
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
+            self.module.graph.nodes, False)
 
     def erase(self):
         """
@@ -618,7 +634,8 @@ class SubGraph:
         headers = ['opcode', 'name', 'target', 'args', 'kwargs']
 
         if col_get:
-            headers.append(col)
+            assert col
+            headers.append(str(col))
 
         def mcol_get(x):
             if col_get:
@@ -626,16 +643,28 @@ class SubGraph:
             else:
                 return []
 
-        node_specs = [['placeholder*', trunc(n.name), trunc(n.target),
-                       tuple(),
-                       dict(), *mcol_get(n)] for n in self.inputs]
-
-        node_specs = node_specs + [[n.op, trunc(n.name), trunc(n.target), trunc(n.args), n.kwargs, *mcol_get(n)]
-                                   for n in self.nodes]
+        node_specs = [[
+            'placeholder*',
+            trunc(n.name),
+            trunc(n.target),
+            tuple(),
+            dict(), *mcol_get(n)
+        ] for n in self.inputs]
 
         node_specs = node_specs + [[
-            'output*', 'output*', 'output*',
-            (trunc(n), ), dict(), *mcol_get(n),
+            n.op,
+            trunc(n.name),
+            trunc(n.target),
+            trunc(n.args), n.kwargs, *mcol_get(n)
+        ] for n in self.nodes]
+
+        node_specs = node_specs + [[
+            'output*',
+            'output*',
+            'output*',
+            (trunc(n), ),
+            dict(),
+            *mcol_get(n),
         ] for n in self.outputs]
 
         return tabulate(node_specs, headers=headers)

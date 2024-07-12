@@ -26,11 +26,7 @@ class FusedOpGenerator(ABC):
 
     @abstractmethod
     def make_fused_op(
-        self,
-        op_name: str,
-        inputs: List[torch.fx.Node],
-        outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-    ) -> Callable:
+            self, op_name: str, inputs: List[torch.fx.Node],
+            outputs: List[torch.fx.Node], nodes: List[torch.fx.Node],
+            kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
         raise FusionFail("no generator")

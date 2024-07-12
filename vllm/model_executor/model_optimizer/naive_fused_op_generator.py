@@ -20,6 +20,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+EllipsisType = type(...)
+NoneType = type(None)
+
 
 class NaiveFusedOpGenerator(FusedOpGenerator):
     """
@@ -103,7 +106,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             return 'torch::kFloat32'
         elif s == 'torch::float8_e4m3fn':
             return 'torch::kFloat8_e4m3fn'
-        elif s in ['cpu', 'cuda', 'hip', 'fpga', 'ort', 'xla', 'mps', 'xpu', 'hpu', 've', 'ipu', 'mtia']:
+        elif s in [
+                'cpu', 'cuda', 'hip', 'fpga', 'ort', 'xla', 'mps', 'xpu',
+                'hpu', 've', 'ipu', 'mtia'
+        ]:
             return f'torch::k{s.upper()}'
         elif s in ['meta', 'vulkan', 'metal', 'lazy']:
             return f'torch::k{s[0].upper()}{s[1:]}'
@@ -114,9 +120,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         """
         Translate getitem arguments to C++/Python ABI
         """
-        if isinstance(arg, types.EllipsisType):
+        if isinstance(arg, EllipsisType):
             return "py::ellipsis()"
-        elif isinstance(arg, types.NoneType):
+        elif isinstance(arg, NoneType):
             return "std::nullopt"
         elif isinstance(arg, int):
             return f"{arg}"
@@ -129,7 +135,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             raise FusionFail(f"unsupported getitem indexing arg: {arg}.")
 
     def convert_slice_args(self, args: Tuple[torch.fx.node.Argument]) -> str:
-        idx = 1 if isinstance(args[0], types.EllipsisType) else 0
+        idx = 1 if isinstance(args[0], EllipsisType) else 0
 
         assert isinstance(args[idx], slice)
 
@@ -139,16 +145,15 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             idx].step is not None else ""
         return f"{idx}, {start}, {stop}{step}"
 
-    def is_simple_slice(self, arg: torch.fx.node.Argument) -> str:
+    def is_simple_slice(self, arg: torch.fx.node.Argument) -> bool:
         """
         Detect simple 2d slices along a single dimension.
         """
         if not isinstance(arg, tuple) or len(arg) != 2:
             return False
-        if not ((isinstance(arg[0], types.EllipsisType)
-                 and isinstance(arg[1], slice)) or
-                (isinstance(arg[1], types.EllipsisType)
-                 and isinstance(arg[0], slice))):
+        if not (
+            (isinstance(arg[0], EllipsisType) and isinstance(arg[1], slice)) or
+            (isinstance(arg[1], EllipsisType) and isinstance(arg[0], slice))):
             return False
         return True
 
@@ -160,7 +165,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         idx = n.args[1]
 
         #assert isinstance(idx, tuple) or self.is_simple_slice(idx)
-        if not (isinstance(idx, tuple) or self.is_simple_slice(idx) or isinstance(idx, int)):
+        if not (isinstance(idx, tuple) or self.is_simple_slice(idx)
+                or isinstance(idx, int)):
             raise FusionFail(f"unsupported slice: {idx}")
 
         if self.is_simple_slice(idx):
@@ -204,8 +210,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         return user_to_last_uses
 
-    def delete_unused_values(self, user_to_last_uses,
-                             user: torch.fx.Node,
+    def delete_unused_values(self, user_to_last_uses, user: torch.fx.Node,
                              outputs: List[torch.fx.Node]) -> str:
         """
         Generate code to delete values after their last use. This ensures that
@@ -227,13 +232,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         return to_delete_str
 
     def make_fused_op(
-        self,
-        op: str,
-        inputs: List[torch.fx.Node],
-        outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-    ) -> Callable:
+            self, op: str, inputs: List[torch.fx.Node],
+            outputs: List[torch.fx.Node], nodes: List[torch.fx.Node],
+            kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
         """
         Generate naive C++/CUDA code for a stack of fused ops.
 
@@ -277,7 +278,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         if len(outputs) == 1:
             self.fused_op.append(f'torch::Tensor {op}({cxx_arg_sig})')
         else:
-            self.fused_op.append(f'std::tuple<{", ".join(["torch::Tensor" for output in outputs])}> {op}({cxx_arg_sig})')
+            self.fused_op.append(
+                f'std::tuple<{", ".join(["torch::Tensor" for output in outputs])}> {op}({cxx_arg_sig})'
+            )
         self.fused_op.append('{')
 
         # pybind only needed for non-simple slices.
@@ -293,8 +296,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
             if fn == '_operator_getitem':
                 call_str = self.translate_getitem(n)
-                assert kwargs.get(n.name) is None or len(kwargs.get(
-                    n.name)) == 0
+                assert kwargs.get(n.name) is None or len(kwargs[n.name]) == 0
             else:
                 if return_type is None:
                     call_str = "  "
@@ -330,8 +332,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     #supported_empty_kwargs = ['dtype', 'device', 'layout', 'memory_format']
                     supported_empty_kwargs = ['dtype', 'device']
 
-                    if not all([(k in supported_empty_kwargs) for k in n.kwargs.keys()]):
-                        raise FusionFail(f"unsupported kwarg type in {n.kwargs.keys()}")
+                    if not all([(k in supported_empty_kwargs)
+                                for k in n.kwargs.keys()]):
+                        raise FusionFail(
+                            f"unsupported kwarg type in {n.kwargs.keys()}")
 
                     dtype = n.kwargs.get('dtype')
                     device = n.kwargs.get('device')
@@ -354,13 +358,18 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
             self.fused_op.append(comment_str)
             self.fused_op.append(call_str)
-            self.fused_op.append(self.delete_unused_values(user_to_last_uses, n, outputs))
+            self.fused_op.append(
+                self.delete_unused_values(user_to_last_uses, n, outputs))
 
-        self.fused_op.append(f"  // {', '.join([str(extract_node_type(output)) for output in outputs])}")
+        self.fused_op.append(
+            f"  // {', '.join([str(extract_node_type(output)) for output in outputs])}"
+        )
         if len(outputs) == 1:
             self.fused_op.append(f"  return {self.sanitize(outputs[0].name)};")
         else:
-            self.fused_op.append(f"  return {oc}{', '.join([self.sanitize(output.name) for output in outputs])}{cc};")
+            self.fused_op.append(
+                f"  return {oc}{', '.join([self.sanitize(output.name) for output in outputs])}{cc};"
+            )
 
         self.fused_op.append('}')
         self.fused_op.append(
@@ -378,13 +387,11 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         #self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) {oc} m.impl("{op}", &{op}); {cc}')
 
         return self.build_op(
-            op,
-            f"torch.ops.fused_ops{self.N}.{op}",
-            arg_sig,
-            generate_meta_function(inputs, outputs, nodes, kwargs)
-        )
+            op, f"torch.ops.fused_ops{self.N}.{op}", arg_sig,
+            generate_meta_function(inputs, outputs, nodes, kwargs))
 
-    def build_op(self, op: str, torch_op_name: str, sig: str, meta_fn: Callable) -> Callable:
+    def build_op(self, op: str, torch_op_name: str, sig: str,
+                 meta_fn: Callable) -> Callable:
         """
         Compile the code for the current "library".
         Note: this could fail and throw a FusionFail exception.
@@ -414,11 +421,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 out.close()
                 build_extension(
                     op_lib,
-                    str(out.name),
+                    [str(out.name)],
                     # TODO: Note: these is a total hack to get naive C++ fused ops working.
                     extra_cflags=[f"-I{self.vllm_root}/csrc"],
-                    extra_ldflags=[f"{self.vllm_root}/vllm/_C.abi3.so"]
-                )
+                    extra_ldflags=[f"{self.vllm_root}/vllm/_C.abi3.so"])
                 logger.info(f"code generation success: {out.name}")
 
             self.N = NaiveFusedOpGenerator.N

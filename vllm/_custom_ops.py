@@ -159,17 +159,19 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
+
 def rms_norm_quant(out: torch.Tensor, input: torch.Tensor, tmp: torch.Tensor,
                    weight: torch.Tensor, scale: torch.Tensor,
                    epsilon: float) -> None:
     torch.ops._C.rms_norm_quant(out, input, tmp, weight, scale, epsilon)
+
 
 def add_residual_rms_norm_quant(out: torch.Tensor, input: torch.Tensor,
                                 residual: torch.Tensor, tmp: torch.Tensor,
                                 weight: torch.Tensor, scale: torch.Tensor,
                                 epsilon: float) -> None:
     torch.ops._C.add_residual_rms_norm_quant(out, input, residual, tmp, weight,
-                                         scale, epsilon)
+                                             scale, epsilon)
 
 
 def silu_and_mul_quant(out: torch.Tensor, input: torch.Tensor,
@@ -267,19 +269,6 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     return out
 
-def foo(output: torch.Tensor,
-        input: torch.Tensor, 
-        weight: torch.Tensor, 
-        input_scale: torch.Tensor, 
-        weight_scale: torch.Tensor,
-        output_scale: torch.Tensor):
-    torch.ops._C.cutlass_scaled_mm(output, input, weight, input_scale, weight_scale, None)
-
-    # needs to be n//2 which could be a problem?
-    silu_mul_output = torch.empty((output.size(0), output.size(1)//2))
-    tmp = torch.empty_like(silu_mul_output)
-    silu_and_mul_quant(output, silu_mul_output, output_scale, tmp)
-    return silu_mul_output
 
 def cutlass_scaled_mm_azp(a: torch.Tensor,
                           b: torch.Tensor,

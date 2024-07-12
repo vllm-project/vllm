@@ -2,12 +2,13 @@ import torch
 from .code_cache import CodeCache
 
 silu_mul_quant_name = "torch_P_empty_T_int_3_int_1K_device_D_cuda_0_K_dtype_float32_torch_P_ops_P__C_P_cutlass_scaled_mm_float16_int8_int8_float32_float32_None__operator_P_getitem_float16_T_Ellipsis_S_None_14336_None__operator_P_getitem_float16_T_Ellipsis_S_14336_None_None_torch_P_nn_P_functional_P_silu_float16__operator_P_mul_float16_float16_torch_P_empty_like_float16K_dtype_int8_torch_P_ops_P__C_P_dynamic_scaled_int8_quant_int8_float16_float32_fused"
-def silu_mul_quant(output: torch.Tensor,
-                input: torch.Tensor, 
-                weight: torch.Tensor, 
-                input_scale: torch.Tensor, 
-                weight_scale: torch.Tensor):
-    torch.ops._C.cutlass_scaled_mm(output, input, weight, input_scale, weight_scale, None)
+
+
+def silu_mul_quant(output: torch.Tensor, input: torch.Tensor,
+                   weight: torch.Tensor, input_scale: torch.Tensor,
+                   weight_scale: torch.Tensor):
+    torch.ops._C.cutlass_scaled_mm(output, input, weight, input_scale,
+                                   weight_scale, None)
 
     silu_mul_output = torch.empty((output.size(0), output.size(1)//2), dtype=torch.int8, device="cuda")
     tmp = torch.empty_like(silu_mul_output, dtype=torch.float32)

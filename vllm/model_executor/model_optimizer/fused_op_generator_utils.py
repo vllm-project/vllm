@@ -50,9 +50,7 @@ def build_extension(lib_name: str,
     torch.utils.cpp_extension.load(
         name=lib_name,
         sources=sources,
-        extra_cflags=[
-            opt, f'-DLIBRARY_NAME={lib_name}', *extra_cflags
-        ],
+        extra_cflags=[opt, f'-DLIBRARY_NAME={lib_name}', *extra_cflags],
         extra_ldflags=extra_ldflags,
         verbose=verbose,
         is_python_module=False,
@@ -73,7 +71,7 @@ def arg_schema_type(n: torch.fx.Node, add_prefix: bool = False) -> str:
         # this default is a bit sketchy
         ty = "Tensor"
 
-    builtin_types = {"int":"int64_t", "float":"double"}
+    builtin_types = {"int": "int64_t", "float": "double"}
 
     if add_prefix and ty in builtin_types:
         return builtin_types[ty]
@@ -82,11 +80,9 @@ def arg_schema_type(n: torch.fx.Node, add_prefix: bool = False) -> str:
 
 
 def generate_op_schema(
-    inputs: List[torch.fx.Node],
-    outputs: List[torch.fx.Node],
-    nodes: List[torch.fx.Node],
-    kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-) -> str:
+        inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
+        nodes: List[torch.fx.Node],
+        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> str:
     sep = f"("
     arg_sig = ""
     for i, n in enumerate(inputs):
@@ -114,11 +110,9 @@ def generate_op_schema(
 
 
 def generate_meta_function(
-    inputs: List[torch.fx.Node],
-    outputs: List[torch.fx.Node],
-    nodes: List[torch.fx.Node],
-    kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-) -> Callable:
+        inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
+        nodes: List[torch.fx.Node],
+        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
     """
     Generate a meta function for a fused op by composing the individual
     operations.
@@ -134,7 +128,7 @@ def register_op_schema(library: str, op: str, sig: str):
     """
     Register schema for the given 'op' in the given 'lib'.
     """
-    op = op.mangle(".", "::").replace("torch::ops::", "")
+    op = op.replace(".", "::").replace("torch::ops::", "")
     logger.debug(f"Registering schema for {op}: {sig}")
     torch.library.define(f"{op}", sig)
 

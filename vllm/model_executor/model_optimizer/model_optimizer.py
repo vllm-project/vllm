@@ -14,15 +14,14 @@ from typing import List, Tuple, Optional, Callable
 
 from vllm.logger import init_logger
 
-
 logger = init_logger(__name__)
-
 
 ###############################################################################
 #
 # Backend
 #
 ###############################################################################
+
 
 def optimize(
     cc: CodeCache,
@@ -50,9 +49,9 @@ def backend_compile(gm: torch.fx.GraphModule,
         return gm.name if hasattr(gm, 'name') else None
 
     try:
-        backend = lookup_backend(backend)
+        backend_fn = lookup_backend(backend)
         logger.debug(f"attempting {backend} on {maybe_name(gm)}")
-        backend_compiled = backend(gm, example_inputs)
+        backend_compiled = backend_fn(gm, example_inputs)
         if backend_compiled is not None:
             logger.debug(f"{backend} compiled {maybe_name(gm)}.")
             return backend_compiled
@@ -88,7 +87,9 @@ class backend_class:
         logger.info("Graph optimizer start")
 
         logger.debug("Original module:")
-        logger.debug(lazy_graph_print_tabular(gm.graph, 'users', lambda n: list(n.users.keys())))
+        logger.debug(
+            lazy_graph_print_tabular(gm.graph, 'users',
+                                     lambda n: list(n.users.keys())))
         logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
 
         # Annotate all nodes with types and shapes.
@@ -128,7 +129,13 @@ def make_backend(backend: Optional[str] = 'inductor') -> backend_class:
 
 
 # TODO: come up with better name for this
-def optimizer(_func: Optional[Callable] = None, backend: Optional[str] = None, fullgraph: bool = False) -> Callable:
+def optimizer(_func: Optional[Callable] = None,
+              backend: Optional[str] = None,
+              fullgraph: bool = False):
+
     def body(fn: Callable) -> Callable:
-        return torch.compile(fn, backend=make_backend(backend=backend), fullgraph=fullgraph)
+        return torch.compile(fn,
+                             backend=make_backend(backend=backend),
+                             fullgraph=fullgraph)
+
     return body if _func is None else body(_func)

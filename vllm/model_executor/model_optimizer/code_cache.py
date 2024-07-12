@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -21,7 +21,7 @@ class CodeCache:
     """
 
     def __init__(self, disable: bool = False):
-        self.cache = dict()
+        self.cache: Dict[str, Optional[Callable]] = dict()
         self.disable = disable
 
     def lookup_or_create(self, mangled_name: str,
