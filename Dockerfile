@@ -79,7 +79,7 @@ COPY requirements-cuda.txt requirements-cuda.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm vllm
 
-# max jobs used by Ninja to build extensions
+# max jobs usesd by Ninja to build extensions
 ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
 # number of threads used by nvcc
