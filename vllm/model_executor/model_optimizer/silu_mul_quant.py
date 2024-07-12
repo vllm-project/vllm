@@ -10,19 +10,26 @@ def silu_mul_quant(output: torch.Tensor, input: torch.Tensor,
     torch.ops._C.cutlass_scaled_mm(output, input, weight, input_scale,
                                    weight_scale, None)
 
-    silu_mul_output = torch.empty((output.size(0), output.size(1)//2), dtype=torch.int8, device="cuda")
+    silu_mul_output = torch.empty((output.size(0), output.size(1) // 2),
+                                  dtype=torch.int8,
+                                  device="cuda")
     tmp = torch.empty_like(silu_mul_output, dtype=torch.float32)
-    output_scale = torch.empty((output.size(0),1), dtype=torch.float32, device="cuda")
+    output_scale = torch.empty((output.size(0), 1),
+                               dtype=torch.float32,
+                               device="cuda")
     torch.ops._C.silu_and_mul_quant(silu_mul_output, output, output_scale, tmp)
     return (output_scale, silu_mul_output)
 
-def silu_mul_quant_meta(output: torch.Tensor,
-                input: torch.Tensor, 
-                weight: torch.Tensor, 
-                input_scale: torch.Tensor, 
-                weight_scale: torch.Tensor):
-    full_output = torch.empty((output.size(0), output.size(1)//2), dtype=torch.int8, device="cuda")
-    output_scale = torch.empty((output.size(0),1), dtype=torch.float32, device="cuda")
+
+def silu_mul_quant_meta(output: torch.Tensor, input: torch.Tensor,
+                        weight: torch.Tensor, input_scale: torch.Tensor,
+                        weight_scale: torch.Tensor):
+    full_output = torch.empty((output.size(0), output.size(1) // 2),
+                              dtype=torch.int8,
+                              device="cuda")
+    output_scale = torch.empty((output.size(0), 1),
+                               dtype=torch.float32,
+                               device="cuda")
     return (output_scale, full_output)
 
 
