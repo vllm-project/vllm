@@ -77,9 +77,6 @@ def get_attn_backend(
         return IpexAttnBackend
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
-        logger.warning(("Flashinfer will be stuck on llama-2-7b,"
-                        " please avoid using Flashinfer as the "
-                        "backend when running on llama-2-7b."))
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
     elif backend == _Backend.PALLAS:
