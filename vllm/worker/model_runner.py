@@ -754,6 +754,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 slot_mapping=slot_mapping_tensor,
                 num_prefill_tokens=num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
+                max_prefill_seq_len=max_prefill_seq_len,
                 block_tables=block_tables,
                 paged_kv_indptr=paged_kv_indptr_tensor,
                 paged_kv_indices=paged_kv_indices_tensor,
