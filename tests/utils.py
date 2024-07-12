@@ -46,13 +46,6 @@ VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
 
 
-def api_sever_runner(cli_args: List[str]) -> None:
-    os.environ["PYTHONUNBUFFERED"] = "1"
-    sys.argv = ["vllm.entrypoints.openai.api_server"] + cli_args
-    import runpy
-    runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__")
-
-
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
