@@ -381,7 +381,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
-        # initilize GGUF param after we know the quantize type
+        # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
         if is_gguf_weight_type:
@@ -462,7 +462,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
-            
+
             if is_gguf_weight:
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
@@ -569,11 +569,11 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
-        # initilize GGUF param after we know the quantize type
+        # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            idx_map = {"q":0, "k":1, "v":2}
+        if is_gguf_weight_type and loaded_shard_id is not None:
+            idx_map = {"q": 0, "k": 1, "v": 2}
             param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
             param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             return
@@ -676,7 +676,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 }
                 shard_size, shard_offset = adjust_bitsandbytes_shard(
                     param, orig_qkv_offsets, loaded_shard_id)
-            
+
             if is_gguf_weight:
                 param.shard_id.append(loaded_shard_id)
                 param.shard_size[loaded_shard_id] = loaded_weight.shape

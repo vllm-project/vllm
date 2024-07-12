@@ -34,8 +34,7 @@ from vllm.distributed import (get_pp_group, get_pp_indices,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -140,9 +139,8 @@ class LlamaAttention(nn.Module):
         )
 
         is_neox_style = True
-        if quant_config is not None:
-            if quant_config.get_name()=="gguf":
-                is_neox_style = False
+        if quant_config is not None and quant_config.get_name() == "gguf":
+            is_neox_style = False
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -167,8 +165,7 @@ class LlamaAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
-                            dim=-1)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
