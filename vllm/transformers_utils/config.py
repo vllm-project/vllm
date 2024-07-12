@@ -106,3 +106,4 @@ def try_get_generation_config(
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
+
