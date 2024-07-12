@@ -268,6 +268,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         layer input.  See LinearMethodBase for param details
 
         """
+
         if bias is not None:
             raise ValueError("bias is not supported for this linear method")
 
