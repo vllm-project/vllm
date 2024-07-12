@@ -63,7 +63,6 @@ class QuantizationArgs(BaseModel):
     strategy: Optional[QuantizationStrategy] = None
     block_structure: Optional[str] = None
     dynamic: bool = False
-    actorder: bool = False
     observer: str = Field(
         default="minmax",
         description=("The class to use to compute the quantization param - "
