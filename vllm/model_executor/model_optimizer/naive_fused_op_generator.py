@@ -51,6 +51,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         super().__init__()
         # base filename for generated code.
         self.filename = "fused_"
+        self.vllm_root = Path(__file__).parent.parent.parent.parent
         self.reset_fused_op()
         self.N = NaiveFusedOpGenerator.N
 
@@ -61,7 +62,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         self.fused_op = []
         self.fused_op.append(f'#include <torch/extension.h>')
-        ops_header = Path(__file__).parent.parent.parent / "csrc" / "ops.h"
+        ops_header = self.vllm_root / "csrc" / "ops.h"
         #self.fused_op.append(f'#include <iostream>')
         self.fused_op.append(f'#include "{ops_header}"')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
@@ -411,13 +412,12 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     out.write(l)
                     out.write('\n')
                 out.close()
-                vllm_root = Path(__file__).parent.parent.parent
                 build_extension(
                     op_lib,
                     str(out.name),
                     # TODO: Note: these is a total hack to get naive C++ fused ops working.
-                    extra_cflags=[f"-I{vllm_root}/csrc"],
-                    extra_ldflags=[f"{vllm_root}/vllm/_C.abi3.so"]
+                    extra_cflags=[f"-I{self.vllm_root}/csrc"],
+                    extra_ldflags=[f"{self.vllm_root}/vllm/_C.abi3.so"]
                 )
                 logger.info(f"code generation success: {out.name}")
 
