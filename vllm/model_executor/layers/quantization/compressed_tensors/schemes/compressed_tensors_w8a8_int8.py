@@ -1,4 +1,4 @@
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import torch
 from torch.nn import Parameter
@@ -78,8 +78,11 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                                                   **layer_kwargs)
             layer.register_parameter("input_scale", scale)
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
+                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+
         return apply_int8_linear(input=x,
                                  weight=layer.weight,
                                  weight_scale=layer.weight_scale,
-                                 input_scale=layer.input_scale)
+                                 input_scale=layer.input_scale,
+                                 bias=bias)
