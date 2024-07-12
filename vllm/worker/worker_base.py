@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
-from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
+from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
@@ -309,14 +309,6 @@ class WorkerWrapperBase:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`
             del os.environ[key]
-            if is_hip():
-                hip_env_var = "HIP_VISIBLE_DEVICES"
-                if hip_env_var in os.environ:
-                    logger.warning(
-                        "Ignoring pre-set environment variable `%s=%s` as "
-                        "%s has also been set, which takes precedence.",
-                        hip_env_var, os.environ[hip_env_var], key)
-                os.environ.pop(hip_env_var, None)
         update_environment_variables(envs)
 
     def init_worker(self, *args, **kwargs):
