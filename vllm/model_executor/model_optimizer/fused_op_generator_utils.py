@@ -42,9 +42,9 @@ def build_extension(lib_name: str,
                     extra_ldflags: Optional[List[str]] = None,
                     verbose: bool = False):
     """
-    Given a list of cpp and cuda source files, build and load a pytorch extension
-    module with the given name.  Loaded ops will appear in the torch.ops.{lib_name}
-    namespace.
+    Given a list of cpp and cuda source files, build and load a pytorch
+    extension module with the given name.  Loaded ops will appear in the
+    torch.ops.{lib_name} namespace.
     """
     if not extra_cflags:
         extra_cflags = []
@@ -141,7 +141,7 @@ def register_op_schema(library: str, op: str, sig: str):
 def register_meta_function(library: str, op: str, meta_fn: Callable):
     """
     Register meta function the given 'op' in the given 'lib'.
-    See also: torch.library.impl_abstract(qualname, func=None, *, lib=None, _stacklevel=1)
+    See also: torch.library.impl_abstract()
     """
     op = op.replace(".", "::").replace("torch::ops::", "")
     logger.debug("Registering meta function for %s: %s", op, str(meta_fn))

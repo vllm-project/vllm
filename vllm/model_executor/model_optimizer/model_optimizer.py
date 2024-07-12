@@ -64,11 +64,9 @@ def backend_compile(gm: torch.fx.GraphModule,
 
 class backend_class:
     """
-    A custom backend for torch.compile.
-
-    This backend works by partitioning the provided module into supported/unsupported
-    sub-modules.  The supported submodules are passed to an optimizer and then compiled
-    via an optional "final" backend.
+    A custom backend for torch.compile that performs graph level optimizations
+    on the given fx.Graph.  It then passes the optimized graph off to an
+    optional "final" backend.
     """
 
     # This is a global code cache that applies to all models.
@@ -89,7 +87,7 @@ class backend_class:
         logger.debug(
             lazy_graph_print_tabular(gm.graph, 'users',
                                      lambda n: list(n.users.keys())))
-        logger.debug("input_types: %s", [type(inp) for inp in example_inputs])
+        logger.debug("input_types: %s", str([type(inp) for inp in example_inputs]))
 
         # Annotate all nodes with types and shapes.
         ShapeProp(gm).propagate(*example_inputs)

@@ -11,7 +11,8 @@ from .code_cache import CodeCache
 from .fused_op_generator import FusionFail
 from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
-from .utils import FlowGraph, node_function_target, SubGraph, is_call, lazy_graph_print_tabular, mangle_name
+from .utils import (FlowGraph, node_function_target, SubGraph, is_call,
+                    lazy_graph_print_tabular, mangle_name)
 
 from torch.fx.passes.shape_prop import ShapeProp
 from typing import List, Dict, Optional, Callable, Set
@@ -73,7 +74,8 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     # Note: we do not update the meta info for cf here.  It should
     # not be required after transformation anyway.
     cf = sub.module.graph.call_function(fn, args=tuple(inputs), kwargs=kwargs)
-    logger.debug("fused op: %s, num_outputs=%s", cf.format_node(), len(outputs))
+    logger.debug("fused op: %s, num_outputs=%s", cf.format_node(),
+                 len(outputs))
 
     new_sub = [cf]
 
@@ -219,15 +221,16 @@ def pointwise_fusion(cc: CodeCache,
             node_map[n] = 0
             continue
 
-        pred = is_fusable_pair if not fuse_with_compute else is_compute_fusable_pair
+        pred = (is_fusable_pair
+                if not fuse_with_compute else is_compute_fusable_pair)
 
         fusable = [
             pred(s, n) for s in fg.predecessors(n)
             if s.op != 'placeholder' and not is_get_attr(s)
         ]
         if not all(fusable):
-            logger.debug(
-                "  REJECT %s: not all preds fusable: %s, %s", n, fusable, fg.predecessors(n))
+            logger.debug("  REJECT %s: not all preds fusable: %s, %s", n,
+                         fusable, fg.predecessors(n))
 
             if n not in node_map:
                 node_map[n] = 0
@@ -274,8 +277,9 @@ def pointwise_fusion(cc: CodeCache,
         for n in mod.graph.nodes:
             part = node_map[n]
             if is_compute(n):
-                assert part == 0 or num_compute[
-                    part] == 0, f"part = {part}: {[n for n, p in node_map.items() if p == part]}"
+                assert part == 0 or num_compute[part] == 0, (
+                    f"part = {part}:"
+                    f"{[n for n, p in node_map.items() if p == part]}")
                 num_compute[part] = num_compute[part] + 1
 
         for n in mod.graph.nodes:
@@ -292,30 +296,28 @@ def pointwise_fusion(cc: CodeCache,
 
             if not same_partition(nodes):
                 logger.debug(
-                    "COMPUTE REJECT %s: not all neighbors in same partition %s", n, str(nodes)
-                )
+                    "COMPUTE REJECT %s: not all neighbors in same partition %s",
+                    n, str(nodes))
                 continue
 
             fuse_part = next(iter(nodes))
 
             if not only_pointwise(fuse_part):
                 logger.debug(
-                    "COMPUTE REJECT %s: not only_pointwise in users %s", n, str(fuse_part)
-                )
+                    "COMPUTE REJECT %s: not only_pointwise in users %s", n,
+                    str(fuse_part))
                 continue
 
             fuse_part_id = node_map[fuse_part]
 
-            if fuse_part_id != 0 and fuse_part_id in num_compute and num_compute[
-                    fuse_part_id] >= 1:
-                logger.debug(
-                    "COMPUTE REJECT %s: already a compute node in %s", n, str(node_map[fuse_part])
-                )
+            if (fuse_part_id != 0 and fuse_part_id in num_compute
+                    and num_compute[fuse_part_id] >= 1):
+                logger.debug("COMPUTE REJECT %s: already a compute node in %s",
+                             n, str(node_map[fuse_part]))
                 continue
 
-            logger.debug(
-                "COMPUTE ACCEPT %s: partition %s, nodes=%s", n, fuse_part_id, str(nodes)
-            )
+            logger.debug("COMPUTE ACCEPT %s: partition %s, nodes=%s", n,
+                         fuse_part_id, str(nodes))
 
             num_compute[fuse_part_id] = num_compute[fuse_part_id] + 1
             node_map[n] = fuse_part_id
@@ -323,7 +325,7 @@ def pointwise_fusion(cc: CodeCache,
     logger.debug("final paritions = %s", dump_partitions(node_map))
 
     # Make sure all nodes have been assigned a partition.
-    assert (all([n in node_map for n in mod.graph.nodes]))
+    assert all([n in node_map for n in mod.graph.nodes])
 
     logger.debug("pre-fusion split mod:")
     logger.debug(
@@ -345,9 +347,8 @@ def pointwise_fusion(cc: CodeCache,
         if len([n for n in sub.nodes if non_trivial_op(n)]) <= 1:
             logger.debug("Reject empty/singleton subgraph:\n%s", sub.tabular())
             continue
-        logger.debug(
-            "Fusing sub-module (last_input=%s):\n%s", sub.last_input(), sub.tabular()
-        )
+        logger.debug("Fusing sub-module (last_input=%s):\n%s",
+                     sub.last_input(), sub.tabular())
         fuse_graph_nodes(cc, sub)
         logger.debug("Post fusion sub-module:\n%s", sub.tabular())
 

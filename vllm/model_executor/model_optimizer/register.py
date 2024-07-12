@@ -69,7 +69,7 @@ def register_supported(op: Union[str, Callable]):
     class_name, op_name = operator_name(op)
     if op_name is None:
         raise RuntimeError(f"{op} has unsupported type.")
-    logger.debug("register supported %s/%s", class_name, op_name)
+    logger.debug("register supported %s/%s", str(class_name), op_name)
     if op_name not in SUPPORTED:
         SUPPORTED[op_name] = set()
     if class_name:
@@ -87,7 +87,8 @@ def register_fusable(op: Union[str, Callable],
     if op_name is None:
         raise RuntimeError(f"{op} has unsupported type.")
     assert op_name not in FUSABLE
-    logger.debug("register fusable %s, is_compute %s, is_trivial %s", op_name, is_compute, is_trivial)
+    logger.debug("register fusable %s, is_compute %s, is_trivial %s", op_name,
+                 is_compute, is_trivial)
     register_supported(op)
 
     # TODO: need to register classes for methods

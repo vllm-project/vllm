@@ -12,8 +12,9 @@ from typing import List, Dict, Callable
 
 class FusionFail(Exception):
     """
-    An exception used to indicate a failure in the fusion or fused op generation process.
-    Should be recoverable, i.e. can fall back to the non-fused version of graph.
+    An exception used to indicate a failure in the fusion or fused op generation
+    process. Should be recoverable, i.e. can fall back to the non-fused version
+    of graph.
     """
     pass
 

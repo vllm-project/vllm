@@ -162,7 +162,8 @@ def argument_type_str(arg: torch.fx.node.Argument,
         return str(arg)
     elif isinstance(arg, (str, int, float, bool)):
         if include_constants:
-            return f"{type(arg).__name__}_{str(arg).replace('-','_').replace('.','_')}"
+            arg_name = str(arg).replace('-', '_').replace('.', '_')
+            return f"{type(arg).__name__}_{arg_name}"
         else:
             return type(arg).__name__
     elif isinstance(arg, (EllipsisType, NoneType)):
@@ -207,9 +208,9 @@ class ModuleInputGenerator(FakeTensorProp):
     After running propagate the 'module_args' property will hold a map of
     module name to list of example inputs.
 
-    For now, if a particular submodule is called from more than one location, 'module_args'
-    will contain 'None'.  This could be made smarter but is not necessary for now
-    since we currently only care about single use submodules.
+    For now, if a particular submodule is called from more than one location,
+    'module_args' will contain 'None'.  This could be made smarter but is not
+    necessary for now since we currently only care about single use submodules.
 
     TODO: can this be combined with ShapeProp somehow?
     """
@@ -264,8 +265,8 @@ def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
         return None
 
     if len(matched_schemas) != 1:
-        logger.debug(
-            "ambiguous sig failure: %s, %s", n.format_node(), matched_schemas)
+        logger.debug("ambiguous sig failure: %s, %s", n.format_node(),
+                     matched_schemas)
         return None
 
     _, s = matched_schemas[0]
@@ -328,8 +329,10 @@ def dump_inputs_users(
 
     entries = [[
         trunc(n.name),
-        f"{trunc(all_input_nodes[n])}{'***' if n.all_input_nodes != all_input_nodes[n] else ''}",
-        f"{trunc(all_node_users[n])}{'***' if n.users != all_node_users[n] else ''}",
+        (f"{trunc(all_input_nodes[n])}"
+         f"{'***' if n.all_input_nodes != all_input_nodes[n] else ''}"),
+        (f"{trunc(all_node_users[n])}"
+         f"{'***' if n.users != all_node_users[n] else ''}"),
     ] for n in nodes]
 
     return tabulate(entries, headers=headers)
@@ -342,14 +345,17 @@ def gather_all_input_nodes(
         torch.fx.Node, None]]]:
     """
     Collect all def/use information for each node in 'nodes'.  This is different
-    than node.all_input_nodes and node.users since it handles in-place functions.
-    It is assumed that any mutable input in an in-place function is also an output.
+    than node.all_input_nodes and node.users since it handles in-place
+    functions.  It is assumed that any mutable input in an in-place function is
+    also an output.
 
     Run a pass over the graph (graph must be topo sorted)
     1. keep map of renames
     2. if call node has a mutable input
-       - the call node must record itself as user of the mutable input (modulo renames)
-       - the output of that call node will be the "rename" of the mutable input until the next use of the original name
+       - the call node must record itself as user of the mutable input (modulo
+         renames)
+       - the output of that call node will be the "rename" of the mutable input
+         until the next use of the original name.
          (there could be multiple mutable nodes with the same rename)
        - only one rename for a node should be active at one point.
     3. Use rename maps to track proper input nodes
@@ -422,8 +428,6 @@ class FlowGraph:
     It can be regenerated at any time by calling the `build` method.
 
     TODO: turn getitems into "reader views"?
-
-    TODO: might be able to use Node.all_input_nodes + Node.users instead (doesn't work with inplace)
     """
 
     def __init__(self, gm: torch.fx.GraphModule):
@@ -452,10 +456,11 @@ class FlowGraph:
         visited = set()
         q = self.outputs
 
-        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(
-            self.module.graph.nodes, True)
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
-            self.module.graph.nodes, False)
+        self.all_renamed_input_nodes, self.all_renamed_node_users = (
+            gather_all_input_nodes(self.module.graph.nodes, True))
+
+        self.all_input_nodes, self.all_node_users = (gather_all_input_nodes(
+            self.module.graph.nodes, False))
 
         while len(q) > 0:
             n = q.pop()
@@ -489,7 +494,9 @@ class FlowGraph:
         oc = '{'
         cc = '}'
         for n in self.module.graph.nodes:
-            res = res + f"{n} ({n.op}) {oc}\n  preds={str(self.predecessors(n))}\n  succs={str(self.successors(n))}\n{cc}\n"
+            res = res + (f"{n} ({n.op}) {oc}\n  "
+                         f"preds={str(self.predecessors(n))}\n  "
+                         f"succs={str(self.successors(n))}\n{cc}\n")
         return res
 
 
@@ -517,7 +524,8 @@ class SubGraph:
         inputs = []
         outputs = []
 
-        all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
+        all_input_nodes, all_node_users = (self.all_input_nodes,
+                                           self.all_node_users)
 
         for n in self.nodes:
             new_inputs = [
@@ -540,7 +548,8 @@ class SubGraph:
         in_degree = dict()
         worklist: collections.deque = collections.deque()
 
-        all_input_nodes, all_node_users = self.all_renamed_input_nodes, self.all_renamed_node_users
+        all_input_nodes, all_node_users = (self.all_renamed_input_nodes,
+                                           self.all_renamed_node_users)
 
         for n in self.nodes:
             count = len(
@@ -603,8 +612,9 @@ class SubGraph:
         return candidates.pop()
 
     def _refresh_def_use(self):
-        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(
-            self.module.graph.nodes, True)
+        self.all_renamed_input_nodes, self.all_renamed_node_users = (
+            gather_all_input_nodes(self.module.graph.nodes, True))
+
         self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
             self.module.graph.nodes, False)
 

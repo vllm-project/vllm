@@ -10,7 +10,9 @@ import torch
 
 from .utils import node_function_target, extract_node_type, argument_type_str
 from .fused_op_generator import FusionFail, FusedOpGenerator
-from .fused_op_generator_utils import build_extension, is_optional_arg, arg_schema_type, generate_op_schema, generate_meta_function
+from .fused_op_generator_utils import (build_extension, arg_schema_type,
+                                       generate_op_schema,
+                                       generate_meta_function)
 
 from pathlib import Path
 from typing import List, Tuple, Dict, Callable
@@ -24,28 +26,33 @@ NoneType = type(None)
 
 class NaiveFusedOpGenerator(FusedOpGenerator):
     """
-    The NaiveFusedOpGenerator is a class that is responsible for generating a fused CUDA/C++
-    operation for sequences of gx graph nodes.
+    The NaiveFusedOpGenerator is a class that is responsible for generating a
+    fused CUDA/C++ operation for sequences of gx graph nodes.
 
-    Use of the class is broken up into two steps: 'make_fused_op' and 'build_op'.
+    Use of the class is broken up into two steps: 'make_fused_op' and
+    'build_op'.
 
     'make_fused_op' generates the C++/CUDA code for a list of fx graph nodes and
     adds it to the current "library".  Multiple fused operations can be added to
     the current "library" using 'make_fused_op'.  'make_fused_op' then calls
     'build_op' to generate the code for the new operation.
 
-    In order to build the code for a "library", the 'build_op' function is called.
-    'build_op' invokes the compiler on all the code for the current "library".
-    This code will be associated with a torch library named 'fused_ops{N}' (where
-    N is the id provided by the NaiveFusedOpGenerator class). 'build_op' returns a
-    Callable.  Each call to 'build_op' will generate a new torch library.
+    In order to build the code for a "library", the 'build_op' function is
+    called. 'build_op' invokes the compiler on all the code for the current
+    "library".  This code will be associated with a torch library named
+    'fused_ops{N}' (where N is the id provided by the NaiveFusedOpGenerator
+    class). 'build_op' returns a Callable.  Each call to 'build_op' will
+    generate a new torch library.
 
-    All generated code will appear in the 'torch.ops.fused_ops{N}' python namespace.
+    All generated code will appear in the 'torch.ops.fused_ops{N}' python
+    namespace.
 
-    In addition to generating the CUDA/C++ code, the NaiveFusedOpGenerator also needs
-    to register the schemas and meta functions for torch.compile support.
+    In addition to generating the CUDA/C++ code, the NaiveFusedOpGenerator also
+    needs to register the schemas and meta functions for torch.compile support.
     """
-    # A unique id to prevent multiple instances of the same torch library being created.
+
+    # A unique id to prevent multiple instances of the same torch library being
+    # created.
     N = 0
 
     def __init__(self):
@@ -68,14 +75,14 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         self.fused_op.append(f'#include "{ops_header}"')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
         self.fused_op.append('#define _operator_mul(a, b) ((a) * (b))')
+        self.fused_op.append(('#define TORCH_LIBRARY_EXPAND(name, mod) '
+                              'TORCH_LIBRARY(name, mod)'))
         self.fused_op.append(
-            '#define TORCH_LIBRARY_EXPAND(name, mod) TORCH_LIBRARY(name, mod)')
+            ('#define TORCH_LIBRARY_IMPL_EXPAND(name, k, mod) '
+             'TORCH_LIBRARY_IMPL(name, k, mod)'))
         self.fused_op.append(
-            '#define TORCH_LIBRARY_IMPL_EXPAND(name, k, mod) TORCH_LIBRARY_IMPL(name, k, mod)'
-        )
-        self.fused_op.append(
-            'inline torch::Tensor to_tensor(py::object obj) { return THPVariable_Unpack(obj.release().ptr()); }'
-        )
+            ('inline torch::Tensor to_tensor(py::object obj) '
+             '{ return THPVariable_Unpack(obj.release().ptr()); }'))
         #self.fused_op.append('namespace py = pybind11;')
 
     def sanitize(self, s: str, rep: str = '_') -> str:
@@ -156,8 +163,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         return True
 
     def translate_getitem(self, n: torch.fx.Node) -> str:
-        # Note: The default (non-simple slice) implementation causes extra copies of the
-        # input to be made.
+        # Note: The default (non-simple slice) implementation causes extra
+        # copies of the input to be made.
         call_str = ''
         tensor = n.args[0]
         idx = n.args[1]
@@ -168,13 +175,20 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             raise FusionFail(f"unsupported slice: {idx}")
 
         if self.is_simple_slice(idx):
-            call_str = f"  auto {self.sanitize(n.name)} = {self.sanitize(str(tensor))}.slice({self.convert_slice_args(idx)});"
+            call_str = (f"  auto {self.sanitize(n.name)} = "
+                        f"{self.sanitize(str(tensor))}.slice("
+                        f"{self.convert_slice_args(idx)});")
         elif isinstance(idx, int):
-            call_str = f"  auto {self.sanitize(n.name)} = {self.sanitize(str(tensor))}[{idx}];"
+            call_str = (f"  auto {self.sanitize(n.name)} = "
+                        f"{self.sanitize(str(tensor))}[{idx}];")
         else:
-            # Note: this code works but requires pybind which we don't want to use.
+            # Note: this code works but requires pybind which we don't want
+            # to use.
             call_str = f"  auto {self.sanitize(n.name)} = to_tensor("
-            call_str = call_str + f"py::reinterpret_steal<py::object>(THPVariable_Wrap({self.sanitize(str(tensor))}))["
+            arg = self.sanitize(str(tensor))
+            call_str = (call_str +
+                        "py::reinterpret_steal<py::object>(THPVariable_Wrap(" +
+                        arg + "}))[")
             call_str = call_str + "py::make_tuple("
 
             sep = ""
@@ -190,7 +204,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         self, nodes: List[torch.fx.Node]
     ) -> Dict[torch.fx.Node, List[torch.fx.Node]]:
         """
-        Collect last uses locations for all variables in the set of nodes being fused.
+        Collect last uses locations for all variables in the set of nodes being
+        fused.
         """
         node_to_last_use: Dict[torch.fx.Node, torch.fx.Node] = {}
         user_to_last_uses: Dict[torch.fx.Node, List[torch.fx.Node]] = {}
@@ -201,10 +216,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 user_to_last_uses.setdefault(user, []).append(n)
 
         for node in reversed(nodes):
-            torch.fx.node.map_arg(node.args,
-                                  lambda n, node=node: register_last_uses(n, node))
-            torch.fx.node.map_arg(node.kwargs,
-                                  lambda n, node=node: register_last_uses(n, node))
+            torch.fx.node.map_arg(
+                node.args, lambda n, node=node: register_last_uses(n, node))
+            torch.fx.node.map_arg(
+                node.kwargs, lambda n, node=node: register_last_uses(n, node))
 
         return user_to_last_uses
 
@@ -261,7 +276,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         arg_types = [f"{arg_schema_type(inp, True)}" for inp in inputs]
         logger.debug("fused op argument types: %s", arg_types)
         for i, n in enumerate(inputs):
-            # Don't use const refs here so inputs can be deleted when no longer needed.
+            # Don't use const refs here so inputs can be deleted when no
+            # longer needed.
             if arg_types[i] == 'torch::Tensor':
                 cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {n}"
             else:
@@ -276,9 +292,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         if len(outputs) == 1:
             self.fused_op.append(f'torch::Tensor {op}({cxx_arg_sig})')
         else:
+            output_types = ["torch::Tensor" for output in outputs]
             self.fused_op.append(
-                f'std::tuple<{", ".join(["torch::Tensor" for output in outputs])}> {op}({cxx_arg_sig})'
-            )
+                f'std::tuple<{", ".join(output_types)}> {op}({cxx_arg_sig})')
         self.fused_op.append('{')
 
         # pybind only needed for non-simple slices.
@@ -290,7 +306,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         for n, fn in zip(nodes, fn_names):
             return_type = extract_node_type(n)
-            comment_str = f"  // ({', '.join([argument_type_str(inp) for inp in n.args])}) -> {str(return_type)}"
+            input_types = [argument_type_str(inp) for inp in n.args]
+            comment_str = f"  // ({', '.join(input_types)}) -> {return_type}"
 
             if fn == '_operator_getitem':
                 call_str = self.translate_getitem(n)
@@ -302,18 +319,17 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     call_str = f"  auto {self.sanitize(n.name)} = "
                 first_arg = 0
                 if n.op == 'call_method':
-                    call_str = call_str + f"{self.sanitize(n.args[0].name, '::')}."
+                    call_str = (call_str +
+                                f"{self.sanitize(n.args[0].name, '::')}.")
                     first_arg = 1
                 call_str = call_str + f"{self.sanitize(fn, '::')}("
                 sep = ''
                 for i, inp in enumerate(n.args[first_arg:]):
                     # bit of a hack for optional/empty tensor arguments
                     if inp is None:
-                        # {} should work for both default Tensor and optional<Tensor>
-                        if is_optional_arg(n, i):
-                            call_str = call_str + sep + "{}"
-                        else:
-                            call_str = call_str + sep + "torch::Tensor()"
+                        # {} should work for both default Tensor and
+                        # std::optional<Tensor>
+                        call_str = call_str + sep + "{}"
                     elif isinstance(inp, tuple):
                         call_str = call_str + sep + "{" + ','.join(
                             [str(t) for t in inp]) + "}"
@@ -327,7 +343,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     if fn != 'torch.empty' and fn != 'torch.empty_like':
                         raise FusionFail(f"kwargs nyi on {n}, {n.kwargs}")
 
-                    #supported_empty_kwargs = ['dtype', 'device', 'layout', 'memory_format']
+                    # TODO ['layout', 'memory_format']
                     supported_empty_kwargs = ['dtype', 'device']
 
                     if not all([(k in supported_empty_kwargs)
@@ -344,13 +360,19 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     call_str = call_str + sep + 'torch::TensorOptions()'
 
                     if dtype:
-                        call_str = call_str + f'.dtype({self.rename(self.sanitize(str(dtype), "::"))})'
+                        dtype_arg = self.rename(self.sanitize(
+                            str(dtype), "::"))
+                        call_str = call_str + f'.dtype({dtype_arg})'
 
                     if device:
                         if device.index:
-                            call_str = call_str + f'.device(torch::Device({self.rename(device.type)}, {device.index}))'
+                            dev_name = self.rename(device.type)
+                            call_str = (call_str +
+                                        f'.device(torch::Device({dev_name}, ' +
+                                        f'{device.index}))')
                         else:
-                            call_str = call_str + f'.device({self.rename(device.type)})'
+                            call_str = (call_str +
+                                        f'.device({self.rename(device.type)})')
 
                 call_str = call_str + ');'
 
@@ -359,30 +381,29 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             self.fused_op.append(
                 self.delete_unused_values(user_to_last_uses, n, outputs))
 
-        self.fused_op.append(
-            f"  // {', '.join([str(extract_node_type(output)) for output in outputs])}"
-        )
+        output_types = [str(extract_node_type(output)) for output in outputs]
+        self.fused_op.append(f"  // {', '.join(output_types)}")
         if len(outputs) == 1:
             self.fused_op.append(f"  return {self.sanitize(outputs[0].name)};")
         else:
-            self.fused_op.append(
-                f"  return {oc}{', '.join([self.sanitize(output.name) for output in outputs])}{cc};"
-            )
+            output_strs = [self.sanitize(output.name) for output in outputs]
+            self.fused_op.append(f"  return {oc}{', '.join(output_strs)}{cc};")
 
         self.fused_op.append('}')
+        self.fused_op.append((f'TORCH_LIBRARY_EXPAND(fused_ops{self.N}, m) '
+                              f'{oc} m.def("{op}{arg_sig}"); {cc}'))
         self.fused_op.append(
-            f'TORCH_LIBRARY_EXPAND(fused_ops{self.N}, m) {oc} m.def("{op}{arg_sig}"); {cc}'
-        )
+            (f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CPU, m) '
+             f'{oc} m.impl("{op}", &{op}); {cc}'))
         self.fused_op.append(
-            f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CPU, m) {oc} m.impl("{op}", &{op}); {cc}'
-        )
-        self.fused_op.append(
-            f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CUDA, m) {oc} m.impl("{op}", &{op}); {cc}'
-        )
+            (f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CUDA, m) '
+             f'{oc} m.impl("{op}", &{op}); {cc}'))
 
-        # For now, generate the meta function via 'generate_meta_function' even though this version is probably
-        # more robust.
-        self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) {oc} m.impl("{op}", &{op}); {cc}')
+        # For now, generate the meta function via 'generate_meta_function' even
+        # though this version is probably more robust.
+        self.fused_op.append(
+            (f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) '
+             f'{oc} m.impl("{op}", &{op}); {cc}'))
 
         return self.build_op(
             op, f"torch.ops.fused_ops{self.N}.{op}", arg_sig,
@@ -420,7 +441,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 build_extension(
                     op_lib,
                     [str(out.name)],
-                    # TODO: Note: these is a total hack to get naive C++ fused ops working.
+                    # TODO: Note: these is a total hack to get naive C++ fused
+                    # ops working.
                     extra_cflags=[f"-I{self.vllm_root}/csrc"],
                     extra_ldflags=[f"{self.vllm_root}/vllm/_C.abi3.so"])
                 logger.info("code generation success: %s", out.name)

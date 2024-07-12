@@ -1,6 +1,7 @@
 import torch
 from .code_cache import CodeCache
 
+# ruff: noqa: E501
 add_residual_rms_norm_quant_name = "torch_P_ops_P__C_P_fused_add_rms_norm_float16_float16_float16_float_1e_05_torch_P_empty_like_float16_torch_P_ops_P__C_P_static_scaled_int8_quant_int8_float16_float32_fused"
 
 
