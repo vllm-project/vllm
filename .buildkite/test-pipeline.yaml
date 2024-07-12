@@ -7,7 +7,7 @@
 
 
 steps:
-- label: Async Engine, Inputs, Utils, Worker Test
+- label: Async Engine, Inputs, Utils, Worker test
   fast_check: true
   fast_check_only: true
   commands:
@@ -18,7 +18,7 @@ steps:
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
 
-- label: Tensorizer, Metrics, Tracing Test
+- label: Tensorizer, Metrics, Tracing, Doc Build test
   fast_check: true
   fast_check_only: true
   commands:
@@ -30,6 +30,9 @@ steps:
       opentelemetry-exporter-otlp \
       opentelemetry-semantic-conventions-ai" # Tracings
   - pytest -v -s tracing
+  - cd /vllm-workspace/test_docs/docs # Doc build
+  - pip install -r requirements-docs.txt
+  - SPHINXOPTS=\"-W\" make html
 
 - label: Regression Test
   mirror_hardwares: [amd]
@@ -95,6 +98,7 @@ steps:
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  fast_check: true
   commands:
   - pytest -v -s distributed/test_pynccl.py
   # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
@@ -257,7 +261,6 @@ steps:
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
-  fast_check: true
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
