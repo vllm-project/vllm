@@ -111,7 +111,7 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     orig_prompt = llm_inputs.get("prompt")
     orig_prompt_ids = llm_inputs.get("prompt_token_ids")
 
-    if image_token_str in orig_prompt:
+    if orig_prompt is not None and image_token_str in orig_prompt:
         logger.warning(
             "The image token '%s' was detected in the prompt and "
             "will be removed. Please follow the proper prompt format"
@@ -214,7 +214,9 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
 
-        image_outputs = vision_tower(pixel_values, output_hidden_states=True)
+        target_dtype = vision_tower.get_input_embeddings().weight.dtype
+        image_outputs = vision_tower(pixel_values.to(
+            dtype=target_dtype), output_hidden_states=True)
 
         selected_image_features = image_outputs.last_hidden_state
 
