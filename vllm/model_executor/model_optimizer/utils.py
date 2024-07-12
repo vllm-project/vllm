@@ -9,7 +9,7 @@ import copy
 import torch
 
 try:
-    from tabulate import tabulate
+    from tabulate import tabulate # type: ignore
     have_tabulate = True
 except ImportError:
     have_tabulate = False

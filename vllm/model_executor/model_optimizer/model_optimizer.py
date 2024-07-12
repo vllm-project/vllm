@@ -87,7 +87,7 @@ class backend_class:
         logger.debug(
             lazy_graph_print_tabular(gm.graph, 'users',
                                      lambda n: list(n.users.keys())))
-        logger.debug("input_types: %s", str([type(inp) for inp in example_inputs]))
+        logger.debug("input_types: %s", [type(inp) for inp in example_inputs])
 
         # Annotate all nodes with types and shapes.
         ShapeProp(gm).propagate(*example_inputs)
