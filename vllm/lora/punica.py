@@ -3,8 +3,8 @@ Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
 Punica: Multi-Tenant LoRA Serving. 
 https://arxiv.org/abs/2310.18547
-# """
-# from dataclasses import dataclass, field
+"""
+
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 
 import torch
@@ -22,8 +22,7 @@ if TYPE_CHECKING:
     from vllm.lora.models import LongContextLoRAContext
 
 
-@torch.compile
-def _compute_meta(
+def compute_meta(
     token_lora_tensor: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     """
@@ -172,7 +171,8 @@ def convert_mapping(
 
 
 class PunicaWrapper:
-    """PunicaWrapper is designed to manage and provide metadata for the punica 
+    """
+    PunicaWrapper is designed to manage and provide metadata for the punica 
     kernel. The main function  is to maintain the state information for 
     Multi-LoRA, and to provide the interface for the punica operator.
     """
@@ -201,15 +201,15 @@ class PunicaWrapper:
         # embeddings_indices,long_lora_indices
         self.indices_len: List[Optional[int]] = [None] * 5
         # these attributes are the information required for sgmv kernel
-        self.b_seq_start_tensor = torch.zeros(max_batches,
-                                              dtype=torch.long,
-                                              device=device)
-        self.seq_length_tensor = torch.empty(max_batches,
-                                             dtype=torch.long,
-                                             device=device)
-        self.lora_indices_tensor = torch.empty(max_batches,
-                                               dtype=torch.long,
-                                               device=device)
+        self._seq_start_locs = torch.empty(max_batches,
+                                           dtype=torch.long,
+                                           device=device)
+        self._seq_lengths = torch.empty(max_batches,
+                                        dtype=torch.long,
+                                        device=device)
+        self._lora_indices_per_batch = torch.empty(max_batches,
+                                                   dtype=torch.long,
+                                                   device=device)
         self.max_length: int = 0
         self.batch_size: int = -1
         self.is_prefill = False
@@ -276,13 +276,12 @@ class PunicaWrapper:
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
 
         (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
-         batch_size, max_length) = _compute_meta(token_lora_tensor)
+         batch_size, max_length) = compute_meta(token_lora_tensor)
 
-        self.b_seq_start_tensor[:b_seq_start_tensor.shape[0]].copy_(
+        self._seq_start_locs[:b_seq_start_tensor.shape[0]].copy_(
             b_seq_start_tensor)
-        self.seq_length_tensor[:seq_length_tensor.shape[0]].copy_(
-            seq_length_tensor)
-        self.lora_indices_tensor[:lora_indices_tensor.shape[0]].copy_(
+        self._seq_lengths[:seq_length_tensor.shape[0]].copy_(seq_length_tensor)
+        self._lora_indices_per_batch[:lora_indices_tensor.shape[0]].copy_(
             lora_indices_tensor)
         self.batch_size = batch_size
         self.max_length = max_length
@@ -292,18 +291,17 @@ class PunicaWrapper:
             self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         """
         This property provides a convenient way to access the necessary 
-        metadata for prefill-related  kernel computations. It returns a tuple 
-        containing:
-            1. b_seq_start_tensor: Tensor of sequence start positions
-            2. seq_length_tensor: Tensor of sequence lengths
-            3. lora_indices_tensor: Tensor of lora indices
+        metadata for prefill-related  kernel computations.
+            1. seq_start_locs: Tensor of sequence start positions
+            2. seq_lengths: Tensor of sequence lengths
+            3. lora_indices_per_batch: Tensor of lora indices
             4. batch_size: batch size after clustering identical lora indices
             5. max_length: The maximum sequence length in the batch
         """
-        return (self.b_seq_start_tensor[:self.batch_size],
-                self.seq_length_tensor[:self.batch_size],
-                self.lora_indices_tensor[:self.batch_size], self.batch_size,
-                self.max_length)
+        return (self._seq_start_locs[:self.batch_size],
+                self._seq_lengths[:self.batch_size],
+                self._lora_indices_per_batch[:self.batch_size],
+                self.batch_size, self.max_length)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
