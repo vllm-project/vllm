@@ -262,7 +262,7 @@ class TP1DraftModelRunner(ModelRunner):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **model_input.multi_modal_kwargs,
+                **multi_modal_kwargs,
             )
 
             # Compute the logits.
