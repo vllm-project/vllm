@@ -193,7 +193,10 @@ steps:
 
 - label: Tensorizer Test
   #mirror_hardwares: [amd]
-  command: apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
+  commands:
+    - apt-get install curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s tensorizer_loader
 
 - label: Metrics Test
   mirror_hardwares: [amd]

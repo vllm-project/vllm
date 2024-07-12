@@ -1,10 +1,10 @@
 import os
+import subprocess
 import sys
 import time
 import warnings
 import weakref
 from contextlib import contextmanager
-from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -74,9 +74,16 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        self.proc = get_context("fork").Process(target=api_sever_runner,
-                                                args=(cli_args, ))
-        self.proc.start()
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] +
+            cli_args,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr)
         self._wait_for_server(url=self.url_for("health"),
                               timeout=self.MAX_SERVER_START_WAIT_S)
 
@@ -90,7 +97,8 @@ class RemoteOpenAIServer:
                 if requests.get(url).status_code == 200:
                     break
             except Exception as err:
-                if self.proc.exitcode is not None and self.proc.exitcode != 0:
+                result = self.proc.poll()
+                if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from err
 
                 time.sleep(0.5)
