@@ -215,8 +215,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                                   pixel_values: torch.Tensor) -> torch.Tensor:
 
         target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_outputs = vision_tower(pixel_values.to(
-            dtype=target_dtype), output_hidden_states=True)
+        image_outputs = vision_tower(pixel_values.to(dtype=target_dtype),
+                                     output_hidden_states=True)
 
         selected_image_features = image_outputs.last_hidden_state
 
