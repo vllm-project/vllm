@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -203,9 +203,15 @@ class GPTBigCodeModel(nn.Module):
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
-        self.wte = VocabParallelEmbedding(self.vocab_size,
-                                          self.embed_dim,
-                                          org_num_embeddings=config.vocab_size)
+        self.wte = VocabParallelEmbedding(
+            self.vocab_size,
+            self.embed_dim,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+        )
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList([
             GPTBigCodeBlock(config, cache_config, quant_config)
@@ -235,7 +241,7 @@ class GPTBigCodeModel(nn.Module):
 class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
-    supported_lora_modules = ["c_fc", "c_proj", "wte", "c_attn"]
+    supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
 
     embedding_modules = {
         "wte": "input_embeddings",
@@ -259,10 +265,22 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
                                            lora_config)
-        self.lm_head = self.transformer.wte
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.lm_head = ParallelLMHead(
+            self.unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+            quant_config=quant_config,
+            params_dtype=torch.float16,
+        )
+        self.lm_head.weight = self.transformer.wte.weight
+
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
