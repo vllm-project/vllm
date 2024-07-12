@@ -45,15 +45,10 @@ while true; do
         fi
 done
 
-echo "--- Building container"
-sha=$(git rev-parse --short HEAD)
-image_name=rocm_${sha}
-container_name=rocm_${sha}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)
-docker build \
-        -t ${image_name} \
-        -f Dockerfile.rocm \
-        --progress plain \
-        .
+echo "--- Pulling container" 
+image_name="rocmshared/vllm-ci:${BUILDKITE_COMMIT}"
+container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
+docker pull ${image_name}
 
 remove_docker_container() {
    docker rm -f ${container_name} || docker image rm -f ${image_name} || true
