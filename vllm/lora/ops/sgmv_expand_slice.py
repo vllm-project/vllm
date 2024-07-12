@@ -9,10 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .libentry import libentry
 
-
-@libentry()
 @triton.jit
 def _sgmv_expand_slice_kernel(
     input_ptr,
