@@ -109,7 +109,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         typical_acceptance_sampler_posterior_alpha: float,
     ) -> "SpecDecodeWorker":
 
-        allow_zero_draft_token_step = False
+        allow_zero_draft_token_step = True
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
@@ -134,7 +134,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 if draft_tp == 1:
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
-                    allow_zero_draft_token_step = True
+                else:
+                    allow_zero_draft_token_step = False
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
