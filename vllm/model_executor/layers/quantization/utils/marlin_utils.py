@@ -49,36 +49,6 @@ def verify_marlin_supported(num_bits: int, group_size: Optional[int],
         raise ValueError(
             f"Marlin does not support is_sym = is_sym. "
             f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
-GTPQ_MARLIN_UNSUPPORTED_GROUP_SIZE_ACT_ORDER = [-1]
-
-
-def verify_marlin_supports_shape(output_size_per_partition: int,
-                                 input_size_per_partition: int,
-                                 input_size: int, group_size: int) -> None:
-
-    # Validate output_size_per_partition
-    if output_size_per_partition % GPTQ_MARLIN_MIN_THREAD_N != 0:
-        raise ValueError(f"Weight output_size_per_partition = "
-                         f"{output_size_per_partition} is not divisible by "
-                         f" min_thread_n = {GPTQ_MARLIN_MIN_THREAD_N}. "
-                         "Consider reducing tensor_parallel_size or running "
-                         "with --quantization gptq.")
-
-    # Validate input_size_per_partition
-    if input_size_per_partition % GPTQ_MARLIN_MIN_THREAD_K != 0:
-        raise ValueError(f"Weight input_size_per_partition = "
-                         f"{input_size_per_partition} is not divisible "
-                         f"by min_thread_k = {GPTQ_MARLIN_MIN_THREAD_K}. "
-                         "Consider reducing tensor_parallel_size or running "
-                         "with --quantization gptq.")
-
-    if (group_size < input_size
-            and input_size_per_partition % group_size != 0):
-        raise ValueError(
-            f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}."
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq.")
 
 
 def verify_marlin_supports_shape(output_size_per_partition: int,
