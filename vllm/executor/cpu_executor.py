@@ -61,6 +61,7 @@ class CPUExecutor(ExecutorBase):
         # 127.0.0.1 for communication.
         ip = "127.0.0.1"
         port = get_open_port()
+        self.ip_port = ip + "_" + str(port)
         self.distributed_init_method = get_distributed_init_method(ip, port)
 
         is_async = isinstance(self, CPUExecutorAsync)
@@ -111,6 +112,10 @@ class CPUExecutor(ExecutorBase):
         self._run_workers("init_device")
         self._run_workers("load_model")
 
+        if world_size > 1:
+            self._run_workers("init_shm_manager")
+            self._run_workers("join_shm_manager")   
+
     def _create_worker(
         self,
         local_rank: int = 0,
@@ -135,6 +140,7 @@ class CPUExecutor(ExecutorBase):
             load_config=self.load_config,
             local_rank=local_rank,
             rank=rank,
+            ip_port = self.ip_port,
             distributed_init_method=self.distributed_init_method,
             lora_config=self.lora_config,
             multimodal_config=self.multimodal_config,

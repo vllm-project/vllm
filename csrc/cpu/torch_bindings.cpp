@@ -6,6 +6,19 @@
 
 void init_cpu_threads_env(const std::string& cpu_ids);
 
+void shm_gather(torch::Tensor& data,
+                const std::optional<std::vector<torch::Tensor>>& outputs,
+                int64_t dst, int64_t rank);
+
+void shm_allreduce(torch::Tensor& data, int64_t rank);
+
+void init_shm_manager(const std::string& ip_port, const int64_t group_size,
+                      const int64_t rank, const int64_t rank_buffer_size);
+
+std::string join_shm_manager(const std::string& ip_port,
+                             const int64_t group_size, const int64_t rank,
+                             const int64_t rank_buffer_size);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -84,6 +97,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor! key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
+
+  // SHM based all-reduce
+  ops.def(
+      "init_shm_manager(str ip_port, int group_size, int rank, int "
+      "rank_buffer_size) -> ()",
+      &init_shm_manager);
+  ops.def(
+      "join_shm_manager(str ip_port, int group_size, int rank, int "
+      "rank_buffer_size) -> str",
+      &join_shm_manager);
+  ops.def("shm_allreduce(Tensor! data, int rank) -> ()");
+  ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
+  ops.def("shm_gather", &shm_gather);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

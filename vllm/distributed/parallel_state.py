@@ -297,7 +297,8 @@ class GroupCoordinator:
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
         else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+            # torch.distributed.all_reduce(input_, group=self.device_group)
+            torch.ops._C.shm_allreduce(input_, self.rank)
         return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
