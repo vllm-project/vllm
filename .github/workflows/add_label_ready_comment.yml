@@ -1,0 +1,23 @@
+name: Add Ready Label on Ready Comment
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  add-ready-label:
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request && contains(github.event.comment.body, '/ready')
+    steps:
+        -   name: Add label
+            uses: actions/github-script@v5
+            with:
+                script: |
+                    github.rest.issues.addLabels({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        labels: ['ready']
+                    })
+            env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

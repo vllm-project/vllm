@@ -1,0 +1,21 @@
+name: Add label on auto-merge enabled
+on:
+    pull_request_target:
+        types:
+            - auto_merge_enabled
+jobs:
+    add-label-on-auto-merge:
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Add label
+                uses: actions/github-script@v5
+                with:
+                    script: |
+                        github.rest.issues.addLabels({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            issue_number: context.issue.number,
+                            labels: ['ready']
+                        })
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
