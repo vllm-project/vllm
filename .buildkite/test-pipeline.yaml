@@ -7,7 +7,7 @@
 
 
 steps:
-- label: Async Engine, Inputs, Utils, Worker test
+- label: Async Engine, Inputs, Utils, Worker Test
   fast_check: true
   fast_check_only: true
   commands:
@@ -18,7 +18,7 @@ steps:
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
 
-- label: Tensorizer, Metrics, Tracings test
+- label: Tensorizer, Metrics, Tracing Test
   fast_check: true
   fast_check_only: true
   commands:
@@ -30,9 +30,6 @@ steps:
       opentelemetry-exporter-otlp \
       opentelemetry-semantic-conventions-ai" # Tracings
   - pytest -v -s tracing
-  - cd /vllm-workspace/test_docs/docs
-  - pip install -r requirements-docs.txt
-  - SPHINXOPTS=\"-W\" make html
 
 - label: Regression Test
   mirror_hardwares: [amd]
@@ -260,6 +257,7 @@ steps:
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
+  fast_check: true
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
