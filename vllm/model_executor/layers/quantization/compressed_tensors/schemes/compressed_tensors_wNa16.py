@@ -76,26 +76,16 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             ),
             requires_grad=False,
         )
+
         set_weight_attrs(
             weight, {
                 "input_dim": 1,
                 "output_dim": 0,
                 "packed_dim": 1,
                 "pack_factor": self.pack_factor,
-                "pack_factor": self.pack_factor,
                 "weight_loader": weight_loader
             })
         layer.register_parameter("weight_packed", weight)
-
-        # Shape of the weights before packing (not used in inference)
-        weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
-                                 requires_grad=False)
-
-        layer.register_parameter("weight_shape", weight_shape)
-        set_weight_attrs(weight_shape, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True,
-        })
 
         # WEIGHT SCALE
         if marlin_repeat_scales_on_all_ranks(self.act_order, self.group_size,
@@ -121,6 +111,16 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 "output_dim": 0
             })
         layer.register_parameter("weight_scale", weight_scale)
+
+        # Shape of the weights before packing (not used in inference)
+        weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
+                                 requires_grad=False)
+
+        layer.register_parameter("weight_shape", weight_shape)
+        set_weight_attrs(weight_shape, {
+            "weight_loader": weight_loader,
+            "ignore_warning": True,
+        })
 
         # G_IDX (for activation reordering)
         g_idx = Parameter(torch.empty(input_size_per_partition,
