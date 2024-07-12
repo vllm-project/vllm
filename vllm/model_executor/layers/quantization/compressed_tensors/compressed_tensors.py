@@ -260,16 +260,17 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
     def apply(self,
               layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None):
+              x: torch.Tensor):
         """
         Use the output of create_weights and the CompressedTensorsScheme 
         associated with the layer to apply the forward pass with the 
         layer input.  See LinearMethodBase for param details
 
         """
+        if bias is not None:
+            raise ValueError("bias is not supported for this linear method")
 
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x, bias=bias)
+        return scheme.apply_weights(layer, x)

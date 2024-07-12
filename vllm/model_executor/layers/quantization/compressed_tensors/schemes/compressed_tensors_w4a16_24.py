@@ -119,7 +119,6 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         layer.workspace = workspace
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-
         qweight = layer.weight_packed
         meta = layer.meta
         scales = layer.scale_packed
@@ -136,5 +135,4 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                                             size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
-
         return output
