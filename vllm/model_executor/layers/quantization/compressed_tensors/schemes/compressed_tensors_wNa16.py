@@ -149,6 +149,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # Handle sorting for activation reordering if needed.
         if self.act_order:
+            breakpoint()
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.weight_g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "weight_g_idx", g_idx)
