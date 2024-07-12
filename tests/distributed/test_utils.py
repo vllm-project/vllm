@@ -1,7 +1,7 @@
 import ray
 
 import vllm.envs as envs
-from vllm.utils import (cuda_device_count_stateless, is_hip,
+from vllm.utils import (cuda_device_count_stateless,
                         update_environment_variables)
 
 
@@ -22,11 +22,6 @@ class _CUDADeviceCountStatelessTestActor:
 def test_cuda_device_count_stateless():
     """Test that cuda_device_count_stateless changes return value if
     CUDA_VISIBLE_DEVICES is changed."""
-    if is_hip():
-        # Set HIP_VISIBLE_DEVICES == CUDA_VISIBLE_DEVICES. Conversion
-        # is handled by `update_environment_variables`
-        update_environment_variables(
-            {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
     actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2).remote()
     assert sorted(ray.get(
