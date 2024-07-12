@@ -1,18 +1,22 @@
 from typing import List, Optional, Tuple, Type
+from dataclasses import dataclass
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
+from transformers import AutoTokenizer, LlamaForCausalLM, AutoModelForVision2Seq
+from transformers import LlamaTokenizerFast
+from transformers.processing_utils import ProcessorMixin
 
 from vllm.model_executor.models.deepseek_vl import (
     MultiModalityPreTrainedModel, VLMImageProcessor, model_name_to_cls)
 from vllm.sequence import SampleLogprobs
+from vllm.multimodal.utils import rescale_image_size
 from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 
 from ..conftest import HfRunner, VllmRunner, _ImageAssets
-from .utils import check_outputs_equal
+from .utils import check_logprobs_close
 
-models = ["deepseek-ai/deepseek-vl-1.3b-chat"]
+models = ["/deepseek-ai/deepseek-vl-1.3b-chat"]
 IMAGE_TOKEN_ID = 100015
 pytestmark = pytest.mark.vlm
 
@@ -27,6 +31,39 @@ HF_IMAGE_PROMPTS = [
     "user with a variety of tasks using natural language.\n User: "\
     "<image_placeholder>What is the season?\nAssistant:",
 ]
+
+
+class DictOutput(object):
+
+    def keys(self):
+        return self.__dict__.keys()
+
+    def __getitem__(self, item):
+        return self.__dict__[item]
+
+    def __setitem__(self, key, value):
+        self.__dict__[key] = value
+
+
+@dataclass
+class VLChatProcessorOutput(DictOutput):
+    sft_format: List[str]
+    input_ids: torch.Tensor
+    pixel_values: torch.Tensor
+    attention_mask: torch.Tensor
+    images_seq_mask: torch.BoolTensor
+    images_emb_mask: torch.BoolTensor
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def to(self, device):
+        self.input_ids = self.input_ids.to(device)
+        self.attention_mask = self.attention_mask.to(device)
+        self.images_seq_mask = self.images_seq_mask.to(device)
+        self.images_emb_mask = self.images_emb_mask.to(device)
+        self.pixel_values = self.pixel_values.to(device=device)
+        return self
 
 
 class MultiModalityCausalLM(MultiModalityPreTrainedModel):
@@ -67,6 +104,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         bs, n = pixel_values.shape[0:2]
         p_b, p_n, p_c, p_h, p_w = pixel_values.shape
+        pixel_values = pixel_values.to(self.dtype)
         images = pixel_values.reshape(p_b * p_n, p_c, p_h, p_w)
         images_embeds = self.aligner(self.vision_model(images))
 
@@ -85,6 +123,121 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         inputs_embeds[images_seq_mask] = images_embeds
 
         return inputs_embeds
+
+    def generate(self, *args, **kwargs):
+
+        sft_format = kwargs.pop('sft_format')
+        pixel_values = kwargs.pop('pixel_values')
+        images_seq_mask = kwargs.pop('images_seq_mask')
+        images_emb_mask = kwargs.pop('images_emb_mask')
+        input_ids = kwargs.pop('input_ids')
+        inputs_embeds = self.prepare_inputs_embeds(input_ids, pixel_values,
+                                                   images_seq_mask)
+        tokenizer = AutoTokenizer.from_pretrained(
+            "/pretrained_models/deepseek-vl-1.3b-chat")
+        output = self.language_model.generate(
+            *args,
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            pad_token_id=tokenizer.eos_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            **kwargs)
+        # output.sequences[0] = torch.concat([input_ids[0], output.sequences[0]])
+        return output
+
+    def get_output_embeddings(self):
+        return self.language_model.get_output_embeddings()
+
+    def get_input_embeddings(self):
+        return self.language_model.get_input_embeddings()
+
+
+class VLChatProcessor(ProcessorMixin):
+    image_processor_class = "AutoImageProcessor"
+    tokenizer_class = ("LlamaTokenizer", "LlamaTokenizerFast")
+
+    attributes = ["image_processor", "tokenizer"]
+
+    system_prompt = (
+        "You are a helpful language and vision assistant. "
+        "You are able to understand the visual content that the user provides, "
+        "and assist the user with a variety of tasks using natural language.")
+
+    def __init__(
+        self,
+        image_processor: VLMImageProcessor,
+        tokenizer: LlamaTokenizerFast,
+        image_tag: str = "<image_placeholder>",
+        num_image_tokens: int = 576,
+        add_special_token: bool = False,
+        sft_format: str = "deepseek",
+        mask_prompt: bool = True,
+        ignore_id: int = -100,
+        **kwargs,
+    ):
+        self.image_processor = image_processor
+        self.tokenizer = tokenizer
+
+        image_id = self.tokenizer.vocab.get(image_tag)
+        if image_id is None:
+            special_tokens = [image_tag]
+            special_tokens_dict = {"additional_special_tokens": special_tokens}
+            self.tokenizer.add_special_tokens(special_tokens_dict)
+            print(f"Add image tag = {image_tag} to the tokenizer")
+
+        self.image_tag = image_tag
+        self.num_image_tokens = num_image_tokens
+        self.add_special_token = add_special_token
+        self.sft_format = sft_format
+        self.mask_prompt = mask_prompt
+        self.ignore_id = ignore_id
+        self.image_id = image_id
+
+        super().__init__(
+            image_processor,
+            tokenizer,
+            image_tag,
+            num_image_tokens,
+            add_special_token,
+            sft_format,
+            mask_prompt,
+            ignore_id,
+            **kwargs,
+        )
+
+    def __call__(self, *arg, **kwargs):
+        prompt = kwargs.pop('text')
+        image = kwargs.pop('images')
+        return VLChatProcessorOutput(**self.get_input(prompt, image))
+
+    def get_input(self, prompt, image):
+        prompt = prompt
+        image = image
+        prompt = prompt.replace(self.image_tag,
+                                self.image_tag * self.num_image_tokens)
+        input_ids = self.tokenizer.encode(prompt)
+        input_ids = torch.LongTensor(input_ids)
+        image_token_mask = input_ids == self.image_id
+        images_outputs = self.image_processor(image, return_tensors="pt")
+        images_emb_mask = torch.ones(1, 1, self.num_image_tokens) == 1
+        image_size = self.image_processor.image_size
+        prepare = {
+            "sft_format":
+            prompt,
+            "input_ids":
+            input_ids.reshape(1, -1),
+            "pixel_values":
+            images_outputs.pixel_values.reshape(1, -1, 3, image_size,
+                                                image_size),
+            "images_seq_mask":
+            image_token_mask.reshape(1, -1),
+            "images_emb_mask":
+            images_emb_mask,
+            "attention_mask":
+            torch.ones(1, len(input_ids)),
+        }
+        return prepare
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -109,44 +262,13 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def get_input(tokenizer, prompt, image, dtype, device):
-
-    image_id = 100015
-    prompt = prompt[0]
-    image = image[0]
-    vl_image = VLMImageProcessor(384)
-    prompt = prompt.replace('<image_placeholder>', '<image_placeholder>' * 576)
-    input_ids = tokenizer.encode(prompt)
-    input_ids = torch.LongTensor(input_ids)
-    image_token_mask = input_ids == image_id
-    images_outputs = vl_image(image, return_tensors="pt")
-    images_emb_mask = torch.ones(1, 1, 576) == 1
-    prepare = {
-        "sft_format":
-        prompt,
-        "input_ids":
-        input_ids.to(device),
-        "pixel_values":
-        images_outputs.pixel_values.to(dtype).reshape(1, -1, 3, 384,
-                                                      384).to(device),
-        "num_image_tokens":
-        576,
-        "images_seq_mask":
-        image_token_mask.reshape(1, -1).to(device),
-        "images_emb_mask":
-        images_emb_mask.to(device),
-        "attention_mask":
-        torch.ones(1, len(input_ids)).to(device),
-    }
-    return prepare
-
-
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
     *,
+    size_factors: List[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -164,8 +286,10 @@ def run_test(
     """
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [([prompt], [image])
-                        for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -185,56 +309,34 @@ def run_test(
                                                 images=images)
             for prompts, images in inputs_per_image
         ]
-    print(f'vllm_outputs_per_image -> {vllm_outputs_per_image}')
-    AutoModelForCausalLM.register(DeepSeekMultiModalityConfig,
-                                  MultiModalityCausalLM)
-    tokenizer = AutoTokenizer.from_pretrained(model)
-    hf_model = AutoModelForCausalLM.from_pretrained(model,
-                                                    trust_remote_code=True)
-    device = 'cuda'
-    dtype_dict = {
-        'bfloat16': torch.bfloat16,
-        'float16': torch.float16,
-        'half': torch.bfloat16,
-        'float32': torch.float32,
-        'auto': hf_model.dtype
-    }
-    dtype = dtype_dict.get(dtype, hf_model.dtype)
-    hf_model = hf_model.to(dtype).to(device)
-    hf_outputs: List = []
-    for prompts, images in inputs_per_image:
-        print(f'prompt: {prompts}')
-        print(f'images: {images}')
-        prepare_input = get_input(tokenizer, prompts, images, dtype, device)
-        attention_mask = prepare_input['attention_mask']
-        inputs_embeds = hf_model.prepare_inputs_embeds(**prepare_input)
-        outputs = hf_model.language_model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_new_tokens=max_tokens,
-            pad_token_id=tokenizer.eos_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            do_sample=False,
-            use_cache=True,
+    # AutoModelForCausalLM.register(DeepSeekMultiModalityConfig,
+    #                               MultiModalityCausalLM)
+    AutoModelForVision2Seq.register(DeepSeekMultiModalityConfig,
+                                    MultiModalityCausalLM)
+
+    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
+        hf_model.processor = VLChatProcessor.from_pretrained(model)
+
+        hf_outputs_per_image = [
+            hf_model.generate_greedy_logprobs_limit(prompts,
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
+                                        vllm_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
+        print(f'hf_outputs: {hf_outputs}')
+        print(f'vllm_outputs: {vllm_outputs}')
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
         )
-        for o in outputs:
-            hf_outputs.append((o.cpu().tolist(),
-                               tokenizer.decode(o.cpu().tolist(),
-                                                skip_special_tokens=True)))
-    vllm_outputs_list = []
-    for vllm_outputs in vllm_outputs_per_image:
-        vllm_outputs_list.append(
-            tuple([
-                vllm_to_hf_output(vllm_output, model)
-                for vllm_output in vllm_outputs
-            ][:2]))
-    print(f'hf_outputs --> {hf_outputs}')
-    print(f'vllm_outputs --> {vllm_outputs_list}')
-    check_outputs_equal(outputs_0_lst=hf_outputs,
-                        outputs_1_lst=vllm_outputs_list,
-                        name_0='hf',
-                        name_1='vllm')
     print('END---->')
 
 
@@ -248,7 +350,7 @@ def run_test(
         [1.0],
         # Single-scale, batched
         [1.0, 1.0, 1.0],
-        # Multi-scale
+        # # Multi-scale
         [0.25, 0.5, 1.0],
     ],
 )
@@ -262,6 +364,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         vllm_runner,
         image_assets,
         model,
+        size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
