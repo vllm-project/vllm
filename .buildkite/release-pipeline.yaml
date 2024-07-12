@@ -3,7 +3,7 @@ steps:
     agents:
       queue: cpu_queue
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --build-arg PYTHON_VERSION={{matrix.python_version}} --tag vllm-ci:build-image -e CMAKE_BUILD_TYPE=Release --target build --progress plain ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --build-arg PYTHON_VERSION={{matrix.python_version}} --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image cp -r dist /artifacts_host"
       # rename the files to change linux -> manylinux1
