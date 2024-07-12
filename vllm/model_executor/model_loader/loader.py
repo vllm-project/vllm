@@ -9,10 +9,10 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
+import gguf
 import huggingface_hub
 import numpy as np
 import torch
-from gguf import MODEL_ARCH_NAMES, get_tensor_name_map
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
 from transformers import AutoModelForCausalLM
@@ -846,14 +846,14 @@ class GGUFModelLoader(BaseModelLoader):
         if model_type == "cohere":
             model_type = "command-r"
         arch = None
-        for key, value in MODEL_ARCH_NAMES.items():
+        for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:
                 arch = key
                 break
         if arch is None:
             raise RuntimeError(f"Unknown model_type: {model_type}")
         num_layers = config.num_hidden_layers
-        name_map = get_tensor_name_map(arch, num_layers)
+        name_map = gguf.get_tensor_name_map(arch, num_layers)
         with torch.device("meta"):
             dummy_model = AutoModelForCausalLM.from_config(config)
         state_dict = dummy_model.state_dict()
