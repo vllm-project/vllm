@@ -8,8 +8,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata, ExecuteModelRequest)
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SamplerOutput)
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
@@ -168,7 +168,7 @@ class TP1DraftModelRunner(ModelRunner):
         )
 
         # Ensure we skip CPU samples
-        assert new_model_input.sampling_metadata.skip_sampler_cpu_output == True
+        assert new_model_input.sampling_metadata.skip_sampler_cpu_output is True
         # We can reuse sampling tensors since every decode iteration is the same
         new_model_input.sampling_metadata.reuse_sampling_tensors = True
 
@@ -208,6 +208,9 @@ class TP1DraftModelRunner(ModelRunner):
         if self.prompt_adapter_config:
             return False
 
+        # TODO: Ask Cade/Cody what is this
+        if self.model_input.multi_modal_kwargs:
+            return False
         return True
 
     @torch.inference_mode()
@@ -228,6 +231,7 @@ class TP1DraftModelRunner(ModelRunner):
         # Sanity
         assert self.lora_config is None
         assert self.prompt_adapter_config is None
+        assert model_input.multi_modal_kwargs is {}
         assert model_input.attn_metadata is not None
 
         # Detect exec mode
@@ -242,19 +246,16 @@ class TP1DraftModelRunner(ModelRunner):
             # We can skip CPU samples for spec token generation
             model_input.sampling_metadata.skip_sampler_cpu_output = True
 
-        virtual_engine = model_input.virtual_engine
+        # Get model
+        if use_cuda_graph:
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = (self.graph_runners[model_input.virtual_engine]
+                                [graph_batch_size])
+        else:
+            model_executable = self.model
+
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
-            # Get model
-            if use_cuda_graph:
-                graph_batch_size = model_input.input_tokens.shape[0]
-                model_executable = (
-                    self.graph_runners[virtual_engine][graph_batch_size])
-            else:
-                model_executable = self.model
-
-            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-
             # Run model
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
@@ -262,7 +263,7 @@ class TP1DraftModelRunner(ModelRunner):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **multi_modal_kwargs,
+                **model_input.multi_modal_kwargs,
             )
 
             # Compute the logits.

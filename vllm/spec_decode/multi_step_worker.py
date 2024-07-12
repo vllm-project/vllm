@@ -69,14 +69,21 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
         # Run model sample_len times.
-        if isinstance(self.model_runner, TP1DraftModelRunner
-                      ) and self.model_runner.supports_gpu_multi_step(expanded_request):
+        model_outputs: List[SamplerOutput] = []
+        if isinstance(
+                self.model_runner, TP1DraftModelRunner
+        ) and self.model_runner.supports_gpu_multi_step(expanded_request):
+            # Here we run the draft_model_runner with multi-step prepare
+            # on the GPU directly
             expanded_request.num_steps = sample_len
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)
         else:
-            # TODO: Remove this branch once DraftModelRunner supports TP>1.
-            model_outputs: List[SamplerOutput] = []
+            # Here we run multi-step directly, with every step prepared
+            # on the CPU.
+            # TODO: Remove this branch once DraftModelRunner supports TP>1
+            # and other restrictions that are part of DraftModelRunner's
+            # supports_gpu_multi_step(..)
             for _ in range(sample_len):
                 model_output: List[SamplerOutput] = super().execute_model(
                     execute_model_req=expanded_request)
