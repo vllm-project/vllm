@@ -24,53 +24,6 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
-# TEST_SCHEMA = {
-#     "type": "object",
-#     "properties": {
-#         "name": {
-#             "type": "string"
-#         },
-#         "age": {
-#             "type": "integer"
-#         },
-#         "skills": {
-#             "type": "array",
-#             "items": {
-#                 "type": "string",
-#                 "maxLength": 10
-#             },
-#             "minItems": 3
-#         },
-#         "work history": {
-#             "type": "array",
-#             "items": {
-#                 "type": "object",
-#                 "properties": {
-#                     "company": {
-#                         "type": "string"
-#                     },
-#                     "duration": {
-#                         "type": "string"
-#                     },
-#                     "position": {
-#                         "type": "string"
-#                     }
-#                 },
-#                 "required": ["company", "position"]
-#             }
-#         }
-#     },
-#     "required": ["name", "age", "skills", "work history"]
-# }
-
-# TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-#               r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
-
-# TEST_CHOICE = [
-#     "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
-#     "Swift", "Kotlin"
-# ]
-
 
 @pytest.fixture(scope="module")
 def zephyr_lora_files():
@@ -529,7 +482,8 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_json_completion(client: openai.AsyncOpenAI,
-                                      guided_decoding_backend: str, sample_json_schema):
+                                      guided_decoding_backend: str,
+                                      sample_json_schema):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example JSON for an employee profile "
@@ -551,7 +505,8 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_regex_completion(client: openai.AsyncOpenAI,
-                                       guided_decoding_backend: str, sample_regex):
+                                       guided_decoding_backend: str,
+                                       sample_regex):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example IPv4 address with this regex: {sample_regex}",
@@ -564,14 +519,16 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
     assert completion.id is not None
     assert len(completion.choices) == 3
     for i in range(3):
-        assert re.fullmatch(sample_regex, completion.choices[i].text) is not None
+        assert re.fullmatch(sample_regex,
+                            completion.choices[i].text) is not None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_completion(client: openai.AsyncOpenAI,
-                                        guided_decoding_backend: str, sample_guided_choice):
+                                        guided_decoding_backend: str,
+                                        sample_guided_choice):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt="The best language for type-safe systems programming is ",
@@ -588,7 +545,8 @@ async def test_guided_choice_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_guided_grammar(client: openai.AsyncOpenAI, sample_sql_statements):
+async def test_guided_grammar(client: openai.AsyncOpenAI,
+                              sample_sql_statements):
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -650,7 +608,8 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
-                                          guided_decoding_backend: str, sample_json_schema, sample_regex):
+                                          guided_decoding_backend: str,
+                                          sample_json_schema, sample_regex):
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
@@ -662,7 +621,8 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
-            extra_body=dict(guided_regex=sample_regex, guided_json=sample_json_schema))
+            extra_body=dict(guided_regex=sample_regex,
+                            guided_json=sample_json_schema))
 
 
 @pytest.mark.asyncio
