@@ -176,28 +176,17 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
 //     int64_t size_n,
 //     int64_t size_k);
 
-void rms_norm_quant(
-  torch::Tensor& out,
-  torch::Tensor const& input,
-  torch::Tensor& tmp,
-  torch::Tensor const& weight,
-  torch::Tensor& scale,
-  double const epsilon);
+void rms_norm_quant(torch::Tensor& out, torch::Tensor const& input,
+                    torch::Tensor& tmp, torch::Tensor const& weight,
+                    torch::Tensor& scale, double const epsilon);
 
-void add_residual_rms_norm_quant(
-  torch::Tensor& out,
-  torch::Tensor const& input,
-  torch::Tensor& residual,
-  torch::Tensor& tmp,
-  torch::Tensor const& weight,
-  torch::Tensor& scale,
-  double const epsilon);
+void add_residual_rms_norm_quant(torch::Tensor& out, torch::Tensor const& input,
+                                 torch::Tensor& residual, torch::Tensor& tmp,
+                                 torch::Tensor const& weight,
+                                 torch::Tensor& scale, double const epsilon);
 
-void silu_and_mul_quant(
-  torch::Tensor& out,
-  torch::Tensor const& input,
-  torch::Tensor& scale,
-  torch::Tensor& tmp);
+void silu_and_mul_quant(torch::Tensor& out, torch::Tensor const& input,
+                        torch::Tensor& scale, torch::Tensor& tmp);
 
 // void quant(
 //   torch::Tensor& out,

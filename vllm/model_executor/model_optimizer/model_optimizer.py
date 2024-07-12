@@ -1,4 +1,3 @@
-import copy
 import torch
 import traceback
 
@@ -7,10 +6,10 @@ from .fusion import pointwise_fusion
 from .utils import lazy_graph_print_tabular, lazy_module_print_readable
 
 from torch._dynamo import lookup_backend
-from .fused_rms_quant import setup_fused_rms_norm
+#from .fused_rms_quant import setup_fused_rms_norm
 from .silu_mul_quant import setup_silu_mul_quant
 from torch.fx.passes.shape_prop import ShapeProp
-from typing import List, Tuple, Optional, Callable
+from typing import List, Optional, Callable
 
 from vllm.logger import init_logger
 
@@ -50,14 +49,14 @@ def backend_compile(gm: torch.fx.GraphModule,
 
     try:
         backend_fn = lookup_backend(backend)
-        logger.debug(f"attempting {backend} on {maybe_name(gm)}")
+        logger.debug("attempting %s on %s", backend, maybe_name(gm))
         backend_compiled = backend_fn(gm, example_inputs)
         if backend_compiled is not None:
-            logger.debug(f"{backend} compiled {maybe_name(gm)}.")
+            logger.debug("%s compiled %s.", backend, maybe_name(gm))
             return backend_compiled
     except Exception as ex:
-        logger.warning(f"backend_compile failed: {ex}")
-        logger.warning(f"Trace: {traceback.format_tb(ex.__traceback__)}")
+        logger.warning("backend_compile failed: %s", ex)
+        logger.warning("Trace: %s", traceback.format_tb(ex.__traceback__))
         pass
 
     return gm.forward
@@ -90,7 +89,7 @@ class backend_class:
         logger.debug(
             lazy_graph_print_tabular(gm.graph, 'users',
                                      lambda n: list(n.users.keys())))
-        logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
+        logger.debug("input_types: %s", [type(inp) for inp in example_inputs])
 
         # Annotate all nodes with types and shapes.
         ShapeProp(gm).propagate(*example_inputs)

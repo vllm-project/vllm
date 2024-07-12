@@ -26,7 +26,7 @@ def add_residual_rms_norm_quant_meta(input: torch.Tensor,
 def setup_fused_rms_norm(cc: CodeCache):
     namespace = "dogfood"
     ns_op = f"{namespace}::add_residual_rms_norm_quant"
-    sig = f"(Tensor hidden_states_158, Tensor! _, Tensor detach_63, Tensor x_scale_126) -> Tensor"
+    sig = "(Tensor hidden_states_158, Tensor! _, Tensor detach_63, Tensor x_scale_126) -> Tensor"
     torch.library.define(f"{ns_op}", sig)
     torch.library.impl(f"{ns_op}", "CUDA", func=add_residual_rms_norm_quant)
     torch.library.impl(f"{ns_op}",

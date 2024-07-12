@@ -34,15 +34,15 @@ class CodeCache:
         returned instead of a Callable.  This will prevent any failed generators
         from being called repeatedly.
         """
-        if self.disable or not mangled_name in self.cache:
+        if self.disable or mangled_name not in self.cache:
             try:
-                logger.debug(f"generating code for {mangled_name}")
+                logger.debug("generating code for %s", mangled_name)
                 self.cache[mangled_name] = generator()
             except Exception as ex:
                 self.cache[mangled_name] = None
                 raise ex
         else:
-            logger.debug(f"cache hit for {mangled_name}")
+            logger.debug("cache hit for %s", mangled_name)
 
         return self.cache[mangled_name]
 

@@ -7,7 +7,7 @@
 import torch
 
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Dict, Callable
+from typing import List, Dict, Callable
 
 
 class FusionFail(Exception):

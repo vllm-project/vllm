@@ -7,7 +7,6 @@
 import collections
 import copy
 import torch
-import types
 
 try:
     from tabulate import tabulate
@@ -161,13 +160,12 @@ def argument_type_str(arg: torch.fx.node.Argument,
         return str(arg.dtype)
     elif isinstance(arg, torch.dtype):
         return str(arg)
-    elif (isinstance(arg, str) or isinstance(arg, int)
-          or isinstance(arg, float) or isinstance(arg, bool)):
+    elif isinstance(arg, (str, int, float, bool)):
         if include_constants:
             return f"{type(arg).__name__}_{str(arg).replace('-','_').replace('.','_')}"
         else:
             return type(arg).__name__
-    elif (isinstance(arg, EllipsisType) or isinstance(arg, NoneType)):
+    elif isinstance(arg, (EllipsisType, NoneType)):
         return str(arg)
     elif isinstance(arg, tuple):
         return "T_" + "_".join(
@@ -203,7 +201,7 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
     return name.replace(".", rep)
 
 
-class ModuleInputGenerator(torch.fx.passes.fake_tensor_prop.FakeTensorProp):
+class ModuleInputGenerator(FakeTensorProp):
     """
     Generate example inputs for all submodules in the given GraphModule.
     After running propagate the 'module_args' property will hold a map of
@@ -258,7 +256,7 @@ def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
         try:
             candidate_signature.bind(*n.args, **n.kwargs)
             matched_schemas.append((candidate_signature, schema))
-        except TypeError as e:
+        except TypeError:
             continue
 
     if len(matched_schemas) == 0:
@@ -267,7 +265,7 @@ def get_function_schema(n: torch.fx.Node) -> Optional[torch._C.FunctionSchema]:
 
     if len(matched_schemas) != 1:
         logger.debug(
-            f"ambiguous sig failure: {n.format_node()}, {matched_schemas}")
+            "ambiguous sig failure: %s, %s", n.format_node(), matched_schemas)
         return None
 
     _, s = matched_schemas[0]
@@ -379,7 +377,7 @@ def gather_all_input_nodes(
             all_input_nodes[n][i] = renames[inp] if inp in renames else inp
 
     def rename_users(n: torch.fx.Node):
-        for user in all_node_users[n].keys():
+        for user in all_node_users[n]:
             if user in renames:
                 del all_node_users[n][user]
                 all_node_users[n][user] = None
@@ -433,9 +431,9 @@ class FlowGraph:
         self.build()
 
     def add_edge(self, src: torch.fx.GraphModule, dst: torch.fx.GraphModule):
-        if not src in self.succs:
+        if src not in self.succs:
             self.succs[src] = set()
-        if not dst in self.preds:
+        if dst not in self.preds:
             self.preds[dst] = set()
 
         self.succs[src].add(dst)

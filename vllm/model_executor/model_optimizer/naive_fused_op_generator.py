@@ -5,17 +5,15 @@
 #
 ###############################################################################
 
-import logging
 import tempfile
 import torch
-import types
 
-from .utils import mangle_name, node_function_target, extract_node_type, argument_type_str
+from .utils import node_function_target, extract_node_type, argument_type_str
 from .fused_op_generator import FusionFail, FusedOpGenerator
-from .fused_op_generator_utils import compose, build_extension, is_optional_arg, arg_schema_type, generate_op_schema, generate_meta_function, register_op_schema, register_meta_function
+from .fused_op_generator_utils import build_extension, is_optional_arg, arg_schema_type, generate_op_schema, generate_meta_function
 
 from pathlib import Path
-from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
+from typing import List, Tuple, Dict, Callable
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -64,7 +62,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         """
 
         self.fused_op = []
-        self.fused_op.append(f'#include <torch/extension.h>')
+        self.fused_op.append('#include <torch/extension.h>')
         ops_header = self.vllm_root / "csrc" / "ops.h"
         #self.fused_op.append(f'#include <iostream>')
         self.fused_op.append(f'#include "{ops_header}"')
@@ -177,7 +175,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             # Note: this code works but requires pybind which we don't want to use.
             call_str = f"  auto {self.sanitize(n.name)} = to_tensor("
             call_str = call_str + f"py::reinterpret_steal<py::object>(THPVariable_Wrap({self.sanitize(str(tensor))}))["
-            call_str = call_str + f"py::make_tuple("
+            call_str = call_str + "py::make_tuple("
 
             sep = ""
             for idx_arg in idx:
@@ -204,9 +202,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         for node in reversed(nodes):
             torch.fx.node.map_arg(node.args,
-                                  lambda n: register_last_uses(n, node))
+                                  lambda n, node=node: register_last_uses(n, node))
             torch.fx.node.map_arg(node.kwargs,
-                                  lambda n: register_last_uses(n, node))
+                                  lambda n, node=node: register_last_uses(n, node))
 
         return user_to_last_uses
 
@@ -249,7 +247,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         """
 
         fns = [n.target for n in nodes]
-        logger.debug(f"make_fused_op: {fns}")
+        logger.debug("make_fused_op: %s", fns)
 
         # assume no input kwargs for now.
         assert len(kwargs) == 0
@@ -261,7 +259,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         cxx_arg_sig = ''
         sep = ''
         arg_types = [f"{arg_schema_type(inp, True)}" for inp in inputs]
-        logger.debug(f"fused op argument types: {arg_types}")
+        logger.debug("fused op argument types: %s", arg_types)
         for i, n in enumerate(inputs):
             # Don't use const refs here so inputs can be deleted when no longer needed.
             if arg_types[i] == 'torch::Tensor':
@@ -333,7 +331,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     supported_empty_kwargs = ['dtype', 'device']
 
                     if not all([(k in supported_empty_kwargs)
-                                for k in n.kwargs.keys()]):
+                                for k in n.kwargs]):
                         raise FusionFail(
                             f"unsupported kwarg type in {n.kwargs.keys()}")
 
@@ -384,7 +382,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         # For now, generate the meta function via 'generate_meta_function' even though this version is probably
         # more robust.
-        #self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) {oc} m.impl("{op}", &{op}); {cc}')
+        self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) {oc} m.impl("{op}", &{op}); {cc}')
 
         return self.build_op(
             op, f"torch.ops.fused_ops{self.N}.{op}", arg_sig,
@@ -414,9 +412,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     mode='w',
                     delete=False,  # TODO: True to delete tmp files
             ) as out:
-                logger.info(f"generating code to: {out.name}")
-                for l in self.fused_op:
-                    out.write(l)
+                logger.info("generating code to: %s", out.name)
+                for line in self.fused_op:
+                    out.write(line)
                     out.write('\n')
                 out.close()
                 build_extension(
@@ -425,13 +423,13 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     # TODO: Note: these is a total hack to get naive C++ fused ops working.
                     extra_cflags=[f"-I{self.vllm_root}/csrc"],
                     extra_ldflags=[f"{self.vllm_root}/vllm/_C.abi3.so"])
-                logger.info(f"code generation success: {out.name}")
+                logger.info("code generation success: %s", out.name)
 
             self.N = NaiveFusedOpGenerator.N
 
             # TODO: there has to be a better way than eval?
             fn = eval(torch_op_name)
-            register_meta_function(op_lib, torch_op_name, meta_fn)
+            #register_meta_function(op_lib, torch_op_name, meta_fn)
 
             self.reset_fused_op()
 
@@ -439,4 +437,4 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         except Exception as ex:
             self.reset_fused_op()
-            raise FusionFail(ex)
+            raise FusionFail(ex) from ex

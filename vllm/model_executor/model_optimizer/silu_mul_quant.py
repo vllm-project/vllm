@@ -36,7 +36,7 @@ def silu_mul_quant_meta(output: torch.Tensor, input: torch.Tensor,
 def setup_silu_mul_quant(cc: CodeCache):
     namespace = "dogfood"
     ns_op = f"{namespace}::silu_mul_quant"
-    sig = f"(Tensor gate_up_31, Tensor x_q_126, Tensor l__self___layers_31_mlp_gate_up_proj_weight, Tensor x_scale_126, Tensor l__self___layers_31_mlp_gate_up_proj_weight_scale) -> (Tensor, Tensor)"
+    sig = "(Tensor gate_up_31, Tensor x_q_126, Tensor l__self___layers_31_mlp_gate_up_proj_weight, Tensor x_scale_126, Tensor l__self___layers_31_mlp_gate_up_proj_weight_scale) -> (Tensor, Tensor)"
     torch.library.define(f"{ns_op}", sig)
     torch.library.impl(f"{ns_op}", "CUDA", func=silu_mul_quant)
     torch.library.impl(f"{ns_op}", "Meta", func=silu_mul_quant_meta)

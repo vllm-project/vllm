@@ -11,10 +11,10 @@ from .code_cache import CodeCache
 from .fused_op_generator import FusionFail
 from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
-from .utils import FlowGraph, node_function_target, graph_print_tabular, SubGraph, is_call, call_method_class, lazy_graph_print_tabular, mangle_name
+from .utils import FlowGraph, node_function_target, SubGraph, is_call, lazy_graph_print_tabular, mangle_name
 
 from torch.fx.passes.shape_prop import ShapeProp
-from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
+from typing import List, Dict, Optional, Callable, Set
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -51,14 +51,14 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
         fn = cc.lookup_or_create(fn_key, generate)
 
     except FusionFail as ff:
-        logger.info(f"fusion failed '{ff}' for subgraph.")
+        logger.info("fusion failed '%s' for subgraph.", ff)
         return
 
     if fn is None:
-        logger.debug(f"fusion failed previously for subgraph.")
+        logger.debug("fusion failed previously for subgraph.")
         return
 
-    logger.debug(f"fused fn = {fn}")
+    logger.debug("fused fn = %s", fn)
 
     #
     # Update the graph
@@ -73,7 +73,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     # Note: we do not update the meta info for cf here.  It should
     # not be required after transformation anyway.
     cf = sub.module.graph.call_function(fn, args=tuple(inputs), kwargs=kwargs)
-    logger.debug(f"fused op: {cf.format_node()}, num_outputs={len(outputs)}")
+    logger.debug("fused op: %s, num_outputs=%s", cf.format_node(), len(outputs))
 
     new_sub = [cf]
 
@@ -109,7 +109,7 @@ def is_fusable(node: torch.fx.Node) -> bool:
         return op_name in FUSABLE and not FUSABLE[op_name].is_compute
     else:
         # TODO: check class type
-        class_type = call_method_class(node)
+        # class_type = call_method_class(node)
         return op_name in FUSABLE and not FUSABLE[op_name].is_compute
 
 
@@ -125,7 +125,7 @@ def is_compute(node: torch.fx.Node) -> bool:
         return op_name in FUSABLE and FUSABLE[op_name].is_compute
     else:
         # TODO: check class type
-        class_type = call_method_class(node)
+        # class_type = call_method_class(node)
         return op_name in FUSABLE and FUSABLE[op_name].is_compute
 
 
@@ -162,7 +162,7 @@ def supported_kwargs(node: torch.fx.Node,
 def dump_partitions(node_map: Dict[torch.fx.Node, int]) -> str:
     parts = dict()
     for n, p in node_map.items():
-        if not p in parts:
+        if p not in parts:
             parts[p] = set([n])
         else:
             parts[p].add(n)
@@ -195,7 +195,7 @@ def pointwise_fusion(cc: CodeCache,
 
     fg = FlowGraph(mod)
 
-    logger.debug(f"FlowGraph:\n{fg.dump()}")
+    logger.debug("FlowGraph:\n%s", fg.dump())
 
     ShapeProp(mod).propagate(*example_inputs)
 
@@ -212,10 +212,10 @@ def pointwise_fusion(cc: CodeCache,
     # run in reverse order so predecessors of non-unary ops will appear
     # in the same partition.
     for n in reversed(mod.graph.nodes):
-        logger.debug(f"CONSIDER {n}")
+        logger.debug("CONSIDER %s", n)
 
         if not is_call(n):
-            logger.debug(f"  REJECT {n}: not call")
+            logger.debug("  REJECT %s: not call", n)
             node_map[n] = 0
             continue
 
@@ -227,15 +227,15 @@ def pointwise_fusion(cc: CodeCache,
         ]
         if not all(fusable):
             logger.debug(
-                f"  REJECT {n}: not all preds fusable: {fusable}, {fg.predecessors(n)}"
-            )
-            if not n in node_map:
+                "  REJECT %s: not all preds fusable: %s, %s", n, fusable, fg.predecessors(n))
+
+            if n not in node_map:
                 node_map[n] = 0
             continue
 
         # don't support anything with kwargs for now
         if not supported_kwargs(n):
-            logger.debug(f"  REJECT {n}: unsupported kwargs")
+            logger.debug("  REJECT %s: unsupported kwargs", n)
             node_map[n] = 0
             continue
 
@@ -247,9 +247,9 @@ def pointwise_fusion(cc: CodeCache,
             if s.op != 'placeholder':
                 node_map[s] = node_map[n]
 
-        logger.debug(f"ACCEPT {n}: partition {node_map[n]}")
+        logger.debug("ACCEPT %s: partition %s", n, node_map[n])
 
-    logger.debug(f"partitions = {dump_partitions(node_map)}")
+    logger.debug("partitions = %s", dump_partitions(node_map))
 
     def same_partition(nodes: Set[torch.fx.Node]) -> bool:
         if len(nodes) > 0:
@@ -282,20 +282,17 @@ def pointwise_fusion(cc: CodeCache,
             if not is_call(n):
                 continue
 
-            logger.debug(f"COMPUTE CONSIDER {n}")
+            logger.debug("COMPUTE CONSIDER %s", n)
 
-            if fuse_inputs:
-                nodes = fg.predecessors(n)
-            else:
-                nodes = fg.successors(n)
+            nodes = fg.predecessors(n) if fuse_inputs else fg.successors(n)
 
             if not is_compute(n):
-                logger.debug(f"COMPUTE REJECT {n}: not compute")
+                logger.debug("COMPUTE REJECT %s: not compute", n)
                 continue
 
             if not same_partition(nodes):
                 logger.debug(
-                    f"COMPUTE REJECT {n}: not all neighbors in same partition {str(nodes)}"
+                    "COMPUTE REJECT %s: not all neighbors in same partition %s", n, str(nodes)
                 )
                 continue
 
@@ -303,7 +300,7 @@ def pointwise_fusion(cc: CodeCache,
 
             if not only_pointwise(fuse_part):
                 logger.debug(
-                    f"COMPUTE REJECT {n}: not only_pointwise in users {str(fuse_part)}"
+                    "COMPUTE REJECT %s: not only_pointwise in users %s", n, str(fuse_part)
                 )
                 continue
 
@@ -312,18 +309,18 @@ def pointwise_fusion(cc: CodeCache,
             if fuse_part_id != 0 and fuse_part_id in num_compute and num_compute[
                     fuse_part_id] >= 1:
                 logger.debug(
-                    f"COMPUTE REJECT {n}: already a compute node in {str(node_map[fuse_part])}"
+                    "COMPUTE REJECT %s: already a compute node in %s", n, str(node_map[fuse_part])
                 )
                 continue
 
             logger.debug(
-                f"COMPUTE ACCEPT {n}: partition {fuse_part_id}, nodes={str(nodes)}"
+                "COMPUTE ACCEPT %s: partition %s, nodes=%s", n, fuse_part_id, str(nodes)
             )
 
             num_compute[fuse_part_id] = num_compute[fuse_part_id] + 1
             node_map[n] = fuse_part_id
 
-    logger.debug(f"final paritions = {dump_partitions(node_map)}")
+    logger.debug("final paritions = %s", dump_partitions(node_map))
 
     # Make sure all nodes have been assigned a partition.
     assert (all([n in node_map for n in mod.graph.nodes]))
@@ -336,23 +333,23 @@ def pointwise_fusion(cc: CodeCache,
     subgraphs: Dict[torch.fx.Node, List[torch.fx.Node]] = dict()
     for n, p in node_map.items():
         if p > 0:
-            if not p in subgraphs:
+            if p not in subgraphs:
                 subgraphs[p] = []
             subgraphs[p].append(n)
 
-    logger.debug(f"Found {len(subgraphs)} fusable subgraphs.")
+    logger.debug("Found %s fusable subgraphs.", len(subgraphs))
 
     # Attempt to fuse each subgraph.
-    for p in subgraphs.keys():
+    for p in subgraphs:
         sub = SubGraph(fg, subgraphs[p])
         if len([n for n in sub.nodes if non_trivial_op(n)]) <= 1:
-            logger.debug(f"Reject empty/singleton subgraph:\n{sub.tabular()}")
+            logger.debug("Reject empty/singleton subgraph:\n%s", sub.tabular())
             continue
         logger.debug(
-            f"Fusing sub-module (last_input={sub.last_input()}):\n{sub.tabular()}"
+            "Fusing sub-module (last_input=%s):\n%s", sub.last_input(), sub.tabular()
         )
         fuse_graph_nodes(cc, sub)
-        logger.debug(f"Post fusion sub-module:\n{sub.tabular()}")
+        logger.debug("Post fusion sub-module:\n%s", sub.tabular())
 
     logger.debug("Post fusion module:")
     logger.debug(lazy_graph_print_tabular(mod.graph))

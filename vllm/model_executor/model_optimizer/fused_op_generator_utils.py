@@ -1,11 +1,10 @@
 import functools
-import logging
 import torch
 import torch.utils.cpp_extension
 
 from .utils import get_function_schema
 
-from typing import List, Callable, Dict
+from typing import List, Callable, Dict, Optional
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -39,14 +38,20 @@ def is_optional_arg(n: torch.fx.Node, arg_num: int) -> bool:
 def build_extension(lib_name: str,
                     sources: List[str],
                     opt: str = '-O2',
-                    extra_cflags: List[str] = [],
-                    extra_ldflags: List[str] = [],
+                    extra_cflags: Optional[List[str]] = None,
+                    extra_ldflags: Optional[List[str]] = None,
                     verbose: bool = False):
     """
     Given a list of cpp and cuda source files, build and load a pytorch extension
     module with the given name.  Loaded ops will appear in the torch.ops.{lib_name}
     namespace.
     """
+    if not extra_cflags:
+        extra_cflags = []
+
+    if not extra_ldflags:
+        extra_ldflags = []
+
     torch.utils.cpp_extension.load(
         name=lib_name,
         sources=sources,
@@ -83,7 +88,7 @@ def generate_op_schema(
         inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
         nodes: List[torch.fx.Node],
         kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> str:
-    sep = f"("
+    sep = "("
     arg_sig = ""
     for i, n in enumerate(inputs):
         arg_type = arg_schema_type(n).replace(".", "::")
@@ -129,7 +134,7 @@ def register_op_schema(library: str, op: str, sig: str):
     Register schema for the given 'op' in the given 'lib'.
     """
     op = op.replace(".", "::").replace("torch::ops::", "")
-    logger.debug(f"Registering schema for {op}: {sig}")
+    logger.debug("Registering schema for %s: %s", op, sig)
     torch.library.define(f"{op}", sig)
 
 
@@ -139,5 +144,5 @@ def register_meta_function(library: str, op: str, meta_fn: Callable):
     See also: torch.library.impl_abstract(qualname, func=None, *, lib=None, _stacklevel=1)
     """
     op = op.replace(".", "::").replace("torch::ops::", "")
-    logger.debug(f"Registering meta function for {op}: {str(meta_fn)}")
+    logger.debug("Registering meta function for %s: %s", op, str(meta_fn))
     torch.library.impl(f"{op}", "Meta", func=meta_fn)

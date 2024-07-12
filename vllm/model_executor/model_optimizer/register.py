@@ -51,8 +51,7 @@ def operator_name(
     """
     if isinstance(op, str):
         return (None, op)
-    elif (isinstance(op, types.FunctionType)
-          or isinstance(op, types.BuiltinFunctionType)):
+    elif isinstance(op, (types.FunctionType, types.BuiltinFunctionType)):
         return (None, f"{op.__module__}.{op.__name__}")
     elif isinstance(op, types.BuiltinMethodType):
         return (op.__module__, op.__name__)
@@ -70,8 +69,8 @@ def register_supported(op: Union[str, Callable]):
     class_name, op_name = operator_name(op)
     if op_name is None:
         raise RuntimeError(f"{op} has unsupported type.")
-    logger.debug(f"register supported {class_name}/{op_name}")
-    if not op_name in SUPPORTED:
+    logger.debug("register supported %s/%s", class_name, op_name)
+    if op_name not in SUPPORTED:
         SUPPORTED[op_name] = set()
     if class_name:
         SUPPORTED[op_name].add(str(class_name))
@@ -88,7 +87,7 @@ def register_fusable(op: Union[str, Callable],
     if op_name is None:
         raise RuntimeError(f"{op} has unsupported type.")
     assert op_name not in FUSABLE
-    logger.debug(f"register fusable {op_name}, is_compute {is_compute}")
+    logger.debug("register fusable %s, is_compute %s, is_trivial %s", op_name, is_compute, is_trivial)
     register_supported(op)
 
     # TODO: need to register classes for methods
