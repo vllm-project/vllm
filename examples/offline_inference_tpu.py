@@ -3,12 +3,12 @@ from vllm import LLM, SamplingParams
 prompts = [
     "A robot may not injure a human being",
     "It is only with the heart that one can see rightly;",
-    "Life is like a box of chocolates.",
+    "The greatest glory in living lies not in never falling,",
 ]
 answers = [
     " or, through inaction, allow a human being to come to harm.",
     " what is essential is invisible to the eye.",
-    " You never know what you're gonna get.",
+    " but in rising every time we fall.",
 ]
 N = 1
 # Currently, top-p sampling is disabled. `top_p` should be 1.0.
