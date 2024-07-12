@@ -167,7 +167,10 @@ class TP1DraftModelRunner(ModelRunner):
             is_prompt=False,
         )
 
-        model_input.sampling_metadata.reuse_sampling_tensors = True
+        # Ensure we skip CPU samples
+        assert new_model_input.sampling_metadata.skip_sampler_cpu_output == True
+        # We can reuse sampling tensors since every decode iteration is the same
+        new_model_input.sampling_metadata.reuse_sampling_tensors = True
 
         if debug_advance_input:
             print("NEW INPUT: ")
@@ -273,7 +276,7 @@ class TP1DraftModelRunner(ModelRunner):
                     sampling_metadata=model_input.sampling_metadata,
                 ))
 
-            # Prepare the inputs for the next step on GPU.
+            # Prepare inputs for the next step
             if step != num_steps - 1:
                 model_input = self._gpu_advance_step(model_input, outputs[-1])
 
