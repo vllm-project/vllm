@@ -28,12 +28,15 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                QuantizationConfigOverride,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod,
                                                WeightTieLinearMethod)
+# yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
