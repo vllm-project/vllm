@@ -79,7 +79,6 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", scale)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-
         return apply_int8_linear(input=x,
                                  weight=layer.weight,
                                  weight_scale=layer.weight_scale,
