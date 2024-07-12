@@ -7,16 +7,16 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.model_runner import (GPUModelRunnerBase, 
-                                      ModelInputForGPU, 
-                                      LORA_WARMUP_RANK,
-                                      _BATCH_SIZES_TO_CAPTURE,
-                                      _PAD_SLOT_ID,
-                                      )
+from vllm.worker.model_runner import (
+    GPUModelRunnerBase,
+    ModelInputForGPU,
+    ModelInputForGPUWithSamplingMetadata,
+    LORA_WARMUP_RANK,
+    _BATCH_SIZES_TO_CAPTURE,
+    _PAD_SLOT_ID,
+)
 from vllm.distributed import get_pp_group
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
@@ -84,16 +84,17 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 @dataclasses.dataclass(frozen=True)
-class EncoderDecoderModelInput(ModelInputForGPU):
+class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     """
     Used by the EncoderDecoderModelRunner.
     """
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
 
-class EncoderDecoderModelRunner(
-        GPUModelRunnerBase[EncoderDecoderModelInput]):
+
+class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
     _model_input_cls: Type[EncoderDecoderModelInput] = (
         EncoderDecoderModelInput)
 
@@ -218,9 +219,7 @@ class EncoderDecoderModelRunner(
         return [output]
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self,
-            tensor_dict: Dict[str,
-                              Any]) -> EncoderDecoderModelInput:
+            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInput:
         return EncoderDecoderModelInput.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
@@ -361,8 +360,7 @@ class EncoderDecoderModelRunner(
     def _prepare_encoder_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        model_input: EncoderDecoderModelInput,
-        finished_requests_ids: Optional[List[str]] = None
+        model_input: EncoderDecoderModelInput
     ) -> EncoderDecoderModelInput:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -395,29 +393,10 @@ class EncoderDecoderModelRunner(
         query_lens: List[int] = []
         block_tables: List[List[int]] = []
         multi_modal_inputs_list: List[MultiModalInputs] = []
-        request_ids_to_seq_ids: Dict[str, List[int]] = defaultdict(list)
         decode_only = True
         num_prefills = 0
         num_prefill_tokens = 0
         num_decode_tokens = 0
-
-        # The following fields are only for flashinfer
-        # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
-        # for the precise definition of the following fields.
-        # An example:
-        # request 1, page indices [0, 5, 8]
-        # request 2, page indices [1, 6, 7]
-        # request 3, page indices [3, 4]
-        # paged_kv_indices is a concatenation of page indices of all requests:
-        # [0, 5, 8, 1, 6, 7, 3, 4]
-        # paged_kv_indptr is used to index into paged_kv_indices:
-        # [0, 3, 6, 8]
-        paged_kv_indices: List[int] = []
-        # 0 at the beginning of paged_kv_indptr indicates the start of the
-        # first request’s page indices in the paged_kv_indices list.
-        paged_kv_indptr: List[int] = [0]
-        # paged_kv_last_page_len is the length of the last page of each request
-        paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             # Leave the encoder/cross-attention input
@@ -436,11 +415,11 @@ class EncoderDecoderModelRunner(
             seq_ids = list(seq_group_metadata.seq_data.keys())
             is_prompt = seq_group_metadata.is_prompt
 
-            computed_block_nums = seq_group_metadata.computed_block_nums
+            computed_block_nums = None
             if (self.scheduler_config is not None
                     and self.scheduler_config.chunked_prefill_enabled
                     and not (computed_block_nums is None
-                                or computed_block_nums == [])):
+                             or computed_block_nums == [])):
                 raise RuntimeError(
                     "chunked prefill cannot be used with prefix caching "
                     "now.")
@@ -453,11 +432,10 @@ class EncoderDecoderModelRunner(
                 # get_num_computed_tokens is incorrect for spec decoding.
                 # So, we should have a special logic here.
                 # TODO(sang): Fix it.
-                context_len = seq_data.get_len() - 1
+                context_len = seq_data.get_len()
 
-            seq_len = min(
-                seq_data.get_len(),
-                context_len + seq_group_metadata.token_chunk_size)
+            seq_len = seq_data.get_len()
+
             if is_prompt:
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
             else:
@@ -469,8 +447,7 @@ class EncoderDecoderModelRunner(
             # Prefix is not supported with sliding_window
             prefix_cache_hit = (computed_block_nums is not None
                                 and len(computed_block_nums) > 0
-                                and self.sliding_window is None
-                                and is_prompt)
+                                and self.sliding_window is None and is_prompt)
 
             # These are seq_len/context_len capped to the sliding window.
             # They are passed to decode kernel.
@@ -519,13 +496,12 @@ class EncoderDecoderModelRunner(
                 else:
                     block_table = computed_block_nums
             elif (self.scheduler_config.chunked_prefill_enabled
-                    or not is_prompt):
+                  or not is_prompt):
                 if cross_block_table is not None:
                     # chunked prefill or decode
                     block_table = cross_block_table
                     if curr_sliding_window_blocks is not None:
-                        block_table = block_table[
-                            -curr_sliding_window_blocks:]
+                        block_table = block_table[-curr_sliding_window_blocks:]
                 else:
                     # Only happens when memory profiling runs.
                     block_table = []
@@ -550,9 +526,9 @@ class EncoderDecoderModelRunner(
                 decode_only = False
                 prefill_seq_lens.append(seq_len)
             else:
-                assert query_len == 1, (
-                    "seq_len: {}, context_len: {}, query_len: {}".format(
-                        seq_len, context_len, query_len))
+                # assert is_encoder_seq or query_len == 1, (
+                #     "seq_len: {}, context_len: {}, query_len: {}".format(
+                #         seq_len, context_len, query_len))
                 num_decode_tokens += query_len
                 decode_seq_lens.append(sliding_seq_len)
 
@@ -562,9 +538,9 @@ class EncoderDecoderModelRunner(
             lora_index_mapping += [lora_id] * query_len
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (query_len if seq_group_metadata.sampling_params
-                    and seq_group_metadata.sampling_params.prompt_logprobs
-                    is not None else 1))
+                (query_len if seq_group_metadata.sampling_params and
+                 seq_group_metadata.sampling_params.prompt_logprobs is not None
+                 else 1))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
@@ -579,13 +555,13 @@ class EncoderDecoderModelRunner(
                 num_tokens = seq_group_metadata.\
                                         prompt_adapter_num_virtual_tokens
                 pm = [prompt_adapter_id
-                        ] * num_tokens + [0] * (query_len - num_tokens)
+                      ] * num_tokens + [0] * (query_len - num_tokens)
                 prompt_adapter_index_mapping += pm
                 prompt_adapter_prompt_mapping.extend(
                     [prompt_adapter_id] *
                     (query_len if seq_group_metadata.sampling_params
-                        and seq_group_metadata.sampling_params.prompt_logprobs
-                        else 1))
+                     and seq_group_metadata.sampling_params.prompt_logprobs
+                     else 1))
 
             is_profile_run = _is_single_block_table_empty(
                 seq_group_metadata.block_tables)
@@ -634,32 +610,31 @@ class EncoderDecoderModelRunner(
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
-        max_seq_len = (max(prefill_seq_lens, default=0) if is_prompt else
-                        max(decode_seq_lens, default=0))
+        max_seq_len = (max(prefill_seq_lens, default=0)
+                       if is_prompt else max(decode_seq_lens, default=0))
 
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
         # vLLM uses cuda graph only for decoding requests.
-        use_captured_graph = (
-            decode_only and not self.model_config.enforce_eager
-            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-            and max_seq_len <= self.max_seq_len_to_capture)
+        use_captured_graph = (decode_only
+                              and not self.model_config.enforce_eager
+                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                              and max_seq_len <= self.max_seq_len_to_capture)
         if use_captured_graph:
             assert False
 
-        if use_captured_graph:
-            assert False
-        else:
-            max_block_table_len = max(
-                len(block_table) for block_table in block_tables)
-            block_tables = make_tensor_with_pad(
-                block_tables,
-                max_len=max_block_table_len,
-                pad=0,
-                dtype=torch.int,
-                device=self.device,
+        max_block_table_len = max(
+            len(block_table) for block_table in block_tables)
+        block_tables = make_tensor_with_pad(
+            block_tables,
+            max_len=max_block_table_len,
+            pad=0,
+            dtype=torch.int,
+            device=self.device,
+        )
+        assert (not is_prompt) or max_query_len > 0, (
+            "Decode-phase query_lens: {}".format(query_lens)
             )
-        assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
@@ -687,122 +662,62 @@ class EncoderDecoderModelRunner(
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        input_tokens_tensor = torch.tensor(input_tokens,
-                                           dtype=torch.long,
-                                           device=self.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.device)
+        attn_metadata = model_input.attn_metadata
+
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
+
+        # Set encoder-oriented attention metadata fields
+        attn_metadata.num_encoder_tokens = sum(seq_lens)
+        attn_metadata.encoder_seq_lens = seq_lens
+        attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
+        attn_metadata.max_encoder_seq_len = max_seq_len
+        attn_metadata.cross_slot_mapping = slot_mapping_tensor
+        attn_metadata.cross_block_tables = block_tables
+
+        if seq_group_metadata.is_prompt:
+
+            input_tokens_tensor = torch.tensor(input_tokens,
+                                               dtype=torch.long,
+                                               device=self.device)
+            input_positions_tensor = torch.tensor(input_positions,
+                                                  dtype=torch.long,
+                                                  device=self.device)
+
+        else:
+
+            input_tokens_tensor = torch.tensor([],
+                                               dtype=torch.long,
+                                               device=self.device)
+            input_positions_tensor = torch.tensor([],
+                                                  dtype=torch.long,
+                                                  device=self.device)
+
+        # Inject attn_metadata encoder/cross-attention fields &
+        # encoder input tokens/positions into model_input.
+        # Frozen dataclass fields cannot be modified, so use
+        # dataclasses.replace to construct a new model input
+        # instance.
+        model_input = dataclasses.replace(
+                            model_input,
+                            attn_metadata=attn_metadata,
+                            encoder_input_tokens=input_tokens_tensor,
+                            encoder_input_positions=input_positions_tensor,
+                            )
 
         logits_soft_cap = getattr(self.model_config.hf_config,
                                   'attn_logit_softcapping', None)
         if logits_soft_cap is not None and self.attn_backend.get_name(
         ) != "flashinfer":
-            raise ValueError("Please use Flashinfer backend for models with"
-                             "logits_soft_cap (i.e., Gemma-2)."
-                             " Otherwise, the output might be wrong."
-                             " Set Flashinfer backend by "
-                             "export VLLM_ATTENTION_BACKEND=FLASHINFER.")
+            raise ValueError("Models with logits_soft_cap (i.e., Gemma-2)"
+                             " require FlashInfer backend, however vLLM"
+                             " currently only supports xFormers backend"
+                             " for encoder/decoder models.")
 
-        if self.attn_backend.get_name() == "flashinfer":
-            if len(paged_kv_indptr) > 0:
-                paged_kv_indices_tensor = torch.tensor(paged_kv_indices,
-                                                       device='cpu',
-                                                       dtype=torch.int)
-                paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr,
-                                                      device='cpu',
-                                                      dtype=torch.int)
-                paged_kv_last_page_len_tensor = torch.tensor(
-                    paged_kv_last_page_len, device='cpu', dtype=torch.int)
-            else:
-                paged_kv_indices_tensor = None
-                paged_kv_indptr_tensor = None
-                paged_kv_last_page_len_tensor = None
+        return model_input
 
-            kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
-                                                      self.model_config.dtype)
-            attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=num_prefills,
-                slot_mapping=slot_mapping_tensor,
-                num_prefill_tokens=num_prefill_tokens,
-                num_decode_tokens=num_decode_tokens,
-                max_prefill_seq_len=max_seq_len,
-                block_tables=block_tables,
-                paged_kv_indptr=paged_kv_indptr_tensor,
-                paged_kv_indices=paged_kv_indices_tensor,
-                paged_kv_last_page_len=paged_kv_last_page_len_tensor,
-                num_qo_heads=self.model_config.get_num_attention_heads(
-                    self.parallel_config),
-                num_kv_heads=self.model_config.get_num_kv_heads(
-                    self.parallel_config),
-                head_dim=self.model_config.get_head_size(),
-                page_size=self.block_size,
-                seq_start_loc=seq_start_loc,
-                query_start_loc=query_start_loc,
-                device=self.device,
-                data_type=kv_cache_dtype,
-                use_cuda_graph=use_captured_graph,
-                logits_soft_cap=logits_soft_cap)
 
-        else:
-            attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=num_prefills,
-                slot_mapping=slot_mapping_tensor,
-                num_prefill_tokens=num_prefill_tokens,
-                num_decode_tokens=num_decode_tokens,
-                seq_lens=seq_lens,
-                seq_lens_tensor=seq_lens_tensor,
-                max_query_len=max_query_len,
-                max_prefill_seq_len=max_seq_len,
-                max_decode_seq_len=max_seq_len,
-                query_start_loc=query_start_loc,
-                seq_start_loc=seq_start_loc,
-                context_lens_tensor=context_lens_tensor,
-                block_tables=block_tables,
-                use_cuda_graph=use_captured_graph,
-            )
-
-        if self.lora_config:
-            lora_mapping = LoRAMapping(
-                lora_index_mapping,
-                lora_prompt_mapping,
-            )
-        else:
-            lora_mapping = None
-
-        if self.prompt_adapter_config:
-            prompt_adapter_mapping = PromptAdapterMapping(
-                prompt_adapter_index_mapping,
-                prompt_adapter_prompt_mapping,
-            )
-        else:
-            prompt_adapter_mapping = None
-
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
-        request_ids_to_seq_ids = {
-            seq_group_metadata.request_id:
-            list(seq_group_metadata.seq_data.keys())
-            for seq_group_metadata in seq_group_metadata_list
-        }
-        return self._model_input_cls(
-            input_tokens=input_tokens_tensor,
-            input_positions=input_positions_tensor,
-            attn_metadata=attn_metadata,
-            seq_lens=seq_lens,
-            query_lens=query_lens,
-            lora_mapping=lora_mapping,
-            lora_requests=lora_requests,
-            multi_modal_kwargs=multi_modal_kwargs,
-            request_ids_to_seq_ids=request_ids_to_seq_ids,
-            finished_requests_ids=finished_requests_ids,
-            prompt_adapter_mapping=prompt_adapter_mapping,
-            prompt_adapter_requests=prompt_adapter_requests,
-        )
-    
 def _is_single_block_table_empty(block_table: Optional[List[int]]):
     """
     Check if a single block table has not been constructed

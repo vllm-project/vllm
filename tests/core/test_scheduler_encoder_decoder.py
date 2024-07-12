@@ -49,9 +49,11 @@ def test_scheduler_schedule_simple_encoder_decoder():
     seq_group_meta_list, out = schedule_and_update_computed_tokens(scheduler)
     # - Verify that sequence group metadata includes encoder attention
     #   and cross-attention metadata
-    assert all([not ((seq_group_meta.encoder_seq_data is None) or
-                (seq_group_meta.cross_block_table is None))
-                    for seq_group_meta in seq_group_meta_list])
+    assert all([
+        not ((seq_group_meta.encoder_seq_data is None) or
+             (seq_group_meta.cross_block_table is None))
+        for seq_group_meta in seq_group_meta_list
+    ])
     assert set(get_sequence_groups(out)) == set(running)
     assert out.num_batched_tokens == num_seq_group
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
