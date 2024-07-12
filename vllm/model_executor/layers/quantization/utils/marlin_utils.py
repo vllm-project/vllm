@@ -92,7 +92,7 @@ def marlin_make_workspace(output_size_per_partition: int,
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
-    return (act_order and not is_row_parallel)
+    return (not act_order) or (act_order and not is_row_parallel)
 
 
 def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
