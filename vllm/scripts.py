@@ -22,10 +22,6 @@ def registrer_signal_handlers():
 
 def serve(args: argparse.Namespace) -> None:
     # EngineArgs expects the model name to be passed as --model.
-    if args.model is not None and args.model == args.model_tag:
-        raise ValueError(
-            "The --model argument is not supported for the serve command. "
-            "Use positional argument [model_tag] instead.")
     args.model = args.model_tag
 
     run_server(args)
