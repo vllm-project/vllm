@@ -1,0 +1,21 @@
+name: PR Reminder Comment Bot
+on:
+  pull_request_target:
+    types: [opened]
+
+jobs:
+  pr_reminder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remind to run full CI on PR
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '👋 Hi! Thank you for contributing to the vLLM project.\n Just a reminder: PRs would not trigger full CI run by default. Instead, it would only trigger `fastcheck` CI to run, which consists only a small and essential subset of tests to quickly catch small errors.\n\nFull CI run is still required to merge this PR so please make sure that you run full CI before merging or if you need more test signals.\n\n To run full CI, you can do one of these:\n- Add `ready` label to the PR\n- Comment `/ready` on the PR\n- Enable auto-merge.\n\n🚀'
+            })
+        env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
