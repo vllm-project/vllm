@@ -39,17 +39,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         else:
             self.group_size = group_size
 
-        self.group_size: int
-        if group_size is None:
-            if self.strategy != "channel":
-                raise ValueError(
-                    "Marlin kernels require group quantization or "
-                    "channelwise quantization, but found no group "
-                    "size and strategy is not channelwise.")
-            self.group_size = -1
-        else:
-            self.group_size = group_size
-
         if act_order and self.group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -60,7 +49,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         verify_marlin_supported(num_bits=self.num_bits,
                                 group_size=self.group_size,
                                 is_sym=True)
-
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -151,7 +139,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size = input_size
         layer.is_k_full = marlin_is_k_full(self.act_order, is_row_parallel)
 
-
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from marlin format. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -182,12 +169,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         # Permute scales from compressed-tensors format to marlin format.
         marlin_scales = marlin_permute_scales(
             layer.weight_scale.squeeze().t().contiguous(),
-            size_k=(layer.input_size if self.act_order else
-                    layer.input_size_per_partition),
+            size_k=(layer.input_size
+                    if self.act_order else layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
             group_size=self.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
-
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         return apply_marlin_linear(
