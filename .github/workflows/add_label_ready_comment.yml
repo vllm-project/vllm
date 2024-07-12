@@ -19,3 +19,5 @@ jobs:
                         issue_number: context.issue.number,
                         labels: ['ready']
                     })
+            env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
