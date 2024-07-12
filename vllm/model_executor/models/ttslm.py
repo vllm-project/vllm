@@ -137,7 +137,7 @@ class ChatTtsLlm(nn.Module):
         **kwargs: object
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.get_input_embeddings(input_ids)
-        spk_emb = kwargs.pop("speech", None)
+        spk_emb = kwargs.get("speech", None)
         if spk_emb is not None:
             self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
         model_output = self.gpt(

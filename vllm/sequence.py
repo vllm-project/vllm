@@ -257,6 +257,7 @@ class Sequence:
 
         self.data = SequenceData(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
+        self.output_hiddens: List[torch.Tensor] = []
         self.output_text = ""
 
         self.status = SequenceStatus.WAITING
@@ -747,10 +748,12 @@ class CompletionSequenceGroupOutput(SequenceGroupOutput):
         self,
         samples: List[SequenceOutput],
         prompt_logprobs: Optional[PromptLogprobs],
+        hidden_state: Optional[torch.Tensor] = None,
     ) -> None:
         self.samples = samples
         # Prompt logprob for each prompt query token.
         self.prompt_logprobs = prompt_logprobs
+        self.hidden_state = hidden_state
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "

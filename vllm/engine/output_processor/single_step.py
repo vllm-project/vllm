@@ -124,6 +124,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 parent.append_token_id(last_child_sample.output_token,
                                        last_child_sample.logprobs)
             child_seqs.append((parent, parent))
+            
+            parent.output_hiddens.append(outputs.hidden_state.clone())
 
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize and self.detokenizer:

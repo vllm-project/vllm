@@ -1282,6 +1282,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
+            for i, o in enumerate(output):
+                o.hidden_state = hidden_states[i]
 
         return [output]
 

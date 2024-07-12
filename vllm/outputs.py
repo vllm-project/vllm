@@ -2,6 +2,8 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
+import torch
+
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
@@ -31,6 +33,7 @@ class CompletionOutput:
     token_ids: Tuple[int, ...]
     cumulative_logprob: float
     logprobs: Optional[SampleLogprobs]
+    hiddens: Optional[torch.Tensor] = None
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
@@ -129,6 +132,7 @@ class RequestOutput:
                              seq.get_output_token_ids(),
                              seq.get_cumulative_logprob(),
                              seq.output_logprobs if include_logprobs else None,
+                             seq.output_hiddens,
                              SequenceStatus.get_finished_reason(seq.status),
                              seq.stop_reason) for seq in top_n_seqs
         ]
