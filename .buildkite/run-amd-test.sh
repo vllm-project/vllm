@@ -2,7 +2,7 @@
 set -ex
 
 # Print ROCm version
-echo "--- Confirming Valid Initial State"
+echo "--- Confirming Clean Initial State"
 while true; do
         sleep 3
         if grep -q clean /opt/amdgpu/etc/gpu_state; then
