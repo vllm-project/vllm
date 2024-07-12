@@ -26,7 +26,19 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                  group_size: Optional[int] = None):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
+        self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
+
+        self.group_size: int
+        if group_size is None:
+            if self.strategy != "channel":
+                raise ValueError(
+                    "Marlin kernels require group quantization or "
+                    "channelwise quantization, but found no group "
+                    "size and strategy is not channelwise.")
+            self.group_size = -1
+        else:
+            self.group_size = group_size
 
         self.group_size: int
         if group_size is None:
@@ -73,6 +85,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             torch.empty(
                 output_size_per_partition,
                 input_size_per_partition // self.pack_factor,
+                input_size_per_partition // self.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -82,6 +95,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 "input_dim": 1,
                 "output_dim": 0,
                 "packed_dim": 1,
+                "pack_factor": self.pack_factor,
                 "pack_factor": self.pack_factor,
                 "weight_loader": weight_loader
             })

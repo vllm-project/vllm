@@ -31,11 +31,16 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         self.weight_bits = weight_bits
         self.pack_factor = 32 // self.weight_bits  # packed into int32
+        self.pack_factor = 32 // self.weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
         self.is_sym = is_sym
         self.lm_head_quantized = lm_head_quantized
 
+        # Verify supported on platform.
+        verify_marlin_supported(num_bits=self.weight_bits,
+                                group_size=self.group_size,
+                                is_sym=self.is_sym)
         # Verify supported on platform.
         verify_marlin_supported(num_bits=self.weight_bits,
                                 group_size=self.group_size,
@@ -118,6 +123,10 @@ class GPTQMarlinConfig(QuantizationConfig):
                 or desc_act is None):
             return False
 
+        return check_marlin_supported(num_bits=num_bits,
+                                      group_size=group_size,
+                                      is_sym=sym,
+                                      min_capability=cls.get_min_capability())
         return check_marlin_supported(num_bits=num_bits,
                                       group_size=group_size,
                                       is_sym=sym,
@@ -211,7 +220,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 "ignore_warning": True
             },
         )
-    
+
         # Scales
         scales = Parameter(
             torch.empty(
@@ -274,7 +283,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
         # Handle sorting for activation reordering if needed.
         if self.quant_config.desc_act:
-            breakpoint()
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "g_idx", g_idx)

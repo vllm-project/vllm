@@ -1,8 +1,10 @@
 from typing import List, Optional, Tuple
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
+from vllm.model_executor.models.llava_next import (
+    get_llava_next_image_feature_size)
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
@@ -120,3 +122,13 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
             name_0="hf",
             name_1="vllm",
         )
+
+
+@pytest.mark.parametrize("height_and_width_and_result", [(1669, 2560, 2144),
+                                                         (183, 488, 776)])
+def test_image_feature_size(height_and_width_and_result):
+    height, width, result = height_and_width_and_result
+    config = AutoConfig.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
+    assert get_llava_next_image_feature_size(config,
+                                             input_height=height,
+                                             input_width=width) == result

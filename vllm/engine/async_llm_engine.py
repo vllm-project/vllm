@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
@@ -224,11 +225,11 @@ class _AsyncLLMEngine(LLMEngine):
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
-        finished_requests_ids = self.scheduler[
-            virtual_engine].get_and_reset_finished_requests_ids()
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
+            finished_requests_ids = self.scheduler[
+                virtual_engine].get_and_reset_finished_requests_ids()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -264,6 +265,7 @@ class _AsyncLLMEngine(LLMEngine):
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
@@ -279,6 +281,12 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
 
+        if prompt_adapter_request:
+            prompt_token_ids = [
+                0
+            ] * prompt_adapter_request.prompt_adapter_num_virtual_tokens + \
+                prompt_token_ids
+
         llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
                                prompt=inputs.get("prompt"),
                                multi_modal_data=inputs.get("multi_modal_data"))
@@ -286,13 +294,14 @@ class _AsyncLLMEngine(LLMEngine):
         return self.input_processor(llm_inputs)
 
     async def add_request_async(
-        self,
-        request_id: str,
-        inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+            self,
+            request_id: str,
+            inputs: PromptInputs,
+            params: Union[SamplingParams, PoolingParams],
+            arrival_time: Optional[float] = None,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Dict[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -301,7 +310,10 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time = time.time()
 
         processed_inputs = await self.process_model_inputs_async(
-            request_id=request_id, inputs=inputs, lora_request=lora_request)
+            request_id=request_id,
+            inputs=inputs,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request)
 
         self._add_processed_request(
             request_id=request_id,
@@ -309,6 +321,7 @@ class _AsyncLLMEngine(LLMEngine):
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
         )
 
@@ -540,11 +553,13 @@ class AsyncLLMEngine:
             request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
+        finished = True
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
+            finished = finished and request_output.finished
 
-        return len(request_outputs) > 0
+        return not finished
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
@@ -627,6 +642,7 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncStream:
         if self.log_requests:
             if isinstance(inputs, str):
@@ -669,7 +685,7 @@ class AsyncLLMEngine:
             arrival_time=arrival_time,
             lora_request=lora_request,
             trace_headers=trace_headers,
-        )
+            prompt_adapter_request=prompt_adapter_request)
 
         return stream
 
@@ -680,6 +696,7 @@ class AsyncLLMEngine:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -695,6 +712,8 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: Prompt Adapter request to use 
+                                            for generation, if any.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine
@@ -749,6 +768,7 @@ class AsyncLLMEngine:
                 sampling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 
@@ -837,6 +857,7 @@ class AsyncLLMEngine:
         *,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
@@ -849,6 +870,7 @@ class AsyncLLMEngine:
             arrival_time=arrival_time,
             lora_request=lora_request,
             trace_headers=trace_headers,
+            prompt_adapter_request=prompt_adapter_request,
         )
 
         try:
