@@ -7,7 +7,7 @@
 
 
 steps:
-- label: Async Engine, Inputs, Utils, Worker test
+- label: Async Engine, Inputs, Utils, Worker Test
   fast_check: true
   fast_check_only: true
   commands:
@@ -18,7 +18,7 @@ steps:
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
 
-- label: Tensorizer, Metrics, Tracingtest
+- label: Tensorizer, Metrics, Tracing Test
   fast_check: true
   fast_check_only: true
   commands:
@@ -28,7 +28,7 @@ steps:
       opentelemetry-sdk \
       opentelemetry-api \
       opentelemetry-exporter-otlp \
-      opentelemetry-semantic-conventions-ai" # Tracings
+      opentelemetry-semantic-conventions-ai" # Tracing
   - pytest -v -s tracing
 
 - label: Regression Test
