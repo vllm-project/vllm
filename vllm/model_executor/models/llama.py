@@ -53,23 +53,6 @@ from vllm.utils import is_hip, print_warning_once
 
 from .interfaces import SupportsLoRA
 
-_GGUF_KEYS_MAPPING = {
-    "token_embd": "model.embed_tokens",
-    "blk": "model.layers",
-    "ffn_up": "mlp.up_proj",
-    "ffn_down": "mlp.down_proj",
-    "ffn_gate": "mlp.gate_proj",
-    "ffn_norm": "post_attention_layernorm",
-    "attn_norm": "input_layernorm",
-    "attn_q": "self_attn.q_proj",
-    "attn_v": "self_attn.v_proj",
-    "attn_k": "self_attn.k_proj",
-    "attn_output": "self_attn.o_proj",
-    "output.qweight": "lm_head.qweight",
-    "output.qweight_type": "lm_head.qweight_type",
-    "output_norm": "model.norm",
-}
-
 
 class LlamaMLP(nn.Module):
 
@@ -82,22 +65,11 @@ class LlamaMLP(nn.Module):
         bias: bool = False,
     ) -> None:
         super().__init__()
-        self.merge_weight = getattr(quant_config, "merge_weight", True)
-        if self.merge_weight:
-            self.gate_up_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
-                output_sizes=[intermediate_size] * 2,
-                bias=bias,
-                quant_config=quant_config)
-        else:
-            self.gate_proj = ColumnParallelLinear(hidden_size,
-                                                  intermediate_size,
-                                                  bias=bias,
-                                                  quant_config=quant_config)
-            self.up_proj = ColumnParallelLinear(hidden_size,
-                                                intermediate_size,
-                                                bias=bias,
-                                                quant_config=quant_config)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=bias,
+            quant_config=quant_config)
         self.down_proj = RowParallelLinear(input_size=intermediate_size,
                                            output_size=hidden_size,
                                            bias=bias,
@@ -108,12 +80,7 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        if self.merge_weight:
-            gate_up, _ = self.gate_up_proj(x)
-        else:
-            up, _ = self.up_proj(x)
-            gate, _ = self.gate_proj(x)
-            gate_up = torch.cat([gate, up], dim=-1)
+        gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -156,35 +123,14 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.merge_weight = getattr(quant_config, "merge_weight", True)
-        if self.merge_weight:
-            self.qkv_proj = QKVParallelLinear(
-                hidden_size=hidden_size,
-                head_size=self.head_dim,
-                total_num_heads=self.total_num_heads,
-                total_num_kv_heads=self.total_num_kv_heads,
-                bias=bias,
-                quant_config=quant_config,
-            )
-        else:
-            self.q_proj = ColumnParallelLinear(
-                hidden_size,
-                self.total_num_heads * self.head_dim,
-                bias=bias,
-                quant_config=quant_config,
-            )
-            self.k_proj = ColumnParallelLinear(
-                hidden_size,
-                self.total_num_kv_heads * self.head_dim,
-                bias=bias,
-                quant_config=quant_config,
-            )
-            self.v_proj = ColumnParallelLinear(
-                hidden_size,
-                self.total_num_kv_heads * self.head_dim,
-                bias=bias,
-                quant_config=quant_config,
-            )
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+        )
 
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
@@ -193,7 +139,11 @@ class LlamaAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        is_neox_style = getattr(quant_config, "is_neox_style", True)
+        is_neox_style = True
+        if quant_config is not None:
+            if quant_config.get_name()=="gguf":
+                is_neox_style = False
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -216,14 +166,9 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if self.merge_weight:
-            qkv, _ = self.qkv_proj(hidden_states)
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
-        else:
-            q, _ = self.q_proj(hidden_states)
-            k, _ = self.k_proj(hidden_states)
-            v, _ = self.v_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                            dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -436,7 +381,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.merge_weight = getattr(quant_config, "merge_weight", True)
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
@@ -503,7 +447,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-        ] if self.merge_weight else []
+        ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -513,9 +457,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            for key_to_modify, new_key in _GGUF_KEYS_MAPPING.items():
-                if key_to_modify in name:
-                    name = name.replace(key_to_modify, new_key)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue

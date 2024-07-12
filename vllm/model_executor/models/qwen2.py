@@ -62,21 +62,10 @@ class Qwen2MLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.merge_weight = getattr(quant_config, "merge_weight", True)
-        if self.merge_weight:
-            self.gate_up_proj = MergedColumnParallelLinear(
-                hidden_size, [intermediate_size] * 2,
-                bias=False,
-                quant_config=quant_config)
-        else:
-            self.gate_proj = ColumnParallelLinear(hidden_size,
-                                                  intermediate_size,
-                                                  bias=False,
-                                                  quant_config=quant_config)
-            self.up_proj = ColumnParallelLinear(hidden_size,
-                                                intermediate_size,
-                                                bias=False,
-                                                quant_config=quant_config)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -87,12 +76,7 @@ class Qwen2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        if self.merge_weight:
-            gate_up, _ = self.gate_up_proj(x)
-        else:
-            gate, _ = self.gate_proj(x)
-            up, _ = self.up_proj(x)
-            gate_up = torch.cat([gate, up], dim=-1)
+        gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -131,35 +115,14 @@ class Qwen2Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
 
-        self.merge_weight = getattr(quant_config, "merge_weight", True)
-        if self.merge_weight:
-            self.qkv_proj = QKVParallelLinear(
-                hidden_size,
-                self.head_dim,
-                self.total_num_heads,
-                self.total_num_kv_heads,
-                bias=True,
-                quant_config=quant_config,
-            )
-        else:
-            self.q_proj = ColumnParallelLinear(
-                hidden_size,
-                self.total_num_heads * self.head_dim,
-                bias=True,
-                quant_config=quant_config,
-            )
-            self.k_proj = ColumnParallelLinear(
-                hidden_size,
-                self.total_num_kv_heads * self.head_dim,
-                bias=True,
-                quant_config=quant_config,
-            )
-            self.v_proj = ColumnParallelLinear(
-                hidden_size,
-                self.total_num_kv_heads * self.head_dim,
-                bias=True,
-                quant_config=quant_config,
-            )
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=True,
+            quant_config=quant_config,
+        )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -188,14 +151,9 @@ class Qwen2Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if self.merge_weight:
-            qkv, _ = self.qkv_proj(hidden_states)
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
-        else:
-            q, _ = self.q_proj(hidden_states)
-            k, _ = self.k_proj(hidden_states)
-            v, _ = self.v_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                            dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -358,7 +316,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.merge_weight = getattr(quant_config, "merge_weight", True)
         self.model = Qwen2Model(config, cache_config, quant_config)
 
         if config.tie_word_embeddings:
@@ -405,7 +362,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-        ] if self.merge_weight else []
+        ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
