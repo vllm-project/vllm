@@ -251,6 +251,11 @@ CLANG_FORMAT_EXCLUDES=(
     'csrc/punica/bgmv/vec_dtypes.cuh'
     'csrc/punica/punica_ops.cu'
     'csrc/punica/type_convert.h'
+    'csrc/quantization/gguf/ggml-common.h'
+    'csrc/quantization/gguf/dequantize.cuh'
+    'csrc/quantization/gguf/vecdotq.cuh'
+    'csrc/quantization/gguf/mmq.cuh'
+    'csrc/quantization/gguf/mmvq.cuh'
 )
 
 # Format specified files with clang-format

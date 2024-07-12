@@ -4,7 +4,8 @@
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include "common.cuh"
+#include "ggml-common.h"
+#include "vecdotq.cuh"
 #include "dequantize.cuh"
 #include "mmvq.cuh"
 #include "mmq.cuh"
