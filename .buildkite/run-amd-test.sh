@@ -10,6 +10,7 @@ while true; do
                 break
         fi
 done
+
 echo "--- ROCm info"
 rocminfo
 
