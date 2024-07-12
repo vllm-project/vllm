@@ -4,6 +4,6 @@
 # OpenVINO dependencies
 torch >= 2.1.2
 openvino ~= 2024.3.0.dev
-optimum-intel[openvino] >= 1.17.2
+optimum-intel[openvino] >= 1.18.1
 
 triton >= 2.2.0  # FIXME(woosuk): This is a hack to avoid import error.
