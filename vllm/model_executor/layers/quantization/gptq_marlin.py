@@ -143,7 +143,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
 
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -307,7 +306,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             size_n=layer.output_size_per_partition,
             group_size=self.quant_config.group_size)
         replace_tensor(layer, "scales", marlin_scales)
-
 
     def apply(
         self,
