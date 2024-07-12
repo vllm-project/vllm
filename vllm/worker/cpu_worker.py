@@ -11,7 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment, parallel_state)
+                              init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
@@ -131,7 +131,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         load_config: LoadConfig,
         local_rank: int,
         rank: int,
-        ip_port: str,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
@@ -147,7 +146,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.load_config = load_config
         self.local_rank = local_rank
         self.rank = rank
-        self.ip_port = ip_port
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.prompt_adapter_config = prompt_adapter_config
@@ -342,33 +340,3 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return CPUCacheEngine.get_cache_block_size(
             self.cache_config.block_size, self.cache_config.cache_dtype,
             self.model_config, self.parallel_config)
-
-    def init_shm_manager(self):
-        elem_size = torch.tensor([],
-                                 dtype=self.model_config.dtype).element_size()
-        world_size = parallel_state.get_tensor_model_parallel_world_size()
-        hidden_size = self.model_config.get_hidden_size()
-        rank_buffer_size = (self.model_config.max_model_len * hidden_size *
-                            5 // world_size * elem_size)
-        torch.ops._C.init_shm_manager(
-            self.ip_port,
-            parallel_state.get_tensor_model_parallel_world_size(),
-            parallel_state.get_tensor_model_parallel_rank(),
-            rank_buffer_size,
-        )
-
-    def join_shm_manager(self):
-        elem_size = torch.tensor([],
-                                 dtype=self.model_config.dtype).element_size()
-        world_size = parallel_state.get_tensor_model_parallel_world_size()
-        hidden_size = self.model_config.get_hidden_size()
-        rank_buffer_size = (self.model_config.max_model_len * hidden_size *
-                            5 // world_size * elem_size)
-        ret = torch.ops._C.join_shm_manager(
-            self.ip_port,
-            parallel_state.get_tensor_model_parallel_world_size(),
-            parallel_state.get_tensor_model_parallel_rank(),
-            rank_buffer_size,
-        )
-        print("rank: ", parallel_state.get_tensor_model_parallel_rank())
-        print(ret)

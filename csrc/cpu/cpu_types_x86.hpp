@@ -510,17 +510,6 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16 &v) {
 
 inline void prefetch(const void *addr) { _mm_prefetch(addr, _MM_HINT_T1); }
 
-inline void non_temporal_save(BF16Vec32 &vec, void *ptr) {
-  _mm512_stream_si512((__m512i *)ptr, vec.reg);
-}
-
-inline void non_temporal_save(BF16Vec16 &vec, void *ptr) {
-  _mm256_stream_si256((__m256i *)ptr, vec.reg);
-}
-
-inline void non_temporal_save(FP32Vec16 &vec, void *ptr) {
-  _mm512_stream_ps((float *)ptr, vec.reg);
-}
 }; // namespace vec_op
 
 #endif
