@@ -1,5 +1,24 @@
 steps:
-  - block: "Build wheels"
+  - label: "Build wheel default - Python {{matrix.python_version}}, CUDA {{matrix.cuda_version}}" 
+    agents:
+      queue: cpu_queue
+    commands:
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --build-arg PYTHON_VERSION={{matrix.python_version}} --tag vllm-ci:build-image -e CMAKE_BUILD_TYPE=Release --target build --progress plain ."
+      - "mkdir artifacts"
+      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image cp -r dist /artifacts_host"
+      # rename the files to change linux -> manylinux1
+      - "for f in artifacts/dist/*.whl; do mv -- \"$f\" \"${f/linux/manylinux1}\"; done"
+      - "aws s3 cp --recursive --acl public-read artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
+      - "aws s3 cp --recursive --acl public-read artifacts/dist s3://vllm-wheels/nightly/"
+    matrix:
+      setup:
+        cuda_version:
+          - "12.1.0"
+        python_version:
+          - "3.10"
+          - "3.11"
+
+  - block: "Build wheels full"
 
   - label: "Build wheel - Python {{matrix.python_version}}, CUDA {{matrix.cuda_version}}"
     agents:
@@ -8,7 +27,9 @@ steps:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --build-arg PYTHON_VERSION={{matrix.python_version}} --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image cp -r dist /artifacts_host"
-      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
+      - "for f in artifacts/dist/*.whl; do mv -- \"$f\" \"${f/linux/manylinux1}\"; done
+      - "aws s3 cp --recursive --acl public-read artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
+      - "aws s3 cp --recursive --acl public-read artifacts/dist s3://vllm-wheels/nightly/"
     matrix:
       setup:
         cuda_version:
@@ -19,3 +40,12 @@ steps:
           - "3.9"
           - "3.10"
           - "3.11"
+      adjustments:
+      - with:
+          cuda_version: "12.1.0"
+          python_version: "3.10"
+        skip: true
+      - with:
+          cuda_version: "12.1.0"
+          python_version: "3.11"
+        skip: true
