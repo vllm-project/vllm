@@ -99,15 +99,7 @@ class LinearMethodBase(QuantizeMethodBase):
 
 
 class UnquantizedLinearMethod(LinearMethodBase):
-    """Linear method without quantization.
-
-    Args:
-        separate_bias_add: If true, add bias separately after matrix
-                           multiplication.
-    """
-
-    def __init__(self, separate_bias_add: bool = False):
-        self.separate_bias_add = separate_bias_add
+    """Linear method without quantization."""
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -126,12 +118,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        weight = layer.weight
-        if self.separate_bias_add:
-            if bias is not None:
-                return F.linear(x, weight) + bias
-            return F.linear(x, weight)
-        return F.linear(x, weight, bias)
+
+        return F.linear(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
