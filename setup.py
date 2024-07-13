@@ -36,6 +36,7 @@ def embed_commit_hash():
         else:
             commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                                 encoding="utf-8").strip()
+
         commit_contents = f'__commit__ = "{commit_id}"\n'
 
         version_file = os.path.join(ROOT_DIR, "vllm", "commit_id.py")
