@@ -225,9 +225,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.non_driver_workers: List[RayWorkerWrapper] = []
 
         for idx, rank in enumerate(worker_ranks[1:]):
-            if rank == 0:
-                pass
-            elif rank % self.parallel_config.tensor_parallel_size == 0:
+            # We need to skip the driver worker, which we
+            # do by skipping worker_ranks[0] which is always 0.
+            if rank % self.parallel_config.tensor_parallel_size == 0:
                 self.tp_driver_workers.append(self.workers[idx])
             else:
                 self.non_driver_workers.append(self.workers[idx])
