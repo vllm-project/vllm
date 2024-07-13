@@ -392,7 +392,7 @@ def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
 
     def _read_requirements(filename: str) -> List[str]:
-        with open(get_path(filename)) as f:
+        with open(get_path("setup_files/requirements/" + filename)) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
         for line in requirements:
@@ -403,7 +403,7 @@ def get_requirements() -> List[str]:
         return resolved_requirements
 
     if _is_cuda():
-        requirements = _read_requirements("requirements-cuda.txt")
+        requirements = _read_requirements("cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
@@ -415,17 +415,17 @@ def get_requirements() -> List[str]:
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
-        requirements = _read_requirements("requirements-rocm.txt")
+        requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
-        requirements = _read_requirements("requirements-neuron.txt")
+        requirements = _read_requirements("neuron.txt")
     elif _is_openvino():
-        requirements = _read_requirements("requirements-openvino.txt")
+        requirements = _read_requirements("openvino.txt")
     elif _is_tpu():
-        requirements = _read_requirements("requirements-tpu.txt")
+        requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
-        requirements = _read_requirements("requirements-cpu.txt")
+        requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
-        requirements = _read_requirements("requirements-xpu.txt")
+        requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCm, Neuron, "

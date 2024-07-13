@@ -51,7 +51,7 @@ Install from source
   .. code-block:: console
 
       $ pip install --upgrade pip
-      $ pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+      $ pip install -r setup_files/requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 - Finally, install vLLM with OpenVINO backend: 
 

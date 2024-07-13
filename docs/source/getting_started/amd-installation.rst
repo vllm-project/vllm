@@ -125,7 +125,7 @@ Install ROCm's flash attention (v2.0.4) following the instructions from `ROCm/fl
 .. code-block:: console
 
     $ cd vllm
-    $ pip install -U -r requirements-rocm.txt
+    $ pip install -U -r setup_files/requirements/rocm.txt
     $ python setup.py develop # This may take 5-10 minutes. Currently, `pip install .`` does not work for ROCm installation
 
 

@@ -159,7 +159,7 @@ ENV TOKENIZERS_PARALLELISM=false
 
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     --mount=type=cache,target=/root/.cache/pip \
-    pip install -U -r requirements-rocm.txt \
+    pip install -U -r setup_files/requirements/rocm.txt \
     && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-6.0"*) \
             patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \

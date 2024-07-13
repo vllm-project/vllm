@@ -47,7 +47,7 @@ Build from source
 .. code-block:: console
 
     $ pip install --upgrade pip
-    $ pip install -v -r requirements-xpu.txt 
+    $ pip install -v -r setup_files/requirements/xpu.txt 
 
 - Finally, build and install vLLM XPU backend: 
 

@@ -4,7 +4,7 @@ USER root
 
 RUN apt-get update  -y     && apt-get install -y git wget vim numactl gcc-12 g++-12 protobuf-compiler libprotobuf-dev     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
-# Some packages in requirements-cpu are installed here
+# Some packages in setup_files/requirements/cpu.txt are installed here
 # IBM provides optimized packages for ppc64le processors in the open-ce project for mamba
 # Currently these may not be available for venv or pip directly
 RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p10/ -c defaults     python=3.10     pytorch-cpu=2.1.2     torchvision-cpu=0.16.2    &&     micromamba clean --all --yes
@@ -14,7 +14,7 @@ COPY ./ /workspace/vllm
 WORKDIR /workspace/vllm
 
 # These packages will be in rocketce eventually
-RUN pip install -v -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
+RUN pip install -v -r setup_files/requirements/cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
 

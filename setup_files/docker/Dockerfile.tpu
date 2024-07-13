@@ -16,7 +16,7 @@ ENV VLLM_TARGET_DEVICE="tpu"
 RUN cd /workspace/vllm && python setup.py develop
 
 # Re-install outlines to avoid dependency errors.
-# The outlines version must follow requirements-common.txt.
+# The outlines version must follow setup_files/requirements/common.txt.
 RUN pip uninstall outlines -y
 RUN pip install "outlines>=0.0.43"
 

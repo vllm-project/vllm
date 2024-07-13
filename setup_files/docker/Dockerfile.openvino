@@ -8,15 +8,15 @@ RUN apt-get update -y && \
 WORKDIR /workspace
 
 # copy requirements
-COPY requirements-build.txt /workspace/vllm/
-COPY requirements-common.txt /workspace/vllm/
-COPY requirements-openvino.txt /workspace/vllm/
+COPY setup_files/requirements/build.txt /workspace/vllm/setup_files/requirements/
+COPY setup_files/requirements/common.txt /workspace/vllm/setup_files/requirements/
+COPY setup_files/requirements/openvino.txt /workspace/vllm/setup_files/requirements/
 
 COPY vllm/ /workspace/vllm/vllm
 COPY setup.py /workspace/vllm/
 
 # install build requirements
-RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm/requirements-build.txt
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm/setup_files/requirements/build.txt
 # build vLLM with OpenVINO backend
 RUN PIP_PRE=1 PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/nightly/" VLLM_TARGET_DEVICE="openvino" python3 -m pip install /workspace/vllm/
 

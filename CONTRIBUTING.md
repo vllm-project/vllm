@@ -27,7 +27,7 @@ pip install -e .  # This may take several minutes.
 ### Testing
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r setup_files/requirements/dev.txt
 
 # linting and formatting
 bash format.sh

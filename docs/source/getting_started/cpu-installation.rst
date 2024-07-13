@@ -56,7 +56,7 @@ Build from source
 
     $ pip install --upgrade pip
     $ pip install wheel packaging ninja "setuptools>=49.4.0" numpy
-    $ pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    $ pip install -v -r setup_files/requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 - Finally, build and install vLLM CPU backend: 
 

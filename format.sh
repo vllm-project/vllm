@@ -36,12 +36,12 @@ tool_version_check() {
     fi
 }
 
-tool_version_check "yapf" $YAPF_VERSION "$(grep yapf requirements-lint.txt | cut -d'=' -f3)"
-tool_version_check "ruff" $RUFF_VERSION "$(grep "ruff==" requirements-lint.txt | cut -d'=' -f3)"
-tool_version_check "mypy" "$MYPY_VERSION" "$(grep mypy requirements-lint.txt | cut -d'=' -f3)"
-tool_version_check "isort" "$ISORT_VERSION" "$(grep isort requirements-lint.txt | cut -d'=' -f3)"
-tool_version_check "codespell" "$CODESPELL_VERSION" "$(grep codespell requirements-lint.txt | cut -d'=' -f3)"
-tool_version_check "clang-format" "$CLANGFORMAT_VERSION" "$(grep clang-format requirements-lint.txt | cut -d'=' -f3)"
+tool_version_check "yapf" $YAPF_VERSION "$(grep yapf setup_files/requirements/lint.txt | cut -d'=' -f3)"
+tool_version_check "ruff" $RUFF_VERSION "$(grep "ruff==" setup_files/requirements/lint.txt | cut -d'=' -f3)"
+tool_version_check "mypy" "$MYPY_VERSION" "$(grep mypy setup_files/requirements/lint.txt | cut -d'=' -f3)"
+tool_version_check "isort" "$ISORT_VERSION" "$(grep isort setup_files/requirements/lint.txt | cut -d'=' -f3)"
+tool_version_check "codespell" "$CODESPELL_VERSION" "$(grep codespell setup_files/requirements/lint.txt | cut -d'=' -f3)"
+tool_version_check "clang-format" "$CLANGFORMAT_VERSION" "$(grep clang-format setup_files/requirements/lint.txt | cut -d'=' -f3)"
 
 YAPF_FLAGS=(
     '--recursive'
