@@ -2,11 +2,13 @@
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
+import os
 import weakref
 
 import pytest
 
 from vllm import LLM
+from vllm.utils import is_hip
 
 from ..models.utils import check_outputs_equal
 
@@ -26,6 +28,9 @@ def test_vllm_gc_ed():
     assert weak_llm() is None
 
 
+@pytest.mark.skipif(is_hip()
+                    and os.getenv("VLLM_ATTENTION_BACKEND") == "FLASHINFER",
+                    reason="Flashinfer does not support ROCm/HIP.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
