@@ -194,7 +194,8 @@ class SamplingParams:
                     "[IMPORTANT] We plan to discontinue the support for beam "
                     "search in the next major release. Please refer to "
                     "https://github.com/vllm-project/vllm/issues/6226 for "
-                    "more information.")
+                    "more information. Set VLLM_NO_DEPRECATION_WARNING=1 to "
+                    "suppress this warning.")
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
