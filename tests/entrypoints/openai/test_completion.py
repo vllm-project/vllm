@@ -43,7 +43,7 @@ def server(zephyr_lora_files, zephyr_pa_files):
             "bfloat16",
             "--max-model-len",
             "8192",
-            "--max-num-seqs"
+            "--max-num-seqs",
             "128",
             "--enforce-eager",
             # lora config
@@ -96,7 +96,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
@@ -113,7 +113,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
@@ -132,7 +132,7 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
 async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
@@ -153,7 +153,7 @@ async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
 async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
@@ -177,7 +177,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
     with pytest.raises(
         (openai.BadRequestError, openai.APIError)):  # test using token IDs
         await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt=[0, 0, 0, 0, 0],
             max_tokens=5,
             temperature=0.0,
@@ -189,7 +189,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
     with pytest.raises(
         (openai.BadRequestError, openai.APIError)):  # test using token IDs
         stream = await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt=[0, 0, 0, 0, 0],
             max_tokens=5,
             temperature=0.0,
@@ -637,7 +637,7 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
 )
 async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
     base_url = str(client.base_url)[:-3].strip("/")
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
 
     for add_special in [False, True]:
         prompt = "This is a test prompt."
@@ -664,7 +664,7 @@ async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
 )
 async def test_detokenize(client: openai.AsyncOpenAI, model_name: str):
     base_url = str(client.base_url)[:-3]
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
 
     prompt = "This is a test prompt."
     tokens = tokenizer.encode(prompt, add_special_tokens=False)
