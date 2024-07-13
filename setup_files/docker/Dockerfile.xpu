@@ -15,7 +15,7 @@ COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
-RUN pip install -v -r requirements-xpu.txt
+RUN pip install -v -r setup_files/requirements/xpu.txt
 
 RUN VLLM_TARGET_DEVICE=xpu python3 setup.py install
 

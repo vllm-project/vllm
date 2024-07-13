@@ -38,14 +38,14 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
+COPY setup_files/requirements/common.txt setup_files/requirements/common.txt
+COPY setup_files/requirements/cuda.txt setup_files/requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-cuda.txt
+    python3 -m pip install -r setup_files/requirements/cuda.txt
 
-COPY requirements-mamba.txt requirements-mamba.txt
+COPY setup_files/requirements/mamba.txt setup_files/requirements/mamba.txt
 RUN python3 -m pip install packaging
-RUN python3 -m pip install -r requirements-mamba.txt
+RUN python3 -m pip install -r setup_files/requirements/mamba.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -61,10 +61,10 @@ FROM base AS build
 ARG PYTHON_VERSION=3
 
 # install build dependencies
-COPY requirements-build.txt requirements-build.txt
+COPY setup_files/requirements/build.txt setup_files/requirements/build.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-build.txt
+    python3 -m pip install -r setup_files/requirements/build.txt
 
 # install compiler cache to speed up compilation leveraging local or remote caching
 RUN apt-get update -y && apt-get install -y ccache
@@ -74,8 +74,8 @@ COPY csrc csrc
 COPY setup.py setup.py
 COPY cmake cmake
 COPY CMakeLists.txt CMakeLists.txt
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
+COPY setup_files/requirements/common.txt setup_files/requirements/common.txt
+COPY setup_files/requirements/cuda.txt setup_files/requirements/cuda.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm vllm
 
@@ -121,11 +121,11 @@ RUN python3 check-wheel-size.py dist
 #################### DEV IMAGE ####################
 FROM base as dev
 
-COPY requirements-lint.txt requirements-lint.txt
-COPY requirements-test.txt requirements-test.txt
-COPY requirements-dev.txt requirements-dev.txt
+COPY setup_files/requirements/lint.txt setup_files/requirements/lint.txt
+COPY setup_files/requirements/test.txt setup_files/requirements/test.txt
+COPY setup_files/requirements/dev.txt setup_files/requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-dev.txt
+    python3 -m pip install -r setup_files/requirements/dev.txt
 
 #################### DEV IMAGE ####################
 #################### MAMBA Build IMAGE ####################
@@ -136,10 +136,10 @@ ENV MAX_JOBS=${max_jobs}
 
 WORKDIR /usr/src/mamba
 
-COPY requirements-mamba.txt requirements-mamba.txt
+COPY setup_files/requirements/mamba.txt setup_files/requirements/mamba.txt
 
 # Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel -r requirements-mamba.txt \
+RUN pip --verbose wheel -r setup_files/requirements/mamba.txt \
     --no-build-isolation --no-deps --no-cache-dir
 
 #################### MAMBA Build IMAGE ####################
@@ -182,7 +182,7 @@ ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-dev.txt
+    python3 -m pip install -r setup_files/requirements/dev.txt
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
