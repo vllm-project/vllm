@@ -1,4 +1,5 @@
-from typing import Callable, Tuple
+from functools import lru_cache
+from typing import Callable, List, Tuple
 
 import torch
 
@@ -43,6 +44,15 @@ def merge_vision_embeddings(input_ids: torch.Tensor,
     return inputs_embeds
 
 
+class PPMissingLayer(torch.nn.Identity):
+    """
+    A placeholder layer for missing layers in a pipeline parallel model.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+
 def make_layers(
     num_hidden_layers: int, layer_fn: Callable[[], torch.nn.Module]
 ) -> Tuple[int, int, torch.nn.ModuleList]:
@@ -55,7 +65,25 @@ def make_layers(
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
     modules = torch.nn.ModuleList(
-        [torch.nn.Identity() for _ in range(start_layer)] +
+        [PPMissingLayer() for _ in range(start_layer)] +
         [layer_fn() for _ in range(start_layer, end_layer)] +
-        [torch.nn.Identity() for _ in range(end_layer, num_hidden_layers)])
+        [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
+
+
+@lru_cache
+def get_pp_missing_layer_names(model: torch.nn.Module) -> List[str]:
+    """Get the names of the missing layers in a pipeline parallel model."""
+    missing_layer_names = []
+    for name, module in model.named_modules():
+        if isinstance(module, PPMissingLayer):
+            missing_layer_names.append(name)
+    return missing_layer_names
+
+
+def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
+    """Check if a parameter is missing in a pipeline parallel model."""
+    for missing_layer_name in get_pp_missing_layer_names(model):
+        if name.startswith(missing_layer_name):
+            return True
+    return False

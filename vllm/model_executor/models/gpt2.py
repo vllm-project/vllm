@@ -41,7 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
-from .utils import make_layers
+from .utils import is_pp_missing_parameter, make_layers
 
 
 class GPT2Attention(nn.Module):
@@ -284,9 +284,7 @@ class GPT2LMHeadModel(nn.Module):
             if not name.startswith("transformer."):
                 name = "transformer." + name
 
-            if name not in params_dict:
-                # in pipeline parallelism, we may have layers that are not
-                # present on this rank
+            if is_pp_missing_parameter(name, self):
                 continue
 
             param = params_dict[name]

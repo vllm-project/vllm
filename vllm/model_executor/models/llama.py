@@ -50,7 +50,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 
 from .interfaces import SupportsLoRA
-from .utils import make_layers
+from .utils import is_pp_missing_parameter, make_layers
 
 
 class LlamaMLP(nn.Module):
@@ -447,9 +447,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
-                if name not in params_dict:
-                    # in pipeline parallelism, we may have layers that are not
-                    # present on this rank
+                if is_pp_missing_parameter(name, self):
                     continue
 
                 param = params_dict[name]
@@ -475,9 +473,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     else:
                         name = remapped_kv_scale_name
 
-                if name not in params_dict:
-                    # in pipeline parallelism, we may have layers that are not
-                    # present on this rank
+                if is_pp_missing_parameter(name, self):
                     continue
 
                 param = params_dict[name]
