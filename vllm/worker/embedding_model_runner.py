@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
@@ -40,7 +40,8 @@ class EmbeddingModelRunner(
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
     ):
         super().__init__(model_config,
                          parallel_config,
@@ -51,7 +52,8 @@ class EmbeddingModelRunner(
                          lora_config=lora_config,
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
-                         vision_language_config=vision_language_config)
+                         prompt_adapter_config=prompt_adapter_config,
+                         multimodal_config=multimodal_config)
 
     @torch.inference_mode()
     def execute_model(
@@ -70,6 +72,13 @@ class EmbeddingModelRunner(
             assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
+
+        if self.prompt_adapter_config:
+            assert model_input.prompt_adapter_requests is not None
+            assert model_input.prompt_adapter_mapping is not None
+            self.set_active_prompt_adapters(
+                model_input.prompt_adapter_requests,
+                model_input.prompt_adapter_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
@@ -92,10 +101,9 @@ class EmbeddingModelRunner(
             "positions": model_input.input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": model_input.attn_metadata,
+            **(model_input.multi_modal_kwargs or {}),
         }
-        if self.vision_language_config:
-            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-            execute_model_kwargs.update({"image_input": multi_modal_kwargs})
+
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
@@ -120,10 +128,11 @@ class EmbeddingModelRunner(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list)
+            seq_group_metadata_list, finished_requests_ids)
         # Prepare PoolingMetadata.
         assert model_input.seq_lens is not None
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,

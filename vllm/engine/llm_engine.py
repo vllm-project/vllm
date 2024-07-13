@@ -7,9 +7,10 @@ from typing import Set, Type, TypeVar, Union
 from transformers import PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         LoRAConfig, ModelConfig, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -27,6 +28,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
@@ -87,12 +89,14 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        vision_language_config (Optional): The configuration related to vision
-            language models.
+        multimodal_config (Optional): The configuration related to multimodal 
+            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
+        prompt_adapter_config (Optional): The configuration related to serving 
+            prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
     """
@@ -157,10 +161,11 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
+        prompt_adapter_config: Optional[PromptAdapterConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -215,13 +220,14 @@ class LLMEngine:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.speculative_config = speculative_config
         self.load_config = load_config
         self.decoding_config = decoding_config or DecodingConfig()
+        self.prompt_adapter_config = prompt_adapter_config
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
@@ -247,9 +253,10 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            vision_language_config=vision_language_config,
+            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
+            prompt_adapter_config=prompt_adapter_config,
         )
 
         if not self.model_config.embedding_mode:
@@ -277,11 +284,13 @@ class LLMEngine:
                     "quantization":
                     model_config.quantization,
                     "kv_cache_dtype":
-                    cache_config.cache_dtype,
+                    str(cache_config.cache_dtype),
 
                     # Feature flags
                     "enable_lora":
                     bool(lora_config),
+                    "enable_prompt_adapter":
+                    bool(prompt_adapter_config),
                     "enable_prefix_caching":
                     cache_config.enable_prefix_caching,
                     "enforce_eager":
@@ -376,7 +385,6 @@ class LLMEngine:
         engine_config = engine_args.create_engine_config()
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
-
         # Initialize the cluster and specify the executor class.
         if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
@@ -409,7 +417,6 @@ class LLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
-
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),
@@ -470,6 +477,9 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+        if self.prompt_adapter_config:
+            self.prompt_adapter_config.verify_with_model_config(
+                self.model_config)
 
     def _get_eos_token_id(
             self, lora_request: Optional[LoRARequest]) -> Optional[int]:
@@ -487,6 +497,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Create the sequences.
@@ -495,7 +506,7 @@ class LLMEngine:
         eos_token_id = self._get_eos_token_id(lora_request)
 
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
-                       lora_request)
+                       lora_request, prompt_adapter_request)
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -506,7 +517,7 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
-            )
+                prompt_adapter_request=prompt_adapter_request)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -514,7 +525,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-            )
+                prompt_adapter_request=prompt_adapter_request)
         else:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
@@ -535,6 +546,7 @@ class LLMEngine:
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
@@ -548,6 +560,11 @@ class LLMEngine:
                                                 lora_request=lora_request)
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
+
+        if prompt_adapter_request:
+            prompt_token_ids = \
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
+                         + prompt_token_ids
 
         llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
                                prompt=inputs.get("prompt"),
@@ -563,6 +580,7 @@ class LLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -612,9 +630,11 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        processed_inputs = self.process_model_inputs(request_id=request_id,
-                                                     inputs=inputs,
-                                                     lora_request=lora_request)
+        processed_inputs = self.process_model_inputs(
+            request_id=request_id,
+            inputs=inputs,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request)
 
         self._add_processed_request(
             request_id=request_id,
@@ -622,6 +642,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
         )
 
@@ -633,6 +654,7 @@ class LLMEngine:
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -658,7 +680,7 @@ class LLMEngine:
             sampling_params=sampling_params,
             lora_request=lora_request,
             trace_headers=trace_headers,
-        )
+            prompt_adapter_request=prompt_adapter_request)
 
         return seq_group
 
@@ -669,16 +691,19 @@ class LLMEngine:
         pooling_params: PoolingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
         pooling_params = pooling_params.clone()
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  lora_request=lora_request,
-                                  pooling_params=pooling_params)
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            prompt_adapter_request=prompt_adapter_request)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -848,6 +873,8 @@ class LLMEngine:
             0].schedule()
 
         if not scheduler_outputs.is_empty():
+            finished_requests_ids = self.scheduler[
+                0].get_and_reset_finished_requests_ids()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -855,7 +882,7 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-            )
+                finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:
@@ -1079,6 +1106,16 @@ class LLMEngine:
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
+
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        return self.model_executor.add_prompt_adapter(prompt_adapter_request)
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_executor.remove_prompt_adapter(prompt_adapter_id)
+
+    def list_prompt_adapters(self) -> List[int]:
+        return self.model_executor.list_prompt_adapters()
 
     def check_health(self) -> None:
         if self.tokenizer:

@@ -11,7 +11,8 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+from vllm.utils import (error_on_invalid_device_count_status,
+                        get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
 if ray is not None:
@@ -133,11 +134,32 @@ class RayGPUExecutor(DistributedGPUExecutor):
         worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
                                                     use_dummy_driver=True)
 
-        node_workers = defaultdict(list)
-        node_gpus = defaultdict(list)
+        # the order in `worker_node_and_gpu_ids` does not necessarily match
+        # the machine boundaries. We need to make sure that workers in the
+        # same node are assigned consecutive ranks.
+        # examples:
+        # [('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [0]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [0]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [1]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [2]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [3]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [1]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [2]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [3])] # noqa
 
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
-            node_workers[node_id].append(i)
+        # initialize worker ranks with -1 (unassigned)
+        worker_ranks = [-1 for x in worker_node_and_gpu_ids]
+        current_rank = 0
+        while -1 in worker_ranks:
+            # whenever we find an unassigned worker, find the node
+            index = worker_ranks.index(-1)
+            current_node_id = worker_node_and_gpu_ids[index][0]
+            # assign ranks to all workers in the same node
+            for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+                if node_id == current_node_id:
+                    worker_ranks[i] = current_rank
+                    current_rank += 1
+        # with the above example, worker_ranks will be [0, 4, 5, 6, 7, 1, 2, 3]
+
+        node_workers = defaultdict(list)  # node id -> list of worker ranks
+        node_gpus = defaultdict(list)  # node id -> list of gpu ids
+
+        for worker_rank, (node_id, gpu_ids) in zip(worker_ranks,
+                                                   worker_node_and_gpu_ids):
+            node_workers[node_id].append(worker_rank)
             # `gpu_ids` can be a list of strings or integers.
             # convert them to integers for consistency.
             # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
@@ -175,13 +197,16 @@ class RayGPUExecutor(DistributedGPUExecutor):
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
+        error_on_invalid_device_count_status()
+
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [
             self._get_worker_kwargs(
                 local_rank=node_workers[node_id].index(rank),
                 rank=rank,
                 distributed_init_method=distributed_init_method,
-            ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
+            ) for rank, (node_id,
+                         _) in zip(worker_ranks, worker_node_and_gpu_ids)
         ]
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
@@ -199,16 +224,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # broadcasted to.
         self.non_driver_workers: List[RayWorkerWrapper] = []
 
-        for pp_rank in range(self.parallel_config.pipeline_parallel_size):
-            for tp_rank in range(self.parallel_config.tensor_parallel_size):
-                rank = (pp_rank *
-                        self.parallel_config.tensor_parallel_size) + tp_rank
-                if rank == 0:
-                    pass
-                elif rank % self.parallel_config.tensor_parallel_size == 0:
-                    self.tp_driver_workers.append(self.workers[rank - 1])
-                else:
-                    self.non_driver_workers.append(self.workers[rank - 1])
+        for idx, rank in enumerate(worker_ranks[1:]):
+            # We need to skip the driver worker, which we
+            # do by skipping worker_ranks[0] which is always 0.
+            if rank % self.parallel_config.tensor_parallel_size == 0:
+                self.tp_driver_workers.append(self.workers[idx])
+            else:
+                self.non_driver_workers.append(self.workers[idx])
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
@@ -346,6 +368,15 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
+        if self.pp_locks is None:
+            # This locks each pipeline parallel stage so multiple virtual
+            # engines can't execute on the same stage at the same time
+            # We create the locks here to avoid creating them in the constructor
+            # which uses a different asyncio loop.
+            self.pp_locks = [
+                asyncio.Lock()
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
 
         async def _run_task_with_lock(task, lock, *args, **kwargs):
             async with lock:
