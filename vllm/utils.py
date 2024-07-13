@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -172,6 +173,15 @@ def is_cpu() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
         return "cpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
+
+
+@lru_cache(maxsize=None)
+def is_openvino() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "openvino" in version("vllm")
     except PackageNotFoundError:
         return False
 
@@ -384,6 +394,27 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
+def init_kmp_env():
+    if not is_cpu():
+        return
+
+    ld_prealod_str = os.getenv("LD_PRELOAD", "")
+    if "libiomp5.so" not in ld_prealod_str:
+        return
+
+    # The time(milliseconds) that a thread should wait after completing the
+    # execution of a parallel region, before sleeping.
+    os.environ['KMP_BLOCKTIME'] = "1"
+    # dump settings on start up
+    os.environ['KMP_SETTINGS'] = "1"
+    # Prevents the CPU to run into low performance state
+    os.environ['KMP_TPAUSE'] = "0"
+    # Provides fine granularity parallelism
+    os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+
+
 def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
     """Yield successive chunk_size chunks from lst."""
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
@@ -542,7 +573,7 @@ def is_pin_memory_available() -> bool:
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_cpu():
+    elif is_cpu() or is_openvino():
         return False
     return True
 
@@ -779,9 +810,14 @@ def _cuda_device_count_stateless(
 
     if not torch.cuda._is_compiled():
         return 0
-    # bypass _device_count_nvml() if rocm (not supported)
-    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    if is_hip():
+        # ROCm uses amdsmi instead of nvml for stateless device count
+        # This requires a sufficiently modern version of Torch 2.4.0
+        raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
+            torch.cuda, "_device_count_amdsmi")) else -1
+    else:
+        raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
     return r
 
 
@@ -795,8 +831,78 @@ def cuda_device_count_stateless() -> int:
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
-
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+def error_on_invalid_device_count_status():
+    cache_entries = 0
+    with contextlib.suppress(Exception):
+        # future pytorch will fix the issue, device_count will not be cached
+        # at that time, `.cache_info().currsize` will error out
+        cache_entries = torch.cuda.device_count.cache_info().currsize
+    if cache_entries != 0:
+        # the function is already called, and the result is cached
+        remembered = torch.cuda.device_count()
+        current = cuda_device_count_stateless()
+        if remembered > current:
+            raise RuntimeError(
+                "The number of CUDA devices has changed since the first "
+                "call to torch.cuda.device_count(). This is not allowed "
+                "and may result in undefined behavior. Please check out "
+                "https://github.com/vllm-project/vllm/issues/6056 to "
+                "find the first call to torch.cuda.device_count() "
+                "and defer it until the engine is up. Or you can set "
+                "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
+
+
+# NVML utils
+# Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
+# all the related functions work on real physical device ids.
+# the major benefit of using NVML is that it will not initialize CUDA
+
+try:
+    import pynvml
+except ImportError:
+    # For non-NV devices
+    pynvml = None
+
+
+def with_nvml_context(fn):
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if pynvml is not None:
+            pynvml.nvmlInit()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if pynvml is not None:
+                pynvml.nvmlShutdown()
+
+    return wrapper
+
+
+@with_nvml_context
+def is_full_nvlink(device_ids: List[int]) -> bool:
+    """
+    query if the set of gpus are fully connected by nvlink (1 hop)
+    """
+    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
+    for i, handle in enumerate(handles):
+        for j, peer_handle in enumerate(handles):
+            if i < j:
+                try:
+                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
+                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
+                        return False
+                except pynvml.NVMLError as error:
+                    logger.error(
+                        "NVLink detection failed. This is normal if your"
+                        " machine has no NVLink equipped.",
+                        exc_info=error)
+                    return False
+    return True
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
@@ -822,7 +928,13 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         processed_args = []
         for arg in args:
             if arg.startswith('--'):
-                processed_args.append('--' + arg[len('--'):].replace('_', '-'))
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('_', '-'))
             else:
                 processed_args.append(arg)
 

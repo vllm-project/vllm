@@ -4,7 +4,8 @@ import sys
 import time
 import warnings
 from contextlib import contextmanager
-from typing import Dict, List
+from pathlib import Path
+from typing import Any, Dict, List
 
 import openai
 import ray
@@ -15,19 +16,39 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import get_open_port, is_hip
 
-if (not is_hip()):
-    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                        nvmlInit)
+if is_hip():
+    from amdsmi import (amdsmi_get_gpu_vram_usage,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down)
 
-# Path to root of repository so that utilities can be imported by ray workers
-VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
+    @contextmanager
+    def _nvml():
+        try:
+            amdsmi_init()
+            yield
+        finally:
+            amdsmi_shut_down()
+else:
+    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
+                        nvmlInit, nvmlShutdown)
+
+    @contextmanager
+    def _nvml():
+        try:
+            nvmlInit()
+            yield
+        finally:
+            nvmlShutdown()
+
+
+VLLM_PATH = Path(__file__).parent.parent
+"""Path to root of the vLLM repository."""
 
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    @ray.remote(num_gpus=1)
     class _RemoteRunner:
 
         def __init__(self, cli_args: List[str], *, wait_url: str,
@@ -70,7 +91,11 @@ class RemoteOpenAIServer:
             if hasattr(self, "proc"):
                 self.proc.terminate()
 
-    def __init__(self, cli_args: List[str], *, auto_port: bool = True) -> None:
+    def __init__(self,
+                 cli_args: List[str],
+                 *,
+                 auto_port: bool = True,
+                 num_gpus: int = 1) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -83,10 +108,11 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        self._runner = self._RemoteRunner.remote(  # type: ignore
-            cli_args,
-            wait_url=self.url_for("health"),
-            wait_timeout=self.MAX_SERVER_START_WAIT_S)
+        self._runner = ray.remote(num_gpus=num_gpus)(
+            self._RemoteRunner).remote(
+                cli_args,
+                wait_url=self.url_for("health"),
+                wait_timeout=self.MAX_SERVER_START_WAIT_S)
 
         self._wait_until_ready()
 
@@ -129,13 +155,15 @@ def init_test_distributed_environment(
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 
-def multi_process_tensor_parallel(
+def multi_process_parallel(
     tp_size: int,
     pp_size: int,
-    test_target,
+    test_target: Any,
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
+    # NOTE: We need to set working_dir for distributed tests,
+    # otherwise we may get import errors on ray workers
     ray.init(runtime_env={"working_dir": VLLM_PATH})
 
     distributed_init_port = get_open_port()
@@ -160,20 +188,25 @@ def error_on_warning():
         yield
 
 
+@_nvml()
 def wait_for_gpu_memory_to_clear(devices: List[int],
                                  threshold_bytes: int,
                                  timeout_s: float = 120) -> None:
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
-    nvmlInit()
     start_time = time.time()
     while True:
         output: Dict[int, str] = {}
         output_raw: Dict[int, float] = {}
         for device in devices:
-            dev_handle = nvmlDeviceGetHandleByIndex(device)
-            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
-            gb_used = mem_info.used / 2**30
+            if is_hip():
+                dev_handle = amdsmi_get_processor_handles()[device]
+                mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
+                gb_used = mem_info["vram_used"] / 2**10
+            else:
+                dev_handle = nvmlDeviceGetHandleByIndex(device)
+                mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+                gb_used = mem_info.used / 2**30
             output_raw[device] = gb_used
             output[device] = f'{gb_used:.02f}'
 

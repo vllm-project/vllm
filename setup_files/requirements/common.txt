@@ -6,7 +6,7 @@ numpy < 2.0.0
 requests
 tqdm
 py-cpuinfo
-transformers >= 4.40.0  # Required for StarCoder2 & Llava, Llama 3.
+transformers >= 4.42.4  # Required for Gemma 2 and for additional chat template parameters.
 tokenizers >= 0.19.1  # Required for Llama 3.
 fastapi
 aiohttp
@@ -18,6 +18,7 @@ prometheus_client >= 0.18.0
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer == 0.10.1
-outlines >= 0.0.43 # Requires torch >= 2.1.0
+outlines >= 0.0.43, < 0.1 # Requires torch >= 2.1.0
 typing_extensions
 filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
+pyzmq

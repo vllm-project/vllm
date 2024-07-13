@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
+W4A16SPARSE24_SUPPORTED_BITS = [4]
 
 
 class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
@@ -27,6 +28,9 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         if self.strategy == "group" and self.group_size is None:
             raise ValueError(
                 "group_size must be given when using strategy group")
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -114,7 +118,9 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                               requires_grad=False)
         layer.workspace = workspace
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
+                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+
         qweight = layer.weight_packed
         meta = layer.meta
         scales = layer.scale_packed
@@ -131,4 +137,8 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                                             size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
+
+        if bias is not None:
+            output.add_(bias)  # In-place add
+
         return output

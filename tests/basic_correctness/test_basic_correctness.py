@@ -8,12 +8,14 @@ import weakref
 import pytest
 
 from vllm import LLM
+from vllm.utils import is_hip
+
+from ..models.utils import check_outputs_equal
 
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
-VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 def test_vllm_gc_ed():
@@ -26,6 +28,9 @@ def test_vllm_gc_ed():
     assert weak_llm() is None
 
 
+@pytest.mark.skipif(is_hip()
+                    and os.getenv("VLLM_ATTENTION_BACKEND") == "FLASHINFER",
+                    reason="Flashinfer does not support ROCm/HIP.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
@@ -39,10 +44,6 @@ def test_models(
     max_tokens: int,
     enforce_eager: bool,
 ) -> None:
-    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
-    if backend_by_env_var == "FLASHINFER" and enforce_eager is False:
-        pytest.skip("Skipping non-eager test for FlashInferBackend.")
-
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
@@ -52,10 +53,9 @@ def test_models(
                      gpu_memory_utilization=0.7) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-    for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )

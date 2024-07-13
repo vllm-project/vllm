@@ -14,7 +14,8 @@ peft
 requests
 ray
 sentence-transformers # required for embedding
-torchvision # required for the image processor of phi3v
+sparseml==1.8.0 # required for compressed-tensors
+compressed-tensors==0.4.0 # required for compressed-tensors
 
 # Benchmarking
 aiohttp

@@ -28,7 +28,11 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_OPENVINO_KVCACHE_SPACE: int = 0
+    VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
+    VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = "~/.vllm/xla_cache/"
+    VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -49,7 +53,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # ================== Installation Time Env Vars ==================
 
-    # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
+    # Target device of vLLM, supporting [cuda (by default),
+    # rocm, neuron, cpu, openvino]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
 
@@ -208,6 +213,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 
+    # OpenVINO key-value cache space
+    # default is 4GB
+    "VLLM_OPENVINO_KVCACHE_SPACE":
+    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
+
+    # OpenVINO KV cache precision
+    # default is bf16 if natively supported by platform, otherwise f16
+    # To enable KV cache compression, please, explicitly specify u8
+    "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION":
+    lambda: os.getenv("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION", None),
+
+    # Enables weights compression during model export via HF Optimum
+    # default is False
+    "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
+    lambda: bool(os.getenv("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", False)),
+
     # If the env var is set, it uses the Ray's compiled DAG API
     # which optimizes the control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
@@ -228,6 +249,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH":
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
+    "VLLM_FUSED_MOE_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
 }
 
 # end-env-vars-definition

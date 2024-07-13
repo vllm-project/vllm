@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -7,7 +7,6 @@ from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
-from vllm.worker.model_runner import ModelInput
 
 
 class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
@@ -21,6 +20,9 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        # Unused parameter. MLPSpeculatorWorker does not use the KV Cache and
+        # therefore does not need this parameter.
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass to generate sample_len future tokens.
         Returns the list of sampler output, one per layer, along with indicator
@@ -56,7 +58,7 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, List[int], List[int]]:
         if not seq_group_metadata_list:
-            return ModelInput.empty(self.device)
+            return torch.empty(0, device=self.device), [], []
 
         input_tokens: List[int] = []
         seq_lens: List[int] = []
