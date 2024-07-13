@@ -590,7 +590,6 @@ def fused_moe(
         note: Deepseekv2 model uses grouped_topk
     - use_fp8 (bool): If True, use fp8 arithmetic to compute the inner
         products for w1 and w2. Defaults to False.
-    
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
     - w2_scale (Optional[torch.Tensor]): Optional scale to be used for

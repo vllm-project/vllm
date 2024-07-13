@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Optional
+from typing import Optional, List, Tuple, Iterator
 
 import torch
 
@@ -221,3 +221,38 @@ class FusedMoE(torch.nn.Module):
                 final_hidden_states)
 
         return final_hidden_states
+
+    @classmethod
+    def make_expert_params_mapping(
+        cls, 
+        ckpt_gate_proj_name: str,
+        ckpt_down_proj_name: str, 
+        ckpt_up_proj_name: str,
+        num_experts: int
+    ) -> List[Tuple[str, str, int, int]]:
+
+        gate_up = [ckpt_gate_proj_name, ckpt_up_proj_name]
+        gate_down_up = [ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name]
+
+        return [
+            # These are the weight scales for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_scale" if weight_name in gate_up else "experts.w2_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id,
+             shard_id) for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
+        ] + [
+            # These are the weights for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_weight" if weight_name in gate_up else "experts.w2_weight",
+             f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
+            for expert_id in range(num_experts) for shard_id,
+            weight_name in enumerate(gate_down_up)
+        ] + [
+            # These are the weight scales for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.a13_scale" if weight_name in gate_up else "experts.a2_scale",
+             f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
+             shard_id) for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
+        ]
