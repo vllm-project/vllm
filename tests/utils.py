@@ -49,53 +49,7 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    class _RemoteRunner:
-
-        def __init__(self, cli_args: List[str], *, wait_url: str,
-                     wait_timeout: float) -> None:
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
-            self.proc = subprocess.Popen(
-                [
-                    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-                    *cli_args
-                ],
-                env=env,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-            )
-
-            self._wait_for_server(url=wait_url, timeout=wait_timeout)
-
-        def ready(self):
-            return True
-
-        def _wait_for_server(self, *, url: str, timeout: float):
-            # run health check
-            start = time.time()
-            while True:
-                try:
-                    if requests.get(url).status_code == 200:
-                        break
-                except Exception as err:
-                    if self.proc.poll() is not None:
-                        raise RuntimeError(
-                            "Server exited unexpectedly.") from err
-
-                    time.sleep(0.5)
-                    if time.time() - start > timeout:
-                        raise RuntimeError(
-                            "Server failed to start in time.") from err
-
-        def __del__(self):
-            if hasattr(self, "proc"):
-                self.proc.terminate()
-
-    def __init__(self,
-                 cli_args: List[str],
-                 *,
-                 auto_port: bool = True,
-                 num_gpus: int = 1) -> None:
+    def __init__(self, cli_args: List[str], *, auto_port: bool = True) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -108,13 +62,41 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        self._runner = ray.remote(num_gpus=num_gpus)(
-            self._RemoteRunner).remote(
-                cli_args,
-                wait_url=self.url_for("health"),
-                wait_timeout=self.MAX_SERVER_START_WAIT_S)
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] +
+            cli_args,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr)
+        self._wait_for_server(url=self.url_for("health"),
+                              timeout=self.MAX_SERVER_START_WAIT_S)
 
-        self._wait_until_ready()
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+
+    def _wait_for_server(self, *, url: str, timeout: float):
+        # run health check
+        start = time.time()
+        while True:
+            try:
+                if requests.get(url).status_code == 200:
+                    break
+            except Exception as err:
+                result = self.proc.poll()
+                if result is not None and result != 0:
+                    raise RuntimeError("Server exited unexpectedly.") from err
+
+                time.sleep(0.5)
+                if time.time() - start > timeout:
+                    raise RuntimeError(
+                        "Server failed to start in time.") from err
 
     @property
     def url_root(self) -> str:
@@ -122,9 +104,6 @@ class RemoteOpenAIServer:
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
-
-    def _wait_until_ready(self) -> None:
-        ray.get(self._runner.ready.remote())
 
     def get_client(self):
         return openai.OpenAI(
