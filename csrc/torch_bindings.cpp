@@ -117,6 +117,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("awq_gemm", &awq_gemm);
   ops.impl("awq_gemm", torch::kCUDA, &awq_gemm);
 
+  // Quantized Grouped GEMM for AWQ.
+  ops.def("awq_fused_moe", &awq_fused_moe);
+  ops.def("awq_fused_moe", torch::kCUDA, &awq_fused_moe);
+
   // Dequantization for AWQ.
   ops.def("awq_dequantize", &awq_dequantize);
   ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);

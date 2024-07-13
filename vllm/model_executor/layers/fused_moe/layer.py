@@ -161,6 +161,16 @@ class FusedMoE(torch.nn.Module):
         else:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = self.intermediate_size_per_partition
+            
+            # If packed parameter (e.g. AWQ) and packing is on the 
+            # same dimension as TP sharding, adjust indexing by 
+            # pack factor (8 if int4 packed into int32 parameter).
+            sharded_dim = 0 if (shard_id == 0 or shard_id == 2) else 1
+            packed_dim = getattr(param, "packed_dim", None)
+            if packed_dim is not None and packed_dim == sharded_dim:
+                assert hasattr(param, "pack_factor")
+                shard_size = shard_size // param.pack_factor
+
             shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
 
             # w1, gate_proj case: Load into first shard of w13.
