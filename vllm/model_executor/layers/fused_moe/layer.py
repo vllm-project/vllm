@@ -170,13 +170,14 @@ class FusedMoE(torch.nn.Module):
             tp_rank = get_tensor_model_parallel_rank()
 
             is_gate_up = (shard_id == 0 or shard_id == 2)
-            shard_size = param_data.shape[2] // 2 if is_gate_up else param_data.shape[1]
-
-            # If packed parameter (and packing is on the same dim as 
-            # TP sharding, adjust indexing by pack factor.
-            packed_dim = getattr(param, "packed_dim", None)
-            if packed_dim and shard_id != 1:
-                shard_size = shard_size // param.pack_factor
+            if is_gate_up:
+                shard_size = self.intermediate_size_per_partition
+                packed_dim = getattr(param, "packed_dim", None)
+                if packed_dim == 1:
+                    shard_size = shard_size // param.pack_factor
+            else:
+                shard_size = param_data.shape[1]
+            
 
             shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
 
@@ -189,7 +190,7 @@ class FusedMoE(torch.nn.Module):
                     param_data[expert_id, :, 0:shard_size] = loaded_weight[:, shard]
                 # w3, up_proj case: Load into second shard of w13.
                 elif shard_id == 2:
-                    param_data[expert_id, :, shard_size:2*shard_size] = loaded_weight[:, shard]
+                    param_data[expert_id, :, shard_size:] = loaded_weight[:, shard]
                 # w2, down_proj case: Load into only shard of w2.
                 elif shard_id == 1:
                     param_data[expert_id, :, :] = loaded_weight[shard, :]
