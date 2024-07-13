@@ -60,12 +60,15 @@ class BenchmarkMetrics:
     output_throughput: float
     mean_ttft_ms: float
     median_ttft_ms: float
+    std_ttft_ms: float
     p99_ttft_ms: float
     mean_tpot_ms: float
     median_tpot_ms: float
+    std_tpot_ms: float
     p99_tpot_ms: float
     mean_itl_ms: float
     median_itl_ms: float
+    std_itl_ms: float
     p99_itl_ms: float
 
 
@@ -274,12 +277,15 @@ def calculate_metrics(
         mean_ttft_ms=np.mean(ttfts or 0) *
         1000,  # ttfts is empty if streaming is not supported by backend
         median_ttft_ms=np.median(ttfts or 0) * 1000,
+        std_ttft_ms=np.std(ttfts or 0) * 1000,
         p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
         median_tpot_ms=np.median(tpots or 0) * 1000,
+        std_tpot_ms=np.std(tpots or 0) * 1000,
         p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
         mean_itl_ms=np.mean(itls or 0) * 1000,
         median_itl_ms=np.median(itls or 0) * 1000,
+        std_itl_ms=np.std(itls or 0) * 1000,
         p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
     )
 
@@ -396,12 +402,15 @@ async def benchmark(
         "output_throughput": metrics.output_throughput,
         "mean_ttft_ms": metrics.mean_ttft_ms,
         "median_ttft_ms": metrics.median_ttft_ms,
+        "std_ttft_ms": metrics.std_ttft_ms,
         "p99_ttft_ms": metrics.p99_ttft_ms,
         "mean_tpot_ms": metrics.mean_tpot_ms,
         "median_tpot_ms": metrics.median_tpot_ms,
+        "std_tpot_ms": metrics.std_tpot_ms,
         "p99_tpot_ms": metrics.p99_tpot_ms,
         "mean_itl_ms": metrics.mean_itl_ms,
         "median_itl_ms": metrics.median_itl_ms,
+        "std_itl_ms": metrics.std_itl_ms,
         "p99_itl_ms": metrics.p99_itl_ms,
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
@@ -483,10 +492,10 @@ def main(args: argparse.Namespace):
 
     elif args.dataset_name == "random":
         input_requests = sample_random_requests(
-            input_len=args.input_len,
-            output_len=args.output_len,
+            input_len=args.random_input_len,
+            output_len=args.random_output_len,
             num_prompts=args.num_prompts,
-            range_ratio=args.range_ratio,
+            range_ratio=args.random_range_ratio,
             tokenizer=tokenizer,
         )
 
