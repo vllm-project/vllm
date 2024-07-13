@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.nn.functional as F
@@ -153,7 +153,7 @@ class QuantizationConfigOverride(QuantizationConfig):
     """Config class to inject a specific LinearMethod.
     """
 
-    def __init__(self, cls: LinearMethodBase):
+    def __init__(self, cls: Type[LinearMethodBase]):
         self.cls = cls
 
     def get_quant_method(self,
