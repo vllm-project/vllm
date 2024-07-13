@@ -35,7 +35,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QuantizationConfigOverride,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod,
-                                               WeightTieLinearMethod)
+                                               TiedWeightLinearMethod)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -288,7 +288,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
-            quant_config=QuantizationConfigOverride(WeightTieLinearMethod),
+            quant_config=QuantizationConfigOverride(TiedWeightLinearMethod),
             params_dtype=torch.float16,
         )
         self.lm_head.register_parameter("weight", self.transformer.wte.weight)
