@@ -73,7 +73,7 @@ torch::Tensor awq_fused_moe(torch::Tensor _in_feats, torch::Tensor _kernel,
                             torch::Tensor _sorted_token_ids_ptr,
                             torch::Tensor _expert_ids_ptr,
                             torch::Tensor _num_tokens_post_padded,
-                            bool mul_weights, int split_k_iters);
+                            bool mul_weights, int64_t split_k_iters);
 
 torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _scaling_factors,
