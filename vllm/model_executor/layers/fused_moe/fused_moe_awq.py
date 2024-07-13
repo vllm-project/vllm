@@ -4,9 +4,10 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 
-from .fused_moe import fused_moe, moe_align_block_size, fused_topk
+from .fused_moe import fused_moe, fused_topk, moe_align_block_size
 
 logger = init_logger(__name__)
+
 
 def fused_moe_awq(
     hidden_states: torch.Tensor,
@@ -46,50 +47,32 @@ def fused_moe_awq(
     # If large seq_len prefill, dequantize and use the fp16 MoE kernel.
     do_naive_dequant = hidden_states.shape[:-1].numel() >= 1024
     if do_naive_dequant:
-        dequant_w1 = ops.awq_dequantize(
-            w1, w1_scale, w1_qzero, 0, 0,0).permute(0, 2, 1)
-        dequant_w2 = ops.awq_dequantize(
-            w2, w2_scale, w2_qzero, 0, 0,0).permute(0, 2, 1)
-       
-        return fused_moe(hidden_states,
-                         dequant_w1,
-                         dequant_w2,
-                         gating_output,
-                         topk,
-                         renormalize)
+        dequant_w1 = ops.awq_dequantize(w1, w1_scale, w1_qzero, 0, 0,
+                                        0).permute(0, 2, 1)
+        dequant_w2 = ops.awq_dequantize(w2, w2_scale, w2_qzero, 0, 0,
+                                        0).permute(0, 2, 1)
 
-    topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
+        return fused_moe(hidden_states, dequant_w1, dequant_w2, gating_output,
+                         topk, renormalize)
+
+    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
+                                        renormalize)
     (sorted_token_ids, expert_ids,
-        num_tokens_post_padded) = moe_align_block_size(
-            topk_ids, 16, w1.shape[0])
+     num_tokens_post_padded) = moe_align_block_size(topk_ids, 16, w1.shape[0])
 
-    x = x.view(x.shape[0], 1, *x.shape[1:])
+    x = hidden_states.view(hidden_states.shape[0], 1, *hidden_states.shape[1:])
 
-    gate_up = ops.awq_group_gemm(x,
-                                 w1,
-                                 w1_scale,
-                                 w1_qzero,
-                                 topk_weights,
-                                 sorted_token_ids,
-                                 expert_ids,
-                                 num_tokens_post_padded,
-                                 False,
-                                 pack_factor)
+    gate_up = ops.awq_group_gemm(x, w1, w1_scale, w1_qzero, topk_weights,
+                                 sorted_token_ids, expert_ids,
+                                 num_tokens_post_padded, False, pack_factor)
 
     out = torch.empty((gate_up.shape[:-1] + (gate_up.shape[-1] // 2, )),
-                        dtype=x.dtype,
-                        device=x.device)
+                      dtype=hidden_states.dtype,
+                      device=hidden_states.device)
     ops.silu_and_mul(out, gate_up)
 
-    out = ops.awq_group_gemm(out, 
-                             w2,
-                             w2_scale,
-                             w2_qzero,
-                             topk_weights,
-                             sorted_token_ids,
-                             expert_ids,
-                             num_tokens_post_padded,
-                             True,
-                             pack_factor)
+    out = ops.awq_group_gemm(out, w2, w2_scale, w2_qzero, topk_weights,
+                             sorted_token_ids, expert_ids,
+                             num_tokens_post_padded, True, pack_factor)
 
     return torch.sum(out, dim=1)

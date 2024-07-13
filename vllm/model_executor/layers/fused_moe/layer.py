@@ -161,9 +161,9 @@ class FusedMoE(torch.nn.Module):
         else:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = self.intermediate_size_per_partition
-            
-            # If packed parameter (e.g. AWQ) and packing is on the 
-            # same dimension as TP sharding, adjust indexing by 
+
+            # If packed parameter (e.g. AWQ) and packing is on the
+            # same dimension as TP sharding, adjust indexing by
             # pack factor (8 if int4 packed into int32 parameter).
             sharded_dim = 0 if (shard_id == 0 or shard_id == 2) else 1
             packed_dim = getattr(param, "packed_dim", None)

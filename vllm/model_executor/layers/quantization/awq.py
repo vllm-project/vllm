@@ -4,7 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -176,81 +176,91 @@ class AWQLinearMethod(LinearMethodBase):
             out.add_(bias)
         return out.reshape(out_shape)
 
+
 class AWQMoEMethod(FusedMoEMethodBase):
+
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
-    
-    def create_weights(self, layer: torch.nn.Module, num_experts: int, 
-                       hidden_size: int, intermediate_size: int, 
-                       params_dtype: torch.dtype, **extra_weight_attrs):
-        
-        # WEIGHTS
-        w13_weight = Parameter(
-            torch.empty(num_experts,
-                        hidden_size,
-                        2*intermediate_size // self.quant_config.pack_factor,
-                        dtype=torch.int32),
-            required_grad=False)
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, {
-            "packed_dim": 1,
-            "pack_factor": self.quant_config.pack_factor,
-            **extra_weight_attrs})
 
-        w2_weight = Parameter(
-            torch.empty(num_experts,
-                        intermediate_size,
-                        hidden_size // self.quant_config.pack_factor,
-                        dtype=torch.int32),
-            requires_grad=False)
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+
+        # WEIGHTS
+        w13_weight = Parameter(torch.empty(num_experts,
+                                           hidden_size,
+                                           2 * intermediate_size //
+                                           self.quant_config.pack_factor,
+                                           dtype=torch.int32),
+                               requires_grad=False)
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(
+            w13_weight, {
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor,
+                **extra_weight_attrs
+            })
+
+        w2_weight = Parameter(torch.empty(num_experts,
+                                          intermediate_size,
+                                          hidden_size //
+                                          self.quant_config.pack_factor,
+                                          dtype=torch.int32),
+                              requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, {
-            "packed_dim": 1,
-            "pack_factor": self.quant_config.pack_factor,
-            **extra_weight_attrs})
+        set_weight_attrs(
+            w2_weight, {
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor,
+                **extra_weight_attrs
+            })
 
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
-        w13_scales = Parameter(
-            torch.empty(num_experts,
-                        hidden_size // self.quant_config.group_size,
-                        intermediate_size * 2,
-                        dtype=params_dtype),
-            requires_grad=False)
+        w13_scales = Parameter(torch.empty(num_experts,
+                                           hidden_size //
+                                           self.quant_config.group_size,
+                                           intermediate_size * 2,
+                                           dtype=params_dtype),
+                               requires_grad=False)
         layer.register_parameter("w13_scales", w13_scales)
         set_weight_attrs(w13_scales, extra_weight_attrs)
 
-        w2_scales = Parameter(
-            torch.empty(num_experts,
-                        intermediate_size // self.quant_config.group_size,
-                        hidden_size,
-                        dtype=params_dtype),
-            requires_grad=False)
+        w2_scales = Parameter(torch.empty(num_experts,
+                                          intermediate_size //
+                                          self.quant_config.group_size,
+                                          hidden_size,
+                                          dtype=params_dtype),
+                              requires_grad=False)
         layer.register_parameter("w2_scale", w2_scales)
         set_weight_attrs(w2_scales, **extra_weight_attrs)
 
         # WEIGHT_ZERO_POINT
         # Allocate 2 zero points for w1 and w3 respectively.
-        w13_qzeros = Parameter(
-            torch.empty(num_experts,
-                        hidden_size // self.quant_config.group_size,
-                        2 * intermediate_size // self.quant_config.pack_factor,
-                        dtype=torch.int32),
-            requires_grad=False)
+        w13_qzeros = Parameter(torch.empty(
+            num_experts,
+            hidden_size // self.quant_config.group_size,
+            2 * intermediate_size // self.quant_config.pack_factor,
+            dtype=torch.int32),
+                               requires_grad=False)
         layer.register_parameter("w13_qzeros", w13_qzeros)
-        set_weight_attrs(w13_qzeros, {
-            "packed_dim": 1,
-            "pack_factor": self.quant_config.pack_factor,
-            **extra_weight_attrs})
+        set_weight_attrs(
+            w13_qzeros, {
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor,
+                **extra_weight_attrs
+            })
 
-        w2_qzeros = Parameter(
-            torch.empty(num_experts,
-                        intermediate_size // self.quant_config.group_size,
-                        hidden_size // self.quant_config.pack_factor,
-                        dtype=torch.int32),
-            requires_grad=False)
+        w2_qzeros = Parameter(torch.empty(
+            num_experts,
+            intermediate_size // self.quant_config.group_size,
+            hidden_size // self.quant_config.pack_factor,
+            dtype=torch.int32),
+                              requires_grad=False)
         layer.register_parameter("w2_qzeros", w2_qzeros)
-        set_weight_attrs(w2_qzeros, {
-            "packed_dim": 1,
-            "pack_factor": self.quant_config.pack_factor,
-            **extra_weight_attrs})        
+        set_weight_attrs(
+            w2_qzeros, {
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor,
+                **extra_weight_attrs
+            })
