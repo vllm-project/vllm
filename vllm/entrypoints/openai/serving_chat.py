@@ -537,9 +537,12 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         # check to make sure we haven't missed something on the last function call
                         if (
-                                delta_message.tool_calls[0].function.arguments == ''
-                                or delta_message.tool_calls[0].function.arguments
-                                and (output.finish_reason == 'stop' or output.finish_reason == 'tool_calls')
+                                delta_message.tool_calls
+                                and (
+                                    delta_message.tool_calls[0].function.arguments == ''
+                                    or delta_message.tool_calls[0].function.arguments
+                                    and (output.finish_reason == 'stop' or output.finish_reason == 'tool_calls')
+                        )
                         ):
                             expected_call = json.dumps(
                                 tool_parser.prev_tool_call_arr[len(tool_parser.prev_tool_call_arr) - 1].get('arguments', {})

@@ -36,6 +36,7 @@ def find_common_prefix(s1: str, s2: str) -> str:
 def find_common_suffix(s1: str, s2: str) -> str:
     """
     Finds a common suffix shared between two strings, if there is one. Order of arguments is NOT important.
+    Stops when the suffix ends OR it hits an alphanumeric character
 
     e.g. find_common_suffix('{"fruit": "ap"}', '{"fruit": "apple"}') -> '"}'
     """
@@ -380,8 +381,11 @@ class MistralToolParser(ToolParser):
 
 
 class Hermes2ProToolParser(ToolParser):
-    tool_call_start: str = '<tool_call>'
-    tool_call_end: str = '</tool_call>'
+    tool_call_start_token: str = '<tool_call>'
+    tool_call_end_token: str = '</tool_call>'
+    tool_call_start_token_id: int = 128004
+    tool_call_start_token_id: int = 128011
+
 
     # regex to match between <tool_call> and </tool_call> OR between <tool_call> and EOS (happens sometimes :))
     tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>|<tool_call>(.*)', re.DOTALL)
@@ -391,7 +395,7 @@ class Hermes2ProToolParser(ToolParser):
     def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
-        if Hermes2ProToolParser.tool_call_start not in model_output:
+        if Hermes2ProToolParser.tool_call_start_token not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
@@ -444,6 +448,7 @@ class Hermes2ProToolParser(ToolParser):
         self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = []  # map what has been streamed for each tool so far to a list
 
+
     def extract_tool_calls_streaming(self,
                                      previous_text: str,
                                      current_text: str,
@@ -452,4 +457,13 @@ class Hermes2ProToolParser(ToolParser):
                                      current_token_ids: List[int],
                                      delta_token_ids: List[int]
                                      ) -> DeltaMessage:
-        raise NotImplementedError('Hermes2ProToolParser.extract_tool_calls_streaming has not been implemented!')
+
+        # check to see if we should be streaming a tool call - is there a
+        if self.tool_call_start_token not in current_token_ids:
+            logger.info(f'No tool call tokens found!')
+            return DeltaMessage(content=delta_text)
+
+        else:
+            # TODO check if we are in the middle of a tool call OR if it has passed
+            
+            return DeltaMessage(content=delta_text)
