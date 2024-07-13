@@ -498,8 +498,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if (("mlp.experts." in name)
-                        and name not in params_dict):
+                if (("mlp.experts." in name) and name not in params_dict):
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.

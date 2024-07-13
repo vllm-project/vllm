@@ -134,12 +134,8 @@ class FusedMoE(torch.nn.Module):
         self.use_grouped_topk = use_grouped_topk
         if self.use_grouped_topk:
             assert num_expert_group is not None and topk_group is not None
-            self.num_expert_group = num_expert_group
-            self.topk_group = topk_group
-        else:
-            assert num_expert_group is None and topk_group is None
-            self.num_expert_group = None
-            self.topk_group = None
+        self.num_expert_group = num_expert_group
+        self.topk_group = topk_group
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
