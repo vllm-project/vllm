@@ -49,7 +49,13 @@ def test_compare_tp():
 
             # test models list
             models = client.models.list()
-            results.append(models)
+            models = models.data
+            served_model = models[0]
+            results.append({
+                "test": "models_list",
+                "id": served_model.id,
+                "root": served_model.root,
+            })
 
             # test with text prompt
             completion = client.completions.create(model=MODEL_NAME,
@@ -57,7 +63,12 @@ def test_compare_tp():
                                                    max_tokens=5,
                                                    temperature=0.0)
 
-            results.append(completion)
+            results.append({
+                "test": "single_completion",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
 
             # test using token IDs
             completion = client.completions.create(
@@ -67,7 +78,12 @@ def test_compare_tp():
                 temperature=0.0,
             )
 
-            results.append(completion)
+            results.append({
+                "test": "token_ids",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
 
             # test simple list
             batch = client.completions.create(
@@ -77,7 +93,11 @@ def test_compare_tp():
                 temperature=0.0,
             )
 
-            results.append(batch)
+            results.append({
+                "test": "simple_list",
+                "text0": batch.choices[0].text,
+                "text1": batch.choices[1].text,
+            })
 
             # test streaming
             batch = client.completions.create(
@@ -87,8 +107,16 @@ def test_compare_tp():
                 temperature=0.0,
                 stream=True,
             )
-            batch = list(batch)
-            results.append(batch)
+            texts = [""] * 2
+            for chunk in batch:
+                assert len(chunk.choices) == 1
+                choice = chunk.choices[0]
+                texts[choice.index] += choice.text
+            results.append({
+                "test": "streaming",
+                "texts": texts,
+            })
+
     n = len(results) // 2
     pp_results = results[:n]
     tp_results = results[n:]
