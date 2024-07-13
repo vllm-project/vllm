@@ -34,6 +34,8 @@ def test_compare_tp():
         "bfloat16",
         "--tensor-parallel-size",
         str(TP_SIZE),
+        "--distributed-executor-backend",
+        "ray",
     ]
     if CHUNKED_PREFILL:
         pp_args.append("--enable-chunked-prefill")
