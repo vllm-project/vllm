@@ -47,9 +47,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import is_hip, make_layers, print_warning_once
+from vllm.utils import is_hip, print_warning_once
 
 from .interfaces import SupportsLoRA
+from .utils import make_layers
 
 
 class LlamaMLP(nn.Module):

@@ -939,21 +939,3 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
-
-
-def make_layers(
-    num_hidden_layers: int, layer_fn: Callable[[], torch.nn.Module]
-) -> Tuple[int, int, torch.nn.ModuleList]:
-    """Make a list of layers with the given layer function, taking
-    pipeline parallelism into account.
-    """
-    from vllm.distributed.parallel_state import get_pp_group
-    from vllm.distributed.utils import get_pp_indices
-    start_layer, end_layer = get_pp_indices(num_hidden_layers,
-                                            get_pp_group().rank_in_group,
-                                            get_pp_group().world_size)
-    modules = torch.nn.ModuleList(
-        [torch.nn.Identity() for _ in range(start_layer)] +
-        [layer_fn() for _ in range(start_layer, end_layer)] +
-        [torch.nn.Identity() for _ in range(end_layer, num_hidden_layers)])
-    return start_layer, end_layer, modules
