@@ -88,6 +88,9 @@ ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
+ARG buildkite_commit
+ENV BUILDKITE_COMMIT=${buildkite_commit}
+
 ARG USE_SCCACHE
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
