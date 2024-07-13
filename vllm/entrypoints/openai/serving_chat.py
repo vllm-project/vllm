@@ -548,6 +548,7 @@ class OpenAIServingChat(OpenAIServing):
                             actual_call = tool_parser.streamed_args_for_tool[len(tool_parser.prev_tool_call_arr) - 1]
                             logger.info(f'Actual tool call {actual_call}, correcting.')
                             remaining_call = expected_call.replace(actual_call, '', 1)
+                            logger.info(f'Remaining call: {remaining_call}')
                             delta_message = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=len(tool_parser.prev_tool_call_arr) - 1, function=DeltaFunctionCall(
                                 arguments=remaining_call

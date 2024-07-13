@@ -36,7 +36,8 @@ tools = [{
                     "description": "The unit to fetch the temperature in",
                     "enum": ["celsius", "fahrenheit"]
                 }
-            }
+            },
+            "required": ["city", "state", "unit"]
         }
     }
 }]
@@ -87,6 +88,12 @@ for chunk in chunks:
             if chunk.choices[0].delta.tool_calls[0].function.arguments:
                 arguments += chunk.choices[0].delta.tool_calls[0].function.arguments
 print(f'streamed tool call arguments: {arguments}\n\n')
+
+for chunk in chunks:
+    if chunk.choices[0].delta.tool_calls:
+        print(chunk.choices[0].delta.tool_calls[0])
+
+print('\n\n')
 
 messages.append({
     "role": "assistant",
