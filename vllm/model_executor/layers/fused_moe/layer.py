@@ -149,7 +149,7 @@ class FusedMoE(torch.nn.Module):
                     f"must be equal. But got {param_data[expert_id]} "
                     f"vs. {loaded_weight}")
             param_data[expert_id] = loaded_weight
-        # Weight scales 
+        # Weight scales
         elif "weight_scale" in weight_name:
             # If we are in merged column case (gate_up_proj)
             # * shard_id 0 == gate_proj / w1

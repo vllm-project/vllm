@@ -410,27 +410,29 @@ class Qwen2MoeForCausalLM(nn.Module):
         expert_params_mapping = [
             # These are the weight scales for the experts
             # (param_name, weight_name, expert_id, shard_id)
-            ("experts.w13_scale"
-             if weight_name in ["gate_proj", "up_proj"] else "experts.w2_scale",
+            ("experts.w13_scale" if weight_name in ["gate_proj", "up_proj"
+                                                    ] else "experts.w2_scale",
              f"experts.{expert_id}.{weight_name}.weight_scale", expert_id,
              shard_id) for expert_id in range(self.config.num_experts)
-            for shard_id, weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+            for shard_id, weight_name in enumerate(
+                ["gate_proj", "down_proj", "up_proj"])
         ] + [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id, shard_id)
             ("experts.w13_weight" if weight_name in ["gate_proj", "up_proj"]
              else "experts.w2_weight",
              f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
-            for expert_id in range(self.config.num_experts) 
-            for shard_id, weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+            for expert_id in range(self.config.num_experts) for shard_id,
+            weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
         ] + [
             # These are the weight scales for the experts
             # (param_name, weight_name, expert_id, shard_id)
-            ("experts.a13_scale"
-             if weight_name in ["gate_proj", "up_proj"] else "experts.a2_scale",
+            ("experts.a13_scale" if weight_name in ["gate_proj", "up_proj"
+                                                    ] else "experts.a2_scale",
              f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
              shard_id) for expert_id in range(self.config.num_experts)
-            for shard_id, weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+            for shard_id, weight_name in enumerate(
+                ["gate_proj", "down_proj", "up_proj"])
         ]
 
         params_dict = dict(self.named_parameters())
