@@ -291,19 +291,22 @@ class GPT2LMHeadModel(nn.Module):
                 continue
             if not name.startswith("transformer."):
                 name = "transformer." + name
-            try:
-                param = params_dict[name]
-                # The HF's GPT-2 implementation uses Conv1D instead of Linear.
-                # Because of this, we need to transpose the weights.
-                # Note(zhuohan): the logic below might break quantized models.
-                for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
-                    if conv1d_weight_name not in name:
-                        continue
-                    if not name.endswith(".weight"):
-                        continue
-                    loaded_weight = loaded_weight.t()
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-            except KeyError:
+
+            if name not in params_dict:
+                # in pipeline parallelism, we may have layers that are not
+                # present on this rank
                 continue
+
+            param = params_dict[name]
+            # The HF's GPT-2 implementation uses Conv1D instead of Linear.
+            # Because of this, we need to transpose the weights.
+            # Note(zhuohan): the logic below might break quantized models.
+            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
+                if conv1d_weight_name not in name:
+                    continue
+                if not name.endswith(".weight"):
+                    continue
+                loaded_weight = loaded_weight.t()
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
