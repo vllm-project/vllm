@@ -690,7 +690,7 @@ if triton.__version__ >= "2.1.0":
 
         # need to reduce num. blocks when using fp32
         # due to increased use of GPU shared memory
-        if q.dtype == torch.float32:
+        if q.dtype is torch.float32:
             BLOCK = BLOCK // 2
 
         # shape constraints
