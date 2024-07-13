@@ -455,12 +455,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                try:
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                except KeyError:
-                    pass
+
+                if name not in params_dict:
+                    # in pipeline parallelism, we may have layers that are not
+                    # present on this rank
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -479,13 +483,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                         continue
                     else:
                         name = remapped_kv_scale_name
-                try:
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                except KeyError:
-                    pass
+
+                if name not in params_dict:
+                    # in pipeline parallelism, we may have layers that are not
+                    # present on this rank
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
