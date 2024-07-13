@@ -224,16 +224,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # broadcasted to.
         self.non_driver_workers: List[RayWorkerWrapper] = []
 
-        for pp_rank in range(self.parallel_config.pipeline_parallel_size):
-            for tp_rank in range(self.parallel_config.tensor_parallel_size):
-                rank = (pp_rank *
-                        self.parallel_config.tensor_parallel_size) + tp_rank
-                if rank == 0:
-                    pass
-                elif rank % self.parallel_config.tensor_parallel_size == 0:
-                    self.tp_driver_workers.append(self.workers[rank - 1])
-                else:
-                    self.non_driver_workers.append(self.workers[rank - 1])
+        for idx, rank in enumerate(worker_ranks[1:]):
+            # We need to skip the driver worker, which we
+            # do by skipping worker_ranks[0] which is always 0.
+            if rank % self.parallel_config.tensor_parallel_size == 0:
+                self.tp_driver_workers.append(self.workers[idx])
+            else:
+                self.non_driver_workers.append(self.workers[idx])
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
