@@ -10,9 +10,9 @@ from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
+import gguf
 import numpy as np
 import torch
-from gguf import GGUFReader
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
@@ -379,7 +379,7 @@ def pt_weights_iterator(
 
 def get_gguf_extra_tensor_names(
         gguf_file: str, gguf_to_hf_name_map: Dict[str, str]) -> List[str]:
-    reader = GGUFReader(gguf_file)
+    reader = gguf.GGUFReader(gguf_file)
     expected_gguf_keys = set(gguf_to_hf_name_map.keys())
     exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
     extra_keys = expected_gguf_keys - exact_gguf_keys
@@ -391,7 +391,7 @@ def gguf_quant_weights_iterator(
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the quant weights in the model gguf files."""
 
-    reader = GGUFReader(gguf_file)
+    reader = gguf.GGUFReader(gguf_file)
 
     for tensor in reader.tensors:
         weight_type = tensor.tensor_type
