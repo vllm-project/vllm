@@ -226,17 +226,24 @@ class TP1DraftModelRunner(ModelRunner):
             raise ValueError("TP1DraftModelRunner only supports TP=1.")
 
         # Sanity
-        assert self.lora_config is None
-        assert self.prompt_adapter_config is None
-        assert model_input.attn_metadata is not None
+        if self.lora_config is not None:
+            raise ValueError("TP1DraftModelRunner has no support for LORA")
+        if self.prompt_adapter_config is not None:
+            raise ValueError(
+                "TP1DraftModelRunner has no support for prompt_adapter_config")
+        if model_input.multi_modal_kwargs:
+            raise ValueError(
+                "TP1DraftModelRunner has no support for multi_modal_kwargs")
 
         # Detect exec mode
+        assert model_input.attn_metadata is not None
         use_cuda_graph = False
         if model_input.attn_metadata.num_prefills > 0:
             # In this case, execute_model(..) was called directly
-            assert num_steps == 1, (
-                "execute_model(..) of draft_model_runner can be called "
-                "directly only with a single-step prefill")
+            if num_steps > 1:
+                raise ValueError(
+                    "execute_model(..) of draft_model_runner can be called "
+                    "directly only with a single-step prefill")
         else:
             use_cuda_graph = model_input.attn_metadata.use_cuda_graph
             # We can skip CPU samples for spec token generation
@@ -252,8 +259,7 @@ class TP1DraftModelRunner(ModelRunner):
 
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
-            # TODO: Ask Cade/Cody when this can be used
-            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+            multi_modal_kwargs: dict = {}
 
             # Run model
             hidden_states = model_executable(
