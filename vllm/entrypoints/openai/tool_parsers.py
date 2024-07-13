@@ -389,7 +389,7 @@ class Hermes2ProToolParser(ToolParser):
     tool_call_start_token: str = '<tool_call>'
     tool_call_end_token: str = '</tool_call>'
     tool_call_start_token_id: int = 128004
-    tool_call_start_token_id: int = 128011
+    tool_call_end_token_id: int = 128011
 
 
     # regex to match between <tool_call> and </tool_call> OR between <tool_call> and EOS (happens sometimes :))
@@ -426,6 +426,8 @@ class Hermes2ProToolParser(ToolParser):
                         )
                     ) for function_call in raw_function_calls
                 ]
+
+                # TODO extract including the scratch pad into content
                 content_match = Hermes2ProToolParser.scratch_pad_regex.search(model_output)
                 content = content_match.group(1) if content_match else None
                 return ExtractedToolCallInformation(
@@ -436,7 +438,6 @@ class Hermes2ProToolParser(ToolParser):
 
             except Exception as e:
                 logger.error("Error in extracting tool call from response %s", e)
-                # TODO discussion on how to best handle invalidly-generated tool calls
                 return ExtractedToolCallInformation(
                     tools_called=False,
                     tool_calls=[],
@@ -463,12 +464,35 @@ class Hermes2ProToolParser(ToolParser):
                                      delta_token_ids: List[int]
                                      ) -> DeltaMessage:
 
+        logger.info(f'delta_text: {delta_text}')
+        logger.info(f'delta_token_ids: {delta_token_ids}')
         # check to see if we should be streaming a tool call - is there a
-        if self.tool_call_start_token not in current_token_ids:
+        if self.tool_call_start_token_id not in current_token_ids:
             logger.info(f'No tool call tokens found!')
             return DeltaMessage(content=delta_text)
 
         else:
             # TODO check if we are in the middle of a tool call OR if it has passed
+            prev_tool_start_count = previous_token_ids.count(self.tool_call_start_token_id)
+            prev_tool_end_count = previous_token_ids.count(self.tool_call_end_token_id)
+            cur_tool_start_count = current_token_ids.count(self.tool_call_start_token_id)
+            cur_tool_end_count = current_token_ids.count(self.tool_call_end_token_id)
+
+            if cur_tool_start_count > cur_tool_end_count and cur_tool_start_count > prev_tool_start_count:
+                logger.info('Starting a new tool call!')
+
+            elif cur_tool_start_count > cur_tool_end_count and cur_tool_start_count == prev_tool_start_count:
+                logger.info('Working on an existing tool call!')
+
+
+            # TODO These are not working
+            elif cur_tool_start_count == cur_tool_end_count and cur_tool_end_count > prev_tool_end_count:
+                logger.info('Closing the current tool call!')
+
+            elif cur_tool_start_count == cur_tool_end_count and prev_tool_end_count == cur_tool_end_count:
+                logger.info('Generating text content!')
+
+            else:
+                logger.info('INVARIANT')
 
             return DeltaMessage(content=delta_text)

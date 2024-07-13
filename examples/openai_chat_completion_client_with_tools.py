@@ -53,7 +53,7 @@ messages = [
         },
         {
             "role": "user",
-            "content": "Can you tell me what the weather will be in Dallas and San Francisco?"
+            "content": "Can you tell me what the temperate will be in Dallas and San Francisco, in fahrenheit?"
         }
     ]
 
