@@ -34,8 +34,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                QuantizationConfigOverride,
                                                RowParallelLinear,
-                                               UnquantizedLinearMethod,
-                                               TiedWeightLinearMethod)
+                                               TiedWeightLinearMethod,
+                                               UnquantizedLinearMethod)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
