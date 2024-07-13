@@ -169,7 +169,8 @@ class FusedMoE(torch.nn.Module):
         else:
             tp_rank = get_tensor_model_parallel_rank()
 
-            shard_size = self.intermediate_size_per_partition
+            is_gate_up = (shard_id == 0 or shard_id == 2)
+            shard_size = param_data.shape[2] // 2 if is_gate_up else param_data.shape[1]
 
             # If packed parameter (and packing is on the same dim as 
             # TP sharding, adjust indexing by pack factor.
