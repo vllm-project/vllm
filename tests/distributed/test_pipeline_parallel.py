@@ -1,16 +1,17 @@
-import os
+import pytest
 
 from ..utils import RemoteOpenAIServer
 
-# any model with a chat template should work here
-MODEL_NAME = "meta-llama/Meta-Llama-3-8B"
-EAGER_MODE = bool(int(os.getenv("EAGER_MODE", 0)))
-CHUNKED_PREFILL = bool(int(os.getenv("CHUNKED_PREFILL", 0)))
-TP_SIZE = int(os.getenv("TP_SIZE", 1))
-PP_SIZE = int(os.getenv("PP_SIZE", 1))
 
-
-def test_compare_tp():
+@pytest.mark.parametrize(
+    "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME", [
+        (2, 2, 1, 1, "meta-llama/Meta-Llama-3-8B"),
+        (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B"),
+        (1, 3, 1, 0, "meta-llama/Meta-Llama-3-8B"),
+        (1, 4, 1, 1, "meta-llama/Meta-Llama-3-8B"),
+        (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B"),
+    ])
+def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
     pp_args = [
         "--model",
         MODEL_NAME,
