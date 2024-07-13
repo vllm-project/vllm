@@ -17,9 +17,10 @@ from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-# technically this needs Mistral-7B-v0.1 as base, but we're not testing
-# generation quality here
+# technically these adapters use a different base model,
+# but we're not testing generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
+PA_NAME = "swapnilbp/llama_tweet_ptune"
 
 
 @pytest.fixture(scope="module")
@@ -28,7 +29,12 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files):
+def zephyr_pa_files():
+    return snapshot_download(repo_id=PA_NAME)
+
+
+@pytest.fixture(scope="module")
+def server(zephyr_lora_files, zephyr_pa_files):
     with RemoteOpenAIServer([
             "--model",
             MODEL_NAME,
@@ -37,8 +43,10 @@ def server(zephyr_lora_files):
             "bfloat16",
             "--max-model-len",
             "8192",
+            "--max-num-seqs"
+            "128",
             "--enforce-eager",
-            # lora config below
+            # lora config
             "--enable-lora",
             "--lora-modules",
             f"zephyr-lora={zephyr_lora_files}",
@@ -47,7 +55,14 @@ def server(zephyr_lora_files):
             "64",
             "--max-cpu-loras",
             "2",
-            "--max-num-seqs",
+            # pa config
+            "--enable-prompt-adapter",
+            "--prompt-adapters",
+            f"zephyr-pa={zephyr_pa_files}",
+            f"zephyr-pa2={zephyr_pa_files}",
+            "--max-prompt-adapters",
+            "2",
+            "--max-prompt-adapter-token",
             "128",
     ]) as remote_server:
         yield remote_server
@@ -60,9 +75,9 @@ def client(server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # first test base model, then test loras
+    # first test base model, then test loras, then test prompt adapters
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2", "zephyr-pa", "zephyr-pa2"],
 )
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     completion = await client.completions.create(model=model_name,
@@ -91,9 +106,9 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # first test base model, then test loras
+    # first test base model, then test loras, then test prompt adapters
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2", "zephyr-pa", "zephyr-pa2"],
 )
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -110,9 +125,9 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # just test 1 lora hereafter
+    # just test 1 lora and 1 pa hereafter
     "model_name",
-    [MODEL_NAME, "zephyr-lora"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
 )
 async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -133,7 +148,7 @@ async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
 )
 async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -154,7 +169,7 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
 )
 async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
                                             model_name: str):
@@ -199,7 +214,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
 )
 async def test_completion_streaming(client: openai.AsyncOpenAI,
                                     model_name: str):
@@ -233,7 +248,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
 )
 async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                          model_name: str):
@@ -369,9 +384,8 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # just test 1 lora hereafter
     "model_name",
-    [MODEL_NAME, "zephyr-lora"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
 )
 async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
     # test both text and token IDs
