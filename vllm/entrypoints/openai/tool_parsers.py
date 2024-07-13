@@ -280,19 +280,24 @@ class MistralToolParser(ToolParser):
                     if self.current_tool_id >= 0:
                         diff: str | None = current_tool_call.get('arguments')
                         if diff:
-                            diff = diff.replace(self.streamed_args_for_tool[self.current_tool_id], '')
+                            diff = json.dumps(diff).replace(self.streamed_args_for_tool[self.current_tool_id], '')
                             logger.info(f'Found diff between tools: {diff}')
-                            return DeltaMessage(tool_calls=[
+                            delta = DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=self.current_tool_id,
                                               function=DeltaFunctionCall(arguments=diff).model_dump(exclude_none=True))
                             ])
-
+                            self.streamed_args_for_tool[self.current_tool_id] += diff
+                        else:
+                            delta = None
+                    else:
+                        delta = None
                     # re-set stuff pertaining to progress in the current tool
                     self.current_tool_id = len(tool_call_arr) - 1
                     self.current_tool_name_sent = False
                     self.current_tool_initial_sent = False
                     self.streamed_args_for_tool.append('')
                     logger.info('starting on new tool %d', self.current_tool_id)
+                    return delta
 
                 # case: update an existing tool - this is handled below
                 elif len(tool_call_arr) - 1 == self.current_tool_id and self.current_tool_id >= 0:
@@ -465,5 +470,5 @@ class Hermes2ProToolParser(ToolParser):
 
         else:
             # TODO check if we are in the middle of a tool call OR if it has passed
-            
+
             return DeltaMessage(content=delta_text)

@@ -53,7 +53,7 @@ messages = [
         },
         {
             "role": "user",
-            "content": "Can you tell me what the weather will be in Dallas Texas?"
+            "content": "Can you tell me what the weather will be in Dallas and San Francisco?"
         }
     ]
 
@@ -77,21 +77,33 @@ tool_calls_stream = client.chat.completions.create(
 chunks = []
 for chunk in tool_calls_stream:
     chunks.append(chunk)
-arguments = ''
-for chunk in chunks:
     if chunk.choices[0].delta.tool_calls:
+        print(chunk.choices[0].delta.tool_calls[0])
+    else:
+        print(chunk.choices[0].delta)
+
+
+arguments = []
+tool_call_idx = -1
+for chunk in chunks:
+
+    if chunk.choices[0].delta.tool_calls:
+        if chunk.choices[0].delta.tool_calls[0].index != tool_call_idx:
+            if tool_call_idx >= 0:
+                print(f'streamed tool call arguments: {arguments[tool_call_idx]}\n\n')
+            tool_call_idx = chunk.choices[0].delta.tool_calls[0].index
+            arguments.append('')
         if chunk.choices[0].delta.tool_calls[0].id:
             print(f'streamed tool call id: {chunk.choices[0].delta.tool_calls[0].id}')
         if chunk.choices[0].delta.tool_calls[0].function:
             if chunk.choices[0].delta.tool_calls[0].function.name:
                 print(f'streamed tool call name: {chunk.choices[0].delta.tool_calls[0].function.name}')
             if chunk.choices[0].delta.tool_calls[0].function.arguments:
-                arguments += chunk.choices[0].delta.tool_calls[0].function.arguments
-print(f'streamed tool call arguments: {arguments}\n\n')
+                arguments[tool_call_idx] += chunk.choices[0].delta.tool_calls[0].function.arguments
 
-for chunk in chunks:
-    if chunk.choices[0].delta.tool_calls:
-        print(chunk.choices[0].delta.tool_calls[0])
+if len(arguments):
+    print(f'streamed tool call arguments: {arguments[-1]}')
+
 
 print('\n\n')
 
