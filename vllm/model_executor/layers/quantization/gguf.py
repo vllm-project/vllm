@@ -1,7 +1,7 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
-from gguf.constants import GGML_QUANT_SIZES
+import gguf
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
@@ -11,7 +11,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    EmbeddingMethodBase, VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -43,9 +43,12 @@ class GGUFConfig(QuantizationConfig):
         return cls()
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["GGUFLinearMethod"]:
-        if isinstance(layer, (LinearBase, VocabParallelEmbedding)):
+        self, layer: torch.nn.Module
+    ) -> Optional[Union["GGUFLinearMethod", "GGUFEmbeddingMethod"]]:
+        if isinstance(layer, LinearBase):
             return GGUFLinearMethod(self)
+        elif isinstance(layer, VocabParallelEmbedding):
+            return (GGUFEmbeddingMethod(self), GGUFLinearMethod(self))
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -137,7 +140,7 @@ class GGUFLinearMethod(LinearMethodBase):
                       qweight_type: int) -> torch.Tensor:
         # use dequantize mulmat for IQmatrix, mmq for k-quants
         if qweight_type >= 16:
-            block_size, type_size = GGML_QUANT_SIZES[qweight_type]
+            block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
             shape = (qweight.shape[0],
                      qweight.shape[1] // type_size * block_size)
             weight = ops.ggml_dequantize(qweight, qweight_type, *shape)
@@ -146,12 +149,40 @@ class GGUFLinearMethod(LinearMethodBase):
             y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
         return y
 
-    def apply_embeds(self, layer: torch.nn.Module,
-                     x: torch.Tensor) -> torch.Tensor:
+
+class GGUFEmbeddingMethod(EmbeddingMethodBase):
+
+    def __init__(self, quant_config: GGUFConfig):
+        self.quant_config = quant_config
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        qweight = UninitializedParameter(requires_grad=False)
+        set_weight_attrs(qweight, {
+            "input_dim": 1,
+            "output_dim": 0,
+            "is_gguf_weight": True,
+        })
+        set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("qweight", qweight)
+
+        qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
+                                 requires_grad=False)
+        set_weight_attrs(qweight_type, {
+            "is_gguf_weight_type": True,
+            "ignore_warning": True
+        })
+        set_weight_attrs(qweight_type, extra_weight_attrs)
+        layer.register_parameter("qweight_type", qweight_type)
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
         qweight_type = layer.qweight_type.item()
 
-        block_size, type_size = GGML_QUANT_SIZES[qweight_type]
+        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         hidden_size = qweight.shape[1] // type_size * block_size
         if qweight_type < 2:
             return torch.embedding(qweight, x)
