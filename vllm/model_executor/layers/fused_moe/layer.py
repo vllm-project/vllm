@@ -138,6 +138,8 @@ class FusedMoE(torch.nn.Module):
             self.topk_group = topk_group
         else:
             assert num_expert_group is None and topk_group is None
+            self.num_expert_group = None
+            self.topk_group = None
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
@@ -213,7 +215,10 @@ class FusedMoE(torch.nn.Module):
             x=hidden_states,
             router_logits=router_logits,
             top_k=self.top_k,
-            renormalize=self.renormalize)
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            num_expert_group=self.num_expert_group,
+            topk_group=self.topk_group)
 
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
