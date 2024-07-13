@@ -1,0 +1,3 @@
+Mixtral-8x7B-Instruct-v0.1-FP8.yaml
+Qwen2-57B-A14-Instruct-FP8.yaml
+
