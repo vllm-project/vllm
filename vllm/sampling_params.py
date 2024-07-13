@@ -8,6 +8,8 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
+from vllm.utils import print_warning_once
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -184,6 +186,11 @@ class SamplingParams:
 
         self._verify_args()
         if self.use_beam_search:
+            print_warning_once(
+                "[IMPORTANT] We plan to discontinue support for beam search "
+                "in the next major release. Please refer to "
+                "https://github.com/vllm-project/vllm/issues/6226 for more "
+                "information.")
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
