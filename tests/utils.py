@@ -80,6 +80,13 @@ class RemoteOpenAIServer:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.proc.terminate()
+        # Wait up to 10 seconds for the process to exit
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            print(
+                "Process did not terminate within 10 seconds. Forcing a kill.")
+            self.proc.kill()
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check

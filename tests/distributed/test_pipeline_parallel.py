@@ -121,4 +121,4 @@ def test_compare_tp():
     pp_results = results[:n]
     tp_results = results[n:]
     for pp, tp in zip(pp_results, tp_results):
-        print((pp, tp))
+        assert pp == tp
