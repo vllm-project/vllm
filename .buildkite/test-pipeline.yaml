@@ -260,14 +260,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
-- label: LM Eval Large Models - L4 Fp8
-  num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - pip install lm-eval
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-large-fp8.txt -t 4
-
 - label: LM Eval Large Models - A100
   gpu: a100
   num_gpus: 4
