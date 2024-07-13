@@ -152,8 +152,8 @@ class FusedMoE(torch.nn.Module):
         # Weight scales
         elif "weight_scale" in weight_name:
             # If we are in merged column case (gate_up_proj)
-            # * shard_id 0 == gate_proj / w1
-            # * shard_id 2 == up_proj / w3
+            #   shard_id 0 == gate_proj / w1
+            #   shard_id 2 == up_proj / w3
             if shard_id == 0 or shard_id == 2:
                 # We have to keep the weight scales of w1 and w3 because
                 # we need to re-quantize w1/w3 weights after weight loading.
