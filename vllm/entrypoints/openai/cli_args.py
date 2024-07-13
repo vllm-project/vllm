@@ -34,9 +34,7 @@ class PromptAdapterParserAction(argparse.Action):
         setattr(namespace, self.dest, adapter_list)
 
 
-def make_arg_parser():
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server.")
+def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--host",
                         type=nullable_str,
                         default=None,
@@ -135,7 +133,7 @@ def make_arg_parser():
     return parser
 
 
-def create_parser_for_docs() -> argparse.ArgumentParser:
-    parser_for_docs = argparse.ArgumentParser(
+def create_parser_for_docs() -> FlexibleArgumentParser:
+    parser_for_docs = FlexibleArgumentParser(
         prog="-m vllm.entrypoints.openai.api_server")
     return make_arg_parser(parser_for_docs)

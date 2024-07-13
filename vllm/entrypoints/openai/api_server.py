@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import importlib
 import inspect
@@ -6,6 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Optional, Set
+from vllm.utils import FlexibleArgumentParser
 
 import fastapi
 import uvicorn
@@ -220,16 +220,6 @@ def run_server(args, llm_engine=None):
     global engine, engine_args
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-
-    # Enforce pixel values as image input type for vision language models
-    # when serving with API server
-    if engine_args.image_input_type is not None and \
-        engine_args.image_input_type.upper() != "PIXEL_VALUES":
-        raise ValueError(
-            f"Invalid image_input_type: {engine_args.image_input_type}. "
-            "Only --image-input-type 'pixel_values' is supported for serving "
-            "vision language models with the vLLM API server.")
-
     engine = (llm_engine
               if llm_engine is not None else AsyncLLMEngine.from_engine_args(
                   engine_args, usage_context=UsageContext.OPENAI_API_SERVER))
@@ -285,7 +275,7 @@ def run_server(args, llm_engine=None):
 if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/scripts.py for CLI entrypoints.
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()

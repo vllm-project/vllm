@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.utils import FlexibleArgumentParser
 
 
 def registrer_signal_handlers():
@@ -82,7 +83,7 @@ def chat(system_prompt: Optional[str], model_name: str,
 
 
 def _add_query_options(
-        parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument(
         "--url",
         type=str,
@@ -106,7 +107,7 @@ def _add_query_options(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="vLLM CLI")
+    parser = FlexibleArgumentParser(description="vLLM CLI")
     subparsers = parser.add_subparsers(required=True)
 
     serve_parser = subparsers.add_parser(
