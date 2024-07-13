@@ -160,7 +160,7 @@ class FusedMoE(torch.nn.Module):
                 idx = 0 if shard_id == 0 else 1
                 param_data[expert_id][idx] = loaded_weight
             # If we are in the row parallel case (down_proj)
-            # * shard_id 1 == down_proj / w2
+            #   shard_id 1 == down_proj / w2
             else:
                 param_data[expert_id] = loaded_weight
         # Weights
