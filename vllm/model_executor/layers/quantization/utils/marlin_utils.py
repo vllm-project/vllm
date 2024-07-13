@@ -91,6 +91,18 @@ def marlin_make_workspace(output_size_per_partition: int,
                        requires_grad=False)
 
 
+def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
+    return (not act_order) or (act_order and not is_row_parallel)
+
+
+def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
+                                      is_row_parallel: bool) -> bool:
+    # Need to repeat scales on every rank if act_ordering or
+    # channelwise and RowParallelLinear
+    is_channelwise = group_size == -1
+    return act_order or (is_channelwise and is_row_parallel)
+
+
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
                               requires_grad=False)
