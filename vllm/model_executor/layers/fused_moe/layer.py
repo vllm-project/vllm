@@ -137,7 +137,7 @@ class FusedMoE(torch.nn.Module):
 
     def _load_fp8_scale(self, param: torch.nn.Parameter,
                         loaded_weight: torch.Tensor, weight_name: str,
-                        expert_id: int) -> None:
+                        shard_id: int, expert_id: int) -> None:
         param_data = param.data
 
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
@@ -155,9 +155,9 @@ class FusedMoE(torch.nn.Module):
         elif "weight_scale" in weight_name:
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
-            assert "w1" in weight_name or "w3" in weight_name
-            shard_id = 0 if "w1" in weight_name else 1
-            param_data[expert_id][shard_id] = loaded_weight
+            assert shard_id == 0 or shard_id == 2
+            shard_idx = 0 if shard_id == 0 else 1
+            param_data[expert_id][shard_idx] = loaded_weight
 
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
@@ -168,7 +168,7 @@ class FusedMoE(torch.nn.Module):
         # Special case for fp8 scales.
         if getattr(param, "is_fp8_scale", False):
             self._load_fp8_scale(param.data, loaded_weight, weight_name,
-                                 expert_id)
+                                 shard_id, expert_id)
             return
         
         expert_data = param.data[expert_id]
