@@ -135,9 +135,11 @@ class FusedMoE(torch.nn.Module):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader)
 
-    def _load_fp8_scale(self, param_data: torch.Tensor,
+    def _load_fp8_scale(self, param: torch.nn.Parameter,
                         loaded_weight: torch.Tensor, weight_name: str,
                         expert_id: int) -> None:
+        param_data = param.data
+
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
         # Follow up PR to enable fp8 for other MoE models.
         if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
@@ -160,60 +162,52 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: int, expert_id: int) -> None:
-        param_data = param.data
+        if shard_id not in [0,1,2]:
+            raise ValueError(f"Shard id must be in [0,1,2] but got {shard_id}")
 
         # Special case for fp8 scales.
         if getattr(param, "is_fp8_scale", False):
-            self._load_fp8_scale(param_data, loaded_weight, weight_name,
+            self._load_fp8_scale(param.data, loaded_weight, weight_name,
                                  expert_id)
-        # Otherwise, load with usual logic.
-        else:
-            tp_rank = get_tensor_model_parallel_rank()
-
-            is_gate_up = (shard_id == 0 or shard_id == 2)
-            if is_gate_up:
-                shard_size = self.intermediate_size_per_partition
-                packed_dim = getattr(param, "packed_dim", None)
-                if packed_dim == 1:
-                    shard_size = shard_size // param.pack_factor
-            else:
-                shard_size = param_data.shape[1]
-
-            shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-
-            # Usually,  weight is saved in format [output_dim, input_dim]
-            # If transposed, weight is saved in format [input_dim, output_dim]
-            is_transposed = getattr(param, "is_transposed", False)
-            if is_transposed:
-                # w1, gate_proj case: Load into first shard of w13.
-                if shard_id == 0:
-                    param_data[expert_id, :,
-                               0:shard_size] = loaded_weight[:, shard]
-                # w3, up_proj case: Load into second shard of w13.
-                elif shard_id == 2:
-                    param_data[expert_id, :,
-                               shard_size:] = loaded_weight[:, shard]
-                # w2, down_proj case: Load into only shard of w2.
-                elif shard_id == 1:
-                    param_data[expert_id, :, :] = loaded_weight[shard, :]
-                else:
-                    raise ValueError(
-                        f"Shard id must be in [0,1,2] but got {shard_id}")
-            else:
-                # w1, gate_proj case: Load into first shard of w13.
-                if shard_id == 0:
-                    param_data[expert_id,
-                               0:shard_size, :] = loaded_weight[shard, :]
-                # w3, up_proj case: Load into second shard of w13.
-                elif shard_id == 2:
-                    param_data[expert_id, shard_size:2 *
-                               shard_size, :] = loaded_weight[shard, :]
-                # w2, down_proj case: Load into only shard of w2.
-                elif shard_id == 1:
-                    param_data[expert_id, :, :] = loaded_weight[:, shard]
-                else:
-                    raise ValueError(
-                        f"Shard id must be in [0,1,2] but got {shard_id}")
+            return
+        
+        expert = param.data[expert_id]
+        tp_rank = get_tensor_model_parallel_rank()
+        is_gate_proj = (shard_id == 0)
+        is_down_proj = (shard_id == 1)
+        is_up_proj = (shard_id == 2)
+        
+        # If transposed, weight is saved as [input_dim, output_dim]
+        # Otherwise, weight is saved as     [output_dim, input_dim]
+        is_transposed = getattr(param, "is_transposed", False)
+        input_dim = 0 if is_transposed else 1
+        output_dim = 1 if is_transposed else 0
+        
+        # Index the loaded weight for tp sharding.
+        # * down_proj: "RowParallel" so tp sharding on input_dim
+        if (is_down_proj):
+            shard_dim = input_dim
+            shard_size = expert.shape[shard_dim]
+        # * gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+        elif (is_gate_proj or is_up_proj):
+            shard_dim = output_dim
+            shard_size = expert.shape[output_dim] // 2
+        offset = shard_size * tp_rank
+        loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
+        
+        # Narrow parameter and load.
+        # w1, gate_proj case: Load into first shard of w13.
+        if is_gate_proj:
+            expert = expert.narrow(shard_dim, 0, shard_size)
+            expert.copy_(loaded_weight)
+        # w3, up_proj case: Load into second shard of w13.
+        elif is_up_proj:
+            expert = expert.narrow(shard_dim, shard_size, shard_size)
+            expert.copy_(loaded_weight)
+        # w2, down_proj case: Load into only shard of w2.
+        elif is_down_proj:
+            expert.copy_(loaded_weight)
+        
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
