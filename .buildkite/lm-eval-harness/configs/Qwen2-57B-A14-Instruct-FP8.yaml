@@ -1,11 +1,11 @@
-# bash ./run-lm-eval-gsm-vllm-baseline.sh -m Qwen/Qwen2-57B-A14B-Instruct -b "auto" -l 250 -f 5 -t 4
-model_name: "Qwen/Qwen2-57B-A14B-Instruct"
+# bash ./run-lm-eval-gsm-vllm-baseline.sh -m nm-testing/Qwen2-57B-A14B-Instruct-FP8-KV -b "auto" -l 250 -f 5 -t 4
+model_name: "nm-testing/Qwen2-57B-A14B-Instruct-FP8-KV"
 tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.792
+    value: 0.823
   - name: "exact_match,flexible-extract"
-    value: 0.824
-limit: 250
+    value: 0.777
+limit: 1000
 num_fewshot: 5
