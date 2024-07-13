@@ -882,13 +882,13 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
   return _out_feats.sum(0);
 }
 
-torch::Tensor awq_group_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
-                             torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, torch::Tensor _topk_weights,
-                             torch::Tensor _sorted_token_ids_ptr,
-                             torch::Tensor _expert_ids_ptr,
-                             torch::Tensor _num_tokens_post_padded,
-                             bool mul_weights, int split_k_iters) {
+torch::Tensor awq_fused_moe(torch::Tensor _in_feats, torch::Tensor _kernel,
+                            torch::Tensor _scaling_factors,
+                            torch::Tensor _zeros, torch::Tensor _topk_weights,
+                            torch::Tensor _sorted_token_ids_ptr,
+                            torch::Tensor _expert_ids_ptr,
+                            torch::Tensor _num_tokens_post_padded,
+                            bool mul_weights, int split_k_iters) {
   int num_in_feats = _in_feats.size(0);
   int pad_num_in_feats = _sorted_token_ids_ptr.size(0);
   int num_in_channels = _in_feats.size(2);
