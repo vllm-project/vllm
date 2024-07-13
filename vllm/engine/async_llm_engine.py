@@ -278,6 +278,10 @@ class _AsyncLLMEngine(LLMEngine):
                 lora_request=lora_request)
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
+            
+        if hasattr(self.model_config.hf_config, "num_output_head"):
+            # duplicate the prompt_token_ids for each head
+            prompt_token_ids = [[i] *  self.model_config.hf_config.num_output_head for i in prompt_token_ids]
 
         llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
                                prompt=inputs.get("prompt"),
