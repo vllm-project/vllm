@@ -284,7 +284,7 @@ class LLMEngine:
                     "quantization":
                     model_config.quantization,
                     "kv_cache_dtype":
-                    cache_config.cache_dtype,
+                    str(cache_config.cache_dtype),
 
                     # Feature flags
                     "enable_lora":
