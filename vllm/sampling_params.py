@@ -8,6 +8,11 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
+import vllm.envs as envs
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -184,6 +189,13 @@ class SamplingParams:
 
         self._verify_args()
         if self.use_beam_search:
+            if not envs.VLLM_NO_DEPRECATION_WARNING:
+                logger.warning(
+                    "[IMPORTANT] We plan to discontinue the support for beam "
+                    "search in the next major release. Please refer to "
+                    "https://github.com/vllm-project/vllm/issues/6226 for "
+                    "more information. Set VLLM_NO_DEPRECATION_WARNING=1 to "
+                    "suppress this warning.")
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
