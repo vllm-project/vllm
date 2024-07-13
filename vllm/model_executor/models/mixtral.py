@@ -375,25 +375,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         expert_params_mapping = [
             # These are the weight scales for the experts
             # (param_name, weight_name, expert_id, shard_id)
-            ("experts.w13_scale"
-             if weight_name in ["w1", "w3"] else "experts.w2_scale",
-             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id,
-             shard_id) for expert_id in range(self.config.num_local_experts)
-            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-        ] + [
-            # These are the weights for the experts
-            # (param_name, weight_name, expert_id)
-            ("experts.w13_weight"
-             if weight_name in ["w1", "w3"] else "experts.w2_weight",
-             f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
-            for expert_id in range(self.config.num_local_experts)
-            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-        ] + [
-            # These are the activation scales for the experts
-            # (param_name, weight_name, expert_id)
-            ("experts.a13_scale"
-             if weight_name in ["w1", "w3"] else "experts.a2_scale",
-             f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
+            ("experts.w13_"
+             if weight_name in ["w1", "w3"] else "experts.w2_",
+             f"experts.{expert_id}.{weight_name}.", expert_id,
              shard_id) for expert_id in range(self.config.num_local_experts)
             for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
         ]

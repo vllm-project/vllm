@@ -4,7 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+                                                  fused_moe_awq)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -68,6 +69,8 @@ class AWQConfig(QuantizationConfig):
             self, layer: torch.nn.Module) -> Optional["AWQLinearMethod"]:
         if isinstance(layer, LinearBase):
             return AWQLinearMethod(self)
+        elif isinstance(layer, FusedMoE):
+            return AWQMoEMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -187,33 +190,33 @@ class AWQMoEMethod(FusedMoEMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         # WEIGHTS
-        w13_weight = Parameter(torch.empty(num_experts,
+        w13_qweight = Parameter(torch.empty(num_experts,
                                            hidden_size,
                                            2 * intermediate_size //
                                            self.quant_config.pack_factor,
                                            dtype=torch.int32),
                                requires_grad=False)
-        layer.register_parameter("w13_weight", w13_weight)
+        layer.register_parameter("w13_qweight", w13_qweight)
         set_weight_attrs(
-            w13_weight, {
+            w13_qweight, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                **extra_weight_attrs
-            })
+                "is_transposed": True,
+                **extra_weight_attrs})
 
-        w2_weight = Parameter(torch.empty(num_experts,
+        w2_qweight = Parameter(torch.empty(num_experts,
                                           intermediate_size,
                                           hidden_size //
                                           self.quant_config.pack_factor,
                                           dtype=torch.int32),
                               requires_grad=False)
-        layer.register_parameter("w2_weight", w2_weight)
+        layer.register_parameter("w2_qweight", w2_qweight)
         set_weight_attrs(
-            w2_weight, {
+            w2_qweight, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                **extra_weight_attrs
-            })
+                "is_transposed": True,
+                **extra_weight_attrs})
 
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
@@ -224,7 +227,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
                                            dtype=params_dtype),
                                requires_grad=False)
         layer.register_parameter("w13_scales", w13_scales)
-        set_weight_attrs(w13_scales, extra_weight_attrs)
+        set_weight_attrs(w13_scales, {
+            "is_transposed": True,
+            **extra_weight_attrs})
 
         w2_scales = Parameter(torch.empty(num_experts,
                                           intermediate_size //
@@ -232,8 +237,10 @@ class AWQMoEMethod(FusedMoEMethodBase):
                                           hidden_size,
                                           dtype=params_dtype),
                               requires_grad=False)
-        layer.register_parameter("w2_scale", w2_scales)
-        set_weight_attrs(w2_scales, **extra_weight_attrs)
+        layer.register_parameter("w2_scales", w2_scales)
+        set_weight_attrs(w2_scales, {
+            "is_transposed": True,
+            **extra_weight_attrs})
 
         # WEIGHT_ZERO_POINT
         # Allocate 2 zero points for w1 and w3 respectively.
@@ -248,8 +255,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w13_qzeros, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                **extra_weight_attrs
-            })
+                "is_transposed": True,
+                **extra_weight_attrs})
 
         w2_qzeros = Parameter(torch.empty(
             num_experts,
@@ -262,5 +269,24 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w2_qzeros, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                **extra_weight_attrs
-            })
+                "is_transposed": True,
+                **extra_weight_attrs})
+    
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              router_logits: torch.Tensor,
+              top_k: int,
+              renormalize: bool = True) -> torch.Tensor:
+        
+        return fused_moe_awq(x,
+                         layer.w13_qweight,
+                         layer.w2_qweight,
+                         router_logits,
+                         top_k,
+                         renormalize=renormalize,
+                         pack_factor=self.quant_config.pack_factor,
+                         w1_scales=layer.w13_scales,
+                         w2_scales=layer.w2_scales,
+                         w1_qzeros=layer.w13_qzeros,
+                         w2_qzeros=layer.w2_qzeros,)

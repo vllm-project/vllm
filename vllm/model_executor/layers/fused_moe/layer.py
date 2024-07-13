@@ -134,17 +134,15 @@ class FusedMoE(torch.nn.Module):
             intermediate_size=self.intermediate_size_per_partition,
             params_dtype=params_dtype,
             weight_loader=self.weight_loader)
-
-    def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor, weight_name: str,
-                      shard_id: int, expert_id: int):
-        param_data = param.data
-
+        
+    def _load_fp8_scale(self, param_data: torch.Tensor,
+                        loaded_weight: torch.Tensor,
+                        weight_name: str, expert_id: int) -> None:
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
         # Follow up PR to enable fp8 for other MoE models.
         if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
             if param_data[expert_id] != 1 and (param_data[expert_id] -
-                                               loaded_weight).abs() > 1e-5:
+                                            loaded_weight).abs() > 1e-5:
                 raise ValueError(
                     "input_scales of w1 and w3 of a layer "
                     f"must be equal. But got {param_data[expert_id]} "
@@ -158,35 +156,60 @@ class FusedMoE(torch.nn.Module):
             assert "w1" in weight_name or "w3" in weight_name
             shard_id = 0 if "w1" in weight_name else 1
             param_data[expert_id][shard_id] = loaded_weight
+
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor, weight_name: str,
+                      shard_id: int, expert_id: int) -> None:
+        param_data = param.data
+
+        # Special case for fp8 scales.
+        if getattr(param, "is_fp8_scale", False):
+            self._load_fp8_scale(param_data, loaded_weight, weight_name, expert_id)
+        # Otherwise, load with usual logic.
         else:
             tp_rank = get_tensor_model_parallel_rank()
+
             shard_size = self.intermediate_size_per_partition
 
-            # If packed parameter (e.g. AWQ) and packing is on the
-            # same dimension as TP sharding, adjust indexing by
-            # pack factor (8 if int4 packed into int32 parameter).
-            sharded_dim = 0 if (shard_id == 0 or shard_id == 2) else 1
+            # If packed parameter (and packing is on the same dim as 
+            # TP sharding, adjust indexing by pack factor.
             packed_dim = getattr(param, "packed_dim", None)
-            if packed_dim is not None and packed_dim == sharded_dim:
-                assert hasattr(param, "pack_factor")
+            if packed_dim and shard_id != 1:
                 shard_size = shard_size // param.pack_factor
 
             shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
 
-            # w1, gate_proj case: Load into first shard of w13.
-            if shard_id == 0:
-                param_data[expert_id,
-                           0:shard_size, :] = loaded_weight[shard, :]
-            # w3, up_proj case: Load into second shard of w13.
-            elif shard_id == 2:
-                param_data[expert_id, shard_size:2 *
-                           shard_size, :] = loaded_weight[shard, :]
-            # w2, down_proj case: Load into only shard of w2.
-            elif shard_id == 1:
-                param_data[expert_id, :, :] = loaded_weight[:, shard]
+            # Usually,  weight is saved in format [output_dim, input_dim]
+            # If transposed, weight is saved in format [input_dim, output_dim]
+            is_transposed = getattr(param, "is_transposed", False)
+            if is_transposed:
+                # w1, gate_proj case: Load into first shard of w13.
+                if shard_id == 0:
+                    param_data[expert_id, :, 0:shard_size] = loaded_weight[:, shard]
+                # w3, up_proj case: Load into second shard of w13.
+                elif shard_id == 2:
+                    param_data[expert_id, :, shard_size:2*shard_size] = loaded_weight[:, shard]
+                # w2, down_proj case: Load into only shard of w2.
+                elif shard_id == 1:
+                    param_data[expert_id, :, :] = loaded_weight[shard, :]
+                else:
+                    raise ValueError(
+                        f"Shard id must be in [0,1,2] but got {shard_id}")
             else:
-                raise ValueError(
-                    f"Shard id must be in [0,1,2] but got {shard_id}")
+                # w1, gate_proj case: Load into first shard of w13.
+                if shard_id == 0:
+                    param_data[expert_id,
+                            0:shard_size, :] = loaded_weight[shard, :]
+                # w3, up_proj case: Load into second shard of w13.
+                elif shard_id == 2:
+                    param_data[expert_id, shard_size:2 *
+                            shard_size, :] = loaded_weight[shard, :]
+                # w2, down_proj case: Load into only shard of w2.
+                elif shard_id == 1:
+                    param_data[expert_id, :, :] = loaded_weight[:, shard]
+                else:
+                    raise ValueError(
+                        f"Shard id must be in [0,1,2] but got {shard_id}")
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):

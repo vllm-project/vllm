@@ -16,11 +16,11 @@ def fused_moe_awq(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w1_qzero: torch.Tensor,
-    w2_qzero: torch.Tensor,
     pack_factor: int,
+    w1_scales: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w1_qzeros: torch.Tensor,
+    w2_qzeros: torch.Tensor,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -35,10 +35,10 @@ def fused_moe_awq(
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - pack_factor (int): Weight packing factor (int4 in int32 == 8)
-    - w1_scale (torch.Tensor): scale to be used for w1.
-    - w2_scale (torch.Tensor): scale to be used for w2.
-    - w1_qzero (torch.Tensor): zero point to be used for w1.
-    - w2_qzero (torch.Tensor): zero point to be used for w2.
+    - w1_scales (torch.Tensor): scale to be used for w1.
+    - w2_scales (torch.Tensor): scale to be used for w2.
+    - w1_qzeros (torch.Tensor): zero point to be used for w1.
+    - w2_qzeros (torch.Tensor): zero point to be used for w2.
 
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -47,10 +47,11 @@ def fused_moe_awq(
     # If large seq_len prefill, dequantize and use the fp16 MoE kernel.
     do_naive_dequant = hidden_states.shape[:-1].numel() >= 1024
     if do_naive_dequant:
-        dequant_w1 = ops.awq_dequantize(w1, w1_scale, w1_qzero, 0, 0,
-                                        0).permute(0, 2, 1)
-        dequant_w2 = ops.awq_dequantize(w2, w2_scale, w2_qzero, 0, 0,
-                                        0).permute(0, 2, 1)
+        # TODO: why is this not contiguous alreayd?
+        dequant_w1 = ops.awq_dequantize(w1, w1_scales, w1_qzeros, 0, 0,
+                                        0).permute(0, 2, 1).contiguous()
+        dequant_w2 = ops.awq_dequantize(w2, w2_scales, w2_qzeros, 0, 0,
+                                        0).permute(0, 2, 1).contiguous()
 
         return fused_moe(hidden_states, dequant_w1, dequant_w2, gating_output,
                          topk, renormalize)
@@ -62,17 +63,17 @@ def fused_moe_awq(
 
     x = hidden_states.view(hidden_states.shape[0], 1, *hidden_states.shape[1:])
 
-    gate_up = ops.awq_group_gemm(x, w1, w1_scale, w1_qzero, topk_weights,
-                                 sorted_token_ids, expert_ids,
-                                 num_tokens_post_padded, False, pack_factor)
+    gate_up = ops.awq_fused_moe(x, w1, w1_scales, w1_qzeros, topk_weights,
+                                sorted_token_ids, expert_ids,
+                                num_tokens_post_padded, False, pack_factor)
 
     out = torch.empty((gate_up.shape[:-1] + (gate_up.shape[-1] // 2, )),
                       dtype=hidden_states.dtype,
                       device=hidden_states.device)
     ops.silu_and_mul(out, gate_up)
 
-    out = ops.awq_group_gemm(out, w2, w2_scale, w2_qzero, topk_weights,
-                             sorted_token_ids, expert_ids,
-                             num_tokens_post_padded, True, pack_factor)
+    out = ops.awq_fused_moe(out, w2, w2_scales, w2_qzeros, topk_weights,
+                            sorted_token_ids, expert_ids,
+                            num_tokens_post_padded, True, pack_factor)
 
     return torch.sum(out, dim=1)

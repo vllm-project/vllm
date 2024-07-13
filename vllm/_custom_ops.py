@@ -177,6 +177,21 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
+
+def awq_fused_moe(input: torch.Tensor,
+                  qweight: torch.Tensor,
+                  scales: torch.Tensor,
+                  qzeros: torch.Tensor,
+                  topk_weights: torch.Tensor,
+                  sorted_token_ids: torch.Tensor, 
+                  expert_ids: torch.Tensor,
+                  num_tokens_post_padded: int,
+                  mul_weights: bool,
+                  pack_factor: int) -> torch.Tensor:
+    return torch.ops._C.awq_fused_moe(input, qweight, scales, qzeros, topk_weights,
+                                      sorted_token_ids, expert_ids, num_tokens_post_padded,
+                                      mul_weights, pack_factor)
+
 # gptq
 def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
