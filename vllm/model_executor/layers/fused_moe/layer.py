@@ -142,7 +142,7 @@ class FusedMoE(torch.nn.Module):
 
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
         # Follow up PR to enable fp8 for other MoE models.
-        if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
+        if "input_scale" in weight_name or "w2_weight_scale" in weight_name:
             if param_data[expert_id] != 1 and (param_data[expert_id] -
                                                loaded_weight).abs() > 1e-5:
                 raise ValueError(
@@ -171,7 +171,7 @@ class FusedMoE(torch.nn.Module):
                                  expert_id)
             return
         
-        expert = param.data[expert_id]
+        expert_data = param.data[expert_id]
         tp_rank = get_tensor_model_parallel_rank()
         is_gate_proj = (shard_id == 0)
         is_down_proj = (shard_id == 1)
@@ -187,26 +187,28 @@ class FusedMoE(torch.nn.Module):
         # * down_proj: "RowParallel" so tp sharding on input_dim
         if (is_down_proj):
             shard_dim = input_dim
-            shard_size = expert.shape[shard_dim]
+            shard_size = expert_data.shape[shard_dim]
         # * gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         elif (is_gate_proj or is_up_proj):
             shard_dim = output_dim
-            shard_size = expert.shape[output_dim] // 2
+            shard_size = expert_data.shape[output_dim] // 2
         offset = shard_size * tp_rank
         loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
         
         # Narrow parameter and load.
-        # w1, gate_proj case: Load into first shard of w13.
+        # w1, gate_proj: Load into first shard of w13.
         if is_gate_proj:
-            expert = expert.narrow(shard_dim, 0, shard_size)
-            expert.copy_(loaded_weight)
-        # w3, up_proj case: Load into second shard of w13.
+            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+            expert_data.copy_(loaded_weight)
+        # w3, up_proj: Load into second shard of w13.
         elif is_up_proj:
-            expert = expert.narrow(shard_dim, shard_size, shard_size)
-            expert.copy_(loaded_weight)
-        # w2, down_proj case: Load into only shard of w2.
+            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+            expert_data.copy_(loaded_weight)
+        # w2, down_proj: Load into only shard of w2.
         elif is_down_proj:
-            expert.copy_(loaded_weight)
+            expert_data.copy_(loaded_weight)
+        else:
+            raise ValueError
         
 
     def forward(self, hidden_states: torch.Tensor,

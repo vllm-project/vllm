@@ -266,10 +266,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                               requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
 
-        w13_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                         dtype=torch.float32),
-                                              requires_grad=False)
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        w2_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
+                                                        dtype=torch.float32),
+                                             requires_grad=False)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
         # If loading fp8 checkpoint, pass the weight loaders.
         # If loading an fp16 checkpoint, do not (we will quantize in
@@ -279,7 +279,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 "is_fp8_scale": True,
                 **extra_weight_attrs
             })
-            set_weight_attrs(w13_weight_scale, {
+            set_weight_attrs(w2_weight_scale, {
                 "is_fp8_scale": True,
                 **extra_weight_attrs
             })
@@ -353,8 +353,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     raise ValueError(
                         "QuantConfig has static quantization, but found "
                         "activation scales are None.")
-                if (not all_close_1d(layer.a13_scale)
-                        or not all_close_1d(layer.a2_scale)):
+                if (not all_close_1d(layer.w13_input_scale)
+                        or not all_close_1d(layer.w2_input_scale)):
                     print_warning_once(
                         "Found input_scales that are not equal for "
                         "fp8 MoE layer. Using the maximum across experts "
@@ -403,7 +403,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                          w1_scale=layer.w13_weight_scale,
                          w2_scale=layer.w2_weight_scale,
                          a1_scale=layer.w13_input_scale,
-                         a2_scale=layer.w2_input_sclae)
+                         a2_scale=layer.w2_input_scale)
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):
