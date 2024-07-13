@@ -1,4 +1,4 @@
-# bash ./run-lm-eval-gsm-vllm-baseline.sh -m nm-testing/Qwen2-57B-A14B-Instruct-FP8-KV -b "auto" -l 250 -f 5 -t 4
+# bash ./run-lm-eval-gsm-vllm-baseline.sh -m nm-testing/Qwen2-57B-A14B-Instruct-FP8-KV -b "auto" -l 1000 -f 5 -t 4
 model_name: "nm-testing/Qwen2-57B-A14B-Instruct-FP8-KV"
 tasks:
 - name: "gsm8k"
