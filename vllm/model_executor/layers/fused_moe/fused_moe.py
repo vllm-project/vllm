@@ -400,8 +400,11 @@ def grouped_topk(
     topk: int,
     renormalize: bool,
     num_expert_group: int = 0,
-    topk_group: int = 0,
-):
+    topk_group: int = 0):
+
+    assert hidden_states.shape[0] == gating_output.shape[0], (
+        "Number of tokens mismatch")
+
     scores = torch.softmax(gating_output, dim=-1)
     num_token = scores.shape[0]
     group_scores = scores.view(num_token, num_expert_group,
@@ -557,11 +560,15 @@ def fused_moe(
     renormalize: bool,
     inplace: bool = False,
     override_config: Optional[Dict[str, Any]] = None,
+    num_expert_group: Optional[int] = None,
+    topk_group: Optional[int] = None,
+    use_grouped_topk: bool = False,
     use_fp8: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -579,8 +586,13 @@ def fused_moe(
         Defaults to False.
     - override_config (Optional[Dict[str, Any]]): Optional override
         for the kernel configuration.
+    - num_expert_group: Optional[int]: additional parameter for grouped_topk
+    - topk_group: Optional[int]: additional parameter for grouped_topk
+    - use_grouped_topk: If True, use grouped_topk instead of fused_topk
+        note: Deepseekv2 model uses grouped_topk
     - use_fp8 (bool): If True, use fp8 arithmetic to compute the inner
         products for w1 and w2. Defaults to False.
+    
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
     - w2_scale (Optional[torch.Tensor]): Optional scale to be used for
@@ -592,8 +604,14 @@ def fused_moe(
     # Check constraints.
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
 
-    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                        renormalize)
+    if use_grouped_topk:
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states, gating_output, topk, renormalize, 
+            num_expert_group, topk_group)
+    else:
+        topk_weights, topk_ids = fused_topk(
+            hidden_states, gating_output, topk, renormalize)
+    
     return fused_experts(hidden_states,
                          w1,
                          w2,

@@ -377,7 +377,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
               x: torch.Tensor,
               router_logits: torch.Tensor,
               top_k: int,
-              renormalize: bool = True) -> torch.Tensor:
+              renormalize: bool = True,
+              use_grouped_topk: bool = False,
+              num_expert_group: Optional[int] = None,
+              topk_group: Optional[int] = None) -> torch.Tensor:
 
         return fused_moe(x,
                          layer.w13_weight,
@@ -390,7 +393,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                          w1_scale=layer.w13_scale,
                          w2_scale=layer.w2_scale,
                          a1_scale=layer.a13_scale,
-                         a2_scale=layer.a2_scale)
+                         a2_scale=layer.a2_scale,
+                         use_grouped_topk=use_grouped_topk,
+                         num_expert_group=num_expert_group,
+                         topk_group=topk_group)
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):

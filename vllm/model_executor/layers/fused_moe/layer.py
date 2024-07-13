@@ -29,7 +29,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
               x: torch.Tensor,
               router_logits: torch.Tensor,
               top_k: int,
-              renormalize: bool = True) -> torch.Tensor:
+              renormalize: bool = True,
+              use_grouped_topk: bool = False,
+              num_expert_group: Optional[int] = None,
+              topk_group: Optional[int] = None) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -63,7 +66,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
               x: torch.Tensor,
               router_logits: torch.Tensor,
               top_k: int,
-              renormalize: bool = True) -> torch.Tensor:
+              renormalize: bool = True,
+              use_grouped_topk: bool = False,
+              num_expert_group: Optional[int] = None,
+              topk_group: Optional[int] = None) -> torch.Tensor:
 
         return fused_moe(x,
                          layer.w13_weight,
@@ -71,7 +77,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                          router_logits,
                          top_k,
                          renormalize=renormalize,
-                         inplace=True)
+                         inplace=True,
+                         use_grouped_topk=use_grouped_topk,
+                         num_expert_group=num_expert_group,
+                         topk_group=topk_group)
 
 
 class FusedMoE(torch.nn.Module):
@@ -104,6 +113,9 @@ class FusedMoE(torch.nn.Module):
         params_dtype: Optional[torch.dtype] = None,
         reduce_results: bool = False,
         renormalize: bool = True,
+        use_grouped_topk: bool = False,
+        num_expert_group: Optional[int] = None,
+        topk_group: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
     ):
@@ -119,6 +131,13 @@ class FusedMoE(torch.nn.Module):
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
+        self.use_grouped_topk = use_grouped_topk
+        if self.use_grouped_topk:
+            assert num_expert_group is not None and topk_group is not None
+            self.num_expert_group = num_expert_group
+            self.topk_group = topk_group
+        else:
+            assert num_expert_group is None and topk_group is None
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
