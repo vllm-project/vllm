@@ -27,7 +27,7 @@ Quick start using Dockerfile
 
 .. code-block:: console
 
-    $ docker build -f Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
+    $ docker build -f setup_files/docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
     $ docker run -it \
                  --rm \
                  --network=host \

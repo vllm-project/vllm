@@ -31,7 +31,7 @@ Quick start using Dockerfile
 
 .. code-block:: console
 
-    $ docker build -f Dockerfile.openvino -t vllm-openvino-env .
+    $ docker build -f setup_files/docker/Dockerfile.openvino -t vllm-openvino-env .
     $ docker run -it --rm vllm-openvino-env
 
 .. _install_openvino_backend_from_source:

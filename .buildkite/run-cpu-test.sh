@@ -3,8 +3,8 @@
 set -ex
 
 # Try building the docker image
-docker build -t cpu-test -f Dockerfile.cpu .
-docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-avx2 -f Dockerfile.cpu .
+docker build -t cpu-test -f setup_files/docker/Dockerfile.cpu .
+docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-avx2 -f setup_files/docker/Dockerfile.cpu .
 
 # Setup cleanup
 remove_docker_container() { docker rm -f cpu-test cpu-test-avx2 || true; }

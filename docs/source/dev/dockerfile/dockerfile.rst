@@ -1,7 +1,7 @@
 Dockerfile
 ====================
 
-See `here <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`__ for the main Dockerfile to construct 
+See `here <https://github.com/vllm-project/vllm/blob/main/setup_files/docker/Dockerfile>`__ for the main Dockerfile to construct 
 the image for running an OpenAI compatible server with vLLM. More information about deploying with Docker can be found `here <https://docs.vllm.ai/en/stable/serving/deploying_with_docker.html>`__.
 
 Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
@@ -23,11 +23,11 @@ The edges of the build graph represent:
 
    Made using: https://github.com/patrickhoefler/dockerfilegraph
 
-   Commands to regenerate the build graph (make sure to run it **from the `root` directory of the vLLM repository** where the dockerfile is present):
+   Commands to regenerate the build graph (make sure to run it **from the `root` directory of the vLLM repository**):
 
    .. code:: bash
 
-      dockerfilegraph -o png --legend --dpi 200 --max-label-length 50 --filename Dockerfile
+      dockerfilegraph -o png --legend --dpi 200 --max-label-length 50 --filename setup_files/docker/Dockerfile
 
    or in case you want to run it directly with the docker image:
    
@@ -42,9 +42,8 @@ The edges of the build graph represent:
          --output png \
          --dpi 200 \
          --max-label-length 50 \
-         --filename Dockerfile \
+         --filename setup_files/docker/Dockerfile \
          --legend
 
    (To run it for a different file, you can pass in a different argument to the flag `--filename`.)
 
-   

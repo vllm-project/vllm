@@ -24,7 +24,7 @@ The image can be used to run OpenAI compatible server and is available on Docker
         memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 
-You can build and run vLLM from source via the provided `Dockerfile <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`_. To build vLLM:
+You can build and run vLLM from source via the provided `Dockerfile <https://github.com/vllm-project/vllm/blob/main/setup_files/docker/Dockerfile>`_. To build vLLM:
 
 .. code-block:: console
 

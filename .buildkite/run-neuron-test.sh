@@ -18,7 +18,7 @@ else
     echo $(date +%s) > /tmp/neuron-docker-build-timestamp
 fi
 
-docker build -t neuron -f Dockerfile.neuron .
+docker build -t neuron -f setup_files/docker/Dockerfile.neuron .
 
 # Setup cleanup
 remove_docker_container() { docker rm -f neuron || true; }

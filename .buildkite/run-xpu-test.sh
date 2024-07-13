@@ -3,7 +3,7 @@
 set -ex
 
 # Try building the docker image
-docker build -t xpu-test -f Dockerfile.xpu .
+docker build -t xpu-test -f setup_files/docker/Dockerfile.xpu .
 
 # Setup cleanup
 remove_docker_container() { docker rm -f xpu-test || true; }

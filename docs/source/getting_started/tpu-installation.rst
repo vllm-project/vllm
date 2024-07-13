@@ -22,11 +22,11 @@ Installation options:
 Build a docker image with :code:`Dockerfile.tpu`
 ------------------------------------------------
 
-`Dockerfile.tpu <https://github.com/vllm-project/vllm/blob/main/Dockerfile.tpu>`_ is provided to build a docker image with TPU support.
+`Dockerfile.tpu <https://github.com/vllm-project/vllm/blob/main/setup_files/docker/Dockerfile.tpu>`_ is provided to build a docker image with TPU support.
 
 .. code-block:: console
 
-    $ docker build -f Dockerfile.tpu -t vllm-tpu .
+    $ docker build -f setup_files/docker/Dockerfile.tpu -t vllm-tpu .
 
 
 You can run the docker image with the following command:

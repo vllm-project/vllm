@@ -3,7 +3,7 @@
 set -ex
 
 # Try building the docker image
-docker build -t openvino-test -f Dockerfile.openvino .
+docker build -t openvino-test -f setup_files/docker/Dockerfile.openvino .
 
 # Setup cleanup
 remove_docker_container() { docker rm -f openvino-test || true; }

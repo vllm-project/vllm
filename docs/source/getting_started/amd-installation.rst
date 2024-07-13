@@ -25,9 +25,9 @@ Option 1: Build from source with docker (recommended)
 
 You can build and install vLLM from source.
 
-First, build a docker image from `Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ and launch a docker container from the image.
+First, build a docker image from `Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/setup_files/docker/Dockerfile.rocm>`_ and launch a docker container from the image.
 
-`Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ uses ROCm 6.0 by default, but also supports ROCm 5.7.
+`Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/setup_files/docker/Dockerfile.rocm>`_ uses ROCm 6.0 by default, but also supports ROCm 5.7.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 * `BASE_IMAGE`: specifies the base image used when running ``docker build``, specifically the PyTorch on ROCm base image. We have tested ROCm 5.7 and ROCm 6.0. The default is `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`
@@ -43,20 +43,20 @@ To build vllm on ROCm 6.0 for MI200 and MI300 series, you can use the default:
 
 .. code-block:: console
 
-    $ docker build -f Dockerfile.rocm -t vllm-rocm .
+    $ docker build -f setup_files/docker/Dockerfile.rocm -t vllm-rocm .
 
 To build vllm on ROCm 6.0 for Radeon RX7900 series (gfx1100), you should specify ``BUILD_FA`` as below:
 
 .. code-block:: console
 
-    $ docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
+    $ docker build --build-arg BUILD_FA="0" -f setup_files/docker/Dockerfile.rocm -t vllm-rocm .
 
 To build docker image for vllm on ROCm 5.7, you can specify ``BASE_IMAGE`` as below:
 
 .. code-block:: console
 
     $ docker build --build-arg BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" \
-       -f Dockerfile.rocm -t vllm-rocm . 
+       -f setup_files/docker/Dockerfile.rocm -t vllm-rocm . 
 
 To run the above docker image ``vllm-rocm``, use the below command:
 
