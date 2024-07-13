@@ -480,7 +480,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_local_experts)
+            num_experts=self.config.n_routed_experts)
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
