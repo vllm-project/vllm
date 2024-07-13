@@ -19,27 +19,28 @@ def zephyr_lora_files():
 
 @pytest.fixture(scope="module")
 def server(zephyr_lora_files):
-    return RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "8192",
-        "--enforce-eager",
-        # lora config below
-        "--enable-lora",
-        "--lora-modules",
-        f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_files}",
-        "--max-lora-rank",
-        "64",
-        "--max-cpu-loras",
-        "2",
-        "--max-num-seqs",
-        "128",
-    ])
+    with RemoteOpenAIServer([
+            "--model",
+            MODEL_NAME,
+            # use half precision for speed and memory savings in CI environment
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "8192",
+            "--enforce-eager",
+            # lora config below
+            "--enable-lora",
+            "--lora-modules",
+            f"zephyr-lora={zephyr_lora_files}",
+            f"zephyr-lora2={zephyr_lora_files}",
+            "--max-lora-rank",
+            "64",
+            "--max-cpu-loras",
+            "2",
+            "--max-num-seqs",
+            "128",
+    ]) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")

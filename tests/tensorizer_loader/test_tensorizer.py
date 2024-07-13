@@ -219,21 +219,21 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
         json.dumps(model_loader_extra_config),
     ]
 
-    server = RemoteOpenAIServer(openai_args)
-    print("Server ready.")
+    with RemoteOpenAIServer(openai_args) as server:
+        print("Server ready.")
 
-    client = server.get_client()
-    completion = client.completions.create(model=model_ref,
-                                           prompt="Hello, my name is",
-                                           max_tokens=5,
-                                           temperature=0.0)
+        client = server.get_client()
+        completion = client.completions.create(model=model_ref,
+                                            prompt="Hello, my name is",
+                                            max_tokens=5,
+                                            temperature=0.0)
 
-    assert completion.id is not None
-    assert len(completion.choices) == 1
-    assert len(completion.choices[0].text) >= 5
-    assert completion.choices[0].finish_reason == "length"
-    assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11)
+        assert completion.id is not None
+        assert len(completion.choices) == 1
+        assert len(completion.choices[0].text) >= 5
+        assert completion.choices[0].finish_reason == "length"
+        assert completion.usage == openai.types.CompletionUsage(
+            completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
 
 def test_raise_value_error_on_invalid_load_format(vllm_runner):

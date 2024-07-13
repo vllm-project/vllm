@@ -3,7 +3,6 @@ import subprocess
 import sys
 import time
 import warnings
-import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List
@@ -76,7 +75,11 @@ class RemoteOpenAIServer:
         self._wait_for_server(url=self.url_for("health"),
                               timeout=self.MAX_SERVER_START_WAIT_S)
 
-        weakref.finalize(self, self.proc.terminate)
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check

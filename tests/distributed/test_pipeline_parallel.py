@@ -40,7 +40,8 @@ def server():
         args += [
             "--enforce-eager",
         ]
-    return RemoteOpenAIServer(args)
+    with RemoteOpenAIServer(args) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")

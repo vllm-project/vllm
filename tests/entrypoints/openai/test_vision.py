@@ -23,17 +23,18 @@ TEST_IMAGE_URLS = [
 
 @pytest.fixture(scope="module")
 def server():
-    return RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "4096",
-        "--enforce-eager",
-        "--chat-template",
-        str(LLAVA_CHAT_TEMPLATE),
-    ])
+    with RemoteOpenAIServer([
+            "--model",
+            MODEL_NAME,
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "4096",
+            "--enforce-eager",
+            "--chat-template",
+            str(LLAVA_CHAT_TEMPLATE),
+    ]) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")
