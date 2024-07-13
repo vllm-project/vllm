@@ -5,7 +5,6 @@ import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Optional, Set
-from vllm.utils import FlexibleArgumentParser
 
 import fastapi
 import uvicorn
@@ -36,6 +35,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
