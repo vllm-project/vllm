@@ -13,7 +13,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig, SchedulerConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -612,7 +612,7 @@ class JambaModel(nn.Module):
         return hidden_states
 
 
-class JambaForCausalLM(nn.Module):
+class JambaForCausalLM(nn.Module, HasInnerState):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -640,9 +640,11 @@ class JambaForCausalLM(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        scheduler_config: Optional[SchedulerConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
+        self.scheduler_config = scheduler_config
         self.model = JambaModel(config,
                                 cache_config=cache_config,
                                 quant_config=quant_config,
@@ -867,9 +869,12 @@ class JambaForCausalLM(nn.Module):
         layers_type = self.config.layers_block_type
         mamba_layers = sum(
             [layer_type == "mamba" for layer_type in layers_type])
-        max_batch_size = _BATCH_SIZES_TO_CAPTURE[-1] + 10
+        max_batch_size = (_get_graph_batch_size(
+            self.scheduler_config.max_num_seqs) if self.scheduler_config else
+                          max(_BATCH_SIZES_TO_CAPTURE)) + 10
         conv_state_shape, temporal_state_shape = self._get_mamba_cache_shape()
         assert conv_state_shape is not None and temporal_state_shape is not None
+
         for buffername in ["mamba_cache", "mamba_gc_cache_buffer"]:
             buffer = (torch.empty(size=(mamba_layers, max_batch_size) +
                                   conv_state_shape,
