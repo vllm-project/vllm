@@ -1,5 +1,4 @@
-from functools import lru_cache
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Dict
 
 import torch
 
@@ -71,13 +70,22 @@ def make_layers(
     return start_layer, end_layer, modules
 
 
-@lru_cache
+# NOTE: don't use lru_cache here because it can prevent garbage collection
+_model_to_pp_missing_layer_names: Dict[int, List[str]] = {}
+
+
 def get_pp_missing_layer_names(model: torch.nn.Module) -> List[str]:
     """Get the names of the missing layers in a pipeline parallel model."""
+    model_id = id(model)
+    if model_id in _model_to_pp_missing_layer_names:
+        return _model_to_pp_missing_layer_names[model_id]
+
     missing_layer_names = []
     for name, module in model.named_modules():
         if isinstance(module, PPMissingLayer):
             missing_layer_names.append(name)
+    _model_to_pp_missing_layer_names[model_id] = missing_layer_names
+
     return missing_layer_names
 
 
