@@ -71,6 +71,17 @@ def graph_capture():
             yield graph_capture_context
 
 
+@torch.library.impl("myops::_tensor_model_parallel_all_reduce", "cpu")
+def _tensor_model_parallel_all_reduce(
+    input_: torch.Tensor):
+    ops.shm_allreduce(input_, get_tensor_model_parallel_rank())
+    return input_
+
+torch.library.define(
+    "myops::_tensor_model_parallel_all_reduce",
+    "(Tensor input_) -> Tensor",
+)
+
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group.
 
@@ -86,17 +97,12 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
-    ops.shm_allreduce(input_, get_tensor_model_parallel_rank())
-    return input_
+    return _tensor_model_parallel_all_reduce(input_)
 
 
-def tensor_model_parallel_all_gather(input_: torch.Tensor,
-                                     dim: int = -1) -> torch.Tensor:
-    """All-gather the input tensor across model parallel group."""
-    world_size = get_tensor_model_parallel_world_size()
-    # Bypass the function if we are using only 1 GPU.
-    if world_size == 1:
-        return input_
+@torch.library.impl("myops::_tensor_model_parallel_all_gather", "cpu")
+def _tensor_model_parallel_all_gather(
+    input_: torch.Tensor, world_size:int, dim: int = -1):
     assert -input_.dim() <= dim < input_.dim(), (
         f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
     if dim < 0:
@@ -117,19 +123,23 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor,
                                           input_size[dim + 1:])
     return output_tensor
 
+torch.library.define(
+    "myops::_tensor_model_parallel_all_gather",
+    "(Tensor input_, int world_size, int dim) -> Tensor",
+)
 
-def tensor_model_parallel_gather(input_: torch.Tensor,
-                                 dst: int = 0,
-                                 dim: int = -1) -> torch.Tensor:
-    """Gather the input tensor across model parallel group.
-
-    NOTE: We assume that the input tensor is on the same device across
-    all the ranks.
-    """
+def tensor_model_parallel_all_gather(input_: torch.Tensor,
+                                     dim: int = -1) -> torch.Tensor:
+    """All-gather the input tensor across model parallel group."""
     world_size = get_tensor_model_parallel_world_size()
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
         return input_
+    return _tensor_model_parallel_all_gather(input_, world_size, dim)
+
+@torch.library.impl("myops::_tensor_model_parallel_gather", "cpu")
+def _tensor_model_parallel_gather(
+    input_: torch.Tensor, world_size:int, dst: int = 0, dim: int = -1):
     assert -input_.dim() <= dim < input_.dim(), (
         f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
     if dim < 0:
@@ -150,6 +160,29 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     else:
         output_tensor = None
     return output_tensor
+
+
+torch.library.define(
+    "myops::_tensor_model_parallel_gather",
+    "(Tensor input_, int world_size, int dst, int dim) -> Tensor",
+)
+
+def tensor_model_parallel_gather(input_: torch.Tensor,
+                                 dst: int = 0,
+                                 dim: int = -1) -> torch.Tensor:
+    """Gather the input tensor across model parallel group.
+
+    NOTE: We assume that the input tensor is on the same device across
+    all the ranks.
+    """
+    world_size = get_tensor_model_parallel_world_size()
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return input_
+
+    return _tensor_model_parallel_gather(input_, world_size, dst, dim)
+
+
 
 
 def broadcast(input_: torch.Tensor,
