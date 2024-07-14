@@ -99,3 +99,82 @@ def test_mixtral_moe(dtype: torch.dtype):
                           vllm_states,
                           rtol=mixtral_moe_tol[dtype],
                           atol=mixtral_moe_tol[dtype])
+
+def torch_moe_awq(a, w1, w1_scale, w1_zero, w2, w2_scale, w2_zero, score,
+                  topk):
+    score = torch.softmax(score.float(), dim=-1)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    (B, D) = a.shape
+    a = a.view(B, -1, D).repeat(1, topk_ids.shape[1], 1).reshape(-1, D)
+    out = torch.zeros(B * topk_ids.shape[1],
+                      w2.shape[2] * 8,
+                      dtype=a.dtype,
+                      device=a.device)
+    topk_ids = topk_ids.view(-1)
+    topk_weight = topk_weight.view(-1)
+    for i in range(w1.shape[0]):
+        mask = topk_ids == i
+        if mask.sum():
+            dw1 = ops.awq_dequantize(w1[i], w1_scale[i], w1_zero[i], 0, 0, 0)
+            dw2 = ops.awq_dequantize(w2[i], w2_scale[i], w2_zero[i], 0, 0, 0)
+            r1 = SiluAndMul()(torch.matmul(a[mask].half(), dw1))
+            out[mask] = torch.matmul(r1, dw2).to(out.dtype)
+    return (out.view(B, -1, w2.shape[2] * 8) *
+            topk_weight.view(B, -1, 1)).sum(dim=1).half()
+
+
+@pytest.mark.parametrize("m", [1024, 222, 33, 1])
+@pytest.mark.parametrize("n", [2048, 256, 1024])
+@pytest.mark.parametrize("k", [128, 512, 1024])
+@pytest.mark.parametrize("e", [8])
+@pytest.mark.parametrize("topk", [2, 6])
+def test_fused_moe_awq(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+):
+    # awq requires minimum capability 75
+    if torch.version.hip is not None:
+        return
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    if capability < 75:
+        return
+
+    RANGE = 1000000000
+    groupsize = 128
+    a = torch.randn((m, k), device='cuda', dtype=torch.half) / 10
+    qw1 = torch.randint(-RANGE,
+                        RANGE, (e, k, n * 2 // 8),
+                        dtype=torch.int,
+                        device='cuda')
+    qw2 = torch.randint(-RANGE,
+                        RANGE, (e, n, k // 8),
+                        dtype=torch.int,
+                        device='cuda')
+
+    scale1 = torch.randn(
+        (e, k // groupsize, n * 2), dtype=torch.half, device='cuda') / 50
+    scale2 = torch.randn(
+        (e, n // groupsize, k), dtype=torch.half, device='cuda') / 50
+
+    zero1 = torch.randint(-RANGE,
+                          RANGE, (e, k // groupsize, (n * 2 // 32) * 4),
+                          dtype=torch.int32,
+                          device='cuda')
+    zero2 = torch.randint(-RANGE,
+                          RANGE, (e, n // groupsize, (k // 32) * 4),
+                          dtype=torch.int32,
+                          device='cuda')
+    w1 = {"qweight": qw1, "scales": scale1, "qzeros": zero1}
+    w2 = {"qweight": qw2, "scales": scale2, "qzeros": zero2}
+
+    score = torch.randn((m, e), device='cuda', dtype=torch.half)
+
+    awq_method = AWQLinearMethod(AWQConfig(4, groupsize, False))
+    torch_output = torch_moe_awq(a, qw1, scale1, zero1, qw2, scale2, zero2,
+                                 score, topk)
+    cuda_output = awq_method.apply_moe_weights(w1, w2, a, score, topk, False)
+    assert torch.allclose(cuda_output, torch_output, atol=1e-2, rtol=0)
