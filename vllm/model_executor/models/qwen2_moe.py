@@ -466,6 +466,8 @@ class Qwen2MoeForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if name.endswith(".g_idx") and name not in params_dict:
+                    continue
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -480,6 +482,8 @@ class Qwen2MoeForCausalLM(nn.Module):
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
+                        continue
+                    if 'g_idx' in name:
                         continue
                     name = name.replace(weight_name, param_name)
                     # Skip layers on other devices.
@@ -496,6 +500,8 @@ class Qwen2MoeForCausalLM(nn.Module):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if name.endswith(".g_idx") and name not in params_dict:
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
