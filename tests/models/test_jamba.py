@@ -116,28 +116,6 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-def test_cleanup_upon_aborted_requests(
-    vllm_runner,
-    model: str,
-    dtype: str,
-    example_prompts,
-) -> None:
-    # This test is for verifying that the Jamba inner state management doesn't
-    # collapse in case where the number of incoming requests and
-    # finished_requests_ids is larger than the maximum mamba block capacity.
-    # This could generally happen due to the fact that Jamba does support
-    # statelessness mechanism where it can cleanup new incoming requests in
-    # a single step.
-    try:
-        with vllm_runner(model, dtype=dtype, max_num_seqs=10) as vllm_model:
-            vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
-    except ValueError:
-        pytest.fail("Jamba inner state wasn't cleaned up properly between"
-                    "steps finished requests registered unnecessarily ")
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
 def test_state_cleanup(
     vllm_runner,
     model: str,
