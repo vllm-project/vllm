@@ -488,4 +488,9 @@ setup(
     },
     cmdclass={"build_ext": cmake_build_ext} if _build_custom_ops() else {},
     package_data=package_data,
+    entry_points={
+        "console_scripts": [
+            "vllm=vllm.scripts:main",
+        ],
+    },
 )
