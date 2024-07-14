@@ -142,7 +142,7 @@ class FusedMoE(torch.nn.Module):
     def make_expert_params_mapping(
             cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
             ckpt_up_proj_name: str,
-            num_experts: int) -> List[Tuple[str, str, int, int]]:
+            num_experts: int) -> List[Tuple[str, str, int, str]]:
 
         return [
             # (param_name, weight_name, expert_id, shard_id)
@@ -150,16 +150,16 @@ class FusedMoE(torch.nn.Module):
              in [ckpt_gate_proj_name, ckpt_up_proj_name] else "experts.w2_",
              f"experts.{expert_id}.{weight_name}.", expert_id, shard_id)
             for expert_id in range(num_experts)
-            for shard_id, weight_name in enumerate([
-                ckpt_gate_proj_name,
-                ckpt_down_proj_name,
-                ckpt_up_proj_name,
-            ])
+            for shard_id, weight_name in [
+                ("w1", ckpt_gate_proj_name),
+                ("w2", ckpt_down_proj_name),
+                ("w3", ckpt_up_proj_name),
+            ]
         ]
 
     def _load_fp8_scale(self, param: torch.nn.Parameter,
                         loaded_weight: torch.Tensor, weight_name: str,
-                        shard_id: int, expert_id: int) -> None:
+                        shard_id: str, expert_id: int) -> None:
         param_data = param.data
 
         # Input scales can be loaded directly and should be equal.
@@ -174,23 +174,21 @@ class FusedMoE(torch.nn.Module):
         # Weight scales
         elif "weight_scale" in weight_name:
             # If we are in merged column case (gate_up_proj)
-            #   shard_id 0 == gate_proj / w1
-            #   shard_id 2 == up_proj / w3
-            if shard_id == 0 or shard_id == 2:
+            if shard_id == "w1" or shard_id == "w3":
                 # We have to keep the weight scales of w1 and w3 because
                 # we need to re-quantize w1/w3 weights after weight loading.
-                idx = 0 if shard_id == 0 else 1
+                idx = 0 if shard_id == "w1" else 1
                 param_data[expert_id][idx] = loaded_weight
             # If we are in the row parallel case (down_proj)
-            #   shard_id 1 == down_proj / w2
             else:
                 param_data[expert_id] = loaded_weight
 
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
-                      shard_id: int, expert_id: int) -> None:
-        if shard_id not in [0, 1, 2]:
-            raise ValueError(f"Shard id must be in [0,1,2] but got {shard_id}")
+                      shard_id: str, expert_id: int) -> None:
+        if shard_id not in ["w1", "w2", "w3"]:
+            raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
+                             f"got {shard_id}.")
 
         # Special case for fp8 scales.
         if getattr(param, "is_fp8_scale", False):
@@ -200,9 +198,6 @@ class FusedMoE(torch.nn.Module):
 
         expert_data = param.data[expert_id]
         tp_rank = get_tensor_model_parallel_rank()
-        is_gate_proj = (shard_id == 0)
-        is_down_proj = (shard_id == 1)
-        is_up_proj = (shard_id == 2)
 
         # If transposed, weight is saved as [input_dim, output_dim]
         # Otherwise, weight is saved as     [output_dim, input_dim]
@@ -211,28 +206,28 @@ class FusedMoE(torch.nn.Module):
         output_dim = 1 if is_transposed else 0
 
         # Index the loaded weight for tp sharding.
-        # * down_proj: "RowParallel" so tp sharding on input_dim
-        if (is_down_proj):
+        # down_proj: "RowParallel" so tp sharding on input_dim
+        if (shard_id == "w2"):
             shard_dim = input_dim
             shard_size = expert_data.shape[shard_dim]
-        # * gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        elif (is_gate_proj or is_up_proj):
+        # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+        elif (shard_id == "w1" or shard_id == "w3"):
             shard_dim = output_dim
             shard_size = expert_data.shape[output_dim] // 2
         offset = shard_size * tp_rank
         loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
 
         # Narrow parameter and load.
-        # w1, gate_proj: Load into first shard of w13.
-        if is_gate_proj:
+        # w1, gate_proj: Load into first logical weight of w13.
+        if shard_id == "w1":
             expert_data = expert_data.narrow(shard_dim, 0, shard_size)
             expert_data.copy_(loaded_weight)
-        # w3, up_proj: Load into second shard of w13.
-        elif is_up_proj:
+        # w3, up_proj: Load into second logical weight of w13.
+        elif shard_id == "w3":
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
             expert_data.copy_(loaded_weight)
-        # w2, down_proj: Load into only shard of w2.
-        elif is_down_proj:
+        # w2, down_proj: Load into only logical weight of w2.
+        elif shard_id == "w2":
             expert_data.copy_(loaded_weight)
         else:
             raise ValueError
