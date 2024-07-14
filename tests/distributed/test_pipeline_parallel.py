@@ -27,6 +27,10 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
     ]
 
     # compare without pipeline parallelism
+    # NOTE: use mp backend for TP
+    # PP tests might involve multiple nodes, and ray might
+    #  schedule all workers in a node other than the head node,
+    #  which can cause the test to fail.
     tp_args = [
         "--model",
         MODEL_NAME,
@@ -36,7 +40,7 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
         "--tensor-parallel-size",
         str(TP_SIZE),
         "--distributed-executor-backend",
-        "ray",
+        "mp",
     ]
     if CHUNKED_PREFILL:
         pp_args.append("--enable-chunked-prefill")
