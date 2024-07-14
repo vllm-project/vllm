@@ -149,8 +149,7 @@ class FusedMoE(torch.nn.Module):
             ("experts.w13_" if weight_name
              in [ckpt_gate_proj_name, ckpt_up_proj_name] else "experts.w2_",
              f"experts.{expert_id}.{weight_name}.", expert_id, shard_id)
-            for expert_id in range(num_experts)
-            for shard_id, weight_name in [
+            for expert_id in range(num_experts) for shard_id, weight_name in [
                 ("w1", ckpt_gate_proj_name),
                 ("w2", ckpt_down_proj_name),
                 ("w3", ckpt_up_proj_name),
