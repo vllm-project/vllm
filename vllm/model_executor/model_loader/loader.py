@@ -851,7 +851,7 @@ class GGUFModelLoader(BaseModelLoader):
                 arch = key
                 break
         if arch is None:
-            raise RuntimeError(f"Unknown model_type: {model_type}")
+            raise RuntimeError(f"Unknown gguf model_type: {model_type}")
         num_layers = config.num_hidden_layers
         name_map = gguf.get_tensor_name_map(arch, num_layers)
         with torch.device("meta"):
