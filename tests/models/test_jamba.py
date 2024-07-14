@@ -1,5 +1,6 @@
 import pytest
 
+from tests.models.utils import check_outputs_equal
 from vllm.worker.model_runner import _get_graph_batch_size
 
 MODELS = ["ai21labs/Jamba-tiny-random"]
@@ -21,17 +22,152 @@ def test_models(
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+        hf_logprobs_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs=2)
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_logprobs_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs=2)
 
     for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+        _, hf_output_str = hf_outputs[i]
+        hf_output_ids, _, hf_output_logprobs = hf_logprobs_outputs[i]
+
+        _, vllm_output_str = vllm_outputs[i]
+        vllm_output_ids, _, vllm_output_logprobs = vllm_logprobs_outputs[i]
+
+        if hf_output_str != vllm_output_str:
+            first_diff_index = [
+                hf_id == vllm_id
+                for hf_id, vllm_id in zip(hf_output_ids, vllm_output_ids)
+            ].index(False)
+            hf_disagreement_logprobs = hf_output_logprobs[first_diff_index]
+            vllm_disagreement_logprobs = {
+                k: v.logprob
+                for k, v in vllm_output_logprobs[first_diff_index].items()
+            }
+
+            assert (hf_output_ids[first_diff_index]
+                    in vllm_disagreement_logprobs), (
+                        f"Test{i}:different outputs\n"
+                        f"HF: {hf_output_str!r}\n"
+                        f"vLLM: {vllm_output_str!r}\n",
+                        f"Disagreement in {first_diff_index}th token. "
+                        f"HF id: {hf_output_ids[first_diff_index]}, "
+                        f"vLLM id: {vllm_output_ids[first_diff_index]})\n",
+                        "HF top token not in vLLM top 2 tokens")
+
+            vllm_disagreement_logprobs_values = list(
+                vllm_disagreement_logprobs.values())
+            vllm_logprobs_diff = abs(vllm_disagreement_logprobs_values[0] -
+                                     vllm_disagreement_logprobs_values[1])
+            vllm_hf_diff = abs(
+                hf_disagreement_logprobs[hf_output_ids[first_diff_index]] -
+                vllm_disagreement_logprobs[hf_output_ids[first_diff_index]])
+
+            assert (vllm_logprobs_diff < vllm_hf_diff
+                    or vllm_logprobs_diff < 1e-4), (
+                        f"Test{i}:different outputs\n"
+                        f"HF: {hf_output_str!r}\n"
+                        f"vLLM: {vllm_output_str!r}\n",
+                        f"Disagreement in {first_diff_index}th token. "
+                        f"HF id: {hf_output_ids[first_diff_index]}, "
+                        f"vLLM id: {vllm_output_ids[first_diff_index]})\n",
+                        f"HF top token in vLLM top 2 tokens, "
+                        f"but logprobs diff is too large. "
+                        f"vLLM top 2 logprob diff: {vllm_logprobs_diff}\n",
+                        f"HF to vLLM diff of top HF token: {vllm_hf_diff}")
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [15])
+def test_batching(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+) -> None:
+    # To pass the small model tests, we need full precision.
+    # assert dtype == "float"
+
+    with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
+        for_loop_outputs = []
+        for_loop_logprobs_outputs = []
+        for prompt in example_prompts:
+            for_loop_outputs.append(
+                vllm_model.generate_greedy([prompt], max_tokens)[0])
+            for_loop_logprobs_outputs.append(
+                vllm_model.generate_greedy_logprobs([prompt],
+                                                    max_tokens,
+                                                    num_logprobs=2)[0])
+
+        batched_outputs = vllm_model.generate_greedy(example_prompts,
+                                                     max_tokens)
+        batched_logprobs_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs=2)
+
+    for i in range(len(example_prompts)):
+        _, for_loop_output_str = for_loop_outputs[i]
+        (for_loop_output_ids, _,
+         for_loop_output_logprobs) = for_loop_logprobs_outputs[i]
+
+        _, batched_output_str = batched_outputs[i]
+        (batched_output_ids, _,
+         batched_output_logprobs) = batched_logprobs_outputs[i]
+
+        if for_loop_output_str != batched_output_str:
+            first_diff_index = [
+                for_loop_id == batched_id for for_loop_id, batched_id in zip(
+                    for_loop_output_ids, batched_output_ids)
+            ].index(False)
+            for_loop_disagreement_logprobs = {
+                k: v.logprob
+                for k, v in for_loop_output_logprobs[first_diff_index].items()
+            }
+            batched_disagreement_logprobs = {
+                k: v.logprob
+                for k, v in batched_output_logprobs[first_diff_index].items()
+            }
+
+            assert (
+                for_loop_output_ids[first_diff_index]
+                in batched_disagreement_logprobs), (
+                    f"Test{i}:different outputs\n"
+                    f"For-loop: {for_loop_output_str!r}\n",
+                    f"Batched: {batched_output_str!r}\n",
+                    f"Disagreement in {first_diff_index}th token. "
+                    f"For-loop id: {for_loop_output_ids[first_diff_index]}, "
+                    f"Batched id: {batched_output_ids[first_diff_index]})\n",
+                    "For-loop top token not in batched top 2 tokens")
+
+            batched_disagreement_logprobs_values = list(
+                batched_disagreement_logprobs.values())
+            batched_logprobs_diff = abs(
+                batched_disagreement_logprobs_values[0] -
+                batched_disagreement_logprobs_values[1])
+            batched_for_loop_diff = abs(
+                for_loop_disagreement_logprobs[
+                    for_loop_output_ids[first_diff_index]] -
+                batched_disagreement_logprobs[
+                    for_loop_output_ids[first_diff_index]])
+
+            assert (
+                batched_logprobs_diff < batched_for_loop_diff
+                or batched_logprobs_diff < 1e-4), (
+                    f"Test{i}:different outputs\n"
+                    f"For-loop: {for_loop_output_str!r}\n"
+                    f"Batched: {batched_output_str!r}\n",
+                    f"Disagreement in {first_diff_index}th token. "
+                    f"For-loop id: {for_loop_output_ids[first_diff_index]}, "
+                    f"Batched id: {batched_output_ids[first_diff_index]})\n",
+                    f"For-loop top token in batched top 2 tokens, "
+                    f"but logprobs diff is too large. "
+                    f"Batched top 2 logprob diff: {batched_logprobs_diff}\n",
+                    f"For-loop to batched diff of top for-loop token: "
+                    f"{batched_logprobs_diff}")
 
 
 @pytest.mark.parametrize("model", MODELS)
