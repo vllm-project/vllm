@@ -4,48 +4,44 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 
-from .fused_moe import fused_moe, fused_topk, moe_align_block_size
+from .fused_moe import fused_experts, moe_align_block_size
 
 logger = init_logger(__name__)
 
+NAIVE_THRESHOLD = 1024
 
-def fused_moe_awq(
+
+def fused_experts_awq(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    pack_factor: int,
     w1_scales: torch.Tensor,
     w2_scales: torch.Tensor,
     w1_qzeros: torch.Tensor,
     w2_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    pack_factor: int,
 ) -> torch.Tensor:
     """
-    This function computes a Mixture of Experts (MoE) layer using two sets of
-    weights, w1 and w2, and top-k gating mechanism.
+    This function computes an AWQ fused_expert.
 
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - w1 (torch.Tensor): The first set of expert weights.
-    - w2 (torch.Tensor): The second set of expert weights.
-    - gating_output (torch.Tensor): The output of the gating operation
-        (before softmax).
-    - topk (int): The number of top-k experts to select.
-    - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
-    - pack_factor (int): Weight packing factor (int4 in int32 == 8)
+    - w2 (torch.Tensor): The second set of expert weights.    
     - w1_scales (torch.Tensor): scale to be used for w1.
     - w2_scales (torch.Tensor): scale to be used for w2.
     - w1_qzeros (torch.Tensor): zero point to be used for w1.
     - w2_qzeros (torch.Tensor): zero point to be used for w2.
+    - pack_factor (int): Weight packing factor (int4 in int32 == 8)
 
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
 
     # If large seq_len prefill, dequantize and use the fp16 MoE kernel.
-    do_naive_dequant = hidden_states.shape[:-1].numel() >= 1024
+    do_naive_dequant = hidden_states.shape[:-1].numel() >= NAIVE_THRESHOLD
     if do_naive_dequant:
         # TODO: why is this not contiguous already?
         dequant_w1 = ops.awq_dequantize(w1, w1_scales, w1_qzeros, 0, 0,
@@ -53,11 +49,9 @@ def fused_moe_awq(
         dequant_w2 = ops.awq_dequantize(w2, w2_scales, w2_qzeros, 0, 0,
                                         0).permute(0, 2, 1).contiguous()
 
-        return fused_moe(hidden_states, dequant_w1, dequant_w2, gating_output,
-                         topk, renormalize)
+        return fused_experts(hidden_states, dequant_w1, dequant_w2,
+                             topk_weights, topk_ids)
 
-    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                        renormalize)
     (sorted_token_ids, expert_ids,
      num_tokens_post_padded) = moe_align_block_size(topk_ids, 16, w1.shape[0])
 

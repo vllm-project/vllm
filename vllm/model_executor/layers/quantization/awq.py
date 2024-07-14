@@ -5,7 +5,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  fused_moe_awq)
+                                                  fused_experts_awq)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -278,23 +278,12 @@ class AWQMoEMethod(FusedMoEMethodBase):
                 **extra_weight_attrs
             })
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              router_logits: torch.Tensor,
-              top_k: int,
-              renormalize: bool = True) -> torch.Tensor:
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
+              topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor) -> torch.Tensor:
 
-        return fused_moe_awq(
-            x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            router_logits,
-            top_k,
-            renormalize=renormalize,
-            pack_factor=self.quant_config.pack_factor,
-            w1_scales=layer.w13_scales,
-            w2_scales=layer.w2_scales,
-            w1_qzeros=layer.w13_qzeros,
-            w2_qzeros=layer.w2_qzeros,
-        )
+        return fused_experts_awq(x, layer.w13_qweight, layer.w2_qweight,
+                                 layer.w13_scales, layer.w2_scales,
+                                 layer.w13_qzeros, layer.w2_qzeros,
+                                 topk_weights, topk_ids,
+                                 self.quant_config.pack_factor)

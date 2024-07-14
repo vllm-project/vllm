@@ -7,7 +7,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  fused_moe)
+                                                  fused_experts)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -385,31 +385,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                         requires_grad=False)
             return
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              router_logits: torch.Tensor,
-              top_k: int,
-              renormalize: bool = True,
-              use_grouped_topk: bool = False,
-              num_expert_group: Optional[int] = None,
-              topk_group: Optional[int] = None) -> torch.Tensor:
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
+              topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor) -> torch.Tensor:
 
-        return fused_moe(x,
-                         layer.w13_weight,
-                         layer.w2_weight,
-                         router_logits,
-                         top_k,
-                         renormalize=renormalize,
-                         inplace=True,
-                         use_fp8=True,
-                         w1_scale=layer.w13_weight_scale,
-                         w2_scale=layer.w2_weight_scale,
-                         a1_scale=layer.w13_input_scale,
-                         a2_scale=layer.w2_input_scale,
-                         use_grouped_topk=use_grouped_topk,
-                         num_expert_group=num_expert_group,
-                         topk_group=topk_group)
+        return fused_experts(x,
+                             layer.w13_weight,
+                             layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True,
+                             use_fp8=True,
+                             w1_scale=layer.w13_weight_scale,
+                             w2_scale=layer.w2_weight_scale,
+                             a1_scale=layer.w13_input_scale,
+                             a2_scale=layer.w2_input_scale)
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):
