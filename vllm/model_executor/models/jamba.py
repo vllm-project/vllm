@@ -689,6 +689,8 @@ class JambaForCausalLM(nn.Module):
                 for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
 
             request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
+            finished_requests_ids = kwargs["finished_requests_ids"]
+            self._release_mamba_cache(finished_requests_ids)
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
                 batch_size = len(request_ids_to_seq_ids)
@@ -696,9 +698,8 @@ class JambaForCausalLM(nn.Module):
                 current_seqlen_agnostic_cache,
                 indices,
             ) = self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
-                                                      batch_size)
-            finished_requests_ids = kwargs["finished_requests_ids"]
-            self._release_mamba_cache(finished_requests_ids)
+                                                      batch_size,
+                                                      finished_requests_ids)
         else:
             # CUDA graph capturing runs
             current_seqlen_agnostic_cache, indices = (
@@ -760,10 +761,15 @@ class JambaForCausalLM(nn.Module):
         return indices_for_current_run
 
     def _prepare_current_run_mamba_cache(
-        self, request_ids_to_seq_ids: Dict[str, list[int]], batch_size: int
+        self, request_ids_to_seq_ids: Dict[str, list[int]], batch_size: int,
+        finished_requests_ids: List[str]
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
         indices_for_current_run = []
         for request_id, seqs_id in request_ids_to_seq_ids.items():
+            if request_id in finished_requests_ids:
+                # Do not allocate cache for requests that run
+                # and finish right after
+                continue
             indices_for_current_run += self._assign_seq_id_to_mamba_cache(
                 request_id, seqs_id)
         ## Pad the batch in case of running batch that was not captured via CG
@@ -787,16 +793,17 @@ class JambaForCausalLM(nn.Module):
         assert all(
             key in kwargs
             for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
+        finished_requests_ids = kwargs["finished_requests_ids"]
+        self._release_mamba_cache(finished_requests_ids)
         request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
         cg_batch_size = input_buffers['input_ids'].shape[0]
         (
             current_mamba_cache,
             indices,
         ) = self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
-                                                  cg_batch_size)
+                                                  cg_batch_size,
+                                                  finished_requests_ids)
         self.current_indices = indices
-        finished_requests_ids = kwargs["finished_requests_ids"]
-        self._release_mamba_cache(finished_requests_ids)
 
         for input_buffer, current_cache_buffer in zip(
                 input_buffers["seqlen_agnostic_capture_inputs"],
