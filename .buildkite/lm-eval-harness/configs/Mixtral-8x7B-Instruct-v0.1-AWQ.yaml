@@ -1,0 +1,11 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m casperhansen/mixtral-instruct-awq -b auto -l 1000 -f 5 -t 2
+model_name: "casperhansen/mixtral-instruct-awq"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.601
+  - name: "exact_match,flexible-extract"
+    value: 0.599
+limit: 1000
+num_fewshot: 5
