@@ -38,7 +38,13 @@ bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
   if (cuda_device_capability >= 90) {
     return CUDA_VERSION >= 12000;
   } else if (cuda_device_capability >= 89) {
-    return CUDA_VERSION >= 12040;
+    // CUTLASS Kernels have not been tuned for Ada Lovelace systems
+    // and are slower than torch.mm. Return false unconditionally in this case.
+    return false;
+
+    // Once the CUTLASS kernels have been optimized for Lovelace systems,
+    // use the following check:
+    // return CUDA_VERSION >= 12040;
   }
 #endif
 
