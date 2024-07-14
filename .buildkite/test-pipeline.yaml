@@ -194,7 +194,9 @@ steps:
   command: pytest -v -s test_logits_processor.py
 
 - label: Utils Test
-  command: pytest -v -s test_utils.py
+  commands:
+    - pytest -v -s test_utils.py
+    - pytest -v -s test_embedded_commit.py
 
 - label: Worker Test
   mirror_hardwares: [amd]
