@@ -169,7 +169,13 @@ class ChatTtsLlm(nn.Module):
     ):
         assert emb.size(1) == spk_emb.size(1)
         assert attn_metadata.seq_lens_tensor.size(0) == spk_emb.size(0)
-        pass
+        # convert spk_emb to the same dtype as emb
+        spk_emb = spk_emb.to(emb.dtype)
+        # find the index of the speaker token
+        indices = (input_ids[:,0] == self.spk_emb_token_id).nonzero(as_tuple=True)
+        if indices[0].size(0) == 0:
+            return
+        emb.index_put_(indices, spk_emb)
 
     def merge_sample_results(
         self,
