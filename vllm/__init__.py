@@ -12,7 +12,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 # UPSTREAM SYNC: use the current downstream.
-__version__ = "0.4.0"
+__version__ = "0.4.3"
 
 __all__ = [
     "LLM",
