@@ -196,7 +196,7 @@ steps:
 - label: Utils Test
   commands:
     - pytest -v -s test_utils.py
-    - pytest -v -s test_embedded_commit.py.py
+    - pytest -v -s test_embedded_commit.py
 
 - label: Worker Test
   mirror_hardwares: [amd]
