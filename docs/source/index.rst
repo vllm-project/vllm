@@ -117,6 +117,12 @@ Documentation
    automatic_prefix_caching/details
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Performance benchmarks
+
+   performance_benchmark/benchmarks
+
+.. toctree::
    :maxdepth: 2
    :caption: Developer Documentation
 
