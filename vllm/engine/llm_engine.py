@@ -42,7 +42,9 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter
+from vllm.utils import (Counter,
+                        is_embedding_model_config,
+                        is_encoder_decoder_model_config,)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
