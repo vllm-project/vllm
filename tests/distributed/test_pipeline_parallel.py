@@ -38,6 +38,7 @@ def server():
         args += [
             "--enforce-eager",
         ]
+
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
