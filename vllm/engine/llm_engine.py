@@ -1,8 +1,19 @@
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
-from typing import Sequence as GenericSequence
-from typing import Set, Type, TypeVar, Union
+from typing import (TYPE_CHECKING, 
+                    Any, 
+                    ClassVar, 
+                    Dict, 
+                    Iterable, 
+                    List, 
+                    Optional,
+                    Set, 
+                    Type, 
+                    TypeVar, 
+                    Union, 
+                    Tuple, 
+                    Sequence as GenericSequence,
+                    )
 
 from transformers import PreTrainedTokenizer
 
@@ -547,6 +558,31 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
+    _LLMInputComponentsType = Tuple[str, List[int],]
+
+    # def _process_single_decoder_prompt_to_llm_input_components(self,inputs: PromptInputs,
+    #                                                   ptype: str,
+    #                                                   request_id: str,
+    #                                                   lora_request: Optional[LoRARequest] = None,
+    #                                                   is_decoder_prompt: bool = True,
+    #                                                   ) -> _LLMInputComponentsType:
+    #     assert ptype != "ExplicitEncoderDecoder"
+
+    #     if "prompt_token_ids" in inputs:
+    #         prompt_token_ids = inputs["prompt_token_ids"]
+    #     else:
+
+    #         tokenizer = self.get_tokenizer_group("prompts must be None if "
+    #                                                 "skip_tokenizer_init is True")
+
+    #         prompt_token_ids = tokenizer.encode(request_id=request_id,
+    #                                             prompt=inputs["prompt"],
+    #                                             lora_request=lora_request) 
+
+    #     prompt = (
+    #         inputs["prompt"] if "prompt" in inputs else None
+    #     )
+
     def process_model_inputs(
         self,
         request_id: str,
@@ -562,6 +598,13 @@ class LLMEngine:
             # input prompts to encoder & decoder
 
             ptype = get_single_prompt_type(inputs)
+
+            if ptype == "ExplicitEncoderDecoder":
+                # User supplied a 
+                pass
+            else:
+                # 
+                pass
 
         else:
             # Decoder-only operation
