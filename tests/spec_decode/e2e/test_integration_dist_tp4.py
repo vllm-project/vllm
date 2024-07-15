@@ -60,6 +60,8 @@ def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
                                          force_output_len=True)
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
+                    reason="Need at least 4 GPUs to run the test.")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
