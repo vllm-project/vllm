@@ -306,6 +306,11 @@ class _AsyncLLMEngine(LLMEngine):
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+        if (type(params) is SamplingParams and params.use_beam_search
+                and self.speculative_config):
+            raise ValueError("Beam search is not supported when speculative "
+                             "decoding is enabled.")
+
         if arrival_time is None:
             arrival_time = time.time()
 

@@ -80,6 +80,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         assert seqs, "expected running sequences"
 
+        # If we are processing outputs for more than one sequence, or about
+        # to create more than one sequence, we need to fall back to the
+        # single-step processor.
         if len(seqs) > 1 or sequence_group.sampling_params.best_of > 1:
             return self.single_step_processor.process_outputs(
                 sequence_group, outputs)

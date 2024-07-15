@@ -360,16 +360,35 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def _should_disable_all_speculation(
             self, execute_model_req: ExecuteModelRequest) -> bool:
-        # When the batch size is too large, disable speculative decoding
-        # to stop trading off throughput for latency.
+        """Decide whether to disable speculation for all
+        of the running sequence groups."""
+        return (self._should_disable_by_batch_size(execute_model_req)
+                or self._should_disable_by_best_of(execute_model_req))
+
+    def _should_disable_by_batch_size(
+            self, execute_model_req: ExecuteModelRequest) -> bool:
+        """When the batch size is too large, disable speculative
+        decoding to stop trading off throughput for latency."""
         if execute_model_req.running_queue_size >= self.disable_by_batch_size:
             return True
+        return False
 
-        # Disable speculation if best_of > 1 for any sequence group
+    def _should_disable_by_best_of(
+            self, execute_model_req: ExecuteModelRequest) -> bool:
+        """Disable speculative decoding if the batch contains
+        any request with best_of>1. Note this ensures that
+        we can handle such requests, but may have an adverse
+        effect on performance for the other requests in the
+        batch that have best_of=1."""
         for seq_group_metadata in execute_model_req.seq_group_metadata_list:
             if seq_group_metadata.sampling_params.best_of > 1:
+                if seq_group_metadata.is_prompt:
+                    logger.warning(
+                        "Disabling speculative decoding for the entire batch "
+                        "because at least one sequence group has n>1 or "
+                        "best_of>1. This may have an adverse effect on "
+                        "performance for the other requests in the batch.")
                 return True
-
         return False
 
     def _maybe_disable_speculative_tokens(
