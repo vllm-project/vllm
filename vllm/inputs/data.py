@@ -243,16 +243,17 @@ class LLMInputs(TypedDict):
     if the model supports it.
     """
 
+
 def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs, ) -> bool:
     """
     Return True if the LLMInputs instance has the correct configuration
     for encoder/decoder.
     """
 
-    if ('encoder_prompt_token_ids' in inputs and 
-        inputs['encoder_prompt_token_ids'] is not None):
+    if ('encoder_prompt_token_ids' in inputs
+            and inputs['encoder_prompt_token_ids'] is not None):
         # Encoder prompt token ids field exists &
         # is not None
         return True
-    
+
     return False

@@ -15,9 +15,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
-    from vllm.inputs import (LLMInputs, get_single_prompt_type,
-                             is_valid_encoder_decoder_llm_inputs,
-                             )
+    from vllm.inputs import LLMInputs, is_valid_encoder_decoder_llm_inputs
     from vllm.multimodal import MultiModalDataDict
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -246,16 +244,14 @@ class Sequence:
 
     """
 
-    def __init__(
-            self,
-            seq_id: int,
-            inputs: "LLMInputs",
-            block_size: int,
-            eos_token_id: Optional[int] = None,
-            lora_request: Optional[LoRARequest] = None,
-            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-            from_decoder_prompt: bool = True
-    ) -> None:
+    def __init__(self,
+                 seq_id: int,
+                 inputs: "LLMInputs",
+                 block_size: int,
+                 eos_token_id: Optional[int] = None,
+                 lora_request: Optional[LoRARequest] = None,
+                 prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+                 from_decoder_prompt: bool = True) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
         self.block_size = block_size
@@ -263,11 +259,11 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
         self.from_decoder_prompt = True
-        self._prompt = None
-        self._prompt_token_ids = None
+        self._prompt: Optional[str] = None
+        self._prompt_token_ids: Optional[List[int]] = None
 
-        if not (from_decoder_prompt or 
-                is_valid_encoder_decoder_llm_inputs(inputs)):
+        if not (from_decoder_prompt
+                or is_valid_encoder_decoder_llm_inputs(inputs)):
             raise ValueError("Cannot extract encoder input prompt from "
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
@@ -297,10 +293,8 @@ class Sequence:
 
         # Select decoder or encoder input prompt str,
         # as appropriate
-        if self.from_decoder_prompt:
-            prompt_key = "prompt"
-        else:
-            prompt_key = "encoder_prompt"
+        prompt_key = ("prompt"
+                      if self.from_decoder_prompt else "encoder_prompt")
 
         # Cache prompt
         self._prompt = self.inputs.get(prompt_key)
@@ -314,14 +308,12 @@ class Sequence:
 
         # Select decoder or encoder input prompt
         # token ids, as appropriate
-        if self.from_decoder_prompt:
-            prompt_key = "prompt_token_ids"
-        else:
-            prompt_key = "encoder_prompt_token_ids"
+        prompt_key = ("prompt_token_ids" if self.from_decoder_prompt else
+                      "encoder_prompt_token_ids")
 
         # Cache computed prompt token ids
         self._prompt_token_ids = self.inputs.get(prompt_key)
-        return self._prompt_token_ids 
+        return self._prompt_token_ids
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":

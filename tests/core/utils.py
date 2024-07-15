@@ -56,24 +56,31 @@ def create_dummy_prompt_encoder_decoder(
     # and prompt "0 ... block_size".
     decoder_prompt_tokens = list(range(decoder_prompt_length))
     decoder_prompt_str = " ".join([str(t) for t in decoder_prompt_tokens])
-
-    decoder_prompt = Sequence(int(request_id),
-                              inputs={
-                                  "prompt": decoder_prompt_str,
-                                  "prompt_token_ids": decoder_prompt_tokens,
-                                  "multi_modal_data": None,
-                              },
-                              block_size=block_size)
-
     encoder_prompt_tokens = list(reversed(list(range(encoder_prompt_length))))
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
+
+    inputs={
+        "encoder_prompt": {
+            "prompt": encoder_prompt_str,
+            "prompt_token_ids": encoder_prompt_tokens,
+            "multi_modal_data": None,
+        },
+        "decoder_prompt": {
+            "prompt": decoder_prompt_str,
+            "prompt_token_ids": decoder_prompt_tokens,
+            "multi_modal_data": None,
+        }
+    }
+
+    decoder_prompt = Sequence(int(request_id),
+                              inputs=inputs,
+                              block_size=block_size,
+                              from_decoder_prompt=True)
+
     encoder_prompt = Sequence(int(request_id),
-                              inputs={
-                                  "prompt": encoder_prompt_str,
-                                  "prompt_token_ids": encoder_prompt_tokens,
-                                  "multi_modal_data": None,
-                              },
-                              block_size=block_size)
+                              inputs=inputs,
+                              block_size=block_size,
+                              from_decoder_prompt=False)
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[decoder_prompt],
                               sampling_params=SamplingParams(
@@ -139,16 +146,27 @@ def create_seq_group_encoder_decoder(
 
     prompt_token_ids = [0] * seq_prompt_len
 
+    inputs = {
+        "encoder_prompt": {
+            "prompt": "",
+            "prompt_token_ids": prompt_token_ids,
+            "multi_modal_data": None,
+        },
+        "decoder_prompt": {
+            "prompt": "",
+            "prompt_token_ids": prompt_token_ids,
+            "multi_modal_data": None,
+        }
+    }
+
     seqs = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
+        # Construct decoder input sequences
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,
-            inputs={
-                "prompt": "",
-                "prompt_token_ids": prompt_token_ids,
-                "multi_modal_data": None,
-            },
+            inputs=inputs,
             block_size=16,
+            from_decoder_prompt=True
         )
 
         for i in range(output_len):
@@ -158,15 +176,12 @@ def create_seq_group_encoder_decoder(
             )
         seqs.append(seq)
 
-    # Encoder sequence
+    # Encoder input sequence
     encoder_seq = Sequence(
         seq_id=seq_id_start + len(seq_output_lens),
-        inputs={
-            "prompt": "",
-            "prompt_token_ids": prompt_token_ids,
-            "multi_modal_data": None,
-        },
+        inputs=inputs,
         block_size=16,
+        from_decoder_prompt=False
     )
 
     return SequenceGroup(request_id=request_id,
