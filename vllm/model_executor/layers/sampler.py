@@ -91,6 +91,7 @@ class Sampler(nn.Module):
                 # TODO: Check with Cade if this is needed for spec tokens
                 self._init_sampling_tensors(logits, sampling_metadata)
 
+        assert self._sampling_tensors is not None
         sampling_tensors = self._sampling_tensors
         do_penalties = self._do_penalties
         do_top_p_top_k = self._do_top_p_top_k
