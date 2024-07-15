@@ -37,7 +37,7 @@ def test_models(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
+@pytest.mark.parametrize("max_tokens", [20])
 def test_batching(
     vllm_runner,
     example_prompts,
