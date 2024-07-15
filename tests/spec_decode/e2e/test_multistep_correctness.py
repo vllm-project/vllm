@@ -97,7 +97,7 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         temperature=temperature,
     )
 
-    batch_tokens, batch_token_ids = get_output_from_llm_generator(
+    batch_tokens, batch_token_ids, _ = get_output_from_llm_generator(
         test_llm_generator, prompts, sampling_params)
 
     # Expect a generation for each prompt in the batch.
@@ -151,7 +151,8 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
                                          test_llm_generator,
                                          batch_size,
                                          max_output_len=32,
-                                         force_output_len=True)
+                                         force_output_len=True,
+                                         encure_all_accepted=True)
 
 
 @pytest.mark.parametrize(
@@ -205,7 +206,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
                                          test_llm_generator,
                                          batch_size,
                                          max_output_len=output_len,
-                                         force_output_len=True)
+                                         force_output_len=True,
+                                         encure_all_accepted=True)
 
 
 @pytest.mark.parametrize(

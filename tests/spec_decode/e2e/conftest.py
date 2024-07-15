@@ -204,18 +204,23 @@ def maybe_assert_ngram_worker(llm):
 
 def get_output_from_llm_generator(
         llm_generator, prompts,
-        sampling_params) -> Tuple[List[str], List[List[int]]]:
+        sampling_params) -> Tuple[List[str], List[List[int]], float]:
     tokens: List[str] = []
     token_ids: List[List[int]] = []
+    acceptance_rate: float = -1.0
     for llm in llm_generator():
         maybe_assert_ngram_worker(llm)
 
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
+        stat_logger = llm.llm_engine.stat_loggers["prometheus"]
+        acceptance_rate = (
+            stat_logger.metrics.gauge_spec_decode_draft_acceptance_rate.labels(
+                **stat_logger.labels)._value.get())
         del llm
 
-    return tokens, token_ids
+    return tokens, token_ids, acceptance_rate
 
 
 def get_logprobs_from_llm_generator(
@@ -237,7 +242,8 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
                                          batch_size,
                                          max_output_len,
                                          force_output_len: bool,
-                                         print_tokens: bool = False):
+                                         print_tokens: bool = False,
+                                         encure_all_accepted: bool = False):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
@@ -267,12 +273,13 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         temperature=temperature,
     )
 
-    spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
-        test_llm_generator, prompts, sampling_params)
+    (spec_batch_tokens, spec_batch_token_ids,
+     acceptance_rate) = get_output_from_llm_generator(test_llm_generator,
+                                                      prompts, sampling_params)
 
-    (baseline_batch_tokens,
-     baseline_batch_token_ids) = get_output_from_llm_generator(
-         baseline_llm_generator, prompts, sampling_params)
+    (baseline_batch_tokens, baseline_batch_token_ids,
+     _) = get_output_from_llm_generator(baseline_llm_generator, prompts,
+                                        sampling_params)
 
     assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
@@ -287,3 +294,6 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         print(f'{i=} {baseline_token_ids=}')
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
+
+    if encure_all_accepted:
+        assert acceptance_rate == 1.0
