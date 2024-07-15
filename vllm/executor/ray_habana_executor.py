@@ -49,7 +49,7 @@ class RayHabanaExecutor(DistributedGPUExecutor):
         if (self.parallel_config.tensor_parallel_size == 1
                 and self.parallel_config.pipeline_parallel_size == 1):
             # For single GPU case, we use a ray worker with constrained memory.
-            num_gpus = self.cache_config.gpu_memory_utilization
+            num_gpus = 1
         else:
             # Otherwise, the ray workers are allocated with a full GPU.
             num_gpus = 1
