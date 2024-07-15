@@ -6,6 +6,8 @@ from vllm.utils import STR_XFORMERS_ATTN_VAL, is_cpu
 
 if not is_cpu():
     # CPU backend is not currently supported with encoder/decoder models
+    # skip test definitions entirely to avoid importing GPU kernel libs
+    # (xFormers, etc.)
 
     import pytest
 

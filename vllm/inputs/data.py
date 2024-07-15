@@ -3,6 +3,11 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 
 from typing_extensions import NotRequired
 
+from .utils import (has_required_keys, 
+                    is_str,
+                    is_dict,
+                    )
+
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
 
@@ -110,7 +115,38 @@ class TextTokensPrompt(TypedDict):
     """
 
 
-PromptStrictInputs = Union[str, TextPrompt, TokensPrompt]
+DecoderOnlyPromptInputs = Union[str, TextPrompt, TokensPrompt,
+                                TextTokensPrompt]
+StrictDecoderOnlyPromptInputs = Union[str, TextPrompt, TokensPrompt]
+
+
+class ExplicitEncoderDecoderPrompt(TypedDict):
+    """Represents an encoder/decoder model input prompt,
+    comprising an encoder prompt and a decoder prompt.
+
+    Only the encoder prompt may have multi-modal data.
+    """
+
+    encoder_prompt: DecoderOnlyPromptInputs
+
+    decoder_prompt: DecoderOnlyPromptInputs
+
+
+class ExplicitEncoderDecoderPromptStrict(TypedDict):
+    """Represents an encoder/decoder model input prompt,
+    comprising an encoder prompt and a decoder prompt.
+    Strictly forbid a prompt containing both text and
+    tokens.
+
+    Only the encoder prompt may have multi-modal data.
+    """
+
+    encoder_prompt: StrictDecoderOnlyPromptInputs
+
+    decoder_prompt: StrictDecoderOnlyPromptInputs
+
+PromptStrictInputs = Union[StrictDecoderOnlyPromptInputs,
+                           ExplicitEncoderDecoderPromptStrict]
 """
 The inputs to the LLM, which can take one of the following forms:
 
@@ -118,10 +154,39 @@ The inputs to the LLM, which can take one of the following forms:
 - A tokenized prompt (:class:`TokensPrompt`)
 """
 
-PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
+PromptInputs = Union[DecoderOnlyPromptInputs, 
+                     ExplicitEncoderDecoderPrompt]
 """Same as :const:`PromptStrictInputs` but additionally accepts
 :class:`TextTokensPrompt`."""
 
+AllPromptInputs = Union[PromptInputs,
+                        ExplicitEncoderDecoderPromptStrict]
+"""All possible input prompt options, strict or non-strict"""
+
+def get_single_prompt_type(prompt: AllPromptInputs):
+    required_keys_dict = {
+        'TextPrompt': ['prompt'],
+        'TokensPrompt': ['prompt_token_ids'],
+        'TextTokensPrompt': ['prompt','prompt_token_ids'],
+        'ExplicitEncoderDecoder': ['encoder_prompt','decoder_prompt'],
+    }
+
+    if is_dict(prompt):
+        for ptype in required_keys_dict:
+            if has_required_keys(prompt,required_keys_dict[ptype]):
+                return ptype
+            
+        raise ValueError(f"Invalid prompt {prompt}, valid types are "
+                         "required_keys_dict={required_keys_dict}")
+    elif is_str(prompt):
+        return "str"
+
+    raise ValueError(f"Invalid prompt {prompt}")
+
+def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs):
+
+
+    return True
 
 class LLMInputs(TypedDict):
     """
@@ -134,6 +199,15 @@ class LLMInputs(TypedDict):
     prompt: NotRequired[Optional[str]]
     """
     The original prompt text corresponding to the token IDs, if available.
+    """
+
+    encoder_prompt_token_ids: NotRequired[Optional[List[int]]]
+    """The token IDs of the encoder prompt."""
+
+    encoder_prompt: NotRequired[Optional[str]]
+    """
+    The original encoder prompt text corresponding to the token IDs, if
+    available.
     """
 
     multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
