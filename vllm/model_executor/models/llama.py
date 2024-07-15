@@ -44,10 +44,10 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, remap_kv_scale_name)
+    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import is_hip, print_warning_once
+from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
@@ -460,11 +460,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Remapping the name of FP8 kv-scale.
-                remapped_name = remap_kv_scale_name(name, params_dict)
-                if remapped_name is None:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
                     continue
-                else:
-                    name = remapped_name
 
                 if is_pp_missing_parameter(name, self):
                     continue

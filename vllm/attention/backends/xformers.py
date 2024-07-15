@@ -532,8 +532,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                                     value_cache,
                                                     updated_slot_mapping,
                                                     self.kv_cache_dtype,
-                                                    key_scale,
-                                                    value_scale)
+                                                    key_scale, value_scale)
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.

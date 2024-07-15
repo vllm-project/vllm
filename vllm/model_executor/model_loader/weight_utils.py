@@ -465,7 +465,7 @@ def initialize_dummy_weights(
                 param.uniform_(low, high)
 
 
-def remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
+def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
     """Remap the name of FP8 kv-scale parameters.
 
     This function handles the remapping of FP8 kv-scale parameter names.

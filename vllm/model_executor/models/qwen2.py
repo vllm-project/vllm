@@ -44,10 +44,9 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, remap_kv_scale_name)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
 
@@ -383,11 +382,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Remapping the name of FP8 kv-scale.
-                remapped_name = remap_kv_scale_name(name, params_dict)
-                if remapped_name is None:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
                     continue
-                else:
-                    name = remapped_name
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
