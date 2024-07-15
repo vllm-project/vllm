@@ -482,11 +482,13 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
              if no remapping is needed.
         None: If the remapped name is not found in params_dict.
     """
-    if name.endswith("kv_scale"):
+    if name.endswith(".kv_scale"):
         print_warning_once(
-            f"Found kv_scale in the checkpoint (e.g. {name}). This format "
-            "is deprecated in favor of separate key_scale and value_scale "
-            "tensors and will be removed in a future release.")
+            f"DEPRECATED. Found kv_scale in the checkpoint (e.g. {name}). "
+            "This format is deprecated in favor of separate k_scale and "
+            "v_scale tensors and will be removed in a future release. "
+            "Functionally for now, we will remap kv_scale to k_scale and "
+            "duplicate k_scale to v_scale")
         remapped_scale_name = name.replace(".kv_scale", ".attn.kv_scale")
         if remapped_scale_name not in params_dict:
             print_warning_once(
@@ -496,23 +498,23 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
                 "not loaded.")
             return None
         return remapped_scale_name
-    elif name.endswith("key_scale"):
-        remapped_scale_name = name.replace(".key_scale", ".attn.key_scale")
+    elif name.endswith(".k_scale"):
+        remapped_scale_name = name.replace(".k_scale", ".attn.k_scale")
         if remapped_scale_name not in params_dict:
             print_warning_once(
-                f"Found key_scale in the checkpoint (e.g. {name}), "
+                f"Found k_scale in the checkpoint (e.g. {name}), "
                 "but not found the expected name in the model "
-                f"(e.g. {remapped_scale_name}). key_scale is "
+                f"(e.g. {remapped_scale_name}). k_scale is "
                 "not loaded.")
             return None
         return remapped_scale_name
-    elif name.endswith("value_scale"):
-        remapped_scale_name = name.replace(".value_scale", ".attn.value_scale")
+    elif name.endswith(".v_scale"):
+        remapped_scale_name = name.replace(".v_scale", ".attn.v_scale")
         if remapped_scale_name not in params_dict:
             print_warning_once(
-                f"Found value_scale in the checkpoint (e.g. {name}), "
+                f"Found v_scale in the checkpoint (e.g. {name}), "
                 "but not found the expected name in the model "
-                f"(e.g. {remapped_scale_name}). value_scale is "
+                f"(e.g. {remapped_scale_name}). v_scale is "
                 "not loaded.")
             return None
         return remapped_scale_name
