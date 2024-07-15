@@ -122,6 +122,6 @@ If you are running api server with :code:`vllm serve <args>`, you can wrap the e
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
     import runpy
-    runpy.run_module('vllm serve', run_name='__main__')
+    runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
 
-Save the above code in a file and run it with `python your_file.py args`.
+Save the above code in a file and run it with :code:`python your_file.py args`.
