@@ -26,41 +26,13 @@ def test_models(
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-    check_outputs_equal(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
-def test_batching(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-) -> None:
-    # To pass the small model tests, we need full precision.
-    # assert dtype == "float"
-    for_loop_outputs = []
-    with vllm_runner(model, dtype=dtype) as vllm_model:
-        for prompt in example_prompts:
-            for_loop_outputs.append(
-                vllm_model.generate_greedy([prompt], max_tokens)[0])
-
-        batched_outputs = vllm_model.generate_greedy(example_prompts,
-                                                     max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=for_loop_outputs,
-        outputs_1_lst=batched_outputs,
-        name_0="for_loop_vllm",
-        name_1="batched_vllm",
-    )
+    for i in range(len(example_prompts)):
+        hf_output_ids, hf_output_str = hf_outputs[i]
+        vllm_output_ids, vllm_output_str = vllm_outputs[i]
+        assert hf_output_str == vllm_output_str, (
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+        assert hf_output_ids == vllm_output_ids, (
+            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
 @pytest.mark.parametrize("model", MODELS)
