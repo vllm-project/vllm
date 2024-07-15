@@ -22,7 +22,12 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import INPUT_REGISTRY, LLMInputs, PromptInputs
+from vllm.inputs import (INPUT_REGISTRY, 
+                         LLMInputs, 
+                         PromptInputs, 
+                         get_single_prompt_type, 
+                         is_valid_encoder_decoder_prompt,
+                         )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
@@ -552,24 +557,33 @@ class LLMEngine:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 
-        if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
+        if self.is_encoder_decoder_model():
+            # Encoder-decoder model requires special mapping of
+            # input prompts to encoder & decoder
 
-            prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                                prompt=inputs["prompt"],
-                                                lora_request=lora_request)
+            ptype = get_single_prompt_type(inputs)
+
         else:
-            prompt_token_ids = inputs["prompt_token_ids"]
+            # Decoder-only operation
 
-        if prompt_adapter_request:
-            prompt_token_ids = \
-                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
-                         + prompt_token_ids
+            if "prompt_token_ids" not in inputs:
+                tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                                     "skip_tokenizer_init is True")
 
-        llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
-                               prompt=inputs.get("prompt"),
-                               multi_modal_data=inputs.get("multi_modal_data"))
+                prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                    prompt=inputs["prompt"],
+                                                    lora_request=lora_request)
+            else:
+                prompt_token_ids = inputs["prompt_token_ids"]
+
+            if prompt_adapter_request:
+                prompt_token_ids = \
+                    [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
+                            + prompt_token_ids
+
+            llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
+                                prompt=inputs.get("prompt"),
+                                multi_modal_data=inputs.get("multi_modal_data"))
 
         return self.input_processor(llm_inputs)
 
