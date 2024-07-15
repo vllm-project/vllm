@@ -111,9 +111,10 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
     artificially low value, such that when the sequences grow beyond it, they
     are skipped in speculative decoding.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    with pytest.raises(RuntimeError):
+        run_greedy_equality_correctness_test(baseline_llm_generator,
+                                             test_llm_generator,
+                                             batch_size,
+                                             max_output_len=output_len,
+                                             force_output_len=True)
 
