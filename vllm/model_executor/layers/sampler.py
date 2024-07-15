@@ -85,11 +85,10 @@ class Sampler(nn.Module):
         # Prepare sampling tensors with pinned memory to avoid blocking.
         if not sampling_metadata.reuse_sampling_tensors:
             self._init_sampling_tensors(logits, sampling_metadata)
-        else:
-            if self._do_penalties:
-                # In this case, we depend on the output tokens
-                # TODO: Check with Cade if this is needed for spec tokens
-                self._init_sampling_tensors(logits, sampling_metadata)
+        elif self._do_penalties:
+            # In this case, we depend on the output tokens
+            # TODO: Check with Cade if this is needed for spec tokens
+            self._init_sampling_tensors(logits, sampling_metadata)
 
         assert self._sampling_tensors is not None
         sampling_tensors = self._sampling_tensors

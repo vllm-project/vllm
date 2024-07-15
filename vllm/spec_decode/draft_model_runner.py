@@ -173,21 +173,28 @@ class TP1DraftModelRunner(ModelRunner):
         new_model_input.sampling_metadata.reuse_sampling_tensors = True
 
         if debug_advance_input:
-            print("NEW INPUT: ")
-            print("  input_tokens = {}".format(new_model_input.input_tokens))
-            print("  input_positions = {}".format(
-                new_model_input.input_positions))
-            print("  seq_lens = {}".format(new_model_input.seq_lens))
-            print("  query_lens = {}".format(new_model_input.query_lens))
-            print("  attn_metadata:")
-            print("    seq_lens_tensor: {}".format(
-                attn_metadata.seq_lens_tensor))
-            print("    slot_mapping: {}".format(attn_metadata.slot_mapping))
-            print("    block_tables: {}".format(attn_metadata.block_tables))
+            logger.debug("NEW INPUT: ")
+            logger.debug("  input_tokens = %s", new_model_input.input_tokens)
+            logger.debug("  input_positions = %s",
+                         new_model_input.input_positions)
+            logger.debug("  seq_lens = %d", new_model_input.seq_lens)
+            logger.debug("  query_lens = %d", new_model_input.query_lens)
+            logger.debug("  attn_metadata:")
+            logger.debug("    seq_lens_tensor: %s",
+                         attn_metadata.seq_lens_tensor)
+            logger.debug("    slot_mapping: %s", attn_metadata.slot_mapping)
+            logger.debug("    block_tables: %s", attn_metadata.block_tables)
 
         return new_model_input
 
     def supports_gpu_multi_step(self, execute_model_req: ExecuteModelRequest):
+        """Determines if draft_model_runner GPU multi-step can be used.
+        Currently required conditions are:
+            1. Only decodes 
+            2. Only flash-attn
+            3. No LORA
+            4. No prompt_adapter_config
+        """
         if not enable_gpu_advance_step:
             return False
 
@@ -204,7 +211,7 @@ class TP1DraftModelRunner(ModelRunner):
         if self.lora_config:
             return False
 
-        # TODO: Ask Cade/Cody what is this
+        # TODO: Add if required
         if self.prompt_adapter_config:
             return False
 
@@ -218,6 +225,16 @@ class TP1DraftModelRunner(ModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
+        """Executes num_steps forward passes with advacement of input tensors 
+        on the GPU. Look at supports_gpu_multi_step(..) for pre-conditions.
+
+        Optimizations used:
+            1. Input tensors are updated on the GPU directly
+            2. Skips GPU=>CPU serialization of sampler outputs (we don't need 
+                them since we do batch expansion later that uses GPU outputs)
+            3. Reuses sampling tensors (since we run only decodes and they have
+                a repeating sampling logic)
+        """
         # Since we do not broadcast data inside execute_model anymore,
         # we need to figure out the best way to support TP > 1 in this
         # case, because we will at least need to broadcast the sampled

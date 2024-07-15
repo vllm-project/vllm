@@ -166,7 +166,7 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
-# prepare_inputs
+# Advance a step on GPU for existing inputs for a multi-step runner.
 def advance_step(num_seqs: int, num_queries: int, block_size: int,
                  input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
                  input_positions: torch.Tensor, seq_lens: torch.Tensor,
