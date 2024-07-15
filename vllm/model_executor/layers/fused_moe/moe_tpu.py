@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-import torch_xla.core.xla_model as xm
 from torch_xla.experimental.custom_kernel import _histogram
 
 
