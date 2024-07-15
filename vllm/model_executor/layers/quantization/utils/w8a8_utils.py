@@ -112,7 +112,7 @@ def apply_fp8_linear(
     #   If dynamic, layer.input_scale is None and x_scale computed from x.
     #   If static, layer.input_scale is scalar and x_scale is input_scale.
 
-    if bias is None and cutlass_fp8_supported:
+    if cutlass_fp8_supported:
         qinput, x_scale = ops.scaled_fp8_quant(input, input_scale)
 
         # Fused GEMM_DQ
@@ -120,7 +120,8 @@ def apply_fp8_linear(
                                        weight,
                                        out_dtype=input.dtype,
                                        scale_a=x_scale,
-                                       scale_b=weight_scale)
+                                       scale_b=weight_scale,
+                                       bias=bias)
 
     else:
         qinput, x_scale = ops.scaled_fp8_quant(input,
