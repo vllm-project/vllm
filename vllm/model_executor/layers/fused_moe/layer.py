@@ -116,7 +116,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         num_expert_group: Optional[int],
         topk_group: Optional[int],
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.moe_tpu import fused_moe
+        from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe
         assert not use_grouped_topk
         assert num_expert_group is None
         assert topk_group is None
