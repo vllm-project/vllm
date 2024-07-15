@@ -206,6 +206,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "FLASH_ATTN": use FlashAttention
     # - "XFORMERS": use XFormers
     # - "ROCM_FLASH": use ROCmFlashAttention
+    # - "FLASHINFER": use flashinfer
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
