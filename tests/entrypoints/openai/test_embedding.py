@@ -11,9 +11,7 @@ EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
 @pytest.fixture(scope="module")
 def embedding_server():
-    with RemoteOpenAIServer([
-            "--model",
-            EMBEDDING_MODEL_NAME,
+    with RemoteOpenAIServer(EMBEDDING_MODEL_NAME, [
             # use half precision for speed and memory savings in CI environment
             "--dtype",
             "bfloat16",

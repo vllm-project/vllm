@@ -9,9 +9,7 @@ MODEL_NAME = "facebook/opt-125m"
 
 @pytest.fixture(scope="module")
 def server():
-    with RemoteOpenAIServer([
-            "--model",
-            MODEL_NAME,
+    with RemoteOpenAIServer(MODEL_NAME, [
             # use half precision for speed and memory savings in CI environment
             "--dtype",
             "float16",

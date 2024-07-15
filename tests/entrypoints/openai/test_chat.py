@@ -27,9 +27,7 @@ def zephyr_lora_files():
 
 @pytest.fixture(scope="module")
 def server(zephyr_lora_files):
-    with RemoteOpenAIServer([
-            "--model",
-            MODEL_NAME,
+    with RemoteOpenAIServer(MODEL_NAME, [
             # use half precision for speed and memory savings in CI environment
             "--dtype",
             "bfloat16",

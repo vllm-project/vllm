@@ -23,9 +23,7 @@ TEST_IMAGE_URLS = [
 
 @pytest.fixture(scope="module")
 def server():
-    with RemoteOpenAIServer([
-            "--model",
-            MODEL_NAME,
+    with RemoteOpenAIServer(MODEL_NAME, [
             "--dtype",
             "bfloat16",
             "--max-model-len",

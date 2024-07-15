@@ -73,15 +73,13 @@ Start the server:
 
 .. code-block:: console
 
-    $ vllm serve --model facebook/opt-125m
+    $ vllm serve facebook/opt-125m
 
 By default, the server uses a predefined chat template stored in the tokenizer. You can override this template by using the ``--chat-template`` argument:
 
 .. code-block:: console
 
-    $ vllm serve \
-    $     --model facebook/opt-125m \
-    $     --chat-template ./examples/template_chatml.jinja
+    $ vllm serve facebook/opt-125m --chat-template ./examples/template_chatml.jinja
 
 This server can be queried in the same format as OpenAI API. For example, list the models:
 

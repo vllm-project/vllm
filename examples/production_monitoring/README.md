@@ -10,8 +10,7 @@ Install:
 
 Prometheus metric logging is enabled by default in the OpenAI-compatible server. Launch via the entrypoint:
 ```bash
-vllm serve \
-    --model mistralai/Mistral-7B-v0.1 \
+vllm serve mistralai/Mistral-7B-v0.1 \
     --max-model-len 2048 \
     --disable-log-requests
 ```
