@@ -28,7 +28,7 @@ def server_function(port):
         ("--model facebook/opt-125m --gpu-memory-utilization 0.10 "
         f"--dtype float32 --api-key token-abc123 --port {port}").split()
     import runpy
-    runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
+    runpy.run_module('vllm serve', run_name='__main__')
 
 
 def test_oot_registration_for_api_server():

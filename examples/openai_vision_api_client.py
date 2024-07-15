@@ -1,7 +1,7 @@
 """An example showing how to use vLLM to serve VLMs.
 
 Launch the vLLM server with the following command:
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model llava-hf/llava-1.5-7b-hf \
     --chat-template template_llava.jinja
 """

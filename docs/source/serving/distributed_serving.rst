@@ -19,7 +19,7 @@ To run multi-GPU serving, pass in the :code:`--tensor-parallel-size` argument wh
 
 .. code-block:: console
 
-    $ python -m vllm.entrypoints.openai.api_server \
+    $ vllm serve \
     $     --model facebook/opt-13b \
     $     --tensor-parallel-size 4
 
@@ -27,7 +27,7 @@ You can also additionally specify :code:`--pipeline-parallel-size` to enable pip
 
 .. code-block:: console
 
-    $ python -m vllm.entrypoints.openai.api_server \
+    $ vllm serve \
     $     --model gpt2 \
     $     --tensor-parallel-size 4 \
     $     --pipeline-parallel-size 2 \

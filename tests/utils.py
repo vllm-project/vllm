@@ -69,8 +69,7 @@ class RemoteOpenAIServer:
         # to be safe, we should use spawn method
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] +
-            cli_args,
+            ["vllm", "serve"] + cli_args,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr)

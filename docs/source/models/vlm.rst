@@ -94,7 +94,7 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
 .. code-block:: bash
 
-    python -m vllm.entrypoints.openai.api_server \
+    vllm serve \
         --model llava-hf/llava-1.5-7b-hf \
         --chat-template template_llava.jinja
 

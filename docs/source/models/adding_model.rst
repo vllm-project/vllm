@@ -114,7 +114,7 @@ Just add the following lines in your code:
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
 
-If you are running api server with `python -m vllm.entrypoints.openai.api_server args`, you can wrap the entrypoint with the following code:
+If you are running api server with :code:`vllm serve <args>`, you can wrap the entrypoint with the following code:
 
 .. code-block:: python
 
@@ -122,6 +122,6 @@ If you are running api server with `python -m vllm.entrypoints.openai.api_server
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
     import runpy
-    runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
+    runpy.run_module('vllm serve', run_name='__main__')
 
 Save the above code in a file and run it with `python your_file.py args`.
