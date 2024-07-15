@@ -34,6 +34,7 @@ def test_models(
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
