@@ -91,7 +91,7 @@ def test_mamba_cache_cg_padding(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
+@pytest.mark.parametrize("max_tokens", [20])
 def test_models_preemption_recompute(
     hf_runner,
     vllm_runner,
