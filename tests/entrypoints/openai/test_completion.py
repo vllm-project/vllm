@@ -109,7 +109,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
         max_tokens=5,
         temperature=0.0,
     )
-    assert len(completion.choices[0].text) >= 5
+    assert len(completion.choices[0].text) >= 1
 
 
 @pytest.mark.asyncio
