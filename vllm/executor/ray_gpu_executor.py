@@ -38,7 +38,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
          # Get the model config for the only attn in SP from the input model config.
-        if (self.parallel_config.sequence_parallel_size > 0):
+        if (self.parallel_config.sequence_parallel_size > 1):
             self.only_attn_model_config = copy.deepcopy(self.model_config)
             self.only_attn_model_config.model = "only_attn"
 
@@ -62,8 +62,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
          # Get the final model config.
         if rank < self.parallel_config.tensor_parallel_size * self.parallel_config.pipeline_parallel_size:
             model_config = self.model_config
+            is_sp_worker = False
         else:
             model_config = self.only_attn_model_config
+            is_sp_worker = True
 
         return dict(
             model_config=model_config,
@@ -79,6 +81,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             vision_language_config=self.vision_language_config,
             speculative_config=self.speculative_config,
             is_driver_worker=rank == 0,
+            is_sp_worker = is_sp_worker
         )        
 
     def _configure_ray_workers_use_nsight(self,

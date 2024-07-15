@@ -41,6 +41,12 @@ class PagedAttention:
         head_size: int,
     ) -> Tuple[int, ...]:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
+    
+    @staticmethod
+    def get_blocks(kv_cache: torch.Tensor, 
+                   start: int,
+                   step: int) -> torch.Tensor:
+        return kv_cache[:, start:start+step]
 
     @staticmethod
     def split_kv_cache(
@@ -237,3 +243,7 @@ class PagedAttention:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
+
+        
+    def get_blocks(self, layer: int, start: int, step: int) -> torch.Tensor:
+        self.attn_backend.get_blocks(self.gpu_cache[i], start, step)
