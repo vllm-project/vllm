@@ -214,12 +214,18 @@ class CLIPEncoder(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
         self.config = config
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
         self.layers = nn.ModuleList([
             CLIPEncoderLayer(config=config, quant_config=quant_config)
-            for _ in range(config.num_hidden_layers)
+            for _ in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):
@@ -235,7 +241,8 @@ class CLIPVisionTransformer(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
@@ -245,7 +252,10 @@ class CLIPVisionTransformer(nn.Module):
         # NOTE: This typo of "layrnorm" is not fixed on purpose to match
         # the original transformers code and name of the model weights.
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.encoder = CLIPEncoder(config=config, quant_config=quant_config)
+        self.encoder = CLIPEncoder(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override)
 
     def forward(
         self,
@@ -269,10 +279,10 @@ class CLIPVisionModel(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  num_hidden_layers_override: Optional[int] = None):
         super().__init__()
-        if num_hidden_layers_override is not None:
-            config.num_hidden_layers = num_hidden_layers_override
-        self.vision_model = CLIPVisionTransformer(config=config,
-                                                  quant_config=quant_config)
+        self.vision_model = CLIPVisionTransformer(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override)
 
     def forward(self, pixel_values: Optional[torch.Tensor] = None):
 
