@@ -8,7 +8,8 @@ from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Set,
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
@@ -44,6 +45,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
+        prompt_adapter_config: Optional[PromptAdapterConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         assert device_config.device_type == "xpu"
@@ -58,6 +60,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.multimodal_config = multimodal_config
+        self.prompt_adapter_config = prompt_adapter_config
 
         placement_group = self.parallel_config.placement_group
 
