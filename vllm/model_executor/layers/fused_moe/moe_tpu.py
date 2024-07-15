@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from torch_xla.experimental.custom_kernel import _histogram
 
 
-@torch.compile(backend="openxla")
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
