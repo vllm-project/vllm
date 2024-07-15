@@ -109,7 +109,7 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 
 ```{argparse}
 :module: vllm.entrypoints.openai.cli_args
-:func: make_arg_parser
+:func: create_parser_for_docs
 :prog: -m vllm.entrypoints.openai.api_server
 ```
 
