@@ -228,7 +228,7 @@ class LLMInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    encoder_prompt_token_ids: NotRequired[Optional[List[int]]]
+    encoder_prompt_token_ids: NotRequired[List[int]]
     """The token IDs of the encoder prompt."""
 
     encoder_prompt: NotRequired[Optional[str]]
@@ -242,3 +242,17 @@ class LLMInputs(TypedDict):
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
+
+def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs, ) -> bool:
+    """
+    Return True if the LLMInputs instance has the correct configuration
+    for encoder/decoder.
+    """
+
+    if ('encoder_prompt_token_ids' in inputs and 
+        inputs['encoder_prompt_token_ids'] is not None):
+        # Encoder prompt token ids field exists &
+        # is not None
+        return True
+    
+    return False
