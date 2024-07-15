@@ -53,23 +53,19 @@ def create_dummy_prompt_encoder_decoder(
         block_size = decoder_prompt_length
 
     # Create dummy prompt sequence with tokens 0...block_size-1
-    # and prompt "0 ... block_size".
+    # and prompt "0 ... block_size". Note that the prompt string
+    # doesn't actually match the tokens
     decoder_prompt_tokens = list(range(decoder_prompt_length))
     decoder_prompt_str = " ".join([str(t) for t in decoder_prompt_tokens])
     encoder_prompt_tokens = list(reversed(list(range(encoder_prompt_length))))
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
 
     inputs={
-        "encoder_prompt": {
-            "prompt": encoder_prompt_str,
-            "prompt_token_ids": encoder_prompt_tokens,
-            "multi_modal_data": None,
-        },
-        "decoder_prompt": {
-            "prompt": decoder_prompt_str,
-            "prompt_token_ids": decoder_prompt_tokens,
-            "multi_modal_data": None,
-        }
+        "prompt": decoder_prompt_str,
+        "prompt_token_ids": decoder_prompt_tokens,
+        "encoder_prompt": encoder_prompt_str,
+        "encoder_prompt_token_ids": encoder_prompt_tokens,
+        "multi_modal_data": None,
     }
 
     decoder_prompt = Sequence(int(request_id),
@@ -146,17 +142,12 @@ def create_seq_group_encoder_decoder(
 
     prompt_token_ids = [0] * seq_prompt_len
 
-    inputs = {
-        "encoder_prompt": {
-            "prompt": "",
-            "prompt_token_ids": prompt_token_ids,
-            "multi_modal_data": None,
-        },
-        "decoder_prompt": {
-            "prompt": "",
-            "prompt_token_ids": prompt_token_ids,
-            "multi_modal_data": None,
-        }
+    inputs={
+        "prompt": "",
+        "prompt_token_ids": prompt_token_ids,
+        "encoder_prompt": "",
+        "encoder_prompt_token_ids": prompt_token_ids,
+        "multi_modal_data": None,
     }
 
     seqs = []
