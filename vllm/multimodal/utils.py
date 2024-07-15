@@ -36,7 +36,7 @@ def _load_image_from_data_url(image_url: str):
 
 
 def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
-    """Load PIL image from a url or base64 encoded openai GPT4V format"""
+    """Load PIL image from a HTTP or base64 data URL."""
     if image_url.startswith('http'):
         _validate_remote_url(image_url, name="image_url")
 
@@ -71,7 +71,7 @@ class ImageFetchAiohttp:
 
     @classmethod
     async def fetch_image(cls, image_url: str) -> Image.Image:
-        """Load PIL image from a url or base64 encoded openai GPT4V format"""
+        """Load PIL image from a HTTP or base64 data URL."""
 
         if image_url.startswith('http'):
             _validate_remote_url(image_url, name="image_url")
