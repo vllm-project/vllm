@@ -134,7 +134,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         return output
 
     def get_output_embeddings(self):
-        return self.language_model.get_output_embeddings()
+        return None
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
