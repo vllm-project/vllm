@@ -7,7 +7,7 @@ from tests.kernels.utils import override_backend_env_variable
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import (STR_XFORMERS_ATTN_VAL, is_cpu)
+from vllm.utils import STR_XFORMERS_ATTN_VAL, is_cpu
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 
 # Backends under test
@@ -38,9 +38,11 @@ def _create_model_runner(model: str, *args,
     )
     return model_runner
 
-@pytest.mark.skipif(condition=is_cpu(),reason="CPU backend is currently "
-                                              "unsupported for encoder/ "
-                                              "decoder models")
+
+@pytest.mark.skipif(condition=is_cpu(),
+                    reason="CPU backend is currently "
+                    "unsupported for encoder/ "
+                    "decoder models")
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
 def test_empty_seq_group(backend_name, enforce_eager, monkeypatch):
@@ -104,9 +106,11 @@ def test_empty_seq_group(backend_name, enforce_eager, monkeypatch):
     assert attn_metadata is None
     assert return_seq_lens is None
 
-@pytest.mark.skipif(condition=is_cpu(),reason="CPU backend is currently "
-                                              "unsupported for encoder/ "
-                                              "decoder models")
+
+@pytest.mark.skipif(condition=is_cpu(),
+                    reason="CPU backend is currently "
+                    "unsupported for encoder/ "
+                    "decoder models")
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
@@ -293,9 +297,11 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
 
-@pytest.mark.skipif(condition=is_cpu(),reason="CPU backend is currently "
-                                              "unsupported for encoder/ "
-                                              "decoder models")
+
+@pytest.mark.skipif(condition=is_cpu(),
+                    reason="CPU backend is currently "
+                    "unsupported for encoder/ "
+                    "decoder models")
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
