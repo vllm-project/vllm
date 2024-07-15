@@ -36,7 +36,11 @@ def _load_image_from_data_url(image_url: str):
 
 
 def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
-    """Load PIL image from a HTTP or base64 data URL."""
+    """
+    Load a PIL image from a HTTP or base64 data URL.
+
+    By default, the image is converted into RGB format.
+    """
     if image_url.startswith('http'):
         _validate_remote_url(image_url, name="image_url")
 
@@ -71,7 +75,11 @@ class ImageFetchAiohttp:
 
     @classmethod
     async def fetch_image(cls, image_url: str) -> Image.Image:
-        """Load PIL image from a HTTP or base64 data URL."""
+        """
+        Asynchronously load a PIL image from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
 
         if image_url.startswith('http'):
             _validate_remote_url(image_url, name="image_url")
@@ -105,7 +113,11 @@ def encode_image_base64(
     image_mode: str = "RGB",
     format: str = "JPEG",
 ) -> str:
-    """Encode a pillow image to base64 format."""
+    """
+    Encode a pillow image to base64 format.
+
+    By default, the image is converted into RGB format before being encoded.
+    """
     buffered = BytesIO()
     image = image.convert(image_mode)
     image.save(buffered, format)
