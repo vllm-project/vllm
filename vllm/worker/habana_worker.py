@@ -11,8 +11,9 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, MultiModalConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.lora.request import LoRARequest
@@ -45,7 +46,7 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
-        speculative_config: Optional[SpeculativeConfig] = None, 
+        speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
