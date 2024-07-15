@@ -9,7 +9,7 @@ import torch
 
 import vllm.hpu.ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -172,6 +172,7 @@ class HabanaAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: HabanaAttentionMetadata,
         kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 

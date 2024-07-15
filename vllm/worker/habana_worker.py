@@ -77,8 +77,7 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             multimodal_config=self.multimodal_config,
-            is_driver_worker=is_driver_worker
-        )
+            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
