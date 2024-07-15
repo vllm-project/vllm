@@ -74,7 +74,12 @@ class ImageFetchAiohttp:
         return cls.aiohttp_client
 
     @classmethod
-    async def fetch_image(cls, image_url: str) -> Image.Image:
+    async def fetch_image(
+        cls,
+        image_url: str,
+        *,
+        image_mode: str = "RGB",
+    ) -> Image.Image:
         """
         Asynchronously load a PIL image from a HTTP or base64 data URL.
 
@@ -99,7 +104,7 @@ class ImageFetchAiohttp:
                 "Invalid 'image_url': A valid 'image_url' must start "
                 "with either 'data:image' or 'http'.")
 
-        return image
+        return image.convert(image_mode)
 
 
 async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
