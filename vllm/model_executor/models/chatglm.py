@@ -8,7 +8,6 @@ from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 import torch
 from torch import nn
 from torch.nn import LayerNorm
-from PIL import Image
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
