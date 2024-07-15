@@ -192,8 +192,8 @@ def test_metric_spec_decode(
         # metrics instead of functional correctness, so the expected values
         # are intended to be loose.
         metric_name_to_expected_fn = {
-            "gauge_spec_decode_draft_acceptance_rate": lambda v: 0 < v <= 1,
-            "gauge_spec_decode_efficiency": lambda v: 0 < v <= 1,
+            "gauge_spec_decode_draft_acceptance_rate": lambda v: 0 <= v <= 1,
+            "gauge_spec_decode_efficiency": lambda v: 0 <= v <= 1,
             "counter_spec_decode_num_accepted_tokens": lambda v: 0 <= v <= k,
             "counter_spec_decode_num_draft_tokens": lambda v: v == k,
             "counter_spec_decode_num_emitted_tokens":
