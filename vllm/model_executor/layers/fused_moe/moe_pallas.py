@@ -43,7 +43,7 @@ def fused_moe(
     group_sizes = _histogram(topk_indices.to(torch.int32), 0, num_experts - 1)
 
     # NOTE(woosuk): The GMM Pallas kernel requires a different weight layout
-    # from HF Transformers. 
+    # from HF Transformers.
     w1 = w1.transpose(1, 2)
     w2 = w2.transpose(1, 2)
 
