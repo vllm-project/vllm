@@ -1,6 +1,6 @@
 import pytest
 
-from tests.models.utils import check_logprobs_close, check_outputs_equal
+from tests.models.utils import check_outputs_equal
 from vllm.worker.model_runner import _get_graph_batch_size
 
 MODELS = ["ai21labs/Jamba-tiny-random"]
@@ -50,10 +50,10 @@ def test_batching(
     with vllm_runner(model, dtype=dtype) as vllm_model:
         for prompt in example_prompts:
             for_loop_outputs.append(
-                vllm_model.generate_greedy([prompt], max_tokens)[0]
-            )
+                vllm_model.generate_greedy([prompt], max_tokens)[0])
 
-        batched_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        batched_outputs = vllm_model.generate_greedy(example_prompts,
+                                                     max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=for_loop_outputs,
@@ -61,7 +61,6 @@ def test_batching(
         name_0="for_loop_vllm",
         name_1="batched_vllm",
     )
-
 
 
 @pytest.mark.parametrize("model", MODELS)

@@ -160,15 +160,16 @@ class HasInnerState(Protocol):
                  scheduler_config: Optional[SchedulerConfig] = None) -> None:
         ...
 
+
 @runtime_checkable
 class _HasInnerStateType(Protocol):
     has_inner_state: ClassVar[Literal[True]]
-
 
     def __init__(self,
                  *,
                  scheduler_config: Optional[SchedulerConfig] = None) -> None:
         ...
+
 
 @overload
 def has_inner_state(model: object) -> TypeGuard[HasInnerState]:
@@ -187,4 +188,3 @@ def has_inner_state(
         return isinstance(model, _HasInnerStateType)
 
     return isinstance(model, HasInnerState)
-
