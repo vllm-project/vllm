@@ -185,6 +185,11 @@ class HabanaAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "HabanaAttentionImpl")
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 
