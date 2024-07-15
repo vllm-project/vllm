@@ -11,7 +11,8 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+from vllm.utils import (error_on_invalid_device_count_status,
+                        get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
 if ray is not None:
@@ -62,7 +63,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        if self.parallel_config.tensor_parallel_size == 1:
+        if (self.parallel_config.tensor_parallel_size == 1
+                and self.parallel_config.pipeline_parallel_size == 1):
             # For single GPU case, we use a ray worker with constrained memory.
             num_gpus = self.cache_config.gpu_memory_utilization
         else:
@@ -132,11 +134,32 @@ class RayGPUExecutor(DistributedGPUExecutor):
         worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
                                                     use_dummy_driver=True)
 
-        node_workers = defaultdict(list)
-        node_gpus = defaultdict(list)
+        # the order in `worker_node_and_gpu_ids` does not necessarily match
+        # the machine boundaries. We need to make sure that workers in the
+        # same node are assigned consecutive ranks.
+        # examples:
+        # [('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [0]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [0]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [1]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [2]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [3]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [1]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [2]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [3])] # noqa
 
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
-            node_workers[node_id].append(i)
+        # initialize worker ranks with -1 (unassigned)
+        worker_ranks = [-1 for x in worker_node_and_gpu_ids]
+        current_rank = 0
+        while -1 in worker_ranks:
+            # whenever we find an unassigned worker, find the node
+            index = worker_ranks.index(-1)
+            current_node_id = worker_node_and_gpu_ids[index][0]
+            # assign ranks to all workers in the same node
+            for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+                if node_id == current_node_id:
+                    worker_ranks[i] = current_rank
+                    current_rank += 1
+        # with the above example, worker_ranks will be [0, 4, 5, 6, 7, 1, 2, 3]
+
+        node_workers = defaultdict(list)  # node id -> list of worker ranks
+        node_gpus = defaultdict(list)  # node id -> list of gpu ids
+
+        for worker_rank, (node_id, gpu_ids) in zip(worker_ranks,
+                                                   worker_node_and_gpu_ids):
+            node_workers[node_id].append(worker_rank)
             # `gpu_ids` can be a list of strings or integers.
             # convert them to integers for consistency.
             # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
@@ -174,13 +197,16 @@ class RayGPUExecutor(DistributedGPUExecutor):
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
+        error_on_invalid_device_count_status()
+
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [
             self._get_worker_kwargs(
                 local_rank=node_workers[node_id].index(rank),
                 rank=rank,
                 distributed_init_method=distributed_init_method,
-            ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
+            ) for rank, (node_id,
+                         _) in zip(worker_ranks, worker_node_and_gpu_ids)
         ]
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
@@ -188,6 +214,23 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+
+        # This is the list of workers that are rank 0 of each TP group EXCEPT
+        # global rank 0. These are the workers that will broadcast to the
+        # rest of the workers.
+        self.tp_driver_workers: List[RayWorkerWrapper] = []
+        # This is the list of workers that are not drivers and not the first
+        # worker in a TP group. These are the workers that will be
+        # broadcasted to.
+        self.non_driver_workers: List[RayWorkerWrapper] = []
+
+        for idx, rank in enumerate(worker_ranks[1:]):
+            # We need to skip the driver worker, which we
+            # do by skipping worker_ranks[0] which is always 0.
+            if rank % self.parallel_config.tensor_parallel_size == 0:
+                self.tp_driver_workers.append(self.workers[idx])
+            else:
+                self.non_driver_workers.append(self.workers[idx])
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
@@ -204,7 +247,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        async_run_remote_workers_only: bool = False,
+        async_run_tensor_parallel_workers_only: bool = False,
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
@@ -215,10 +258,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
         """Runs the given method on all workers. Can be used in the following
         ways:
 
-        - async_run_remote_workers_only: If True the method will be run only
-          in the remote workers, not the driver worker. It will also be
-          run asynchronously and return a list of futures rather than blocking
-          on the results.
+        Args:
+        - async_run_tensor_parallel_workers_only: If True the method will be
+          run only in the remote TP workers, not the driver worker.
+          It will also be run asynchronously and return a list of futures
+          rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
         - all_args/all_kwargs: args/kwargs for each worker are specified
           individually
@@ -228,7 +272,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        count = len(self.workers)
+        count = len(self.workers) if not \
+            async_run_tensor_parallel_workers_only \
+            else len(self.non_driver_workers)
         all_worker_args = repeat(args, count) if all_args is None \
             else islice(all_args, 1, None)
         all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
@@ -242,14 +288,17 @@ class RayGPUExecutor(DistributedGPUExecutor):
             ray_worker_outputs = []
         else:
             # Start the ray workers first.
+            ray_workers = self.workers
+            if async_run_tensor_parallel_workers_only:
+                ray_workers = self.non_driver_workers
             ray_worker_outputs = [
                 worker.execute_method.remote(method, *worker_args,
                                              **worker_kwargs)
                 for (worker, worker_args, worker_kwargs
-                     ) in zip(self.workers, all_worker_args, all_worker_kwargs)
+                     ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
             ]
 
-        if async_run_remote_workers_only:
+        if async_run_tensor_parallel_workers_only:
             # Just return futures
             return ray_worker_outputs
 
@@ -319,12 +368,41 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        return await self.driver_exec_method("execute_model",
-                                             execute_model_req)
+        if self.pp_locks is None:
+            # This locks each pipeline parallel stage so multiple virtual
+            # engines can't execute on the same stage at the same time
+            # We create the locks here to avoid creating them in the constructor
+            # which uses a different asyncio loop.
+            self.pp_locks = [
+                asyncio.Lock()
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+
+        async def _run_task_with_lock(task, lock, *args, **kwargs):
+            async with lock:
+                return await task(*args, **kwargs)
+
+        tasks = []
+        tasks.append(
+            asyncio.create_task(
+                _run_task_with_lock(self.driver_exec_method, self.pp_locks[0],
+                                    "execute_model", execute_model_req)))
+        for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
+                                                start=1):
+            tasks.append(
+                asyncio.create_task(
+                    _run_task_with_lock(driver_worker.execute_method.remote,
+                                        self.pp_locks[pp_rank],
+                                        "execute_model", execute_model_req)))
+
+        results = await asyncio.gather(*tasks)
+
+        # Only the last PP stage has the final results.
+        return results[-1]
 
     async def _start_worker_execution_loop(self):
         coros = [
             worker.execute_method.remote("start_worker_execution_loop")
-            for worker in self.workers
+            for worker in self.non_driver_workers
         ]
         return await asyncio.gather(*coros)

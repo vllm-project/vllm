@@ -46,7 +46,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
 
@@ -316,11 +317,11 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
         self.model = Qwen2Model(config, cache_config, quant_config)
 
         if config.tie_word_embeddings:
-            self.lm_head_weight = self.model.embed_tokens.weight
+            self.lm_head = self.model.embed_tokens
         else:
             self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size)
-            self.lm_head_weight = self.lm_head.weight
+                                          config.hidden_size,
+                                          quant_config=quant_config)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -331,6 +332,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -338,7 +340,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -384,6 +386,8 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
                 remapped_name = remap_kv_scale_name(name, params_dict)
                 if remapped_name is None:
                     continue
+                else:
+                    name = remapped_name
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

@@ -7,7 +7,7 @@ from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -258,6 +258,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         key_scale: float = 1.0,
         value_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -270,6 +271,12 @@ class FlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "FlashAttentionImpl")
+
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert key_scale == 1.0 and value_scale == 1.0, (
             "key/value_scale is not supported in FlashAttention.")

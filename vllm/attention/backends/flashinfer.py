@@ -14,7 +14,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 
 
 class FlashInferBackend(AttentionBackend):
@@ -102,6 +102,8 @@ class FlashInferMetadata(AttentionMetadata):
     # The data type of the paged kv cache
     data_type: torch.dtype = None
     device: torch.device = torch.device("cuda")
+    # Only used by gemma2 model
+    logits_soft_cap: Optional[float] = None
 
     def __post_init__(self):
         # Refer to
@@ -223,9 +225,15 @@ class FlashInferImpl(AttentionImpl):
         attn_metadata: FlashInferMetadata,
         key_scale: float = 1.0,
         value_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         assert key_scale == 1.0 and value_scale == 1.0, (
             "key/value_scale is not supported in FlashInfer.")
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "FlashInferImpl")
         num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -273,9 +281,11 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert prefill_meta is not None
                 assert prefill_meta.prefill_wrapper is not None
-                output = prefill_meta.prefill_wrapper.forward(query,
-                                                              kv_cache,
-                                                              causal=True)
+                output = prefill_meta.prefill_wrapper.forward(
+                    query,
+                    kv_cache,
+                    logits_soft_cap=attn_metadata.logits_soft_cap,
+                    causal=True)
         else:
             assert attn_metadata.decode_metadata is not None
             assert attn_metadata.decode_metadata.decode_wrapper is not None
@@ -283,5 +293,5 @@ class FlashInferImpl(AttentionImpl):
                 query,
                 kv_cache,
                 sm_scale=self.scale,
-            )
+                logits_soft_cap=attn_metadata.logits_soft_cap)
         return output.view(num_tokens, hidden_size)

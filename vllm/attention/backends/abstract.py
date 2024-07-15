@@ -1,9 +1,16 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
+from enum import Enum, auto
 from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
                     TypeVar)
 
 import torch
+
+
+class AttentionType(Enum):
+    DECODER = auto()  # Decoder attention between previous layer Q/K/V
+    ENCODER = auto()  # Encoder attention between previous layer Q/K/V
+    ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
 
 
 class AttentionBackend(ABC):
@@ -129,5 +136,6 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         key_scale: float = 1.0,
         value_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         raise NotImplementedError
