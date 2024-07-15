@@ -11,7 +11,8 @@ MODELS = ["facebook/opt-125m"]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype",
+                         ["float"])  # needed for comparing logprobs with HF
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("num_top_logprobs", [6])  # 32000 == vocab_size
 @pytest.mark.parametrize("detokenize", [True, False])
