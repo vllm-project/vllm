@@ -99,12 +99,15 @@ async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
     return {"image": image}
 
 
-def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
+def encode_image_base64(
+    image: Image.Image,
+    *,
+    image_mode: str = "RGB",
+    format: str = "JPEG",
+) -> str:
     """Encode a pillow image to base64 format."""
-
     buffered = BytesIO()
-    if format == 'JPEG':
-        image = image.convert('RGB')
+    image = image.convert(image_mode)
     image.save(buffered, format)
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
