@@ -131,6 +131,9 @@ class LLMInputs(TypedDict):
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
+    position_ids: NotRequired[Optional[List[int]]]
+    """The position IDs along with prompt tokens"""
+
     prompt: NotRequired[Optional[str]]
     """
     The original prompt text corresponding to the token IDs, if available.

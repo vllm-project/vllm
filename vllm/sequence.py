@@ -117,8 +117,10 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
+        position_ids: Optional[List[int]] = None,
     ) -> None:
         self._prompt_token_ids: List[int] = list(prompt_token_ids)
+        self._position_ids: List[int] = list(position_ids) if position_ids is not None else None
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids: List[int] = (
             list(output_token_ids) if output_token_ids is not None else [])
@@ -143,6 +145,7 @@ class SequenceData:
         self._prompt_token_ids = list(new_prompt_token_ids)
         self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
         self._update_cached_all_tokens()
+        self._position_ids = None
 
     @property
     def output_token_ids(self) -> Tuple[int, ...]:
@@ -152,11 +155,24 @@ class SequenceData:
     def output_token_ids(self, new_output_token_ids) -> None:
         self._output_token_ids = list(new_output_token_ids)
         self._update_cached_all_tokens()
+        self._position_ids = None  # TODO: should fix this for spec_decode
+
+    @property
+    def position_ids(self) -> Union[None, Tuple[int, ...]]:
+        if self._position_ids is not None:
+            return tuple(self._position_ids)
+        return None
+
+    @position_ids.setter
+    def position_ids(self, new_position_ids) -> None:
+        self._position_ids = list(new_position_ids)
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
         self._cached_all_token_ids.append(token_id)
         self.cumulative_logprob += logprob
+        if self._position_ids is not None:
+            self._position_ids.append(self._position_ids[-1] + 1)
 
     def get_len(self) -> int:
         return len(self._output_token_ids) + len(self._prompt_token_ids)
@@ -213,12 +229,20 @@ class SequenceData:
         if not self._output_token_ids:
             return self._prompt_token_ids[-1]
         return self._output_token_ids[-1]
+    
+    def get_last_position_id(self) -> Union[None, int]:
+        if self._position_ids is not None:
+            return self._position_ids[-1]
+        return None
 
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.prompt_token_ids
 
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
+
+    def get_position_ids(self) -> Tuple[int, ...]:
+        return self.position_ids
 
     @property
     def stage(self) -> SequenceStage:
@@ -260,7 +284,7 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
 
-        self.data = SequenceData(self.prompt_token_ids)
+        self.data = SequenceData(self.prompt_token_ids, position_ids=self.position_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -284,6 +308,10 @@ class Sequence:
     @property
     def prompt_token_ids(self) -> List[int]:
         return self.inputs["prompt_token_ids"]
+
+    @property
+    def position_ids(self) -> List[int]:
+        return self.inputs.get("position_ids")
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
@@ -342,11 +370,17 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
+    def get_position_ids(self) -> List[int]:
+        return self.data.get_position_ids()
+
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
+
+    def get_last_position_id(self) -> int:
+        return self.data.get_last_position_id()
 
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_output_token_ids()

@@ -79,23 +79,64 @@ def dummy_data_for_glmv(ctx: InputContext, seq_len: int):
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, dict):
-        token_ids = [151339] + [0] * 1600 + [151340]  # TODO: use tokenizer or config here
-        token_ids += [0] * (seq_len - 1602)
+        image_placeholder_length = (vision_config["image_size"] // vision_config["patch_size"] // 2) ** 2
+        token_ids = [hf_config.boi_token_id] + [0] * image_placeholder_length + [hf_config.eoi_token_id]
+        token_ids += [0] * (seq_len - image_placeholder_length - 2)
         seq_data = SequenceData(token_ids)
 
-        mm_data = {"image": torch.zeros(1, 3, 1120, 1120)}
+        mm_data = {"image": torch.zeros(1, 3, vision_config["image_size"], vision_config["image_size"])}
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
 
 
-def input_processor_for_glmv(ctx: InputContext, llm_inputs: LLMInputs):  # TODO: double check this
-    # print(f"llm_inputs: {llm_inputs}")
-    return llm_inputs
+def find_all_positions(input_ids: List[int], target: int) -> List[int]:
+    return [index for index, value in enumerate(input_ids) if value == target]
 
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
+
+def input_processor_for_glmv(ctx: InputContext, llm_inputs: LLMInputs):
+    hf_config = ctx.get_hf_config(ChatGLMConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, dict):
+        image_placeholder_length = (vision_config["image_size"] // vision_config["patch_size"] // 2) ** 2  # 1600
+    else:
+        msg = f"Unsupported vision config: {type(vision_config)}"
+        raise NotImplementedError(msg)
+
+    input_ids = llm_inputs.get("prompt_token_ids")
+    position_ids = llm_inputs.get("position_ids")
+    if position_ids is None:
+        position_ids = list(range(len(input_ids)))
+    boi_token_id = hf_config.boi_token_id
+    eoi_token_id = hf_config.eoi_token_id
+    boi_positions = find_all_positions(input_ids, boi_token_id)
+    eoi_positions = find_all_positions(input_ids, eoi_token_id)
+
+    assert len(boi_positions) == len(eoi_positions)
+
+    new_input_ids = []
+    new_position_ids = []
+    final_processed_position = 0
+    final_processed_position = 0
+
+    for boi_position, eoi_position in zip(boi_positions, eoi_positions):
+        assert boi_position < eoi_position
+        new_input_ids.extend(input_ids[final_processed_position:boi_position + 1])
+        new_position_ids.extend(list(range(final_processed_position, boi_position + 1)))
+        new_input_ids.extend([input_ids[boi_position + 1]] * image_placeholder_length)
+        new_position_ids.extend([boi_position + 1] * image_placeholder_length)
+        final_processed_position = eoi_position
+
+    new_input_ids.extend(input_ids[final_processed_position:])
+    new_position_ids.extend(list(range(final_processed_position, len(input_ids))))
+
+    assert len(new_input_ids) == len(new_position_ids)
+
+    llm_inputs["prompt_token_ids"] = new_input_ids
+    llm_inputs["position_ids"] = new_position_ids
+    return llm_inputs
 
 
 class GLMAttention(nn.Module):
@@ -398,11 +439,8 @@ class ChatGLMModel(nn.Module):
             image_features = self.vision(pixel_values)
 
         if image_features is not None:
-            assert self.vision is not None
-            # boi_token_id = self.vision_config.boi_token_id
-            # eoi_token_id = self.vision_config.eoi_token_id
-            boi_token_id = 151339  # TODO: use tokenizer or write in vision config
-            eoi_token_id = 151340
+            boi_token_id = self.config.boi_token_id
+            eoi_token_id = self.config.eoi_token_id
             inputs_embeds = merge_glm_vision_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
