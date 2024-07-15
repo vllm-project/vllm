@@ -100,6 +100,7 @@ def repeat_and_pad_image_tokens(
 
 
 class ImagePlugin(MultiModalPlugin):
+    """Plugin for image data."""
 
     def get_data_key(self) -> str:
         return "image"
@@ -130,3 +131,6 @@ class ImagePlugin(MultiModalPlugin):
             raise NotImplementedError("Embeddings input is not supported yet")
 
         raise TypeError(f"Invalid image type: {type(data)}")
+
+    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
+        return 3000

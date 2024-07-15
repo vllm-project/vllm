@@ -37,6 +37,9 @@ _KEYS_TO_MODIFY_MAPPING = {
     "language_model.model": "language_model",
 }
 
+# Result in the max possible feature size (2x2 grid of 336x336px tiles)
+MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
+
 
 class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -44,7 +47,8 @@ class LlavaNextImagePixelInputs(TypedDict):
     """
     Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for each batch.
+    Note that `num_patches` may be different for each batch, in which case
+    the data is passed as a list instead of a batched tensor.
     """
 
     image_sizes: NotRequired[torch.Tensor]
@@ -70,19 +74,21 @@ def _get_llava_next_num_unpadded_features(
 ) -> Tuple[int, int]:
     current_height = npatches * num_patch_height
     current_width = npatches * num_patch_width
+    current_height = torch.tensor(current_height).to("cuda")
+    current_width = torch.tensor(current_width).to("cuda")
 
     aspect_ratio: float = width / height
     current_aspect_ratio: float = current_width / current_height
     if aspect_ratio > current_aspect_ratio:
-        new_height = (height * current_width) // width
-        if new_height % 2 == 1:
-            new_height += 1
-        current_height = new_height
+        scale_factor = current_width / width
+        new_height = int(height * scale_factor)
+        padding = (current_height - new_height) // 2
+        current_height -= padding * 2
     else:
-        new_width = (width * current_height) // height
-        if new_width % 2 == 1:
-            new_width += 1
-        current_width = new_width
+        scale_factor = current_height / height
+        new_width = int(width * scale_factor)
+        padding = (current_width - new_width) // 2
+        current_width -= padding * 2
 
     unpadded_features = current_height * current_width
     newline_features = current_height
@@ -127,17 +133,20 @@ def get_llava_next_image_feature_size(
     raise NotImplementedError(msg)
 
 
+def get_max_llava_next_image_tokens(ctx: InputContext):
+
+    return get_llava_next_image_feature_size(
+        ctx.get_hf_config(LlavaNextConfig),
+        input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+    )
+
+
 def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(LlavaNextConfig)
     vision_config = hf_config.vision_config
 
-    # Result in the max possible feature size (2x2 grid of 336x336px tiles)
-    dummy_height = dummy_width = 448
-    image_feature_size = get_llava_next_image_feature_size(
-        hf_config,
-        input_height=dummy_height,
-        input_width=dummy_width,
-    )
+    image_feature_size = get_max_llava_next_image_tokens(ctx)
 
     if isinstance(vision_config, CLIPVisionConfig):
         seq_data = dummy_seq_data_for_clip(
@@ -149,8 +158,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
 
         mm_data = dummy_image_for_clip(
             vision_config,
-            image_width_override=dummy_width,
-            image_height_override=dummy_height,
+            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         )
 
         return seq_data, mm_data
@@ -198,6 +207,7 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
@@ -248,40 +258,20 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
 
-        def _validate_shape(data: torch.Tensor):
+        h = w = self.config.vision_config.image_size
+        expected_dims = (3, h, w)
 
-            dim = data.dim()
-            height = width = self.config.vision_config.image_size
-            # All 4d image tensors have the same number of patches,
-            # so data is a 5d batch of these tensors
-            if dim == 5:
-                if list(data.shape)[2:] != [
-                        3, self.config.vision_config.image_size,
-                        self.config.vision_config.image_size
-                ]:
-                    raise ValueError(
-                        "Expected pixel value tensor in shape of: (batch size, "
-                        f"patch number, 3, {height}, {width}), got {data.shape}"
-                    )
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape[1:])
 
-            # 4d image tensors have different number of patches,
-            # so data is each individual tensor.
-            elif dim == 4:
-                if list(data.shape)[1:] != [
-                        3, self.config.vision_config.image_size,
-                        self.config.vision_config.image_size
-                ]:
-                    raise ValueError(
-                        "Expected pixel value tensor in shape of: (patch "
-                        f"number, 3, {height}, {width}), got {data.shape}")
-            else:
+            if actual_dims != expected_dims:
+                expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
-                    f"Invalid pixel value tensor of shape {data.shape}")
+                    "The expected shape of pixel values in each batch element "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
-        if isinstance(data, torch.Tensor):
-            _validate_shape(data)
-        else:
-            [_validate_shape(d) for d in data]
+        for d in data:
+            _validate_shape(d)
 
         return data
 
@@ -457,18 +447,33 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
+
         Concretely, consider a text prompt:
-        "<image>\nUSER: What's the content of the image?\nASSISTANT:".
+        `"A chat between a curious human and an artificial intelligence
+        assistant. The assistant gives helpful, detailed, and polite answers to
+        the human's questions.
+        USER: <image>\\nWhat is shown in this image? ASSISTANT:"`.
+
         Tokenizer outputs:
-        [1, 32000, 29871, 13, 11889, 29901, 1724, 29915, 29879, 278,
-        2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566, 29901].
-        The to-be-inserted image has a size of 576 (24 * 24) along the context
-        length dimension.
-        `input_ids` is thus [1, 32000, ..., 32000, 29871, 13, 11889, 29901,
-        1724, 29915, 29879, 278, 2793, 310, 278, 1967, 29973, 13, 22933,
-        9047, 13566, 29901].
-        There will be 576 `32000` in the `input_ids`.
-        (32000 is the token id for `<image>`.)
+        `[1, 319, 13563, 1546, 263, 12758, 5199, 322, 385, 23116, 21082, 20255,
+        29889, 450, 20255, 4076, 8444, 29892, 13173, 29892, 322, 1248, 568,
+        6089, 304, 278, 5199, 29915, 29879, 5155, 29889, 3148, 1001, 29901,
+        29871, 32000, 13, 5618, 338, 4318, 297, 445, 1967, 29973, 319, 1799,
+        9047, 13566, 29901]`.
+
+        To reserve space in KV cache, we have to insert placeholder tokens
+        before they are inputted to the model, so the input processor prepends 
+        additional image tokens (denoted as `32000`), resulting in:
+        `[1, 319, 13563, 1546, 263, 12758, 5199, 322, 385, 23116, 21082, 20255,
+        29889, 450, 20255, 4076, 8444, 29892, 13173, 29892, 322, 1248, 568,
+        6089, 304, 278, 5199, 29915, 29879, 5155, 29889, 3148, 1001, 29901,
+        29871, 32000, ..., 32000, 13, 5618, 338, 4318, 297, 445, 1967, 29973,
+        319, 1799, 9047, 13566, 29901]`.
+
+        Unlike in LLaVA-1.5, the number of image tokens inputted to the language
+        model depends on the original size of the input image. Including the
+        original image token in the input, the required number of image tokens
+        is given by :func:`get_llava_next_image_feature_size`.
 
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
@@ -477,15 +482,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values: The pixels in each grid patch for each input image.
-                Expects a batch with shape `[1, num_patches, 3, h, w]`.
             image_sizes: The original `(height, width)` for each input image.
-                Expects a batch with shape `[1, 2]`.
-
+        
         See also:
-            Each input maps to huggingface implementation, as follows:
-
-            - `pixel_values`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava_next/modeling_llava_next.py#L690
-            - `image_sizes`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava_next/modeling_llava_next.py#L691
+            :class:`LlavaNextImageInputs`
         """
         image_input = self._parse_and_validate_image_input(**kwargs)
 
