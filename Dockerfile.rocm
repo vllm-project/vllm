@@ -150,8 +150,7 @@ RUN case "$(which python3)" in \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade numba scipy huggingface-hub[cli]
 
-# Make sure punica kernels are built (for LoRA)
-ENV VLLM_INSTALL_PUNICA_KERNELS=1
+
 # Workaround for ray >= 2.10.0
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 # Silences the HF Tokenizers warning

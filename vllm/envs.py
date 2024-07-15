@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
-    VLLM_INSTALL_PUNICA_KERNELS: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
@@ -73,10 +72,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
-
-    # If set, vllm will install Punica kernels
-    "VLLM_INSTALL_PUNICA_KERNELS":
-    lambda: bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0"))),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"

@@ -220,61 +220,7 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-#
-# _punica_C extension
-#
 
-set(VLLM_PUNICA_EXT_SRC
-  "csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp32_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp32_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
-  "csrc/punica/punica_ops.cu"
-  "csrc/punica/torch_bindings.cpp")
-
-#
-# Copy GPU compilation flags+update for punica
-#
-set(VLLM_PUNICA_GPU_FLAGS ${VLLM_GPU_FLAGS})
-list(REMOVE_ITEM VLLM_PUNICA_GPU_FLAGS
-  "-D__CUDA_NO_HALF_OPERATORS__"
-  "-D__CUDA_NO_HALF_CONVERSIONS__"
-  "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
-  "-D__CUDA_NO_HALF2_OPERATORS__")
-
-#
-# Filter out CUDA architectures < 8.0 for punica.
-#
-if (${VLLM_GPU_LANG} STREQUAL "CUDA")
-  set(VLLM_PUNICA_GPU_ARCHES)
-  foreach(ARCH ${VLLM_GPU_ARCHES})
-    string_to_ver(CODE_VER ${ARCH})
-    if (CODE_VER GREATER_EQUAL 8.0)
-      list(APPEND VLLM_PUNICA_GPU_ARCHES ${ARCH})
-    endif()
-  endforeach()
-  message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
-elseif(${VLLM_GPU_LANG} STREQUAL "HIP")
-  set(VLLM_PUNICA_GPU_ARCHES ${VLLM_GPU_ARCHES})
-  message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
-endif()
-
-if (VLLM_PUNICA_GPU_ARCHES)
-  define_gpu_extension_target(
-    _punica_C
-    DESTINATION vllm
-    LANGUAGE ${VLLM_GPU_LANG}
-    SOURCES ${VLLM_PUNICA_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_PUNICA_GPU_FLAGS}
-    ARCHITECTURES ${VLLM_PUNICA_GPU_ARCHES}
-    USE_SABI 3
-    WITH_SOABI)
-else()
-  message(WARNING "Unable to create _punica_C target because none of the "
-    "requested architectures (${VLLM_GPU_ARCHES}) are supported, i.e. >= 8.0")
-endif()
 
 #
 # Add the `default` target which detects which extensions should be
@@ -298,12 +244,4 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
 
-  # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
-  # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and
-  # there are supported target arches.
-  if (VLLM_PUNICA_GPU_ARCHES AND
-      (ENV{VLLM_INSTALL_PUNICA_KERNELS} OR VLLM_INSTALL_PUNICA_KERNELS))
-    message(STATUS "Enabling punica extension.")
-    add_dependencies(default _punica_C)
-  endif()
 endif()
