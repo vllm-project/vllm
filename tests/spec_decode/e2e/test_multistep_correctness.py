@@ -151,8 +151,7 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
                                          test_llm_generator,
                                          batch_size,
                                          max_output_len=32,
-                                         force_output_len=True,
-                                         encure_all_accepted=True)
+                                         force_output_len=True)
 
 
 @pytest.mark.parametrize(
@@ -202,12 +201,14 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     Since this test is cheaper than other e2e correctness tests, we generate
     with a higher output_len.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True,
-                                         encure_all_accepted=True)
+    encure_all_accepted = test_llm_generator.same_draft_target_model
+    run_greedy_equality_correctness_test(
+        baseline_llm_generator,
+        test_llm_generator,
+        batch_size,
+        max_output_len=output_len,
+        force_output_len=True,
+        encure_all_accepted=encure_all_accepted)
 
 
 @pytest.mark.parametrize(

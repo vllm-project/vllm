@@ -478,21 +478,21 @@ class PrometheusStatLogger(StatLoggerBase):
             self.num_generation_tokens = []
             self.last_local_log = stats.now
 
-        if stats.spec_decode_metrics is not None:
-            self._log_gauge(
-                self.metrics.gauge_spec_decode_draft_acceptance_rate,
-                stats.spec_decode_metrics.draft_acceptance_rate)
-            self._log_gauge(self.metrics.gauge_spec_decode_efficiency,
-                            stats.spec_decode_metrics.system_efficiency)
-            self._log_counter(
-                self.metrics.counter_spec_decode_num_accepted_tokens,
-                stats.spec_decode_metrics.accepted_tokens)
-            self._log_counter(
-                self.metrics.counter_spec_decode_num_draft_tokens,
-                stats.spec_decode_metrics.draft_tokens)
-            self._log_counter(
-                self.metrics.counter_spec_decode_num_emitted_tokens,
-                stats.spec_decode_metrics.emitted_tokens)
+            if stats.spec_decode_metrics is not None:
+                self._log_gauge(
+                    self.metrics.gauge_spec_decode_draft_acceptance_rate,
+                    stats.spec_decode_metrics.draft_acceptance_rate)
+                self._log_gauge(self.metrics.gauge_spec_decode_efficiency,
+                                stats.spec_decode_metrics.system_efficiency)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_accepted_tokens,
+                    stats.spec_decode_metrics.accepted_tokens)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_draft_tokens,
+                    stats.spec_decode_metrics.draft_tokens)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_emitted_tokens,
+                    stats.spec_decode_metrics.emitted_tokens)
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):

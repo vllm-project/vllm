@@ -162,6 +162,11 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
     }
     test_name = request.node.name
 
+    model = kwargs["model"]
+    draft_model = kwargs.get("speculative_model", None)
+    same_draft_target_model = (draft_model is not None
+                               and draft_model == model)
+
     def generator_inner():
 
         wait_for_gpu_memory_to_clear(
@@ -177,6 +182,12 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
 
         print(f'Creating {baseline_or_test=} LLM for {test_name=}. {kwargs=}')
         llm = AsyncLLM(**kwargs) if use_async else LLM(**kwargs)
+
+        # Override logging interval to 0 for spec decode test run to
+        # log all metrics in time.
+        if baseline_or_test == "test" and not use_async:
+            for sate_logger in llm.llm_engine.stat_loggers.values():
+                sate_logger.local_interval = 0
         set_random_seed(seed)
 
         yield llm
@@ -188,6 +199,9 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
             yield llm
             del llm
 
+    # Set an attribute to the generator_outer function to allow us to
+    # determine whether to further check the acceptance rate in tests.
+    generator_outer.same_draft_target_model = same_draft_target_model  # type: ignore
     return generator_outer
 
 
