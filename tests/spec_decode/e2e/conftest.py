@@ -257,7 +257,7 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
                                          max_output_len,
                                          force_output_len: bool,
                                          print_tokens: bool = False,
-                                         encure_all_accepted: bool = False):
+                                         ensure_all_accepted: bool = False):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
@@ -309,5 +309,5 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
 
-    if encure_all_accepted:
+    if ensure_all_accepted:
         assert acceptance_rate == 1.0
