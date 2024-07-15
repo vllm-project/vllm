@@ -131,16 +131,19 @@ class MambaMixer(nn.Module):
         )
         self.activation = config.hidden_act
 
-        self.dt_layernorm = RMSNorm(self.time_step_rank,
-                                    eps=config.layer_norm_epsilon)
-        self.b_layernorm = RMSNorm(self.ssm_state_size,
-                                   eps=config.layer_norm_epsilon)
-        self.c_layernorm = RMSNorm(self.ssm_state_size,
-                                   eps=config.layer_norm_epsilon)
+        # Jamba has layer norms here. Mamba doesn't.
+        # TODO: Leaving these in for now, just as a placeholder in case mamba2 needs them.
+        #self.dt_layernorm = RMSNorm(self.time_step_rank,
+        #                            eps=config.layer_norm_epsilon)
+        #self.b_layernorm = RMSNorm(self.ssm_state_size,
+        #                           eps=config.layer_norm_epsilon)
+        #self.c_layernorm = RMSNorm(self.ssm_state_size,
+        #                           eps=config.layer_norm_epsilon)
 
     def mamba_forward(self,
                       hidden_states: torch.Tensor,
                       cache_params: MambaCacheParams = None):
+
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(1, 2)
         hidden_states, gate = projected_states.chunk(2, dim=1)
@@ -180,9 +183,12 @@ class MambaMixer(nn.Module):
             [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
             dim=-1,
         )
-        time_step = self.dt_layernorm(time_step.contiguous())
-        B = self.b_layernorm(B.contiguous())
-        C = self.c_layernorm(C.contiguous())
+
+        # Jamba has layer norms here. Mamba doesn't.
+        # TODO: Leaving these in for now, just as a placeholder in case mamba2 needs them.
+        # time_step = self.dt_layernorm(time_step.contiguous())
+        # B = self.b_layernorm(B.contiguous())
+        # C = self.c_layernorm(C.contiguous())
 
         discrete_time_step = self.dt_proj(time_step)[0].transpose(1, 2)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
@@ -382,6 +388,8 @@ class MambaModel(nn.Module):
                 ssm_state=current_ssm_state,
             )
         hidden_states, _ = self.norm_f(hidden_states, residual)
+
+
         return hidden_states
 
 class MambaForCausalLM(nn.Module):
