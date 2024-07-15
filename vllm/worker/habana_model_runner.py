@@ -52,12 +52,14 @@ LORA_WARMUP_RANK = 8
 _TYPE_CACHE = {}
 
 
-# Read bucketing configuration from env variables
-# phase is either 'prompt' or 'decode'
-# dim is either 'bs' or 'seq'
-# param is either 'min', 'step' or 'max'
-# example env variable: VLLM_DECODE_BS_BUCKET_STEP=128
 def read_bucket_settings(phase: str, dim: str, **defaults):
+    """Read bucketing configuration from env variables.
+
+    phase is either 'prompt' or 'decode'
+    dim is either 'bs' or 'block'
+    param is either 'min', 'step' or 'max'
+    example env variable: VLLM_DECODE_BS_BUCKET_STEP=128
+    """
     params = ['min', 'step', 'max']
     values = [
         int(
@@ -68,7 +70,19 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
 
 
 def warmup_range(config: Tuple[int, int, int]):
+    """Generate a warmup range.
+
+    Start from bmin and multiply by 2 until you reach bstep.
+    Then, increase the values in the range by the value of bstep until you reach bmax.
+
+    Example:
+    bmin = 2, bstep = 32, bmax = 64
+    => ramp_up = (2, 4, 8, 16)
+    => stable = (32, 64)
+    => return ramp_up + stable => (2, 4, 8, 16, 32, 64)
+    """
     bmin, bstep, bmax = config
+    assert bmin <= bmax, "Min. batch size cannot be greater than max. batch size. If you want to skip warmup, set VLLM_SKIP_WARMUP=true"
     base = itertools.repeat(2)
     ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)
     ramp_up_tw = itertools.takewhile(lambda x: x < bstep and x <= bmax, \
