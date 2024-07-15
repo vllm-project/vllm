@@ -106,6 +106,8 @@ class Worker(LocalOrDistributedWorkerBase):
         self.gpu_cache: Optional[List[torch.tensor]] = None
         # initialize CUDA stream for KV migration
         # SP worker only rx KV cache and master workers just tx KV cache
+        # Note the scheduler should call kv_send_stream.synchronize() before 
+        # the next round, but it is not safe [TODO]. 
         if is_sp_worker:
             tp_pp_world = self.parallel_config.pipeline_parallel_size \
                 * self.parallel_config.tensor_parallel_size

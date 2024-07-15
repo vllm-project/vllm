@@ -49,4 +49,4 @@ def recv_sp_tensor(tensor: torch.Tensor = None, sp_group: int = 0, src: int = 0)
     # `src` is the local rank.
     if not torch.distributed.is_initialized():
         return tensor
-    return get_sp_group(src).recv_tensor(tensor, 0)
+    return get_sp_group(src).recv_tensor(tensor, src)
