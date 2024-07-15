@@ -612,7 +612,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
             for _ in range(graph_batch_size - batch_size):
-                input_tokens.append(0)
+                if hasattr(self.model_config.hf_config, "num_output_head"):
+                    # duplicate the prompt_token_ids for each head
+                    input_tokens.append([0] * self.model_config.hf_config.num_output_head)
+                else:
+                    input_tokens.append(0)
                 input_positions.append(0)
                 slot_mapping.append(_PAD_SLOT_ID)
                 seq_lens.append(1)
