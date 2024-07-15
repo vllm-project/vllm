@@ -223,7 +223,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         self.multimodal_config = multimodal_config
 
         # Initialize the vision tower only up to the required feature layer
-        vision_feature_layer = config.vision_config.vision_feature_layer
+        vision_feature_layer = config.vision_feature_layer
         if vision_feature_layer < 0:
             config.vision_config.num_hidden_layers += vision_feature_layer + 1
         else:
