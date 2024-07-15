@@ -175,7 +175,11 @@ def get_single_prompt_type(prompt: AllPromptInputs, ) -> str:
 
     if is_dict(prompt):
         for ptype in required_keys_dict:
-            if has_required_keys(prompt, required_keys_dict[ptype]):
+            # Ignore type checking in the conditional below because type
+            # checker does not understand that is_dict(prompt) narrows
+            # down the possible types
+            if has_required_keys(prompt,
+                                 required_keys_dict[ptype]):  # type: ignore
                 return ptype
 
         raise ValueError(f"Invalid prompt {prompt}, valid types are "
@@ -191,9 +195,14 @@ def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs, ) -> bool:
     Return True if prompt has the correct structure for an encoder/decoder
     prompt.
     """
+    # Ignore type checking in the conditional below because type checker
+    # does not understand that
+    # get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder' narrows
+    # down the possible types
     if (get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder'
             and (prompt['encoder_prompt'] is None
-                 or prompt['decoder_prompt']['multi_modal_data'] is not None)):
+                 or prompt['decoder_prompt']['multi_modal_data']
+                 is not None)):  # type: ignore
         # For explicit encoder/decoder prompts, encoder prompt
         # must be non-None and decoder prompt must be free of
         # multi-modal data (which should instead be passed to
