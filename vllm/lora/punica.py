@@ -4,16 +4,22 @@ from typing import Optional
 
 import torch
 
+from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 
-def _raise_import_error(e):
-    if torch.cuda.get_device_capability() < (8, 0):
+
+def _check_punica_support():
+    if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
+        return
+
+    if current_platform.get_device_capability() < (8, 0):
         raise ImportError(
-            "punica LoRA kernels require compute capability >= 8.0") from e
+            "punica LoRA kernels require compute capability >= 8.0")
     else:
         raise ImportError(
             "punica LoRA kernels could not be imported. If you built vLLM "
             "from source, make sure VLLM_INSTALL_PUNICA_KERNELS=1 env var "
-            "was set.") from e
+            "was set.")
 
 
 def bgmv(
@@ -41,12 +47,9 @@ def bgmv(
       layer_idx: Layer index of the weight matrices.
       scale: Scaling factor.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-    except ImportError as e:
-        _raise_import_error(e)
+    _check_punica_support()
 
-    punica_kernels.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
+    ops.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
 
 
 def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
@@ -75,11 +78,9 @@ def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
       y_offset: Offset to apply to the starting column of y.
       y_slice_size: Size of the y column slice.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-    except ImportError as e:
-        _raise_import_error(e)
-    punica_kernels.dispatch_bgmv_low_level(
+    _check_punica_support()
+
+    ops.dispatch_bgmv_low_level(
         y,
         x,
         w_t_all,
@@ -122,10 +123,7 @@ def add_lora(y: torch.Tensor,
       scale: Scaling factor.
       buffer: Optional. Shape: `[B, R]`. Temporary buffer.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-    except ImportError as e:
-        _raise_import_error(e)
+    _check_punica_support()
 
     r = wb_t_all.size(-1)
     if buffer is None:
@@ -135,9 +133,8 @@ def add_lora(y: torch.Tensor,
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    punica_kernels.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
-    punica_kernels.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx,
-                                 scale)
+    ops.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
+    ops.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx, scale)
 
 
 def add_lora_slice(y: torch.Tensor,
@@ -176,10 +173,7 @@ def add_lora_slice(y: torch.Tensor,
       y_offset: Offset to apply to the starting column of y.
       y_slice_size: Size of the y column slice.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-    except ImportError as e:
-        _raise_import_error(e)
+    _check_punica_support()
 
     r = wb_t_all.size(-1)
     if buffer is None:
@@ -189,7 +183,7 @@ def add_lora_slice(y: torch.Tensor,
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    punica_kernels.dispatch_bgmv_low_level(
+    ops.dispatch_bgmv_low_level(
         buffer,
         x,
         wa_t_all,
@@ -200,7 +194,7 @@ def add_lora_slice(y: torch.Tensor,
         buffer.size(1),
         0,
     )
-    punica_kernels.dispatch_bgmv_low_level(
+    ops.dispatch_bgmv_low_level(
         y,
         buffer,
         wb_t_all,

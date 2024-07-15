@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -42,6 +42,7 @@ class Top1Proposer(SpeculativeProposer):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Get speculative proposals given the input batch.
 
@@ -65,13 +66,19 @@ class Top1Proposer(SpeculativeProposer):
             # token_ids is like [batch] format in proposal_len size list,
             # while if it is false, the format would be [proposal_len]
             # in batch size list
+            hidden_states = execute_model_req.previous_hidden_states
+            if hidden_states is not None:
+                hidden_states.prune(nonzero_proposal_len_seqs)
             nonzero_execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
                 num_lookahead_slots=proposal_len,
+                previous_hidden_states=hidden_states,
             )
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
+                seq_ids_with_bonus_token_in_last_step=\
+                    seq_ids_with_bonus_token_in_last_step,
             )
             (
                 proposal_lens,
@@ -148,7 +155,8 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_indices,
         )
 
-    def _remove_no_proposal_seqs(self, proposal_lens, maybe_sampler_output,
+    @staticmethod
+    def _remove_no_proposal_seqs(proposal_lens, maybe_sampler_output,
                                  nonzero_proposal_len_indices, transposed):
         """Remove sequences from nonzero_proposal_len_indices and reset
         their proposal_len to 0 the draft worker does not provide a proposal
@@ -207,7 +215,7 @@ class Top1Proposer(SpeculativeProposer):
         self,
         batch_size: int,
         proposal_len: int,
-        maybe_sampler_output: Optional[SamplerOutput],
+        maybe_sampler_output: Optional[List[SamplerOutput]],
         proposal_lens: List[int],
         nonzero_proposal_len_indices: List[int],
         sampler_transposed: bool,
@@ -218,25 +226,19 @@ class Top1Proposer(SpeculativeProposer):
         if maybe_sampler_output is None:
             # If no speculative tokens, the sampler output will be None.
             # In this case we return empty proposals.
-            proposal_tokens = torch.full(
-                size=(
-                    batch_size,
-                    proposal_len,
-                ),
-                fill_value=-1,
-                dtype=torch.long,
-                device=self._device,
-            )
-            proposal_probs = torch.zeros(
-                batch_size,
-                proposal_len,
-                self._vocab_size,
-                dtype=torch.float32,
-                device=self._device,
-            )
-            proposal_lens_tensor = torch.zeros(len(proposal_lens),
-                                               dtype=torch.long,
-                                               device=self._device)
+            proposal_tokens = torch.tensor(-1,
+                                           dtype=torch.long,
+                                           device=self._device).expand(
+                                               batch_size, proposal_len)
+            proposal_probs = torch.tensor(0,
+                                          dtype=torch.float32,
+                                          device=self._device).expand(
+                                              batch_size, proposal_len,
+                                              self._vocab_size)
+            proposal_lens_tensor = torch.tensor(0,
+                                                dtype=torch.long,
+                                                device=self._device).expand(
+                                                    len(proposal_lens))
             return proposal_tokens, proposal_probs, proposal_lens_tensor
 
         sampler_output = maybe_sampler_output
@@ -246,18 +248,14 @@ class Top1Proposer(SpeculativeProposer):
         # Now, reformat the output GPU tensors such that each sequence has
         # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
 
-        entire_proposal_tokens = torch.full(
+        entire_proposal_tokens = proposal_tokens.new_full(
             size=(batch_size, *proposal_tokens.shape[1:]),
             fill_value=-1,
-            dtype=torch.long,
-            device=self._device,
         )
         entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
-        entire_proposal_probs = torch.zeros(
+        entire_proposal_probs = proposal_probs.new_zeros(
             batch_size,
             *proposal_probs.shape[1:],
-            dtype=torch.float32,
-            device=self._device,
         )
         entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
 

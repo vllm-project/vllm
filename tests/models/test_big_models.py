@@ -7,6 +7,8 @@ Run `pytest tests/models/test_big_models.py`.
 import pytest
 import torch
 
+from .utils import check_outputs_equal
+
 MODELS = [
     "meta-llama/Llama-2-7b-hf",
     # "mistralai/Mistral-7B-v0.1",  # Tested by test_mistral.py
@@ -34,21 +36,18 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-    for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -58,9 +57,8 @@ def test_model_print(
     model: str,
     dtype: str,
 ) -> None:
-    vllm_model = vllm_runner(model, dtype=dtype)
-    # This test is for verifying whether the model's extra_repr
-    # can be printed correctly.
-    print(vllm_model.model.llm_engine.model_executor.driver_worker.
-          model_runner.model)
-    del vllm_model
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        # This test is for verifying whether the model's extra_repr
+        # can be printed correctly.
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)

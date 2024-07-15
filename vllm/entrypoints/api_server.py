@@ -6,7 +6,6 @@ We are also not going to accept PRs modifying this file, please
 change `vllm/entrypoints/openai/api_server.py` instead.
 """
 
-import argparse
 import json
 import ssl
 from typing import AsyncGenerator
@@ -17,9 +16,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid
+from vllm.utils import FlexibleArgumentParser, random_uuid
+
+logger = init_logger("vllm.entrypoints.api_server")
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
@@ -80,7 +82,7 @@ async def generate(request: Request) -> Response:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = FlexibleArgumentParser()
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
@@ -108,6 +110,14 @@ if __name__ == "__main__":
         engine_args, usage_context=UsageContext.API_SERVER)
 
     app.root_path = args.root_path
+
+    logger.info("Available routes are:")
+    for route in app.routes:
+        if not hasattr(route, 'methods'):
+            continue
+        methods = ', '.join(route.methods)
+        logger.info("Route: %s, Methods: %s", route.path, methods)
+
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,

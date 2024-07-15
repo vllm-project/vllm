@@ -2,14 +2,17 @@
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
-from typing import Iterable, List, Optional, Tuple
+from argparse import Namespace
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
+from PIL import Image
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -25,12 +28,74 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
-from vllm.sequence import SamplerOutput
+from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
+from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from vllm.transformers_utils.configs import ChatGLMConfig
+
+from .interfaces import SupportsLoRA, SupportsVision
+
+
+def merge_glm_vision_embeddings(
+    input_ids: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    vision_embeddings: BatchedTensors,
+    boi_token_id: int,
+    eoi_token_id: int,
+) -> torch.Tensor:
+    boi_positions = (input_ids == boi_token_id).nonzero(as_tuple=True)[0]
+    eoi_positions = (input_ids == eoi_token_id).nonzero(as_tuple=True)[0]
+
+    mask = torch.zeros_like(input_ids, dtype=torch.bool)
+
+    for boi_pos, eoi_pos in zip(boi_positions, eoi_positions):
+        assert boi_pos < eoi_pos
+        mask[boi_pos: eoi_pos + 1] = True
+
+    inputs_embeds[mask] = vision_embeddings.view(-1,
+                                                vision_embeddings.shape[-1])
+    return inputs_embeds
+
+    
+class GLMImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: `(batch_size, num_channels, height, width)`"""
+
+
+def get_max_glmv_image_tokens(ctx: InputContext):
+    hf_config = ctx.get_hf_config(ChatGLMConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, dict):
+        return (vision_config["image_size"] // vision_config["patch_size"] // 2) ** 2
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
+
+
+def dummy_data_for_glmv(ctx: InputContext, seq_len: int):
+    hf_config = ctx.get_hf_config(ChatGLMConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, dict):
+        token_ids = [151339] + [0] * 1600 + [151340]  # TODO: use tokenizer or config here
+        token_ids += [0] * (seq_len - 1602)
+        seq_data = SequenceData(token_ids)
+
+        mm_data = {"image": torch.zeros(1, 3, 1120, 1120)}
+        return seq_data, mm_data
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
+
+
+def input_processor_for_glmv(ctx: InputContext, llm_inputs: LLMInputs):  # TODO: double check this
+    # print(f"llm_inputs: {llm_inputs}")
+    return llm_inputs
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
 class GLMAttention(nn.Module):
@@ -291,14 +356,13 @@ class ChatGLMModel(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
         self.config = config
-        self.vision_language_config = vision_language_config
 
         self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
                                                 config.hidden_size)
@@ -309,10 +373,12 @@ class ChatGLMModel(nn.Module):
         self.encoder = GLMTransformer(config, cache_config, quant_config)
 
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
-                                           config.hidden_size)
+                                           config.hidden_size,
+                                           quant_config=quant_config)
 
         if config.vision_config is not None:
-            self.vision = EVA2CLIPModel(config)
+            self.vision_config = Namespace(**config.vision_config)
+            self.vision = EVA2CLIPModel(self.config)
         else:
             self.vision = None
 
@@ -324,7 +390,7 @@ class ChatGLMModel(nn.Module):
         attn_metadata: AttentionMetadata,
         pixel_values: Optional[torch.Tensor] = None,
         image_features: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor:  # TODO: fix position_ids
         inputs_embeds = self.embedding(input_ids)
         if pixel_values is not None and self.vision is not None:
             assert image_features is None
@@ -332,9 +398,18 @@ class ChatGLMModel(nn.Module):
             image_features = self.vision(pixel_values)
 
         if image_features is not None:
-            mask = (input_ids == self.vision_language_config.image_token_id)
-            inputs_embeds[mask] = image_features.view(-1,
-                                                      image_features.shape[-1])
+            assert self.vision is not None
+            # boi_token_id = self.vision_config.boi_token_id
+            # eoi_token_id = self.vision_config.eoi_token_id
+            boi_token_id = 151339  # TODO: use tokenizer or write in vision config
+            eoi_token_id = 151340
+            inputs_embeds = merge_glm_vision_embeddings(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                vision_embeddings=image_features,
+                boi_token_id=boi_token_id,
+                eoi_token_id=eoi_token_id
+            )
 
         # Run encoder.
         hidden_states = self.encoder(
@@ -346,10 +421,11 @@ class ChatGLMModel(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_image_feature_input()
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
-class ChatGLMForCausalLM(VisionLanguageModelBase):
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glmv_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_glmv)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_glmv)
+class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"]
@@ -367,19 +443,22 @@ class ChatGLMForCausalLM(VisionLanguageModelBase):
     def __init__(
         self,
         config: ChatGLMConfig,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        super().__init__(vision_language_config)
-        self.config: ChatGLMConfig = config
+        super().__init__()
+
+        self.config = config
+        self.lora_config = lora_config
+        self.multimodal_config = multimodal_config
+
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
-        self.transformer = ChatGLMModel(config, vision_language_config,
-                                        cache_config, quant_config)
-        self.lm_head_weight = self.transformer.output_layer.weight
+        self.transformer = ChatGLMModel(config, multimodal_config, cache_config, quant_config)
+        self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()
 
@@ -389,17 +468,16 @@ class ChatGLMForCausalLM(VisionLanguageModelBase):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        pixel_values: Optional[torch.Tensor] = None,
-        image_features: Optional[torch.Tensor] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        **kwargs
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, pixel_values,
-                                         image_features)
+                                         attn_metadata, **kwargs)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

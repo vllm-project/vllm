@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_ip, is_hip
+from vllm.utils import get_ip, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -42,12 +42,24 @@ try:
             output = pickle.dumps(output)
             return output
 
+    ray_import_err = None
+
 except ImportError as e:
-    logger.warning(
-        "Failed to import Ray with %r. For multi-node inference, "
-        "please install Ray with `pip install ray`.", e)
     ray = None  # type: ignore
+    ray_import_err = e
     RayWorkerWrapper = None  # type: ignore
+
+
+def ray_is_available() -> bool:
+    """Returns True if Ray is available."""
+    return ray is not None
+
+
+def assert_ray_available():
+    """Raise an exception if Ray is not available."""
+    if ray is None:
+        raise ValueError("Failed to import Ray, please install Ray with "
+                         "`pip install ray`.") from ray_import_err
 
 
 def initialize_ray_cluster(
@@ -65,13 +77,10 @@ def initialize_ray_cluster(
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
     """
-    if ray is None:
-        raise ImportError(
-            "Ray is not installed. Please install Ray to use multi-node "
-            "serving.")
+    assert_ray_available()
 
     # Connect to a ray cluster.
-    if is_hip():
+    if is_hip() or is_xpu():
         ray.init(address=ray_address,
                  ignore_reinit_error=True,
                  num_gpus=parallel_config.world_size)

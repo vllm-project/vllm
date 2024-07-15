@@ -1,4 +1,4 @@
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #include <ATen/ATen.h>
@@ -108,8 +108,8 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
 }
 }  // namespace vllm
 
-void moe_align_block_size(torch::Tensor topk_ids, int num_experts,
-                          int block_size, torch::Tensor sorted_token_ids,
+void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
+                          int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();

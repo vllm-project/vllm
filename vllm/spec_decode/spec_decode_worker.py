@@ -1,22 +1,33 @@
+from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 
+from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.model_executor.layers.spec_decode_base_sampler import (
+    SpecDecodeBaseSampler)
+from vllm.model_executor.layers.typical_acceptance_sampler import (
+    TypicalAcceptanceSampler)
+from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
+                           HiddenStates, SamplerOutput, SequenceGroupMetadata,
+                           get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
+from vllm.spec_decode.medusa_worker import MedusaWorker
 from vllm.spec_decode.metrics import AsyncMetricsCollector
+from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
+from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
 from vllm.spec_decode.util import (create_sequence_group_output,
-                                   get_all_num_logprobs, get_all_seq_ids,
+                                   get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker import Worker
@@ -30,7 +41,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
     """
     assert "speculative_config" in kwargs
-    speculative_config = kwargs.get("speculative_config")
+    speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
     assert speculative_config is not None
 
     target_worker = Worker(*args, **kwargs)
@@ -51,7 +62,12 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         draft_worker_kwargs=draft_worker_kwargs,
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
-    )
+        draft_token_acceptance_method=speculative_config.
+        draft_token_acceptance_method,
+        typical_acceptance_sampler_posterior_threshold=speculative_config.
+        typical_acceptance_sampler_posterior_threshold,
+        typical_acceptance_sampler_posterior_alpha=speculative_config.
+        typical_acceptance_sampler_posterior_alpha)
 
     return spec_decode_worker
 
@@ -73,8 +89,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         welcome!).
     * Only top-1 proposal and scoring are implemented. Tree-attention is left as
         future work.
-    * Only lossless rejection sampling is supported. Contributions adding lossy
-        verification routines are welcome (e.g. Medusa's typical acceptance).
     * All sequences in a batch must have the same proposal length, or zero. This
         can be improved by having per-sequence speculation in the future.
     * The scoring forward pass is done without an MQA kernel, which is
@@ -87,40 +101,70 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @classmethod
     def create_worker(
         cls,
-        scorer_worker: WorkerBase,
+        scorer_worker: Worker,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
+        draft_token_acceptance_method: str,
+        typical_acceptance_sampler_posterior_threshold: float,
+        typical_acceptance_sampler_posterior_alpha: float,
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
-
-        disable_bonus_tokens = True
         if ngram_prompt_lookup_max > 0:
-            disable_bonus_tokens = False
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
         else:
-            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+            draft_parallel_config: ParallelConfig = draft_worker_kwargs[
+                'parallel_config']
+            draft_tp = draft_parallel_config.tensor_parallel_size
+            target_tp = scorer_worker.parallel_config.tensor_parallel_size
+
+            if draft_worker_kwargs[
+                    "model_config"].hf_config.model_type == "mlp_speculator":
+                proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
+            elif draft_worker_kwargs[
+                    "model_config"].hf_config.model_type == "medusa":
+                proposer_worker = MedusaWorker(**draft_worker_kwargs)
+            else:
+                if draft_tp == 1:
+                    draft_worker_kwargs[
+                        "model_runner_cls"] = TP1DraftModelRunner
+                proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+
+            proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
+                proposer_worker, draft_tp, target_tp)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
 
-        return SpecDecodeWorker(
-            proposer_worker,
-            scorer_worker,
-            disable_by_batch_size=disable_by_batch_size,
-            rejection_sampler=RejectionSampler(
-                disable_bonus_tokens=disable_bonus_tokens, ))
+        spec_decode_sampler: SpecDecodeBaseSampler = None
+        if draft_token_acceptance_method == "rejection_sampler":
+            spec_decode_sampler = RejectionSampler(
+                disable_bonus_tokens=False, )
+        elif draft_token_acceptance_method == "typical_acceptance_sampler":
+            spec_decode_sampler = TypicalAcceptanceSampler(
+                disable_bonus_tokens=False,
+                posterior_threshold=\
+                    typical_acceptance_sampler_posterior_threshold,
+                posterior_alpha=typical_acceptance_sampler_posterior_alpha,
+            )
+        logger.info("Configuring SpecDecodeWorker with sampler=%s",
+                    type(spec_decode_sampler))
+
+        return SpecDecodeWorker(proposer_worker,
+                                scorer_worker,
+                                disable_by_batch_size=disable_by_batch_size,
+                                spec_decode_sampler=spec_decode_sampler)
 
     def __init__(
         self,
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
-        rejection_sampler: RejectionSampler,
+        spec_decode_sampler: SpecDecodeBaseSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
     ):
@@ -133,8 +177,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             scorer_worker: A worker that produces probabilities of speculative
                 tokens according to some base model. Typically a vanilla vLLM
                 Worker.
-            rejection_sampler: A Torch module used to perform modified rejection
-                sampling for speculative decoding.
+            spec_decode_sampler: A Torch module used to perform acceptance
+                sampling of the draft tokens in the verification step of
+                speculative decoding. Currently we support two different 
+                types of sampler namely RejectionSampler and
+                TypicalAcceptanceSampler. 'spec_decode_sampler' is either an
+                instance of RejectionSampler or TypicalAcceptanceSampler.
             disable_by_batch_size: If the batch size is larger than this,
                 disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
@@ -143,17 +191,27 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
-        self.rejection_sampler = rejection_sampler
-
+        self.spec_decode_sampler = spec_decode_sampler
         self._metrics = AsyncMetricsCollector(
-            rejection_sampler
+            self.spec_decode_sampler
         ) if metrics_collector is None else metrics_collector
+        # Tracks the sequence IDs that received a bonus token ID in
+        # their last forward pass. Needed only if KV cache is being
+        # used for token generation such as in the case of MultiStepWorker.
+        self._seq_with_bonus_token_in_last_step: Set[int] = set()
+        # Tracks the currently active request ids and the sequence IDs
+        # corresponding to them
+        self._request_id_seq_id_mapping: Dict[str, Set[int]] = defaultdict(set)
+        # Tracks if the proposer worker uses the KV cache or not.
 
-        self.probs_dtype = self.rejection_sampler.probs_dtype
-        self.token_id_dtype = self.rejection_sampler.token_id_dtype
-
+        self.probs_dtype = self.spec_decode_sampler.probs_dtype
+        self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
+
+        # Hidden states from target model to pass to proposer
+        # in the subsequent step.
+        self.previous_hidden_states: Optional[HiddenStates] = None
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -168,7 +226,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.load_model()
 
         self._metrics.init_gpu_tensors(self.rank)
-        self.rejection_sampler.init_gpu_tensors(self.rank)
+        self.spec_decode_sampler.init_gpu_tensors(self.rank)
+
         self.scorer = BatchExpansionTop1Scorer(
             scorer_worker=self.scorer_worker,
             device=self.device,
@@ -182,7 +241,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def _configure_model_sampler_for_spec_decode(self):
         """Configure model sampler to emit GPU tensors. This allows spec decode
         to keep data on device without transferring to CPU and serializing,
-        which significantly reduces overhead of rejection sampling.
+        which significantly reduces overhead of sampling during verification.
 
         NOTE(cade): This breaks abstraction boundaries pretty badly. The better
         design is to have the "move to CPU and serialize" sampling decision be
@@ -252,6 +311,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             broadcast_tensor_dict({}, src=0)
             return []
 
+        self._track_finished_requests(execute_model_req)
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
@@ -337,6 +397,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
 
+        # Store hidden states from target model execution.
+        hidden_states = sampler_output.hidden_states
+        if hidden_states is not None:
+            if self.previous_hidden_states is None:
+                self.previous_hidden_states = HiddenStates(
+                    execute_model_req.seq_group_metadata_list, hidden_states)
+            else:
+                self.previous_hidden_states.update(
+                    execute_model_req.seq_group_metadata_list, hidden_states)
+
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
         sampler_output.probs = None
@@ -383,8 +453,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
+        # Pass last hidden states from target model to proposer
+        execute_model_req.previous_hidden_states = self.previous_hidden_states
+        self.previous_hidden_states = None
+
         # Generate proposals using draft worker.
-        proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
+        proposals = self.proposer_worker.get_spec_proposals(
+            execute_model_req, self._seq_with_bonus_token_in_last_step)
 
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
@@ -446,7 +521,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
-        accepted_token_ids = self.rejection_sampler(
+        accepted_token_ids = self.spec_decode_sampler(
             target_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
@@ -461,10 +536,23 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
         logprobs = proposal_scores.logprobs
-
         # Rearrange so that results are in the order of the original seq group
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
+
+        hidden_states = proposal_scores.hidden_states
+        if hidden_states is not None:
+            # Contract hidden states based on accepted tokens
+            hs_size = hidden_states.shape[1]
+            hidden_states = hidden_states.reshape(-1, max_proposal_len + 1,
+                                                  hs_size)
+            accepted_index = accepted_token_ids + 1  # Convert -1 to 0
+            accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)
+            index = accepted_index[:, None, None].expand(-1, 1, hs_size)
+            hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
+            # Store hidden states from target model for subsequent decode step
+            self.previous_hidden_states = HiddenStates(seq_group_metadata_list,
+                                                       hidden_states)
 
         return accepted_token_ids, logprobs
 
@@ -503,7 +591,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Get the sequence ids and num_logprobs (sampling parameter) in the
         # batch.
-        seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        seq_ids, request_ids_seq_ids_mapping = get_all_seq_ids_and_request_ids(
+            seq_group_metadata_list)
+
         num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
 
         # Serialize all tensors to CPU Python lists.
@@ -516,17 +606,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         topk_indices_by_step = topk_indices_by_step.tolist()
 
         # Construct the output on a per-step, per-sequence basis.
-        sampler_output_list = []
+        sampler_output_list: List[SamplerOutput] = []
         for step_index in range(num_steps):
             if all(token_id == -1
                    for token_id in accepted_token_ids_by_step[step_index]):
                 break
 
-            step_output_token_ids = []
+            step_output_token_ids: List[CompletionSequenceGroupOutput] = []
             for sequence_index in range(batch_size):
                 # Each sequence may have a different num_logprobs; retrieve it.
                 num_logprobs = num_logprobs_per_seq[sequence_index]
-
                 step_output_token_ids.append(
                     create_sequence_group_output(
                         token_id=accepted_token_ids_by_step[step_index]
@@ -541,17 +630,47 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         topk_logprobs=topk_logprobs_by_step[step_index]
                         [sequence_index][:num_logprobs],
                     ))
-
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 
+        # Populate the data structures needed to keep track of sequences with
+        # bonus tokens.
+        self._track_sequences_with_bonus_tokens(seq_ids,
+                                                request_ids_seq_ids_mapping,
+                                                accepted_token_ids_by_step)
         maybe_rejsample_metrics = (
             self._metrics.maybe_collect_rejsample_metrics(k))
         if maybe_rejsample_metrics is not None:
             sampler_output_list[
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics
-
         return sampler_output_list
+
+    def _track_finished_requests(self, execute_model_req: ExecuteModelRequest):
+        """
+        Removes the finished requests and their associated sequence ids from
+        internal book keeping data structures.
+        """
+        for finished_request in execute_model_req.finished_requests_ids:
+            for seq_id in self._request_id_seq_id_mapping[finished_request]:
+                self._seq_with_bonus_token_in_last_step.discard(seq_id)
+            del self._request_id_seq_id_mapping[finished_request]
+
+    def _track_sequences_with_bonus_tokens(
+            self, seq_ids: List[int],
+            request_ids_seq_ids_mapping: Dict[str, Set[int]],
+            accepted_token_ids_by_step: List[List[int]]):
+        """
+        Updates the internal data structures which keep track of sequences
+        which have been assigned bonus tokens in their last forward pass.
+        """
+        for seq_index, seq_id in enumerate(seq_ids):
+            last_token_id = accepted_token_ids_by_step[-1][seq_index]
+            if last_token_id == -1:
+                self._seq_with_bonus_token_in_last_step.discard(seq_id)
+            else:
+                self._seq_with_bonus_token_in_last_step.add(seq_id)
+        for request_id, sequences in request_ids_seq_ids_mapping.items():
+            self._request_id_seq_id_mapping[request_id].update(sequences)
 
     @cached_property
     def _vocab_size(self) -> int:

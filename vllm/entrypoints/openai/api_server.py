@@ -15,20 +15,27 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
-import vllm
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
-                                              EmbeddingRequest, ErrorResponse)
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              EmbeddingRequest, ErrorResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -85,15 +92,37 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
+@app.post("/tokenize")
+async def tokenize(request: TokenizeRequest):
+    generator = await openai_serving_completion.create_tokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, TokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
+
+
+@app.post("/detokenize")
+async def detokenize(request: DetokenizeRequest):
+    generator = await openai_serving_completion.create_detokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, DetokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
+
+
 @app.get("/v1/models")
 async def show_available_models():
-    models = await openai_serving_chat.show_available_models()
+    models = await openai_serving_completion.show_available_models()
     return JSONResponse(content=models.model_dump())
 
 
 @app.get("/version")
 async def show_version():
-    ver = {"version": vllm.__version__}
+    ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
 
 
@@ -174,7 +203,7 @@ if __name__ == "__main__":
             raise ValueError(f"Invalid middleware {middleware}. "
                              f"Must be a function or a class.")
 
-    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     if args.served_model_name is not None:
@@ -183,6 +212,7 @@ if __name__ == "__main__":
         served_model_names = [args.model]
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
 
@@ -206,10 +236,19 @@ if __name__ == "__main__":
                                             args.lora_modules,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, args.lora_modules)
+        engine, model_config, served_model_names, args.lora_modules,
+        args.prompt_adapters)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     app.root_path = args.root_path
+
+    logger.info("Available routes are:")
+    for route in app.routes:
+        if not hasattr(route, 'methods'):
+            continue
+        methods = ', '.join(route.methods)
+        logger.info("Route: %s, Methods: %s", route.path, methods)
+
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,

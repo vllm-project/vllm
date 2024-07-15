@@ -10,15 +10,23 @@ from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
+                                              DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
                                               ModelCard, ModelList,
-                                              ModelPermission)
+                                              ModelPermission, TokenizeRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class PromptAdapterPath:
+    name: str
+    local_path: str
 
 
 @dataclass
@@ -29,12 +37,18 @@ class LoRAModulePath:
 
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
-                 served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        lora_modules: Optional[List[LoRAModulePath]],
+        prompt_adapters: Optional[List[PromptAdapterPath]] = None,
+    ):
         super().__init__()
 
         self.engine = engine
+        self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
         # A separate tokenizer to map token IDs to strings.
@@ -47,9 +61,8 @@ class OpenAIServing:
 
         self.served_model_names = served_model_names
 
-        if lora_modules is None:
-            self.lora_requests = []
-        else:
+        self.lora_requests = []
+        if lora_modules is not None:
             self.lora_requests = [
                 LoRARequest(
                     lora_name=lora.name,
@@ -57,6 +70,20 @@ class OpenAIServing:
                     lora_local_path=lora.local_path,
                 ) for i, lora in enumerate(lora_modules, start=1)
             ]
+
+        self.prompt_adapter_requests = []
+        if prompt_adapters is not None:
+            for i, prompt_adapter in enumerate(prompt_adapters, start=1):
+                with open(f"./{prompt_adapter.local_path}"
+                          f"/adapter_config.json") as f:
+                    adapter_config = json.load(f)
+                    num_virtual_tokens = adapter_config["num_virtual_tokens"]
+                self.prompt_adapter_requests.append(
+                    PromptAdapterRequest(
+                        prompt_adapter_name=prompt_adapter.name,
+                        prompt_adapter_id=i,
+                        prompt_adapter_local_path=prompt_adapter.local_path,
+                        prompt_adapter_num_virtual_tokens=num_virtual_tokens))
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -73,7 +100,14 @@ class OpenAIServing:
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
+        prompt_adapter_cards = [
+            ModelCard(id=prompt_adapter.prompt_adapter_name,
+                      root=self.served_model_names[0],
+                      permission=[ModelPermission()])
+            for prompt_adapter in self.prompt_adapter_requests
+        ]
         model_cards.extend(lora_cards)
+        model_cards.extend(prompt_adapter_cards)
         return ModelList(data=model_cards)
 
     def create_error_response(
@@ -99,34 +133,45 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest,
-                             EmbeddingRequest]
+        self, request: Union[ChatCompletionRequest, CompletionRequest,
+                             DetokenizeRequest, EmbeddingRequest,
+                             TokenizeRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
+            return None
+        if request.model in [
+                prompt_adapter.prompt_adapter_name
+                for prompt_adapter in self.prompt_adapter_requests
+        ]:
             return None
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_lora(
+    def _maybe_get_adapter(
         self, request: Union[CompletionRequest, ChatCompletionRequest,
                              EmbeddingRequest]
-    ) -> Optional[LoRARequest]:
+    ) -> Tuple[Optional[str], Optional[Union[LoRARequest,
+                                             PromptAdapterRequest]]]:
         if request.model in self.served_model_names:
-            return None
+            return None, None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
-                return lora
+                return 'LoRA', lora
+        for prompt_adapter in self.prompt_adapter_requests:
+            if request.model == prompt_adapter.prompt_adapter_name:
+                return 'PromptAdapter', prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
             self,
             request: Union[ChatCompletionRequest, CompletionRequest,
-                           EmbeddingRequest],
+                           DetokenizeRequest, EmbeddingRequest,
+                           TokenizeRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[Annotated[int,
@@ -172,6 +217,11 @@ class OpenAIServing:
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for embedding "
                     f"generation. Please reduce the length of the input.", )
+            return input_ids, input_text
+
+        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
+        # and does not require model context length validation
+        if isinstance(request, (TokenizeRequest, DetokenizeRequest)):
             return input_ids, input_text
 
         if request.max_tokens is None:

@@ -1,13 +1,15 @@
 import codecs
 import time
-from dataclasses import dataclass
-from typing import (AsyncGenerator, AsyncIterator, Dict, Iterable, List,
-                    Optional)
+from dataclasses import dataclass, field
+from functools import cached_property
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
+                    List, Optional)
 from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
 
 from fastapi import Request
-from openai.types.chat import ChatCompletionContentPartTextParam
+from openai.types.chat import (ChatCompletionContentPartImageParam,
+                               ChatCompletionContentPartTextParam)
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -21,11 +23,16 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.utils import async_get_and_parse_image
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -40,6 +47,8 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
+    mm_futures: List[Awaitable[MultiModalDataDict]] = field(
+        default_factory=list)
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -88,25 +97,85 @@ class OpenAIServingChat(OpenAIServing):
             logger.warning(
                 "No chat template provided. Chat API will not work.")
 
+    @cached_property
+    def image_token_str(self) -> Optional[str]:
+        # TODO: Let user specify how to insert image tokens into prompt
+        # (similar to chat template)
+        model_type = self.model_config.hf_config.model_type
+        if model_type == "phi3_v":
+            # Workaround since this token is not defined in the tokenizer
+            return "<|image_1|>"
+        if model_type in ("blip-2", "chatglm", "fuyu", "minicpmv",
+                          "paligemma"):
+            # These models do not use image tokens in the prompt
+            return None
+        if model_type.startswith("llava"):
+            return self.tokenizer.decode(
+                self.model_config.hf_config.image_token_index)
+
+        else:
+            raise TypeError("Unknown model type: {model_type}")
+
+    # TODO: Let user specify how to insert image tokens into prompt
+    # (similar to chat template)
+    def _get_full_image_text_prompt(self, image_token_str: str,
+                                    text_prompt: str) -> str:
+        """Combine image and text prompts for vision language model"""
+
+        # NOTE: For now we assume all model architectures use the same
+        # image + text prompt format. This may change in the future.
+        return f"{image_token_str}\n{text_prompt}"
+
     def _parse_chat_message_content_parts(
         self,
         role: str,
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
+        mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
-        for _, part in enumerate(parts):
+        for part in parts:
             part_type = part["type"]
             if part_type == "text":
                 text = cast(ChatCompletionContentPartTextParam, part)["text"]
-
                 texts.append(text)
+            elif part_type == "image_url":
+                if len(mm_futures) > 0:
+                    raise NotImplementedError(
+                        "Multiple 'image_url' input is currently not supported."
+                    )
+
+                image_url = cast(ChatCompletionContentPartImageParam,
+                                 part)["image_url"]
+
+                if image_url.get("detail", "auto") != "auto":
+                    logger.warning(
+                        "'image_url.detail' is currently not supported and "
+                        "will be ignored.")
+
+                image_future = async_get_and_parse_image(image_url["url"])
+                mm_futures.append(image_future)
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
-        messages = [ConversationMessage(role=role, content="\n".join(texts))]
+        text_prompt = "\n".join(texts)
 
-        return ChatMessageParseResult(messages=messages)
+        if mm_futures:
+            image_token_str = self.image_token_str
+            if image_token_str is not None:
+                if image_token_str in text_prompt:
+                    logger.warning(
+                        "Detected image token string in the text prompt. "
+                        "Skipping prompt formatting.")
+                else:
+                    text_prompt = self._get_full_image_text_prompt(
+                        image_token_str=image_token_str,
+                        text_prompt=text_prompt,
+                    )
+
+        messages = [ConversationMessage(role=role, content=text_prompt)]
+
+        return ChatMessageParseResult(messages=messages, mm_futures=mm_futures)
 
     def _parse_chat_message_content(
         self,
@@ -116,10 +185,10 @@ class OpenAIServingChat(OpenAIServing):
         content = message.get("content")
 
         if content is None:
-            return ChatMessageParseResult(messages=[])
+            return ChatMessageParseResult(messages=[], mm_futures=[])
         if isinstance(content, str):
             messages = [ConversationMessage(role=role, content=content)]
-            return ChatMessageParseResult(messages=messages)
+            return ChatMessageParseResult(messages=messages, mm_futures=[])
 
         return self._parse_chat_message_content_parts(role, content)
 
@@ -144,19 +213,41 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             conversation: List[ConversationMessage] = []
+            mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
             for msg in request.messages:
-                parsed_msg = self._parse_chat_message_content(msg)
+                chat_parsed_result = self._parse_chat_message_content(msg)
 
-                conversation.extend(parsed_msg.messages)
+                conversation.extend(chat_parsed_result.messages)
+                mm_futures.extend(chat_parsed_result.mm_futures)
+
+            tool_dicts = None if request.tools is None else [
+                tool.model_dump() for tool in request.tools
+            ]
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
+                tools=tool_dicts,
+                documents=request.documents,
+                chat_template=request.chat_template,
+                **(request.chat_template_kwargs or {}),
             )
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
+            return self.create_error_response(str(e))
+
+        mm_data: Optional[MultiModalDataDict] = None
+        try:
+            if len(mm_futures):
+                # since we support only single mm data currently
+                assert len(
+                    mm_futures
+                ) == 1, "Multiple 'image_url' input is currently not supported."
+                mm_data = await mm_futures[0]
+        except Exception as e:
+            logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
@@ -167,7 +258,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt=prompt,
                 add_special_tokens=request.add_special_tokens)
             sampling_params = request.to_sampling_params()
-            lora_request = self._maybe_get_lora(request)
+            _, lora_request = self._maybe_get_adapter(request)
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
@@ -183,14 +274,27 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
+        inputs: PromptInputs = {
+            "prompt": prompt_text,
+            "prompt_token_ids": prompt_ids,
+        }
+        if mm_data:
+            inputs["multi_modal_data"] = mm_data
+
+        is_tracing_enabled = await self.engine.is_tracing_enabled()
+        trace_headers = None
+        if is_tracing_enabled and raw_request:
+            trace_headers = extract_trace_headers(raw_request.headers)
+        if not is_tracing_enabled and raw_request and contains_trace_headers(
+                raw_request.headers):
+            log_tracing_disabled_warning()
+
         result_generator = self.engine.generate(
-            {
-                "prompt": prompt_text,
-                "prompt_token_ids": prompt_ids
-            },
+            inputs,
             sampling_params,
             request_id,
             lora_request,
+            trace_headers=trace_headers,
         )
         # Streaming response
         if request.stream:
@@ -247,6 +351,9 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
+                        if (request.stream_options
+                                and request.stream_options.include_usage):
+                            chunk.usage = None
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
 
@@ -274,6 +381,9 @@ class OpenAIServingChat(OpenAIServing):
                                     choices=[choice_data],
                                     logprobs=None,
                                     model=model_name)
+                                if (request.stream_options and
+                                        request.stream_options.include_usage):
+                                    chunk.usage = None
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
                                 yield f"data: {data}\n\n"
@@ -286,13 +396,15 @@ class OpenAIServingChat(OpenAIServing):
                         continue
 
                     delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                    top_logprobs = output.logprobs[
+                    out_logprobs = output.logprobs[
                         previous_num_tokens[i]:] if output.logprobs else None
 
-                    if request.logprobs:
+                    if request.logprobs and request.top_logprobs is not None:
+                        assert out_logprobs is not None, (
+                            "Did not output logprobs")
                         logprobs = self._create_chat_logprobs(
                             token_ids=delta_token_ids,
-                            top_logprobs=top_logprobs,
+                            top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.top_logprobs,
                         )
                     else:
@@ -327,17 +439,14 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
+                        if (request.stream_options
+                                and request.stream_options.include_usage):
+                            chunk.usage = None
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                     else:
                         # Send the finish response for each request.n only once
                         prompt_tokens = len(res.prompt_token_ids)
-                        final_usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=previous_num_tokens[i],
-                            total_tokens=prompt_tokens +
-                            previous_num_tokens[i],
-                        )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
@@ -350,12 +459,32 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
-                        if final_usage is not None:
-                            chunk.usage = final_usage
-                        data = chunk.model_dump_json(exclude_unset=True,
-                                                     exclude_none=True)
+                        if (request.stream_options
+                                and request.stream_options.include_usage):
+                            chunk.usage = None
+                        data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
+
+            if (request.stream_options
+                    and request.stream_options.include_usage):
+                final_usage = UsageInfo(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=previous_num_tokens[i],
+                    total_tokens=prompt_tokens + previous_num_tokens[i],
+                )
+
+                final_usage_chunk = ChatCompletionStreamResponse(
+                    id=request_id,
+                    object=chunk_object_type,
+                    created=created_time,
+                    choices=[],
+                    model=model_name,
+                    usage=final_usage)
+                final_usage_data = (final_usage_chunk.model_dump_json(
+                    exclude_unset=True, exclude_none=True))
+                yield f"data: {final_usage_data}\n\n"
+
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
@@ -381,17 +510,18 @@ class OpenAIServingChat(OpenAIServing):
             final_res = res
         assert final_res is not None
 
-        choices = []
+        choices: List[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
             token_ids = output.token_ids
-            top_logprobs = output.logprobs
+            out_logprobs = output.logprobs
 
-            if request.logprobs:
+            if request.logprobs and request.top_logprobs is not None:
+                assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
-                    top_logprobs=top_logprobs,
+                    top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
                 )
             else:

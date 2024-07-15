@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+from vllm.adapter_commons.layers import AdapterMapping
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -134,15 +135,8 @@ def _apply_lora_packed_nslice(
 
 
 @dataclass
-class LoRAMapping:
-    # Per every token in input_ids:
-    index_mapping: Tuple[int, ...]
-    # Per sampled token:
-    prompt_mapping: Tuple[int, ...]
-
-    def __post_init__(self):
-        self.index_mapping = tuple(self.index_mapping)
-        self.prompt_mapping = tuple(self.prompt_mapping)
+class LoRAMapping(AdapterMapping):
+    pass
 
 
 class BaseLayerWithLoRA(nn.Module):
@@ -215,19 +209,19 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
 
-        lora_vocab_start_idx = self.base_layer.org_vocab_size
-        weights_idx = None
-        if self.base_layer.vocab_end_index > lora_vocab_start_idx:
+        if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
-            weights_idx = max(
-                lora_vocab_start_idx - self.base_layer.vocab_start_index, 0)
-            self.embeddings_slice = (self.base_layer.vocab_start_index -
-                                     self.base_layer.org_vocab_size +
-                                     weights_idx,
-                                     self.base_layer.vocab_end_index -
-                                     self.base_layer.org_vocab_size)
-            self.embeddings_weights = self.base_layer.weight.data[weights_idx:]
-            self.embeddings_weights.fill_(0)
+            self.embeddings_weights = self.base_layer.weight.data[
+                self.base_layer.num_org_embeddings_per_partition:self.
+                base_layer.num_org_embeddings_per_partition +
+                self.base_layer.num_added_embeddings_per_partition]
+            self.embeddings_slice = (
+                self.base_layer.shard_indices.added_vocab_start_index -
+                self.base_layer.org_vocab_size,
+                self.base_layer.shard_indices.added_vocab_end_index -
+                self.base_layer.org_vocab_size)
+            self.base_layer.weight.data[
+                self.base_layer.num_org_embeddings_per_partition:].fill_(0)
         else:
             self.embeddings_slice = None
             self.embeddings_weights = None
@@ -641,6 +635,24 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         self.kv_proj_total_size = (self.base_layer.total_num_kv_heads *
                                    self.base_layer.head_size)
 
+    def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
+        tp_rank = get_tensor_model_parallel_rank()
+        self.q_shard_id = tp_rank
+        self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
+        lora_b_q = lora_b[:, self.q_proj_shard_size *
+                          self.q_shard_id:self.q_proj_shard_size *
+                          (self.q_shard_id + 1)]
+        k_offset = self.q_proj_total_size
+        lora_b_k = lora_b[:, k_offset +
+                          self.kv_proj_shard_size * self.kv_shard_id:k_offset +
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+        v_offset = k_offset + self.kv_proj_total_size
+        lora_b_v = lora_b[:, v_offset +
+                          self.kv_proj_shard_size * self.kv_shard_id:v_offset +
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+        lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
+        return lora_b
+
     def set_lora(
         self,
         index: int,
@@ -650,21 +662,8 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     ):
         self.reset_lora(index)
         if self.tp_size > 1:
-            tp_rank = get_tensor_model_parallel_rank()
-            self.q_shard_id = tp_rank
-            self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
-            lora_b_q = lora_b[:, self.q_proj_shard_size *
-                              self.q_shard_id:self.q_proj_shard_size *
-                              (self.q_shard_id + 1)]
-            k_offset = self.q_proj_total_size
-            lora_b_k = lora_b[:, k_offset + self.kv_proj_shard_size *
-                              self.kv_shard_id:k_offset +
-                              self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-            v_offset = k_offset + self.kv_proj_total_size
-            lora_b_v = lora_b[:, v_offset + self.kv_proj_shard_size *
-                              self.kv_shard_id:v_offset +
-                              self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-            lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
+            lora_a = self.slice_lora_a(lora_a)
+            lora_b = self.slice_lora_b(lora_b)
 
         self.lora_a_stacked[index,
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
@@ -674,6 +673,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                                 lora_b.T, non_blocking=True)
 
     @classmethod
+    @_not_fully_sharded_can_replace
     def can_replace_layer(cls, source_layer: nn.Module,
                           lora_config: LoRAConfig, packed_modules_list: List,
                           model_config: Optional[PretrainedConfig]) -> bool:
@@ -1025,19 +1025,31 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
+    """
+    LoRA wrapper for LogitsProcessor, with extra logic to handle the
+    application of the LoRA adapter and added LoRA vocabulary.
 
-    def __init__(
-        self,
-        base_layer: LogitsProcessor,
-        hidden_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> None:
+    Args:
+        base_layer: LogitsProcessor layer
+        hidden_size: hidden size of the model
+        dtype: data type of the model
+        device: device of the model
+        sharded_to_full_mapping: index mapping from sharded vocab to full vocab
+            received from base_layer.get_sharded_to_full_mapping(). If None,
+            no reindexing will be done.
+    """
+
+    def __init__(self, base_layer: LogitsProcessor, hidden_size: int,
+                 dtype: torch.dtype, device: torch.device,
+                 sharded_to_full_mapping: Optional[List[int]]) -> None:
         super().__init__()
         self.base_layer = base_layer
         self.hidden_size = hidden_size
         self.dtype = dtype
         self.device = device
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.sharded_to_full_mapping = sharded_to_full_mapping
 
     @property
     def logits_as_input(self):
@@ -1050,6 +1062,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     @property
     def scale(self):
         return self.base_layer.scale
+
+    @property
+    def soft_cap(self):
+        return self.base_layer.soft_cap
 
     @property
     def org_vocab_size(self):
@@ -1098,6 +1114,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.dtype,
             device=self.device,
         )
+        if self.sharded_to_full_mapping is not None:
+            self.sharded_to_full_mapping_gpu = torch.tensor(
+                self.sharded_to_full_mapping,
+                device=self.device,
+                dtype=torch.long)
+        else:
+            self.sharded_to_full_mapping_gpu = None
         # Lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]
@@ -1143,16 +1166,35 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
-        embedding: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
+        logits = lm_head.linear_method.apply(lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
         logits = tensor_model_parallel_gather(logits)
         if logits is None:
             return None
+
+        if self.sharded_to_full_mapping_gpu is not None:
+            # Reindex full logits tensor to ensure 1:1 mapping between
+            # index and token_id
+            # Example for:
+            #   org_vocab_size = 4
+            #   added_vocab_size = 2
+            #   pad_to_size = 8
+            #   tp_size = 2
+
+            # indices:  [0, 1, 2,  3, 4, 5, 6,  7]
+            # token_id: [0, 1, 4, -1, 2, 3, 5, -1]
+
+            # Therefore, the mapping is expected to be:
+            # [0, 1, 4, 6, 2, 3, 5, 7] so that when we reindex,
+            # we get:
+            # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
+            # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
+            logits = logits[:, self.sharded_to_full_mapping_gpu]
 
         lora_logits = torch.empty(
             self.embeddings_tensors.shape[0] + 1,

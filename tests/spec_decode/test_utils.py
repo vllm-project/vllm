@@ -1,9 +1,13 @@
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
-from vllm.sequence import SequenceGroupMetadata
-from vllm.spec_decode.util import get_all_seq_ids, split_batch_by_proposal_len
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.layers.typical_acceptance_sampler import (
+    TypicalAcceptanceSampler)
+from vllm.sequence import SequenceGroupMetadata, get_all_seq_ids
+from vllm.spec_decode.util import split_batch_by_proposal_len
 
 
 def test_get_all_seq_ids():
@@ -109,3 +113,21 @@ def test_all_non_zero_with_zero_filter(fake_sequence_group_metadata):
 
     assert filtered_groups == []
     assert indices == []
+
+
+def mock_spec_decode_sampler(acceptance_sampler_method):
+    """
+    Returns either a RejectionSampler or TypicalAcceptanceSampler
+    object depending on whether acceptance_sampler_method is 
+    'rejection_sampler' or 'typical_acceptance_sampler' respectively.
+    """
+    if acceptance_sampler_method == "rejection_sampler":
+        sampler = MagicMock(spec=RejectionSampler)
+        sampler.token_id_dtype = torch.int64
+        return sampler
+    elif acceptance_sampler_method == "typical_acceptance_sampler":
+        sampler = MagicMock(spec=TypicalAcceptanceSampler)
+        sampler.token_id_dtype = torch.int64
+        return sampler
+    else:
+        raise ValueError(f"Invalid sampler name {acceptance_sampler_method}")

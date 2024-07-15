@@ -1,12 +1,12 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposer
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 
-class ProposerWorkerBase(WorkerBase, SpeculativeProposer):
+class ProposerWorkerBase(LoraNotSupportedWorkerBase, SpeculativeProposer):
     """Interface for proposer workers"""
 
     @abstractmethod
@@ -14,6 +14,13 @@ class ProposerWorkerBase(WorkerBase, SpeculativeProposer):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        # A set containing all sequence IDs that were assigned bonus tokens
+        # in their last forward pass. This set is used to backfill the KV cache
+        # with the key-value pairs of the penultimate token in the sequences.
+        # This parameter is only used by the MultiStepWorker, which relies on
+        # the KV cache for token generation. It is not used by workers that
+        # do not utilize the KV cache.
+        seq_ids_with_bonus_token_in_last_step: Set[int]
     ) -> Tuple[Optional[List[SamplerOutput]], bool]:
         raise NotImplementedError
 
