@@ -172,16 +172,16 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
         # Try two different tiny base models.
         # Note that one is equal to the draft model, another isn't.
         {
-            "model": "JackFram/llama-68m",
+            "model": "meta-llama/Llama-2-7b-chat-hf",
         },
         {
-            "model": "JackFram/llama-160m",
+            "model": "meta-llama/Llama-2-7b-chat-hf",
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": "JackFram/llama-68m",
+        "speculative_model": "meta-llama/Llama-2-7b-chat-hf",
         "num_speculative_tokens": 5,
     },
 ])

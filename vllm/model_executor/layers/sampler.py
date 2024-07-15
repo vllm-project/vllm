@@ -54,6 +54,12 @@ class Sampler(nn.Module):
     ):
         _, vocab_size = logits.shape
 
+        # First free any existing stored sampling tensors.
+        # This is necessary because some sampling tensors may
+        # have pinned memory.
+        self._sampling_tensors = None
+
+        # Initialize new sampling tensors
         (sampling_tensors, do_penalties, do_top_p_top_k,
          do_min_p) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)

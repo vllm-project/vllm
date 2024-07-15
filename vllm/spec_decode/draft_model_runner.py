@@ -245,9 +245,13 @@ class TP1DraftModelRunner(ModelRunner):
                     "execute_model(..) of draft_model_runner can be called "
                     "directly only with a single-step prefill")
         else:
+            # We can skip CPU samples for spec token generation.
+            # (We do allow CPU samples for num_steps == 1 to support the
+            # fallback case, where supports_gpu_multi_step(..) does not pass)
+            model_input.sampling_metadata.skip_sampler_cpu_output = num_steps > 1
+
+            # Attn attr defines if we use cuda graphs
             use_cuda_graph = model_input.attn_metadata.use_cuda_graph
-            # We can skip CPU samples for spec token generation
-            model_input.sampling_metadata.skip_sampler_cpu_output = True
 
         # Get model
         if use_cuda_graph:
