@@ -9,7 +9,6 @@ from vllm.sequence import SequenceGroup
 from .utils import (append_new_token, create_dummy_prompt_encoder_decoder,
                     get_sequence_groups, schedule_and_update_computed_tokens)
 
-
 def test_scheduler_schedule_simple_encoder_decoder():
     block_size = 4
     num_seq_group = 4

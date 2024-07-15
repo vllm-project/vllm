@@ -5,7 +5,10 @@ Run `pytest tests/models/test_bart.py`.
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
-from vllm.utils import STR_XFORMERS_ATTN_VAL
+from vllm.utils import (STR_XFORMERS_ATTN_VAL,
+                        is_cpu,
+                        )
+from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_CPU
 
 from .utils import check_logprobs_close
 
@@ -16,7 +19,7 @@ MODELS = ["facebook/bart-base", "facebook/bart-large-cnn"]
 # Currently only XFormers is supported
 BACKEND_NAMES = [STR_XFORMERS_ATTN_VAL]
 
-
+@pytest.mark.skipif(condition=is_cpu(),reason=STR_NOT_IMPL_ENC_DEC_CPU)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
