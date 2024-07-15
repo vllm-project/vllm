@@ -446,7 +446,7 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
             if not isinstance(k_scale, float) or not isinstance(
                     v_scale, float):
                 raise ValueError("Only support per-tensor scaling factor "
-                                    "for fp8 KV cache")
+                                 "for fp8 KV cache")
             layer._k_scale = k_scale
             layer._v_scale = v_scale
             if (layer._k_scale == 1.0 and layer._v_scale == 1.0
