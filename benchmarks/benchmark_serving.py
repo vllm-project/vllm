@@ -203,7 +203,7 @@ def sample_random_requests(
     )
     offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
     input_requests = []
-    for i in range(args.num_prompts):
+    for i in range(num_prompts):
         prompt = tokenizer.decode([(offsets[i] + i + j) % tokenizer.vocab_size
                                    for j in range(input_lens[i])])
         input_requests.append(
