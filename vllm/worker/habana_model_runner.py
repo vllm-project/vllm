@@ -19,8 +19,8 @@ import torch
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         MultiModalConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -73,7 +73,8 @@ def warmup_range(config: Tuple[int, int, int]):
     """Generate a warmup range.
 
     Start from bmin and multiply by 2 until you reach bstep.
-    Then, increase the values in the range by the value of bstep until you reach bmax.
+    Then, increase the values in the range by the value of bstep until you 
+    reach bmax.
 
     Example:
     bmin = 2, bstep = 32, bmax = 64
@@ -82,7 +83,9 @@ def warmup_range(config: Tuple[int, int, int]):
     => return ramp_up + stable => (2, 4, 8, 16, 32, 64)
     """
     bmin, bstep, bmax = config
-    assert bmin <= bmax, "Min. batch size cannot be greater than max. batch size. If you want to skip warmup, set VLLM_SKIP_WARMUP=true"
+    assert bmin <= bmax, ("Min. batch size cannot be greater than max. "
+                          "batch size. If you want to skip warmup, "
+                          "set VLLM_SKIP_WARMUP=true")
     base = itertools.repeat(2)
     ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)
     ramp_up_tw = itertools.takewhile(lambda x: x < bstep and x <= bmax, \
@@ -812,9 +815,9 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> TModelInputForHPU:
+    ) -> Tuple[TModelInputForHPU, SamplingMetadata]:
         if len(seq_group_metadata_list) == 0:
-            return self._model_input_cls()
+            return self._model_input_cls(), None
 
         input_tokens = None
         input_positions = None
@@ -950,16 +953,17 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         attn_metadata = prefill_attn_metadata if \
             prefill_attn_metadata is not None else decode_attn_metadata
 
-        return self._model_input_cls(input_tokens=input_tokens,
-                                     seq_lens=seq_lens,
-                                     query_lens=query_lens,
-                                     input_positions=input_positions,
-                                     attn_metadata=attn_metadata,
-                                     lora_requests=lora_requests,
-                                     lora_mapping=lora_mapping,
-                                     multi_modal_kwargs=multi_modal_input,
-                                     real_batch_size=real_batch_size,
-                                     batch_size_padded=batch_size_padded)
+        return self._model_input_cls(
+            input_tokens=input_tokens,
+            seq_lens=seq_lens,
+            query_lens=query_lens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            lora_requests=lora_requests,
+            lora_mapping=lora_mapping,
+            multi_modal_kwargs=multi_modal_input,
+            real_batch_size=real_batch_size,
+            batch_size_padded=batch_size_padded), sampling_metadata
 
     def _seq_len(self, attn_metadata):
         if attn_metadata.num_prefills != 0:
@@ -1277,10 +1281,8 @@ class HabanaModelRunner(
             assert seq_group_metadata_list is not None
             self.profiler_counter_helper.capture_seq_group_metadata_stats(
                 seq_group_metadata_list=seq_group_metadata_list)
-            model_input = self.prepare_input_tensors(seq_group_metadata_list)
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, model_input.seq_lens,
-                model_input.query_lens, self.device, self.pin_memory)
+            model_input, sampling_metadata = self.prepare_input_tensors(
+                seq_group_metadata_list)
             assert model_input.attn_metadata is not None
             is_prompt = model_input.attn_metadata.is_prompt
 
