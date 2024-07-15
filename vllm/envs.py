@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
+    VLLM_ASSETS_CACHE: str = "~/.cache/vllm/assets"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -241,6 +242,23 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
+
+    # Path to the cache for storing downloaded assets
+    # Defaults to `~/.cache/vllm/assets` unless `XDG_CACHE_HOME` is set
+    "VLLM_ASSETS_CACHE":
+    lambda: os.path.expanduser(
+        os.getenv(
+            "VLLM_ASSETS_CACHE",
+            os.path.join(
+                os.getenv(
+                    "XDG_CACHE_HOME",
+                    os.path.join(os.path.expanduser("~"), ".cache"),
+                ),
+                "vllm",
+                "assets",
+            ),
+        )
+    ),
 
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds
