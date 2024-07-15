@@ -111,13 +111,15 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
         self.layer_idx = config.img_processor.get('layer_idx', -2)
 
-        # Initialize the vision tower only up to the required feature layer
+        # Initialize the CLIP only up to the required feature layer
         if self.layer_idx < 0:
-            clip_config.num_hidden_layers += self.layer_idx + 1
+            num_hidden_layers = clip_config.num_hidden_layers + \
+                self.layer_idx + 1
         else:
-            clip_config.num_hidden_layers = self.layer_idx + 1
+            num_hidden_layers = self.layer_idx + 1
 
-        self.img_processor = CLIPVisionModel(clip_config)
+        self.img_processor = CLIPVisionModel(
+            clip_config, num_hidden_layers_override=num_hidden_layers)
         image_dim_out = config.img_processor['image_dim_out']
         self.num_img_tokens = config.img_processor['num_img_tokens']
 

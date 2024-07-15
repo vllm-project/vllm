@@ -225,12 +225,14 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         # Initialize the vision tower only up to the required feature layer
         vision_feature_layer = config.vision_feature_layer
         if vision_feature_layer < 0:
-            config.vision_config.num_hidden_layers += vision_feature_layer + 1
+            num_hidden_layers = config.vision_config.num_hidden_layers \
+                + vision_feature_layer + 1
         else:
-            config.vision_config.num_hidden_layers = vision_feature_layer + 1
+            num_hidden_layers = vision_feature_layer + 1
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = CLIPVisionModel(config=config.vision_config)
+        self.vision_tower = CLIPVisionModel(
+            config.vision_config, num_hidden_layers_override=num_hidden_layers)
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,

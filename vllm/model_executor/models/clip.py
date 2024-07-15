@@ -266,8 +266,11 @@ class CLIPVisionModel(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
+        if num_hidden_layers_override is not None:
+            config.num_hidden_layers = num_hidden_layers_override
         self.vision_model = CLIPVisionTransformer(config=config,
                                                   quant_config=quant_config)
 
