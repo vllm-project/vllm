@@ -7,7 +7,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 from uuid import uuid4
 
 import cpuinfo
@@ -24,6 +24,13 @@ _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home,
                                               "vllm/do_not_track")
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
+
+_GLOBAL_RUNTIME_DATA: Dict[str, Union[str, int, bool]] = {}
+
+
+def set_runtime_usage_data(key: str, value: Union[str, int, bool]) -> None:
+    """Set global usage data that will be sent with every usage heartbeat."""
+    _GLOBAL_RUNTIME_DATA[key] = value
 
 
 def is_usage_stats_enabled():
@@ -187,7 +194,11 @@ class UsageMessage:
         """
         while True:
             time.sleep(600)
-            data = {"uuid": self.uuid, "log_time": _get_current_timestamp_ns()}
+            data = {
+                "uuid": self.uuid,
+                "log_time": _get_current_timestamp_ns(),
+            }
+            data.update(_GLOBAL_RUNTIME_DATA)
 
             self._write_to_file(data)
             self._send_to_server(data)
