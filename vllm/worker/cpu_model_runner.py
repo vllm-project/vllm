@@ -160,7 +160,13 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             # Token position ids
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(list(range(computed_len, seq_len)))
+            # TODO: should work as gpu but to be tested.
+            seq_position_ids = seq_data.get_position_ids()
+            if seq_position_ids is not None:
+                input_positions.extend(
+                    list(seq_position_ids[computed_len:seq_len]))
+            else:
+                input_positions.extend(list(range(computed_len, seq_len)))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:

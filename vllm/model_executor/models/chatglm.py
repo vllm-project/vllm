@@ -50,13 +50,13 @@ def merge_glm_vision_embeddings(
 
     for boi_pos, eoi_pos in zip(boi_positions, eoi_positions):
         assert boi_pos < eoi_pos
-        mask[boi_pos: eoi_pos + 1] = True
+        mask[boi_pos:eoi_pos + 1] = True
 
     inputs_embeds[mask] = vision_embeddings.view(-1,
-                                                vision_embeddings.shape[-1])
+                                                 vision_embeddings.shape[-1])
     return inputs_embeds
 
-    
+
 class GLMImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
@@ -68,7 +68,8 @@ def get_max_glmv_image_tokens(ctx: InputContext):
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, dict):
-        return (vision_config["image_size"] // vision_config["patch_size"] // 2) ** 2
+        return (vision_config["image_size"] // vision_config["patch_size"] //
+                2)**2
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -79,12 +80,19 @@ def dummy_data_for_glmv(ctx: InputContext, seq_len: int):
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, dict):
-        image_placeholder_length = (vision_config["image_size"] // vision_config["patch_size"] // 2) ** 2
-        token_ids = [hf_config.boi_token_id] + [0] * image_placeholder_length + [hf_config.eoi_token_id]
+        image_placeholder_length = (vision_config["image_size"] //
+                                    vision_config["patch_size"] // 2)**2
+        token_ids = [
+            hf_config.boi_token_id
+        ] + [0] * image_placeholder_length + [hf_config.eoi_token_id]
         token_ids += [0] * (seq_len - image_placeholder_length - 2)
         seq_data = SequenceData(token_ids)
 
-        mm_data = {"image": torch.zeros(1, 3, vision_config["image_size"], vision_config["image_size"])}
+        mm_data = {
+            "image":
+            torch.zeros(1, 3, vision_config["image_size"],
+                        vision_config["image_size"])
+        }
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -100,7 +108,9 @@ def input_processor_for_glmv(ctx: InputContext, llm_inputs: LLMInputs):
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, dict):
-        image_placeholder_length = (vision_config["image_size"] // vision_config["patch_size"] // 2) ** 2  # 1600
+        image_placeholder_length = (vision_config["image_size"] //
+                                    vision_config["patch_size"] //
+                                    2)**2  # 1600
     else:
         msg = f"Unsupported vision config: {type(vision_config)}"
         raise NotImplementedError(msg)
@@ -123,14 +133,18 @@ def input_processor_for_glmv(ctx: InputContext, llm_inputs: LLMInputs):
 
     for boi_position, eoi_position in zip(boi_positions, eoi_positions):
         assert boi_position < eoi_position
-        new_input_ids.extend(input_ids[final_processed_position:boi_position + 1])
-        new_position_ids.extend(list(range(final_processed_position, boi_position + 1)))
-        new_input_ids.extend([input_ids[boi_position + 1]] * image_placeholder_length)
+        new_input_ids.extend(input_ids[final_processed_position:boi_position +
+                                       1])
+        new_position_ids.extend(
+            list(range(final_processed_position, boi_position + 1)))
+        new_input_ids.extend([input_ids[boi_position + 1]] *
+                             image_placeholder_length)
         new_position_ids.extend([boi_position + 1] * image_placeholder_length)
         final_processed_position = eoi_position
 
     new_input_ids.extend(input_ids[final_processed_position:])
-    new_position_ids.extend(list(range(final_processed_position, len(input_ids))))
+    new_position_ids.extend(
+        list(range(final_processed_position, len(input_ids))))
 
     assert len(new_input_ids) == len(new_position_ids)
 
@@ -446,8 +460,7 @@ class ChatGLMModel(nn.Module):
                 inputs_embeds=inputs_embeds,
                 vision_embeddings=image_features,
                 boi_token_id=boi_token_id,
-                eoi_token_id=eoi_token_id
-            )
+                eoi_token_id=eoi_token_id)
 
         # Run encoder.
         hidden_states = self.encoder(
@@ -495,20 +508,19 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
-        self.transformer = ChatGLMModel(config, multimodal_config, cache_config, quant_config)
+        self.transformer = ChatGLMModel(config, multimodal_config,
+                                        cache_config, quant_config)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        **kwargs
-    ) -> torch.Tensor:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                **kwargs) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, **kwargs)
         return hidden_states

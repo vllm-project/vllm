@@ -120,7 +120,8 @@ class SequenceData:
         position_ids: Optional[List[int]] = None,
     ) -> None:
         self._prompt_token_ids: List[int] = list(prompt_token_ids)
-        self._position_ids: List[int] = list(position_ids) if position_ids is not None else None
+        self._position_ids: Optional[List[int]] = list(
+            position_ids) if position_ids is not None else None
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids: List[int] = (
             list(output_token_ids) if output_token_ids is not None else [])
@@ -229,7 +230,7 @@ class SequenceData:
         if not self._output_token_ids:
             return self._prompt_token_ids[-1]
         return self._output_token_ids[-1]
-    
+
     def get_last_position_id(self) -> Union[None, int]:
         if self._position_ids is not None:
             return self._position_ids[-1]
@@ -241,7 +242,7 @@ class SequenceData:
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
 
-    def get_position_ids(self) -> Tuple[int, ...]:
+    def get_position_ids(self) -> Union[None, Tuple[int, ...]]:
         return self.position_ids
 
     @property
@@ -284,7 +285,8 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
 
-        self.data = SequenceData(self.prompt_token_ids, position_ids=self.position_ids)
+        self.data = SequenceData(self.prompt_token_ids,
+                                 position_ids=self.position_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -310,7 +312,7 @@ class Sequence:
         return self.inputs["prompt_token_ids"]
 
     @property
-    def position_ids(self) -> List[int]:
+    def position_ids(self) -> Optional[List[int]]:
         return self.inputs.get("position_ids")
 
     @property
@@ -370,7 +372,7 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
-    def get_position_ids(self) -> List[int]:
+    def get_position_ids(self) -> Optional[Tuple[int, ...]]:
         return self.data.get_position_ids()
 
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
@@ -379,7 +381,7 @@ class Sequence:
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
 
-    def get_last_position_id(self) -> int:
+    def get_last_position_id(self) -> Optional[int]:
         return self.data.get_last_position_id()
 
     def get_output_token_ids(self) -> Tuple[int, ...]:

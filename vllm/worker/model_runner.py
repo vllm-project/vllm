@@ -527,7 +527,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 input_tokens.extend(tokens)
                 seq_position_ids = seq_data.get_position_ids()
                 if seq_position_ids is not None:
-                    input_positions.extend(list(seq_position_ids[context_len:seq_len]))
+                    input_positions.extend(
+                        list(seq_position_ids[context_len:seq_len]))
                 else:
                     input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
