@@ -156,8 +156,7 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
     # Build decoder model inputs &
     # decoder self-attention KV caching data structures
     decoder_only_model_input = (
-        model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list))
+        model_runner._prepare_model_input_tensors(seq_group_metadata_list))
     input_tokens = decoder_only_model_input.input_tokens
     input_positions = decoder_only_model_input.input_positions
     attn_metadata = decoder_only_model_input.attn_metadata
@@ -171,7 +170,7 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
     # data structures
     encoder_decoder_model_input = (
         model_runner._prepare_encoder_model_input_tensors(
-        seq_group_metadata_list, decoder_only_model_input))
+            seq_group_metadata_list, decoder_only_model_input))
     encoder_input_tokens = encoder_decoder_model_input.encoder_input_tokens
     encoder_input_positions = encoder_decoder_model_input.encoder_input_positions
     attn_metadata = encoder_decoder_model_input.attn_metadata
@@ -335,8 +334,7 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     # Build decoder model inputs &
     # decoder self-attention KV caching data structures
     decoder_only_model_input = (
-        model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list))
+        model_runner._prepare_model_input_tensors(seq_group_metadata_list))
     input_tokens = decoder_only_model_input.input_tokens
     input_positions = decoder_only_model_input.input_positions
     attn_metadata = decoder_only_model_input.attn_metadata
@@ -350,7 +348,7 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     # data structures
     encoder_decoder_model_input = (
         model_runner._prepare_encoder_model_input_tensors(
-        seq_group_metadata_list, decoder_only_model_input))
+            seq_group_metadata_list, decoder_only_model_input))
     encoder_input_tokens = encoder_decoder_model_input.encoder_input_tokens
     encoder_input_positions = encoder_decoder_model_input.encoder_input_positions
     attn_metadata = encoder_decoder_model_input.attn_metadata

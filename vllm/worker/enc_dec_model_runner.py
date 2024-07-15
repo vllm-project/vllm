@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
 
@@ -92,6 +92,36 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     """
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "encoder_input_tokens": self.encoder_input_tokens,
+            "encoder_input_positions": self.encoder_input_positions,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+            "prompt_adapter_mapping": self.prompt_adapter_mapping,
+            "prompt_adapter_requests": self.prompt_adapter_requests,
+            "virtual_engine": self.virtual_engine,
+            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
+            "finished_requests_ids": self.finished_requests_ids,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls,
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "EncoderDecoderModelInput":
+        return cast(
+            EncoderDecoderModelInput,
+            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
 class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
@@ -358,10 +388,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         return
 
     def _prepare_encoder_model_input_tensors(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        model_input: EncoderDecoderModelInput
-    ) -> EncoderDecoderModelInput:
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            model_input: EncoderDecoderModelInput) -> EncoderDecoderModelInput:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -633,8 +661,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             device=self.device,
         )
         assert (not is_prompt) or max_query_len > 0, (
-            "Decode-phase query_lens: {}".format(query_lens)
-            )
+            "Decode-phase query_lens: {}".format(query_lens))
 
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
@@ -700,11 +727,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # dataclasses.replace to construct a new model input
         # instance.
         model_input = dataclasses.replace(
-                            model_input,
-                            attn_metadata=attn_metadata,
-                            encoder_input_tokens=input_tokens_tensor,
-                            encoder_input_positions=input_positions_tensor,
-                            )
+            model_input,
+            attn_metadata=attn_metadata,
+            encoder_input_tokens=input_tokens_tensor,
+            encoder_input_positions=input_positions_tensor,
+        )
 
         logits_soft_cap = getattr(self.model_config.hf_config,
                                   'attn_logit_softcapping', None)
