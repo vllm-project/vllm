@@ -389,7 +389,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         assert USE_RAY_COMPILED_DAG
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag()
-        fut = self.forward_dag.execute_async((execute_model_req, None))
+        fut = await self.forward_dag.execute_async((execute_model_req, None))
         outputs = await fut
         # from ray.experimental.compiled_dag_ref import RayDAGTaskError
         # if isinstance(outputs[0], RayDAGTaskError):
