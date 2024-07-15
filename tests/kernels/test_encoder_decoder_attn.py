@@ -16,7 +16,8 @@ import torch
 
 from tests.kernels.utils import *
 from tests.kernels.utils import make_causal_mask, maybe_make_long_tensor
-from vllm.attention import (Attention, AttentionMetadata, AttentionBackend, AttentionType,)
+from vllm.attention import (Attention, AttentionBackend, AttentionMetadata,
+                            AttentionType)
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.utils import LIST_ENC_DEC_SUPPORTED_BACKENDS, is_hip
 

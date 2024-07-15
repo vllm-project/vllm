@@ -8,8 +8,8 @@ if not is_cpu():
     # CPU backend is not currently supported with encoder/decoder models
 
     import pytest
+
     from tests.kernels.utils import override_backend_env_variable
-    from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_CPU
 
     from .utils import check_logprobs_close
 
@@ -42,15 +42,16 @@ if not is_cpu():
         override_backend_env_variable(monkeypatch, backend_name)
 
         with hf_runner(model, dtype=dtype,
-                    is_encoder_decoder_model=True) as hf_model:
-            hf_outputs = hf_model.generate_encoder_decoder_greedy_logprobs_limit(
-                example_encoder_decoder_prompts, max_tokens, num_logprobs)
+                       is_encoder_decoder_model=True) as hf_model:
+            hf_outputs = (
+                hf_model.generate_encoder_decoder_greedy_logprobs_limit(
+                    example_encoder_decoder_prompts, max_tokens, num_logprobs))
 
         with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 example_encoder_decoder_prompts, max_tokens, num_logprobs)
 
         check_logprobs_close(outputs_0_lst=hf_outputs,
-                            outputs_1_lst=vllm_outputs,
-                            name_0="hf",
-                            name_1="vllm")
+                             outputs_1_lst=vllm_outputs,
+                             name_0="hf",
+                             name_1="vllm")

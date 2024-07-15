@@ -25,7 +25,7 @@ from transformers import BartConfig
 from transformers.activations import ACT2FN
 from transformers.utils import logging
 
-from vllm.attention import (Attention, AttentionMetadata,AttentionType,)
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (

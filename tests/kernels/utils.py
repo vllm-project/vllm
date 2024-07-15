@@ -8,9 +8,7 @@ from typing import Any, List, NamedTuple, Optional, Tuple, Union
 import pytest
 import torch
 
-from vllm.attention import (AttentionBackend,
-                            AttentionMetadata, AttentionType,
-                            )
+from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
                         make_tensor_with_pad)
