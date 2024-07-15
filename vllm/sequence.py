@@ -9,12 +9,11 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 
+from vllm.inputs import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-
-from vllm.inputs import is_valid_encoder_decoder_llm_inputs
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs

@@ -60,7 +60,7 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_tokens = list(reversed(list(range(encoder_prompt_length))))
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
 
-    inputs={
+    inputs = {
         "prompt": decoder_prompt_str,
         "prompt_token_ids": decoder_prompt_tokens,
         "encoder_prompt": encoder_prompt_str,
@@ -142,7 +142,7 @@ def create_seq_group_encoder_decoder(
 
     prompt_token_ids = [0] * seq_prompt_len
 
-    inputs={
+    inputs = {
         "prompt": "",
         "prompt_token_ids": prompt_token_ids,
         "encoder_prompt": "",
@@ -153,12 +153,10 @@ def create_seq_group_encoder_decoder(
     seqs = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         # Construct decoder input sequences
-        seq = Sequence(
-            seq_id=seq_id_start + seq_id_offset,
-            inputs=inputs,
-            block_size=16,
-            from_decoder_prompt=True
-        )
+        seq = Sequence(seq_id=seq_id_start + seq_id_offset,
+                       inputs=inputs,
+                       block_size=16,
+                       from_decoder_prompt=True)
 
         for i in range(output_len):
             seq.append_token_id(
@@ -168,12 +166,10 @@ def create_seq_group_encoder_decoder(
         seqs.append(seq)
 
     # Encoder input sequence
-    encoder_seq = Sequence(
-        seq_id=seq_id_start + len(seq_output_lens),
-        inputs=inputs,
-        block_size=16,
-        from_decoder_prompt=False
-    )
+    encoder_seq = Sequence(seq_id=seq_id_start + len(seq_output_lens),
+                           inputs=inputs,
+                           block_size=16,
+                           from_decoder_prompt=False)
 
     return SequenceGroup(request_id=request_id,
                          seqs=seqs,
