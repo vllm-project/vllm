@@ -392,16 +392,33 @@ def get_open_port() -> int:
 
 
 def update_environment_variables(envs: Dict[str, str]):
-    if is_hip() and "CUDA_VISIBLE_DEVICES" in envs:
-        # Propagate changes to CUDA_VISIBLE_DEVICES to
-        # ROCm's HIP_VISIBLE_DEVICES as well
-        envs["HIP_VISIBLE_DEVICES"] = envs["CUDA_VISIBLE_DEVICES"]
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
                 "Overwriting environment variable %s "
                 "from '%s' to '%s'", k, os.environ[k], v)
         os.environ[k] = v
+
+
+def init_kmp_env():
+    if not is_cpu():
+        return
+
+    ld_prealod_str = os.getenv("LD_PRELOAD", "")
+    if "libiomp5.so" not in ld_prealod_str:
+        return
+
+    # The time(milliseconds) that a thread should wait after completing the
+    # execution of a parallel region, before sleeping.
+    os.environ['KMP_BLOCKTIME'] = "1"
+    # dump settings on start up
+    os.environ['KMP_SETTINGS'] = "1"
+    # Prevents the CPU to run into low performance state
+    os.environ['KMP_TPAUSE'] = "0"
+    # Provides fine granularity parallelism
+    os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
 
 
 def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:

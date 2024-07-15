@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -88,6 +88,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         *args,
         **kwargs,
@@ -98,6 +99,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.cache_config = cache_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
@@ -107,9 +109,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
         self.kv_cache_dtype = kv_cache_dtype
         self.block_size = cache_config.block_size
-        self.max_context_len_to_capture = (
-            self.model_config.max_context_len_to_capture
-            if self.model_config is not None else 0)
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
@@ -168,14 +167,18 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         model_config = self.model_config
 
         if supports_vision(self.model):
-            # TODO: properly inject these numbers from MultiModalRegistry.
-            # Right now, just use an overly conservative number.
-            max_num_seqs = max(
-                1,
-                min(
-                    max_num_seqs,
-                    int(max_num_batched_tokens /
-                        MULTIMODAL_REGISTRY.get_num_input_tokens())))
+            max_mm_tokens = MULTIMODAL_REGISTRY \
+                .get_max_multimodal_tokens(model_config)
+            max_num_seqs_orig = max_num_seqs
+            max_num_seqs = min(max_num_seqs,
+                               max_num_batched_tokens // max_mm_tokens)
+            if max_num_seqs < 1:
+                expr = (f"min({max_num_seqs_orig}, "
+                        f"{max_num_batched_tokens} // {max_mm_tokens})")
+                logger.warning(
+                    "Computed max_num_seqs (%s) to be less than 1. "
+                    "Setting it to the minimum value of 1.", expr)
+                max_num_seqs = 1
 
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +

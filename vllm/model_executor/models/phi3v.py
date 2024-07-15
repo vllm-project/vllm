@@ -53,6 +53,10 @@ _KEYS_TO_MODIFY_MAPPING = {
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 32044
 
+# Result in the max possible feature size (h:w = 16:1)
+MAX_IMAGE_FEATURE_SIZE_HEIGHT = 8000
+MAX_IMAGE_FEATURE_SIZE_WIDTH = 50
+
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      hidden_act="quick_gelu",
                                                      hidden_size=1024,
@@ -76,13 +80,11 @@ class Phi3ImageEmbeddingBase(nn.Module):
 
     def get_img_features(self,
                          img_embeds: torch.FloatTensor) -> torch.FloatTensor:
-        LAYER_IDX = self.layer_idx
         TYPE_FEATURE = self.type_feature
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the img_processor
-        img_feature = self.img_processor(img_embeds,
-                                         vision_feature_layer=LAYER_IDX)
+        img_feature = self.img_processor(img_embeds)
 
         if TYPE_FEATURE == "patch":
             patch_feature = img_feature[:, 1:]
@@ -107,7 +109,17 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             config, 'n_embd') else config.hidden_size
 
         clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
-        self.img_processor = CLIPVisionModel(clip_config)
+        self.layer_idx = config.img_processor.get('layer_idx', -2)
+
+        # Initialize the CLIP only up to the required feature layer
+        if self.layer_idx < 0:
+            num_hidden_layers = clip_config.num_hidden_layers + \
+                self.layer_idx + 1
+        else:
+            num_hidden_layers = self.layer_idx + 1
+
+        self.img_processor = CLIPVisionModel(
+            clip_config, num_hidden_layers_override=num_hidden_layers)
         image_dim_out = config.img_processor['image_dim_out']
         self.num_img_tokens = config.img_processor['num_img_tokens']
 
@@ -138,8 +150,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.img_projection = nn.Sequential(*layers)
 
         self.vocab_size = config.vocab_size
-
-        self.layer_idx = config.img_processor.get('layer_idx', -2)
         self.type_feature = config.img_processor.get('type_feature', 'patch')
 
     def forward(self, input_ids: torch.LongTensor,
@@ -259,7 +269,8 @@ class Phi3VImagePixelInputs(TypedDict):
     """
     Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for each batch.
+    Note that `num_patches` may be different for each batch, in which case
+    the data is passed as a list instead of a batched tensor.
     """
 
     image_sizes: torch.Tensor
@@ -321,14 +332,18 @@ def get_phi3v_image_feature_size(
         + (new_height // 336 + 1) * 12
 
 
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
-    # Result in the max possible feature size (h:w = 16:1)
-    dummy_height, dummy_width = 8000, 50
-    image_feature_size = get_phi3v_image_feature_size(
+def get_max_phi3v_image_tokens(ctx: InputContext):
+
+    return get_phi3v_image_feature_size(
         ctx.get_hf_config(PretrainedConfig),
-        input_height=dummy_height,
-        input_width=dummy_width,
+        input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
+
+
+def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+
+    image_feature_size = get_max_phi3v_image_tokens(ctx)
 
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
@@ -338,8 +353,8 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
     )
     mm_data = dummy_image_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        image_width_override=dummy_width,
-        image_height_override=dummy_height,
+        image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+        image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
 
     return seq_data, mm_data
@@ -429,6 +444,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsVision):
@@ -457,8 +473,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         if list(data.shape[1:]) != [2]:
             raise ValueError(
-                f"The expected image sizes shape is batch dimension plus "
-                f"{[2]}. You supplied {data.shape}.")
+                f"The expected shape of image sizes is batch dimension plus "
+                f"{[2]}. You supplied {tuple(data.shape)}.")
 
         return data
 
@@ -466,19 +482,20 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
 
-        def _validate_shape(data: torch.Tensor):
-            if list(data.shape)[2:] != [
-                    3, CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
-                    CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size
-            ]:
-                raise ValueError(
-                    "The expected pixel value tensor shape is batch dimension "
-                    "plus patch number, channel, height and width.")
+        h = w = CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size
+        expected_dims = (3, h, w)
 
-        if isinstance(data, torch.Tensor):
-            _validate_shape(data)
-        else:
-            [_validate_shape(d) for d in data]
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape[1:])
+
+            if actual_dims != expected_dims:
+                expected_expr = ("num_patches", *map(str, expected_dims))
+                raise ValueError(
+                    "The expected shape of pixel values in each batch element "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
 
         return data
 
@@ -577,7 +594,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if name in params_dict:
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
