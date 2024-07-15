@@ -50,6 +50,8 @@ Here are some common issues that can cause hangs:
     value = cpu_data.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
+    print("sanity check is successful!")
+
 .. tip::
 
     Save the script as ``test.py``.
@@ -61,5 +63,7 @@ Here are some common issues that can cause hangs:
     - is the correct IP address of the master node
     - is reachable from all nodes
     - is set before running the script.
+
+    If the script runs successfully, you should see the message ``sanity check is successful!``.
 
 If the problem persists, feel free to `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_, with a detailed description of the issue, your environment, and the logs.

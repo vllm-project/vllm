@@ -14,7 +14,7 @@ import requests
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.utils import get_open_port, is_hip
+from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
 if is_hip():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -57,7 +57,9 @@ class RemoteOpenAIServer:
 
             cli_args = cli_args + ["--port", str(get_open_port())]
 
-        parser = make_arg_parser()
+        parser = FlexibleArgumentParser(
+            description="vLLM's remote OpenAI server.")
+        parser = make_arg_parser(parser)
         args = parser.parse_args(cli_args)
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
