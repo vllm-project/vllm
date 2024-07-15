@@ -1,38 +1,19 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, cast
 
 import torch
+import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
-from vllm.logger import init_logger
-from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
-                           SequenceGroupMetadata)
-from vllm.worker.model_runner import (
-    GPUModelRunnerBase,
-    ModelInputForGPU,
-    ModelInputForGPUWithSamplingMetadata,
-    LORA_WARMUP_RANK,
-    _BATCH_SIZES_TO_CAPTURE,
-    _PAD_SLOT_ID,
-)
 from vllm.distributed import get_pp_group
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
+from vllm.logger import init_logger
+from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
-
-import dataclasses
-import gc
-import time
-import warnings
-from collections import defaultdict
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
-                    Tuple, Type, TypeVar, Union)
-
-import numpy as np
-import torch
-import torch.distributed
-import torch.nn as nn
+from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
+                                      LORA_WARMUP_RANK, GPUModelRunnerBase,
+                                      ModelInputForGPUWithSamplingMetadata)
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -45,39 +26,17 @@ except ImportError:
     BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
-from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
-from vllm.distributed import get_pp_group
-from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
-from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models.interfaces import (supports_lora,
-                                                   supports_vision)
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
-                             MultiModalInputs)
-from vllm.prompt_adapter.layers import PromptAdapterMapping
+from vllm.model_executor.models.interfaces import supports_vision
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.prompt_adapter.worker_manager import (
-    LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad)
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict,
-    _init_attn_metadata_from_tensor_dict,
-    _init_sampling_metadata_from_tensor_dict)
+    _add_sampling_metadata_broadcastable_dict)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -632,9 +591,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-            # Prepare input tensors for flashinfer
-            if self.attn_backend.get_name() == "flashinfer":
-                assert False
+            # # Prepare input tensors for flashinfer
+            # if self.attn_backend.get_name() == "flashinfer":
+            #     assert False
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
@@ -649,7 +608,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                               and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
                               and max_seq_len <= self.max_seq_len_to_capture)
         if use_captured_graph:
-            assert False
+            raise NotImplementedError("CUDAGraph is currently not supported "
+                                      "for encoder/decoder models.")
 
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
@@ -663,9 +623,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         assert (not is_prompt) or max_query_len > 0, (
             "Decode-phase query_lens: {}".format(query_lens))
 
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device=self.device)
+        # context_lens_tensor = torch.tensor(context_lens,
+        #                                    dtype=torch.int,
+        #                                    device=self.device)
 
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
@@ -690,6 +650,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                      out=query_start_loc[1:])
 
         attn_metadata = model_input.attn_metadata
+        assert attn_metadata is not None
 
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,

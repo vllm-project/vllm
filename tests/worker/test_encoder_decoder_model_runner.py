@@ -172,10 +172,12 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
         model_runner._prepare_encoder_model_input_tensors(
             seq_group_metadata_list, decoder_only_model_input))
     encoder_input_tokens = encoder_decoder_model_input.encoder_input_tokens
-    encoder_input_positions = encoder_decoder_model_input.encoder_input_positions
+    encoder_input_positions = (
+        encoder_decoder_model_input.encoder_input_positions)
     attn_metadata = encoder_decoder_model_input.attn_metadata
     cross_slot_mapping = attn_metadata.cross_slot_mapping
-    return_encoder_seq_lens = encoder_decoder_model_input.attn_metadata.encoder_seq_lens
+    return_encoder_seq_lens = (
+        encoder_decoder_model_input.attn_metadata.encoder_seq_lens)
     assert return_encoder_seq_lens == encoder_seq_lens
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
@@ -350,7 +352,8 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
         model_runner._prepare_encoder_model_input_tensors(
             seq_group_metadata_list, decoder_only_model_input))
     encoder_input_tokens = encoder_decoder_model_input.encoder_input_tokens
-    encoder_input_positions = encoder_decoder_model_input.encoder_input_positions
+    encoder_input_positions = (
+        encoder_decoder_model_input.encoder_input_positions)
     attn_metadata = encoder_decoder_model_input.attn_metadata
     return_encoder_seq_lens = attn_metadata.encoder_seq_lens
     cross_slot_mapping = attn_metadata.cross_slot_mapping
