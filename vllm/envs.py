@@ -257,8 +257,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
                 "vllm",
                 "assets",
             ),
-        )
-    ),
+        )),
 
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds
