@@ -68,11 +68,10 @@ class RemoteOpenAIServer:
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        self.proc = subprocess.Popen(
-            ["vllm", "serve"] + cli_args,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr)
+        self.proc = subprocess.Popen(["vllm", "serve"] + cli_args,
+                                     env=env,
+                                     stdout=sys.stdout,
+                                     stderr=sys.stderr)
         self._wait_for_server(url=self.url_for("health"),
                               timeout=self.MAX_SERVER_START_WAIT_S)
 
