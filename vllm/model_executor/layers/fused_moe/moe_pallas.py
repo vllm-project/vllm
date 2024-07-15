@@ -14,15 +14,15 @@ def fused_moe(
     """
     Args:
         hidden_states: [*, hidden_size]
-        w1: [num_experts, hidden_size, intermediate_size * 2]
-        w2: [num_experts, intermediate_size, hidden_size]
+        w1: [num_experts, intermediate_size * 2, hidden_size]
+        w2: [num_experts, hidden_size, intermediate_size]
         gating_output: [*, num_experts]
     """
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.shape[:-1].numel()
     num_experts = w1.shape[0]
-    intermediate_size = w2.shape[1]
+    intermediate_size = w2.shape[-1]
     device = hidden_states.device
     dtype = hidden_states.dtype
 
@@ -41,6 +41,11 @@ def fused_moe(
                                  device=device).repeat_interleave(topk)
     token_indices = token_indices[topk_argsort_indices]
     group_sizes = _histogram(topk_indices.to(torch.int32), 0, num_experts - 1)
+
+    # NOTE(woosuk): The GMM Pallas kernel requires a different weight layout
+    # from HF Transformers. 
+    w1 = w1.transpose(1, 2)
+    w2 = w2.transpose(1, 2)
 
     x = hidden_states[token_indices]
     x = torch.ops.xla.gmm(x, w1, group_sizes)
