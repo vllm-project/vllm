@@ -110,13 +110,8 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         images_embeds = images_embeds.reshape(bs, n * t, d)
 
         # [b, T, D]
-        input_ids[input_ids < 0] = 0  # ignore the image embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(
-            input_ids).reshape(1, -1, 2048)
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
-        # replace with the image embeddings
-        images_embeds = images_embeds.reshape(
-            1, -1, self.config.aligner_config.params["n_embed"])
         inputs_embeds[images_seq_mask] = images_embeds
 
         return inputs_embeds
@@ -128,15 +123,13 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         input_ids = kwargs.pop('input_ids')
         inputs_embeds = self.prepare_inputs_embeds(input_ids, pixel_values,
                                                    images_seq_mask)
-        tokenizer = AutoTokenizer.from_pretrained(
-            "/pretrained_models/deepseek-vl-1.3b-chat")
         output = self.language_model.generate(
             *args,
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
-            pad_token_id=tokenizer.eos_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.eos_token_id,
+            bos_token_id=self.tokenizer.bos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
             **kwargs)
         return output
 
@@ -206,8 +199,6 @@ class VLChatProcessor(ProcessorMixin):
         return VLChatProcessorOutput(**self.get_input(prompt, image))
 
     def get_input(self, prompt, image):
-        prompt = prompt
-        image = image
         prompt = prompt.replace(self.image_tag,
                                 self.image_tag * self.num_image_tokens)
         input_ids = self.tokenizer.encode(prompt)
@@ -279,7 +270,7 @@ def run_test(
         [prompt for _ in size_factors],
         [rescale_image_size(image, factor) for factor in size_factors],
     ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-
+    print(inputs_per_image)
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -298,13 +289,13 @@ def run_test(
                                                 images=images)
             for prompts, images in inputs_per_image
         ]
-    # AutoModelForCausalLM.register(DeepSeekMultiModalityConfig,
-    #                               MultiModalityCausalLM)
+
     AutoModelForVision2Seq.register(DeepSeekMultiModalityConfig,
                                     MultiModalityCausalLM)
 
     with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
         hf_model.processor = VLChatProcessor.from_pretrained(model)
+        hf_model.model.tokenizer = AutoTokenizer.from_pretrained(model)
 
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
@@ -318,8 +309,8 @@ def run_test(
                                         vllm_outputs_per_image):
         # TODO: Check whether using original CLIPVisionModel can improve
         # consistency against HF
-        print(f'hf_outputs: {hf_outputs}')
-        print(f'vllm_outputs: {vllm_outputs}')
+        # print(f'hf_outputs: {hf_outputs}')
+        # print(f'vllm_outputs: {vllm_outputs}')
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
@@ -339,7 +330,7 @@ def run_test(
         [1.0],
         # Single-scale, batched
         [1.0, 1.0, 1.0],
-        # # Multi-scale
+        # Multi-scale
         [0.25, 0.5, 1.0],
     ],
 )
