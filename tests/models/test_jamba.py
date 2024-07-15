@@ -45,7 +45,6 @@ def test_batching(
     max_tokens: int,
 ) -> None:
     # To pass the small model tests, we need full precision.
-    # assert dtype == "float"
     for_loop_outputs = []
     with vllm_runner(model, dtype=dtype) as vllm_model:
         for prompt in example_prompts:
