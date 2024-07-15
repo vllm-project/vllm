@@ -28,7 +28,8 @@ class RequestFuncInput:
 
 @dataclass
 class RequestFuncOutput:
-    generated_text: str = ""
+    generated_text: str = "",
+    output_tokens: Union[List[int], List[List[int]]] = [],
     success: bool = False
     latency: float = 0.0
     ttft: float = 0.0  # Time to first token
