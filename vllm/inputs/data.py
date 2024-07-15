@@ -163,7 +163,13 @@ AllPromptInputs = Union[PromptInputs,
                         ExplicitEncoderDecoderPromptStrict]
 """All possible input prompt options, strict or non-strict"""
 
-def get_single_prompt_type(prompt: AllPromptInputs):
+def get_single_prompt_type(prompt: AllPromptInputs,
+                           ) -> str:
+    """
+    Get the type-name of the prompt argument instance, given that
+    isinstance() cannot apply to TypedDict subclasses directly.
+    """
+
     required_keys_dict = {
         'TextPrompt': ['prompt'],
         'TokensPrompt': ['prompt_token_ids'],
@@ -183,9 +189,23 @@ def get_single_prompt_type(prompt: AllPromptInputs):
 
     raise ValueError(f"Invalid prompt {prompt}")
 
-def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs):
+def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs,
+                                    ) -> bool:
+    """
+    Return True if prompt has the correct structure for an encoder/decoder
+    prompt.
+    """
+    if (get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder' and
+       (prompt['encoder_prompt'] is None or
+        prompt['decoder_prompt']['multi_modal_data'] is not None)):
+            # For explicit encoder/decoder prompts, encoder prompt
+            # must be non-None and decoder prompt must be free of
+            # multi-modal data (which should instead be passed to
+            # the encoder.)
+            return False
 
-
+    # Any valid prompt type other than an explicit encoder/decoder
+    # prompt is a guaranteed-valid prompt
     return True
 
 class LLMInputs(TypedDict):
