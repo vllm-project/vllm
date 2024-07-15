@@ -8,8 +8,7 @@ Below, you can find an explanation of every engine argument for vLLM:
 .. argparse::
     :module: vllm.engine.arg_utils
     :func: _engine_args_parser
-    :prog: vllm
-    :path: serve
+    :prog: vllm serve
     :nodefaultconst:
 
 Async Engine Arguments
@@ -20,6 +19,5 @@ Below are the additional arguments related to the asynchronous engine:
 .. argparse::
     :module: vllm.engine.arg_utils
     :func: _async_engine_args_parser
-    :prog: vllm
-    :path: serve
+    :prog: vllm serve
     :nodefaultconst:

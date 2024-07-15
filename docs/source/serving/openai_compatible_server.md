@@ -110,8 +110,7 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 ```{argparse}
 :module: vllm.entrypoints.openai.cli_args
 :func: create_parser_for_docs
-:prog: vllm
-:path:serve
+:prog: vllm serve
 ```
 
 ## Tool calling in the chat completion API
