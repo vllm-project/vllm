@@ -25,6 +25,9 @@ def fused_moe(
     intermediate_size = w2.shape[-1]
     device = hidden_states.device
     dtype = hidden_states.dtype
+    assert (num_tokens * topk) % 16 == 0, (
+        "The Pallas GMM kernel requires num_tokens * topk to be a multiple of "
+        f"16 but got {num_tokens * topk}")
 
     hidden_states = hidden_states.view(num_tokens, hidden_size)
     gating_output = gating_output.view(num_tokens, num_experts)
@@ -57,3 +60,46 @@ def fused_moe(
     x = x.sum(dim=-2)
     x = x.reshape(orig_shape)
     return x
+
+
+if __name__ == "__main__":
+    import torch_xla.core.xla_model as xm
+
+    BATCH_SIZE = 8
+    SEQ_LEN = 1
+    HIDDEN_SIZE = 2048
+    INTERMEDIATE_SIZE = 3072
+    NUM_EXPERTS = 8
+    TOPK = 2
+    DTYPE = torch.bfloat16
+    device = xm.xla_device()
+
+    x = torch.randn(BATCH_SIZE * SEQ_LEN,
+                    HIDDEN_SIZE,
+                    dtype=DTYPE,
+                    device=device)
+    gating_output = torch.randn(BATCH_SIZE * SEQ_LEN,
+                                NUM_EXPERTS,
+                                dtype=torch.float,
+                                device=device)
+    w1 = torch.randn(NUM_EXPERTS,
+                     INTERMEDIATE_SIZE * 2,
+                     HIDDEN_SIZE,
+                     dtype=DTYPE,
+                     device=device)
+    w2 = torch.randn(NUM_EXPERTS,
+                     HIDDEN_SIZE,
+                     INTERMEDIATE_SIZE,
+                     dtype=DTYPE,
+                     device=device)
+    fused_moe = torch.compile(fused_moe, backend="openxla")
+    output = fused_moe(
+        x,
+        w1,
+        w2,
+        gating_output,
+        TOPK,
+        renormalize=False,
+    )
+    output = output.cpu()
+    print(output)
