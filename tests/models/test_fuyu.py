@@ -1,10 +1,10 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
+from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
@@ -12,36 +12,22 @@ from .utils import check_logprobs_close
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "caption es",
-    "cherry_blossom": "What is in the picture?",
-    "boardwalk": "What is in the picture?",
+    "stop_sign": "What's the content of the image?\n",  # noqa: E501
+    "cherry_blossom": "What is the season?\n",
+    "boardwalk": "What's in this image?\n",
 })
 
-IMAGE_TOKEN_ID = 257152
-
-models = ["google/paligemma-3b-mix-224"]
+models = ["adept/fuyu-8b"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
-                                         Optional[SampleLogprobs]],
-                      model: str):
+                                         Optional[SampleLogprobs]]):
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
-    eos_token_id = tokenizer.eos_token_id
+    hf_output_str = output_str.lstrip() + "|ENDOFTEXT|"
 
-    hf_output_ids = [
-        token_id for idx, token_id in enumerate(output_ids)
-        if token_id != IMAGE_TOKEN_ID or output_ids[idx - 1] != IMAGE_TOKEN_ID
-    ]
-
-    hf_output_str = output_str
-
-    if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
-
-    return hf_output_ids, hf_output_str, out_logprobs
+    return output_ids, hf_output_str, out_logprobs
 
 
 def run_test(
@@ -80,6 +66,8 @@ def run_test(
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
+                     max_model_len=2560,
+                     max_num_seqs=1,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
@@ -88,31 +76,38 @@ def run_test(
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=images)
-            for prompts, images in inputs_per_image
+                                                images=vllm_images)
+            for prompts, vllm_images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_model.model.get_output_embeddings = lambda: \
+            hf_model.model.language_model.get_output_embeddings()
+        eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=images)
-            for prompts, images in inputs_per_image
+                                                    images=hf_images,
+                                                    eos_token_id=eos_token_id)
+            for prompts, hf_images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
-                vllm_to_hf_output(vllm_output, model)
-                for vllm_output in vllm_outputs
+                vllm_to_hf_output(vllm_output) for vllm_output in vllm_outputs
             ],
             name_0="hf",
             name_1="vllm",
         )
+
+
+target_dtype = "half"
+if is_cpu():
+    target_dtype = "bfloat16"
 
 
 @pytest.mark.parametrize("model", models)
@@ -122,16 +117,16 @@ def run_test(
         # No image
         [],
         # Single-scale
-        [1.0],
+        [0.25],
         # Single-scale, batched
-        [1.0, 1.0, 1.0],
+        [0.25, 0.25, 0.25],
         # Multi-scale
-        [0.25, 0.5, 1.0],
+        [0.25, 0.2, 0.15],
     ],
 )
-@pytest.mark.parametrize("dtype", ["float", "half"])
+@pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("num_logprobs", [10])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
                 dtype: str, max_tokens: int, num_logprobs: int) -> None:
     run_test(

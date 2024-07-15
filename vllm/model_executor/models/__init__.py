@@ -24,6 +24,7 @@ _GENERATION_MODELS = {
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "MultiModalityCausalLM": ("deepseek_vl", "DeepSeekMultiModalityCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
+    "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
@@ -50,6 +51,7 @@ _GENERATION_MODELS = {
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
+    "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PaliGemmaForConditionalGeneration":
     ("paligemma", "PaliGemmaForConditionalGeneration"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
