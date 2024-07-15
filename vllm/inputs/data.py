@@ -3,10 +3,7 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 
 from typing_extensions import NotRequired
 
-from .utils import (has_required_keys, 
-                    is_str,
-                    is_dict,
-                    )
+from .utils import has_required_keys, is_dict, is_str
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
@@ -145,6 +142,7 @@ class ExplicitEncoderDecoderPromptStrict(TypedDict):
 
     decoder_prompt: StrictDecoderOnlyPromptInputs
 
+
 PromptStrictInputs = Union[StrictDecoderOnlyPromptInputs,
                            ExplicitEncoderDecoderPromptStrict]
 """
@@ -154,17 +152,15 @@ The inputs to the LLM, which can take one of the following forms:
 - A tokenized prompt (:class:`TokensPrompt`)
 """
 
-PromptInputs = Union[DecoderOnlyPromptInputs, 
-                     ExplicitEncoderDecoderPrompt]
+PromptInputs = Union[DecoderOnlyPromptInputs, ExplicitEncoderDecoderPrompt]
 """Same as :const:`PromptStrictInputs` but additionally accepts
 :class:`TextTokensPrompt`."""
 
-AllPromptInputs = Union[PromptInputs,
-                        ExplicitEncoderDecoderPromptStrict]
+AllPromptInputs = Union[PromptInputs, ExplicitEncoderDecoderPromptStrict]
 """All possible input prompt options, strict or non-strict"""
 
-def get_single_prompt_type(prompt: AllPromptInputs,
-                           ) -> str:
+
+def get_single_prompt_type(prompt: AllPromptInputs, ) -> str:
     """
     Get the type-name of the prompt argument instance, given that
     isinstance() cannot apply to TypedDict subclasses directly.
@@ -173,15 +169,15 @@ def get_single_prompt_type(prompt: AllPromptInputs,
     required_keys_dict = {
         'TextPrompt': ['prompt'],
         'TokensPrompt': ['prompt_token_ids'],
-        'TextTokensPrompt': ['prompt','prompt_token_ids'],
-        'ExplicitEncoderDecoder': ['encoder_prompt','decoder_prompt'],
+        'TextTokensPrompt': ['prompt', 'prompt_token_ids'],
+        'ExplicitEncoderDecoder': ['encoder_prompt', 'decoder_prompt'],
     }
 
     if is_dict(prompt):
         for ptype in required_keys_dict:
-            if has_required_keys(prompt,required_keys_dict[ptype]):
+            if has_required_keys(prompt, required_keys_dict[ptype]):
                 return ptype
-            
+
         raise ValueError(f"Invalid prompt {prompt}, valid types are "
                          "required_keys_dict={required_keys_dict}")
     elif is_str(prompt):
@@ -189,24 +185,25 @@ def get_single_prompt_type(prompt: AllPromptInputs,
 
     raise ValueError(f"Invalid prompt {prompt}")
 
-def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs,
-                                    ) -> bool:
+
+def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs, ) -> bool:
     """
     Return True if prompt has the correct structure for an encoder/decoder
     prompt.
     """
-    if (get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder' and
-       (prompt['encoder_prompt'] is None or
-        prompt['decoder_prompt']['multi_modal_data'] is not None)):
-            # For explicit encoder/decoder prompts, encoder prompt
-            # must be non-None and decoder prompt must be free of
-            # multi-modal data (which should instead be passed to
-            # the encoder.)
-            return False
+    if (get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder'
+            and (prompt['encoder_prompt'] is None
+                 or prompt['decoder_prompt']['multi_modal_data'] is not None)):
+        # For explicit encoder/decoder prompts, encoder prompt
+        # must be non-None and decoder prompt must be free of
+        # multi-modal data (which should instead be passed to
+        # the encoder.)
+        return False
 
     # Any valid prompt type other than an explicit encoder/decoder
     # prompt is a guaranteed-valid prompt
     return True
+
 
 class LLMInputs(TypedDict):
     """
