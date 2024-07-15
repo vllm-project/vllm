@@ -225,6 +225,14 @@ def is_xpu() -> bool:
 
 
 @lru_cache(maxsize=None)
+def use_ipex() -> bool:
+    try:
+        import intel_extension_for_pytorch as ipex  # noqa: F401
+        return True
+    except ImportError:
+        return False
+    
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     max_shared_mem = (
