@@ -447,6 +447,8 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
                     v_scale, float):
                 raise ValueError("Only support per-tensor scaling factor "
                                  "for fp8 KV cache")
+
+            # These are used in the final Attention.forward()
             layer._k_scale = k_scale
             layer._v_scale = v_scale
             if (layer._k_scale == 1.0 and layer._v_scale == 1.0
