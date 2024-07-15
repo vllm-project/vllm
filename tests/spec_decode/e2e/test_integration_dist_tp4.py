@@ -91,7 +91,6 @@ def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
-
         },
     ])
 @pytest.mark.parametrize("batch_size", [8])
@@ -106,10 +105,12 @@ def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_skip_speculation(baseline_llm_generator, test_llm_generator,
                           batch_size: int, output_len: int):
-    """Verify greedy equality when some (or all) sequences skip speculation.
+    """Verify job failure with RuntimeError when all sequences skip speculation.
     We do this by setting the max model len of the draft model to an
     artificially low value, such that when the sequences grow beyond it, they
     are skipped in speculative decoding.
+
+    TODO: fix it to pass without raising Error. (#5814)
     """
     with pytest.raises(RuntimeError):
         run_greedy_equality_correctness_test(baseline_llm_generator,
