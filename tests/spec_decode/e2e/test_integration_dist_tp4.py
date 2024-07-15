@@ -118,4 +118,3 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
                                              batch_size,
                                              max_output_len=output_len,
                                              force_output_len=True)
-
