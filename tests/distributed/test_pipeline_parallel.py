@@ -20,8 +20,6 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--model",
-        MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -40,7 +38,7 @@ def server():
         args += [
             "--enforce-eager",
         ]
-    with RemoteOpenAIServer(args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
