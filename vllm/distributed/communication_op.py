@@ -97,7 +97,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
-    return _tensor_model_parallel_all_reduce(input_)
+    return torch.ops.myops._tensor_model_parallel_all_reduce(input_)
 
 
 @torch.library.impl("myops::_tensor_model_parallel_all_gather", "cpu")
@@ -135,7 +135,7 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor,
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
         return input_
-    return _tensor_model_parallel_all_gather(input_, world_size, dim)
+    return torch.ops.myops._tensor_model_parallel_all_gather(input_, world_size, dim)
 
 @torch.library.impl("myops::_tensor_model_parallel_gather", "cpu")
 def _tensor_model_parallel_gather(
@@ -180,7 +180,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     if world_size == 1:
         return input_
 
-    return _tensor_model_parallel_gather(input_, world_size, dst, dim)
+    return torch.ops.myops._tensor_model_parallel_gather(input_, world_size, dst, dim)
 
 
 
