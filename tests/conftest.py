@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoTokenizer, BatchEncoding)
+from transformers import (AutoModelForCausalLM, AutoModelForSeq2SeqLM,
+                          AutoModelForVision2Seq, AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -175,6 +175,7 @@ class HfRunner:
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
         is_sparseml_model: bool = False,
+        is_encoder_decoder_model: bool = False,
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -192,6 +193,8 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
+            elif is_encoder_decoder_model:
+                auto_cls = AutoModelForSeq2SeqLM
             elif is_sparseml_model:
                 from sparseml.transformers import SparseAutoModelForCausalLM
                 auto_cls = SparseAutoModelForCausalLM
@@ -405,6 +408,75 @@ class HfRunner:
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
             output_len = seq_ids.shape[0] - input_ids.shape[1]
+            output_ids = seq_ids[-output_len:]
+            all_output_ids.append(output_ids.tolist())
+            all_output_strs.append(self.tokenizer.decode(output_ids))
+
+        outputs = zip(all_output_ids, all_output_strs, all_logprobs)
+        return [(output_ids, output_str, output_logprobs)
+                for output_ids, output_str, output_logprobs in outputs]
+
+    def generate_encoder_decoder_greedy_logprobs_limit(
+        self,
+        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        max_tokens: int,
+        num_logprobs: int,
+    ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
+        '''
+        Greedy logprobs generation for vLLM encoder/decoder models
+        '''
+
+        all_logprobs: List[List[Dict[int, float]]] = []
+        all_output_ids: List[List[int]] = []
+        all_output_strs: List[str] = []
+
+        for encoder_prompt, decoder_prompt in zip(*encoder_decoder_prompts):
+            encoder_input_ids = self.tokenizer(encoder_prompt,
+                                               return_tensors="pt").input_ids
+            decoder_input_ids = self.tokenizer(decoder_prompt,
+                                               return_tensors="pt").input_ids
+            output = self.model.generate(
+                self.wrap_device(encoder_input_ids),
+                decoder_input_ids=self.wrap_device(decoder_input_ids),
+                use_cache=True,
+                do_sample=False,
+                max_new_tokens=max_tokens,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+
+            seq_logprobs: List[torch.Tensor] = []
+            for _, decoder_hidden_states in enumerate(
+                    output.decoder_hidden_states):
+                last_hidden_states = decoder_hidden_states[-1][0]
+                logits = torch.matmul(
+                    last_hidden_states,
+                    self.model.get_output_embeddings().weight.t(),
+                )
+                if getattr(self.model.get_output_embeddings(), "bias",
+                           None) is not None:
+                    logits += self.model.get_output_embeddings(
+                    ).bias.unsqueeze(0)
+                logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+                seq_logprobs.append(logprobs)
+
+            # convert to dict
+            seq_logprobs_lst: List[Dict[int, float]] = []
+            for tok_idx, tok_logprobs in enumerate(seq_logprobs):
+                # drop prompt logprobs
+                if tok_idx == 0:
+                    tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+                topk = tok_logprobs.topk(num_logprobs)
+
+                tok_logprobs_dct = {}
+                for token_id, logprob in zip(topk.indices[0], topk.values[0]):
+                    tok_logprobs_dct[token_id.item()] = logprob.item()
+
+                seq_logprobs_lst.append(tok_logprobs_dct)
+
+            all_logprobs.append(seq_logprobs_lst)
+            seq_ids = output.sequences[0]
+            output_len = seq_ids.shape[0] - decoder_input_ids.shape[1]
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
