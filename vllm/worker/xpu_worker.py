@@ -48,6 +48,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         vision_language_config: Optional[VisionLanguageConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
+        is_sp_worker: bool = False,
     ) -> None:
         assert device_config.device_type == "xpu"
         assert is_xpu()
@@ -63,6 +64,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.is_driver_worker = is_driver_worker
+        self.is_sp_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 

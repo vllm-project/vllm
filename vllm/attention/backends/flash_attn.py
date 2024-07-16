@@ -40,6 +40,14 @@ class FlashAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
+    def get_blocks(kv_cache: torch.Tensor, 
+                   start: int,
+                   step: int
+    ) -> torch.Tensor:
+        return kv_cache[:, start:start+step]
+
+
+    @staticmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,

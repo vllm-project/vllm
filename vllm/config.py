@@ -410,6 +410,9 @@ class CacheConfig:
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
 
+        # 4096 tokens per chunk
+        self.chunk_size = 4096 / block_size
+
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
@@ -606,7 +609,7 @@ class ParallelConfig:
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        sequence_parallel_size: int = 0,
+        sequence_parallel_size: int = 1,
         worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
@@ -627,7 +630,7 @@ class ParallelConfig:
 
         # When SP is enable, i.e., SP > 0, the world should contains 
         # pipeline_parallel_size * self.tensor_parallel_size GPUs as master and SP GPUs.
-        self.world_size = pipeline_parallel_size * tensor_parallel_size + sequence_parallel_size
+        self.world_size = pipeline_parallel_size * tensor_parallel_size + sequence_parallel_size - 1
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
