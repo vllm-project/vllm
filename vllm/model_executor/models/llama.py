@@ -390,8 +390,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
-            self.logits_processor = PPMissingLayer()
-            self.sampler = PPMissingLayer()
 
     def forward(
         self,
