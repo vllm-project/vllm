@@ -3,7 +3,7 @@
 Installation with ROCm
 ======================
 
-vLLM supports AMD GPUs with ROCm 5.7 and 6.0.
+vLLM supports AMD GPUs with ROCm 6.1.
 
 Requirements
 ------------
@@ -11,7 +11,7 @@ Requirements
 * OS: Linux
 * Python: 3.8 -- 3.11
 * GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
-* ROCm 6.0 and ROCm 5.7
+* ROCm 6.1
 
 Installation options:
 
@@ -27,7 +27,7 @@ You can build and install vLLM from source.
 
 First, build a docker image from `Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ and launch a docker container from the image.
 
-`Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ uses ROCm 6.0 by default, but also supports ROCm 5.7.
+`Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ uses ROCm 6.1 by default, but also supports ROCm 5.7 or ROCm 6.1 in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 * `BASE_IMAGE`: specifies the base image used when running ``docker build``, specifically the PyTorch on ROCm base image. We have tested ROCm 5.7 and ROCm 6.0. The default is `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`
@@ -39,24 +39,17 @@ It provides flexibility to customize the build of docker image using the followi
 Their values can be passed in when running ``docker build`` with ``--build-arg`` options.
 
 
-To build vllm on ROCm 6.0 for MI200 and MI300 series, you can use the default:
+To build vllm on ROCm 6.1 for MI200 and MI300 series, you can use the default:
 
 .. code-block:: console
 
-    $ docker build -f Dockerfile.rocm -t vllm-rocm .
+    $ DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
 
-To build vllm on ROCm 6.0 for Radeon RX7900 series (gfx1100), you should specify ``BUILD_FA`` as below:
-
-.. code-block:: console
-
-    $ docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
-
-To build docker image for vllm on ROCm 5.7, you can specify ``BASE_IMAGE`` as below:
+To build vllm on ROCm 6.1 for Radeon RX7900 series (gfx1100), you should specify ``BUILD_FA`` as below:
 
 .. code-block:: console
 
-    $ docker build --build-arg BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" \
-       -f Dockerfile.rocm -t vllm-rocm . 
+    $ DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
 
 To run the above docker image ``vllm-rocm``, use the below command:
 
@@ -88,22 +81,14 @@ Option 2: Build from source
 - `Pytorch <https://pytorch.org/>`_
 - `hipBLAS <https://rocm.docs.amd.com/projects/hipBLAS/en/latest/install.html>`_
 
-For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging`, `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`, `rocm/pytorch-nightly`.
+For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging`, `rocm/pytorch-nightly`.
 
 Alternatively, you can install pytorch using pytorch wheels. You can check Pytorch installation guild in Pytorch `Getting Started <https://pytorch.org/get-started/locally/>`_
 
-For rocm6.0:
 
 .. code-block:: console
 
     $ pip3 install torch --index-url https://download.pytorch.org/whl/rocm6.0
-
-
-For rocm5.7:
-
-.. code-block:: console
-
-    $ pip install torch --index-url https://download.pytorch.org/whl/rocm5.7
 
 
 1. Install `Triton flash attention for ROCm <https://github.com/ROCm/triton>`_
@@ -131,7 +116,6 @@ Install ROCm's flash attention (v2.0.4) following the instructions from `ROCm/fl
 
 .. tip::
 
-    - You may need to turn on the ``--enforce-eager`` flag if you experience process hang when running the `benchmark_thoughput.py` script to test your installation.
     - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
     - To use CK flash-attention, please use this flag ``export VLLM_USE_TRITON_FLASH_ATTN=0`` to turn off triton flash attention. 
     - The ROCm version of pytorch, ideally, should match the ROCm driver version.
