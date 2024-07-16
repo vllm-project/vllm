@@ -22,7 +22,8 @@ from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
-from vllm.utils import cuda_device_count_stateless, is_cpu
+from vllm.utils import (cuda_device_count_stateless, is_cpu,
+                        zip_enc_dec_prompt_lists)
 
 logger = init_logger(__name__)
 
@@ -133,8 +134,7 @@ def example_encoder_decoder_prompts() -> Tuple[List[str], List[str]]:
         encoder_prompts += _read_prompts(filename)
 
     # Encoder prompts, decoder prompts
-    return encoder_prompts, \
-           encoder_prompts[::-1]
+    return zip_enc_dec_prompt_lists(encoder_prompts, encoder_prompts[::-1])
 
 
 @pytest.fixture

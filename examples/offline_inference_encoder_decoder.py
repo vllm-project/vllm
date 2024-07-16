@@ -1,6 +1,7 @@
 from transformers import AutoTokenizer, BartForConditionalGeneration
 
 from vllm import LLM, SamplingParams
+from vllm.utils import zip_enc_dec_prompt_lists
 
 dtype = "float"
 
@@ -24,12 +25,8 @@ decoder_prompts = [
     "",
     "",
 ]
-# - Unified prompts
-prompts = [{
-    "encoder_prompt": encoder_prompt,
-    "decoder_prompt": decoder_prompt
-} for (encoder_prompt, decoder_prompt) in zip(encoder_prompts, decoder_prompts)
-           ]
+# - Unified encoder/decoder prompts
+prompts = zip_enc_dec_prompt_lists(encoder_prompts, decoder_prompts)
 
 print(prompts)
 

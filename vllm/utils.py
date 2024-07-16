@@ -27,6 +27,7 @@ from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.inputs import ExplicitEncoderDecoderPrompt, PromptInputs
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -998,3 +999,22 @@ def is_embedding_model_config(model_config) -> bool:
     '''
     return False if model_config is None else \
                 model_config.embedding_mode
+
+
+def build_explicit_enc_dec_prompt(
+    encoder_prompt: PromptInputs,
+    decoder_prompt: PromptInputs,
+) -> ExplicitEncoderDecoderPrompt:
+    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
+                                        decoder_prompt=decoder_prompt)
+
+
+def zip_enc_dec_prompt_lists(
+    enc_prompt_list: List[PromptInputs],
+    dec_prompt_list: List[PromptInputs],
+) -> List[ExplicitEncoderDecoderPrompt]:
+    return [
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
+        for (encoder_prompt,
+             decoder_prompt) in zip(enc_prompt_list, dec_prompt_list)
+    ]
