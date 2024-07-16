@@ -59,6 +59,5 @@ async def test_log_metrics(client: openai.AsyncOpenAI):
     base_url = str(client.base_url)[:-3].strip("/")
 
     response = requests.get(base_url + "/metrics")
-    response.raise_for_status()
 
-    assert response.json() is not None
+    assert response.status_code == HTTPStatus.OK
