@@ -23,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
 from vllm.utils import (cuda_device_count_stateless, is_cpu,
-                        zip_enc_dec_prompt_lists)
+                        to_enc_dec_tuple_list, zip_enc_dec_prompt_lists)
 
 logger = init_logger(__name__)
 
@@ -426,7 +426,8 @@ class HfRunner:
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for encoder_prompt, decoder_prompt in zip(*encoder_decoder_prompts):
+        for (encoder_prompt,
+             decoder_prompt) in to_enc_dec_tuple_list(encoder_decoder_prompts):
             encoder_input_ids = self.tokenizer(encoder_prompt,
                                                return_tensors="pt").input_ids
             decoder_input_ids = self.tokenizer(decoder_prompt,
@@ -607,11 +608,7 @@ class VllmRunner:
         '''
 
         assert sampling_params.logprobs is not None
-
-        prompt_inputs = list(
-            zip(encoder_decoder_prompts[0], encoder_decoder_prompts[1]))
-
-        req_outputs = self.model.generate(prompt_inputs,
+        req_outputs = self.model.generate(encoder_decoder_prompts,
                                           sampling_params=sampling_params)
         return self._final_steps_generate_w_logprobs(req_outputs)
 
