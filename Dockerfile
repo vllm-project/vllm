@@ -24,10 +24,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
     && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
     && python3 --version \
-    && python3 -m pip --version
+    && python3 -m pip --version \
+    && groupadd -r user && useradd -m -r -g user user
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git curl sudo
+    && apt-get install -y python3-pip git curl sudo supervisor
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -206,5 +207,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+COPY app/ /app/
+
+WORKDIR /app
+
+RUN /bin/bash /app/install.sh
+
+EXPOSE 8000
+
+USER user
+
+ENTRYPOINT ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 #################### OPENAI API SERVER ####################
