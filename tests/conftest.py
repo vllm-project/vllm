@@ -39,7 +39,6 @@ def _read_prompts(filename: str) -> List[str]:
 class _ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
-    boardwalk: str
 
 
 if sys.version_info < (3, 9):
@@ -58,7 +57,6 @@ class _ImageAssets(_ImageAssetsBase):
         super().__init__([
             ImageAsset("stop_sign"),
             ImageAsset("cherry_blossom"),
-            ImageAsset("boardwalk")
         ])
 
     def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
@@ -68,10 +66,7 @@ class _ImageAssets(_ImageAssetsBase):
         The order of the returned prompts matches the order of the
         assets when iterating through this object.
         """
-        return [
-            prompts["stop_sign"], prompts["cherry_blossom"],
-            prompts["boardwalk"]
-        ]
+        return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
 IMAGE_ASSETS = _ImageAssets()
