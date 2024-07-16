@@ -20,6 +20,7 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
+from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
@@ -565,6 +566,22 @@ class VllmRunner:
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
+    def _final_steps_generate_w_logprobs(self,
+                                         req_outputs: List[RequestOutput]) \
+                                            -> List[
+                                                Tuple[List[int],
+                                                      str,
+                                                      Optional[
+                                                          SampleLogprobs]]]:
+        outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
+        for req_output in req_outputs:
+            for sample in req_output.outputs:
+                output_str = sample.text
+                output_ids = sample.token_ids
+                output_logprobs = sample.logprobs
+            outputs.append((output_ids, output_str, output_logprobs))
+        return outputs
+
     def generate_w_logprobs(
         self,
         prompts: List[str],
@@ -583,14 +600,25 @@ class VllmRunner:
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
-        outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
-        for req_output in req_outputs:
-            for sample in req_output.outputs:
-                output_str = sample.text
-                output_ids = sample.token_ids
-                output_logprobs = sample.logprobs
-            outputs.append((output_ids, output_str, output_logprobs))
-        return outputs
+        return self._final_steps_generate_w_logprobs(req_outputs)
+
+    def generate_encoder_decoder_w_logprobs(
+        self,
+        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        sampling_params: SamplingParams,
+    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+        '''
+        Logprobs generation for vLLM encoder/decoder models
+        '''
+
+        assert sampling_params.logprobs is not None
+
+        prompt_inputs = list(
+            zip(encoder_decoder_prompts[0], encoder_decoder_prompts[1]))
+
+        req_outputs = self.model.generate(prompt_inputs,
+                                          sampling_params=sampling_params)
+        return self._final_steps_generate_w_logprobs(req_outputs)
 
     def generate_greedy(
         self,
@@ -616,6 +644,25 @@ class VllmRunner:
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images)
+
+        return [(output_ids, output_str, output_logprobs)
+                for output_ids, output_str, output_logprobs in outputs]
+
+    def generate_encoder_decoder_greedy_logprobs(
+        self,
+        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        max_tokens: int,
+        num_logprobs: int,
+    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+        greedy_logprobs_params = SamplingParams(temperature=0.0,
+                                                max_tokens=max_tokens,
+                                                logprobs=num_logprobs)
+        '''
+        Greedy logprobs generation for vLLM encoder/decoder models
+        '''
+
+        outputs = self.generate_encoder_decoder_w_logprobs(
+            encoder_decoder_prompts, greedy_logprobs_params)
 
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
