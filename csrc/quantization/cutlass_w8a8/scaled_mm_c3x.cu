@@ -220,7 +220,7 @@ struct ScaledEpilogueBiasAzp
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowLoad<ElementD>;
+  using Bias = typename SUPER::template RowOrScalarLoad<ElementD>;
 
   // This is the full AZP term, azp * J @ B, shape (1,n)
   using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
@@ -281,7 +281,7 @@ struct ScaledEpilogueBiasAzpToken
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowLoad<ElementD>;
+  using Bias = typename SUPER::template RowOrScalarLoad<ElementD>;
 
   // Per-token azp term, shape (m,1)
   using Azp = typename SUPER::template ColLoad<int32_t>;

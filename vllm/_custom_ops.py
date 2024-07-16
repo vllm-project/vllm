@@ -256,8 +256,6 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    if bias is None:
-        bias = torch.zeros((n, ), device=a.device, dtype=out_dtype)
     torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, bias, azp,
                                        azp_adj)
 

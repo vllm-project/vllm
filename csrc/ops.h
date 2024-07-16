@@ -109,7 +109,7 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,
                            torch::Tensor const& b_scales,
-                           torch::Tensor const& bias,
+                           c10::optional<torch::Tensor> const& bias,
                            c10::optional<torch::Tensor> const& azp,
                            torch::Tensor const& azp_adj);
 

@@ -107,11 +107,11 @@ struct ScaledEpilogueBase {
   static auto args_from_tensor(torch::Tensor const& tensor) {
     using Arguments = typename Descriptor::Arguments;
     auto* data_ptr = static_cast<T*>(tensor.data_ptr());
-    if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<float>> ||
-                  std::is_same_v<Descriptor, RowOrScalarLoad<float>>) {
-      return Arguments{data_ptr, tensor.numel() != 1, {}};
+    if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<T>> ||
+                  std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
+      return Arguments{data_ptr, tensor.numel() != 1};
     } else {
-      return Arguments{data_ptr, {}};
+      return Arguments{data_ptr};
     }
   }
 };
@@ -226,7 +226,7 @@ struct ScaledEpilogueBiasAzp
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowLoad<ElementD>;
+  using Bias = typename SUPER::template RowOrScalarLoad<ElementD>;
 
   // This is the full AZP term, azp * J @ B, shape (1,n)
   using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
@@ -289,7 +289,7 @@ struct ScaledEpilogueBiasAzpToken
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowLoad<ElementD>;
+  using Bias = typename SUPER::template RowOrScalarLoad<ElementD>;
 
   // Per-token azp term, shape (m,1)
   using Azp = typename SUPER::template ColLoad<int32_t>;

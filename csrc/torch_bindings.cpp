@@ -154,7 +154,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cutlass_scaled_mm_azp(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
-      "                  Tensor b_scales, Tensor bias,"
+      "                  Tensor b_scales, Tensor? bias,"
       "                  Tensor? azp, Tensor azp_adj) -> ()");
   ops.impl("cutlass_scaled_mm_azp", torch::kCUDA, &cutlass_scaled_mm_azp);
 
