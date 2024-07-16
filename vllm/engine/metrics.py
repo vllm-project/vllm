@@ -134,28 +134,26 @@ class Metrics:
             labelnames=labelnames + [Metrics.labelname_finish_reason])
 
         # Speculatie decoding stats
-        self.gauge_spec_decode_draft_acceptance_rate = self._base_library.Gauge(
+        self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
             name="vllm:spec_decode_draft_acceptance_rate",
             documentation="Speulative token acceptance rate.",
             labelnames=labelnames)
-        self.gauge_spec_decode_efficiency = self._base_library.Gauge(
+        self.gauge_spec_decode_efficiency = self._gauge_cls(
             name="vllm:spec_decode_efficiency",
             documentation="Speculative decoding system efficiency.",
             labelnames=labelnames)
-        self.counter_spec_decode_num_accepted_tokens = (
-            self._base_library.Counter(
-                name="vllm:spec_decode_num_accepted_tokens_total",
-                documentation="Number of accepted tokens.",
-                labelnames=labelnames))
-        self.counter_spec_decode_num_draft_tokens = self._base_library.Counter(
+        self.counter_spec_decode_num_accepted_tokens = (self._counter_cls(
+            name="vllm:spec_decode_num_accepted_tokens_total",
+            documentation="Number of accepted tokens.",
+            labelnames=labelnames))
+        self.counter_spec_decode_num_draft_tokens = self._counter_cls(
             name="vllm:spec_decode_num_draft_tokens_total",
             documentation="Number of draft tokens.",
             labelnames=labelnames)
-        self.counter_spec_decode_num_emitted_tokens = (
-            self._base_library.Counter(
-                name="vllm:spec_decode_num_emitted_tokens_total",
-                documentation="Number of emitted tokens.",
-                labelnames=labelnames))
+        self.counter_spec_decode_num_emitted_tokens = (self._counter_cls(
+            name="vllm:spec_decode_num_emitted_tokens_total",
+            documentation="Number of emitted tokens.",
+            labelnames=labelnames))
 
         # Deprecated in favor of vllm:prompt_tokens_total
         self.gauge_avg_prompt_throughput = self._gauge_cls(
