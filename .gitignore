@@ -189,4 +189,4 @@ hip_compat.h
 *.json
 
 # Debug files
-./debug
+debug/

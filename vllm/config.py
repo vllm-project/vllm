@@ -297,6 +297,21 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    def find_flash_attn_supported_head_dims(self, head_dim: int) -> int:
+        """
+        Find the closest head dimension to the given head dimension that is supported by Flash Attention.
+        """
+        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+        FLASHATTN_SUPPORTED_HEAD_DIMS = FlashAttentionBackend.get_supported_head_sizes()
+
+        for supported_head_dim in FLASHATTN_SUPPORTED_HEAD_DIMS:
+            if head_dim <= supported_head_dim:
+                return supported_head_dim
+        raise ValueError(
+            f"Head dimension {head_dim} is not supported by Flash Attention. Supported head dimensions are "
+            f"{FLASHATTN_SUPPORTED_HEAD_DIMS}."
+        )
+
     def get_head_size(self) -> int:
         # TODO remove hard code
         if hasattr(self.hf_text_config, "model_type"
@@ -304,6 +319,11 @@ class ModelConfig:
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             return 256
+        if hasattr(self.hf_text_config, "architectures"
+                   ) and 'BitnetForCausalLM' in self.hf_text_config.architectures:
+            return self.find_flash_attn_supported_head_dims((self.hf_text_config.hidden_size //
+                self.hf_text_config.num_attention_heads))
+
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
@@ -742,7 +762,8 @@ class SchedulerConfig:
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
-                self.max_num_batched_tokens = max(max_model_len, 2048)
+                # self.max_num_batched_tokens = max(max_model_len
+                self.max_num_batched_tokens = 1024
         if enable_chunked_prefill:
             logger.info("Chunked prefill is enabled (EXPERIMENTAL).")
 

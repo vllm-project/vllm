@@ -6,6 +6,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.bitsandbytes import (
     BitsAndBytesConfig)
+from vllm.model_executor.layers.quantization.bitnet_bitblas import (
+    BITNETBitBLASConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig)
 from vllm.model_executor.layers.quantization.deepspeedfp import (
@@ -28,6 +30,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "fp8": Fp8Config,
     # The order of gptq methods is important for config.py iteration over
     # override_quantization_method(..)
+    "bitnet_bitblas": BITNETBitBLASConfig,
     "marlin": MarlinConfig,
     "bitblas": BitBLASConfig,
     "gptq_marlin_24": GPTQMarlin24Config,

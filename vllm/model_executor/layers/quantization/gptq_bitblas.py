@@ -6,7 +6,6 @@ import torch
 from torch.nn.parameter import Parameter
 
 import bitblas.cache
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -404,7 +403,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET)
+            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET, enable_tuning=False)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
