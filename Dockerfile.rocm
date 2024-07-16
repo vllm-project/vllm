@@ -52,25 +52,25 @@ RUN pip install --upgrade pip
 # Remove sccache so it doesn't interfere with ccache
 # TODO: implement sccache support across components
 RUN apt-get purge -y sccache; pip uninstall -y sccache; rm -f "$(which sccache)"
-# Install torch == 2.4.0 on ROCm
+# Install torch == 2.5.0 on ROCm
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-5.7"*) \
             pip uninstall -y torch torchaudio torchvision \
             && pip install --no-cache-dir --pre \
-                torch==2.4.0.dev20240612 torchaudio==2.4.0.dev20240612 \
-                torchvision==0.19.0.dev20240612 \
+                torch==2.5.0.dev20240710 torchaudio==2.4.0.dev20240710 \
+                torchvision==0.20.0.dev20240710 \
                --index-url https://download.pytorch.org/whl/nightly/rocm5.7;; \
         *"rocm-6.0"*) \
             pip uninstall -y torch torchaudio torchvision \
             && pip install --no-cache-dir --pre \
-                torch==2.4.0.dev20240612 torchaudio==2.4.0.dev20240612 \
-                torchvision==0.19.0.dev20240612 \
+                torch==2.5.0.dev20240710 torchaudio==2.4.0.dev20240710 \
+                torchvision==0.20.0.dev20240710 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.0;; \
         *"rocm-6.1"*) \
             pip uninstall -y torch torchaudio torchvision \
             && pip install --no-cache-dir --pre \
-                torch==2.4.0.dev20240612 torchaudio==2.4.0.dev20240612 \
-                torchvision==0.19.0.dev20240612 \
+                torch==2.5.0.dev20240710 torchaudio==2.4.0.dev20240710 \
+                torchvision==0.20.0.dev20240710 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
         *) ;; esac
 
