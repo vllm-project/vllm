@@ -85,10 +85,11 @@ struct ScaledEpilogueBase {
  protected:
   using Accum = cutlass::epilogue::threadblock::VisitorAccFetch;
 
-  template <typename T>
+  template <typename T, bool EnableNullptr = false>
   using ColOrScalarLoad =
       cutlass::epilogue::threadblock::VisitorColOrScalarBroadcast<
-          OutputTileThreadMap, T, Stride<Int<1>, Int<0>, Int<0>>>;
+          OutputTileThreadMap, T, Stride<Int<1>, Int<0>, Int<0>>,
+          EnableNullptr>;
 
   template <typename T, bool EnableNullptr = false>
   using RowOrScalarLoad =
@@ -120,7 +121,7 @@ struct ScaledEpilogueBase {
   static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
     using Arguments = typename Descriptor::Arguments;
     auto* data_ptr = tensor ? static_cast<T*>(tensor->data_ptr()) : nullptr;
-    static_assert( // TODO std::is_same_v<Descriptor, ColOrScalarLoad<T, true>> ||
+    static_assert(std::is_same_v<Descriptor, ColOrScalarLoad<T, true>> ||
                   std::is_same_v<Descriptor, RowOrScalarLoad<T, true>>);
 
     bool is_scalar = tensor && tensor->numel() != 1;  // ignored if null

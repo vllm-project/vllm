@@ -227,7 +227,8 @@ struct VisitorRowOrScalarBroadcast {
 template<
   class ThreadMap,
   class Element,
-  class StrideMNL = Stride<_1,_0,_0>
+  class StrideMNL = Stride<_1,_0,_0>,
+  bool EnableNullptr = false
 >
 struct VisitorColOrScalarBroadcast {
 
@@ -236,6 +237,7 @@ struct VisitorColOrScalarBroadcast {
   struct Arguments {
     Element const* ptr_col = nullptr;
     bool col_broadcast = true;
+    Element null_default = Element(0);
     StrideMNL dCol = {};
   };
 
@@ -297,19 +299,30 @@ struct VisitorColOrScalarBroadcast {
         pred(i) = get<0>(tC_cCol(i)) < m;
       }
 
-      if (params_ptr->col_broadcast) {
-        // In this case we are loading from a column vector and broadcasting
-        copy_if(pred, tC_gCol, tC_rCol);
-      } else {
-        // In this case we are loading from a scalar and broadcasting
+      auto fill_dst = [&](Element const& value) {
         auto dst_v = filter(tC_rCol);
 
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size(dst_v); ++i) {
           if (pred(i)) {
-            dst_v(i) = *(params_ptr->ptr_col);
+            dst_v(i) = value;
           }
         }
+      };
+
+      if constexpr(EnableNullptr) {
+        if (params_ptr->ptr_col == nullptr) {
+          fill_dst(params_ptr->null_default);
+          return;
+        }
+      }
+
+      if (params_ptr->col_broadcast) {
+        // In this case we are loading from a column vector and broadcasting
+        copy_if(pred, tC_gCol, tC_rCol);
+      } else {
+        // In this case we are loading from a scalar and broadcasting
+        fill_dst(*params_ptr->ptr_col);
       }
     }
 
