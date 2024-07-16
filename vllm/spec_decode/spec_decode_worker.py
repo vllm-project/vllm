@@ -144,7 +144,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
             spec_decode_sampler = RejectionSampler(
-                disable_bonus_tokens=False, )
+                disable_bonus_tokens=False)
         elif draft_token_acceptance_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
                 disable_bonus_tokens=False,
@@ -206,7 +206,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self.probs_dtype = self.spec_decode_sampler.probs_dtype
         self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
-        # Lazy initiazliation.
+        # Lazy initialization.
         self.scorer: SpeculativeScorer
 
         # Hidden states from target model to pass to proposer
