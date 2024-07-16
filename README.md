@@ -16,6 +16,15 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+**The Fifth vLLM Bay Area Meetup (July 24th 5pm-8pm PT)**
+
+We are excited to announce our fifth vLLM Meetup!
+Join us to hear the vLLM's recent updates and the upcoming roadmap.
+Additionally, our collaborators from AWS will be presenting their insights and experiences in deploying vLLM.
+Register now [here](https://lu.ma/lp0gyjqr) and be part of the event!
+
+---
+
 *Latest News* 🔥
 - [2024/06] We hosted [the fourth vLLM meetup](https://lu.ma/agivllm) with Cloudflare and BentoML! Please find the meetup slides [here](https://docs.google.com/presentation/d/1iJ8o7V2bQEi0BFEljLTwc5G1S10_Rhv3beed5oB0NJ4/edit?usp=sharing).
 - [2024/05] <b>vLLM-fork specific:</b> Added Intel® Gaudi® 2 support with SynapseAI 1.16.0. For more information, please refer to <a href="README_GAUDI.md"><b>Intel® Gaudi® README</b></a>.
@@ -91,6 +100,7 @@ vLLM is a community project. Our compute resources for development and testing a
 - Databricks
 - DeepInfra
 - Dropbox
+- Google Cloud
 - Lambda Lab
 - NVIDIA
 - Replicate
