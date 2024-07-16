@@ -16,7 +16,9 @@ from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 from ..conftest import HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
 
-models = ["deepseek-ai/deepseek-vl-1.3b-chat"]
+models = [
+    "deepseek-ai/deepseek-vl-1.3b-chat", "deepseek-ai/deepseek-vl-7b-chat"
+]
 IMAGE_TOKEN_ID = 100015
 pytestmark = pytest.mark.vlm
 
@@ -78,6 +80,8 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         language_config = config.language_config
         self.language_model = LlamaForCausalLM(language_config)
+        # this model does not support tie_word_embeddings
+        setattr(self.config, 'tie_word_embeddings', False)
 
     def prepare_inputs_embeds(
         self,
@@ -134,7 +138,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         return output
 
     def get_output_embeddings(self):
-        return None
+        return self.language_model.get_output_embeddings()
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -270,7 +274,6 @@ def run_test(
         [prompt for _ in size_factors],
         [rescale_image_size(image, factor) for factor in size_factors],
     ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-    print(inputs_per_image)
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -309,8 +312,6 @@ def run_test(
                                         vllm_outputs_per_image):
         # TODO: Check whether using original CLIPVisionModel can improve
         # consistency against HF
-        # print(f'hf_outputs: {hf_outputs}')
-        # print(f'vllm_outputs: {vllm_outputs}')
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
