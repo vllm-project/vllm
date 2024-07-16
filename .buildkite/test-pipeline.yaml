@@ -12,7 +12,6 @@ steps:
   fast_check_only: true
   commands:
   - pytest -v -s async_engine # Async Engine
-  - bash ../.buildkite/download-images.sh # Inputs 
   - pytest -v -s test_inputs.py
   - pytest -v -s multimodal
   - pytest -v -s test_utils.py # Utils
@@ -46,9 +45,7 @@ steps:
   fast_check: true
   commands:
   - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
-  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
-  - VLLM_ATTENTION_BACKEND=FLASHINFER pytest -v -s basic_correctness/test_basic_correctness.py
+  - pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
@@ -84,7 +81,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   commands:
-  - bash ../.buildkite/download-images.sh
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -152,7 +148,6 @@ steps:
 - label: Inputs Test
   #mirror_hardwares: [amd]
   commands:
-    - bash ../.buildkite/download-images.sh
     - pytest -v -s test_inputs.py
     - pytest -v -s multimodal
 
@@ -172,7 +167,6 @@ steps:
 - label: Vision Language Models Test
   mirror_hardwares: [amd]
   commands:
-    - bash ../.buildkite/download-images.sh
     - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
