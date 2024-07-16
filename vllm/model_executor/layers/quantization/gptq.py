@@ -236,8 +236,7 @@ class GPTQLinearMethod(LinearMethodBase):
             qconfig = _woq_enable_weight_cache_for_large_batch(
                 qconfig
             )
-
-            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size, g_idx = layer.g_idx)
+            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size, g_idx = layer.g_idx, is_gptq=True)
         out = layer.ipex_qlinear(reshaped_x)
 
         return out.reshape(out_shape)
