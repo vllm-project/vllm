@@ -77,8 +77,6 @@ def get_attn_backend(
         return IpexAttnBackend
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
-        logger.warning("Eager mode is required for the Flashinfer backend. "
-                       "Please make sure --enforce-eager is set.")
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
     elif backend == _Backend.PALLAS:

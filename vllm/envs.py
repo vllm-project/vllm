@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = "~/.vllm/xla_cache/"
+    VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_INSTALL_PUNICA_KERNELS: bool = False
+    VLLM_NO_DEPRECATION_WARNING: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
 
@@ -204,6 +206,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "FLASH_ATTN": use FlashAttention
     # - "XFORMERS": use XFormers
     # - "ROCM_FLASH": use ROCmFlashAttention
+    # - "FLASHINFER": use flashinfer
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -248,6 +251,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH":
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
+    "VLLM_FUSED_MOE_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+
+    # If set, vllm will skip the deprecation warnings.
+    "VLLM_NO_DEPRECATION_WARNING":
+    lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
 }
 
 # end-env-vars-definition
