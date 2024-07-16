@@ -394,7 +394,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
         # vLLM uses cuda graph only for decoding requests.
-        cuda_graph_pad_size = 0
+        cuda_graph_pad_size = -1
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size

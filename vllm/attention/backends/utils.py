@@ -153,7 +153,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
               query_lens: List[int], cuda_graph_pad_size: int,
               batch_size: int):
         device = runner.device
-        use_captured_graph = cuda_graph_pad_size > 0
+        use_captured_graph = cuda_graph_pad_size != -1
 
         logits_soft_cap = getattr(runner.model_config.hf_config,
                                   "attn_logit_softcapping", None)

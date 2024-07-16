@@ -277,7 +277,7 @@ class FlashAttentionMetadataBuilder(
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors."""
         device = runner.device
-        use_captured_graph = cuda_graph_pad_size > 0
+        use_captured_graph = cuda_graph_pad_size != -1
 
         logits_soft_cap = getattr(runner.model_config.hf_config,
                                   "attn_logit_softcapping", None)

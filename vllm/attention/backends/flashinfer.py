@@ -319,7 +319,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def build(self, runner: "GPUModelRunnerBase", seq_lens, query_lens,
               cuda_graph_pad_size: int, batch_size: int):
         device = runner.device
-        use_captured_graph = cuda_graph_pad_size > 0
+        use_captured_graph = cuda_graph_pad_size != -1
 
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
