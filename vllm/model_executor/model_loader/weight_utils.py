@@ -466,10 +466,10 @@ def initialize_dummy_weights(
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
-    """Remap the name of FP8 kv-scale parameters.
+    """Remap the name of FP8 k/v_scale parameters.
 
-    This function handles the remapping of FP8 kv-scale parameter names.
-    It checks if the given name ends with "kv_scale" and attempts to remap
+    This function handles the remapping of FP8 k/v_scale parameter names.
+    It detects if the given name ends with a suffix and attempts to remap
     it to the expected name format in the model. If the remapped name is not
     found in the params_dict, a warning is printed and None is returned.
 
@@ -489,33 +489,29 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
             "v_scale tensors and will be removed in a future release. "
             "Functionally for now, we will remap kv_scale to k_scale and "
             "duplicate k_scale to v_scale")
-        remapped_scale_name = name.replace(".kv_scale", ".attn.kv_scale")
-        if remapped_scale_name not in params_dict:
+        # NOTE: we remap the deprecated kv_scale to k_scale
+        remapped_name = name.replace(".kv_scale", ".attn.k_scale")
+        if remapped_name not in params_dict:
             print_warning_once(
                 f"Found kv_scale in the checkpoint (e.g. {name}), "
                 "but not found the expected name in the model "
-                f"(e.g. {remapped_scale_name}). kv_scale is "
+                f"(e.g. {remapped_name}). kv_scale is "
                 "not loaded.")
             return None
-        return remapped_scale_name
-    elif name.endswith(".k_scale"):
-        remapped_scale_name = name.replace(".k_scale", ".attn.k_scale")
-        if remapped_scale_name not in params_dict:
-            print_warning_once(
-                f"Found k_scale in the checkpoint (e.g. {name}), "
-                "but not found the expected name in the model "
-                f"(e.g. {remapped_scale_name}). k_scale is "
-                "not loaded.")
-            return None
-        return remapped_scale_name
-    elif name.endswith(".v_scale"):
-        remapped_scale_name = name.replace(".v_scale", ".attn.v_scale")
-        if remapped_scale_name not in params_dict:
-            print_warning_once(
-                f"Found v_scale in the checkpoint (e.g. {name}), "
-                "but not found the expected name in the model "
-                f"(e.g. {remapped_scale_name}). v_scale is "
-                "not loaded.")
-            return None
-        return remapped_scale_name
+        return remapped_name
+
+    possible_scale_names = [".k_scale", ".v_scale"]
+    for scale_name in possible_scale_names:
+        if name.endswith(scale_name):
+            remapped_name = name.replace(scale_name, f".attn{scale_name}")
+            if remapped_name not in params_dict:
+                print_warning_once(
+                    f"Found {scale_name} in the checkpoint (e.g. {name}), "
+                    "but not found the expected name in the model "
+                    f"(e.g. {remapped_name}). {scale_name} is "
+                    "not loaded.")
+                return None
+            return remapped_name
+
+    # If there were no matches, return the untouched param name
     return name
