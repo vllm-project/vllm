@@ -46,6 +46,7 @@ def main(args: argparse.Namespace):
         load_format=args.load_format,
         distributed_executor_backend=args.distributed_executor_backend,
         otlp_traces_endpoint=args.otlp_traces_endpoint,
+        enable_prefix_caching=args.enable_prefix_caching,
     )
 
     sampling_params = SamplingParams(
@@ -207,9 +208,10 @@ if __name__ == '__main__':
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        choices=["cuda", "cpu", "tpu", "xpu"],
-        help='device type for vLLM execution, supporting CUDA and CPU.')
+        default="auto",
+        choices=["auto", "cuda", "cpu", "openvino", "tpu", "xpu"],
+        help='device type for vLLM execution, supporting CUDA, OpenVINO and '
+        'CPU.')
     parser.add_argument('--block-size',
                         type=int,
                         default=16,
@@ -219,6 +221,9 @@ if __name__ == '__main__':
         action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
+    parser.add_argument("--enable-prefix-caching",
+                        action='store_true',
+                        help="Enable automatic prefix caching")
     parser.add_argument('--use-v2-block-manager', action='store_true')
     parser.add_argument(
         "--ray-workers-use-nsight",

@@ -3,11 +3,12 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
+import torch_xla.experimental.dynamo_set_buffer_donor  # noqa: F401
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         MultiModalConfig, ParallelConfig, SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -30,7 +31,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -38,11 +39,12 @@ class TPUWorker(LoraNotSupportedWorkerBase):
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -61,7 +63,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
                                            device_config,
                                            cache_config,
                                            load_config,
-                                           vision_language_config,
+                                           multimodal_config,
                                            is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:
@@ -96,8 +98,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): This does not completely eliminate the recompilation
         # overhead because dynamo does not cache the compiled results.
-        xr.initialize_cache(os.path.expanduser(envs.VLLM_XLA_CACHE_PATH),
-                            readonly=False)
+        xr.initialize_cache(envs.VLLM_XLA_CACHE_PATH, readonly=False)
 
     def load_model(self):
         self.model_runner.load_model()
@@ -152,8 +153,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
 
-        self.cpu_cache = []
-        self.tpu_cache = []
+        self.cpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        self.tpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
         cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
@@ -214,7 +215,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         assert len(seq_group_metadata_list) > 0
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.tpu_cache)
-        return [output]
+        return output
 
     def cache_swap(
         self,
@@ -227,18 +228,25 @@ class TPUWorker(LoraNotSupportedWorkerBase):
 
         if blocks_to_swap_in:
             # Swap from CPU to TPU.
-            src_to_dst = _make_src_to_dst(blocks_to_swap_in, "cpu",
-                                          self.device)
+            src_indices, dst_indices = _make_src_to_dst(
+                blocks_to_swap_in, "cpu", self.device)
             for i in range(num_layers):
-                attn_backend.swap_blocks(self.cpu_cache[i], self.tpu_cache[i],
-                                         src_to_dst)
+                tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
+                cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
+                k = cpu_k_cache[:, src_indices].to(self.device)
+                v = cpu_v_cache[:, src_indices].to(self.device)
+                _insert_kv(k, v, dst_indices, tpu_k_cache, tpu_v_cache)
+
         if blocks_to_swap_out:
             # Swap from TPU to CPU.
-            src_to_dst = _make_src_to_dst(blocks_to_swap_out, self.device,
-                                          "cpu")
+            src_indices, dst_indices = _make_src_to_dst(
+                blocks_to_swap_out, self.device, "cpu")
             for i in range(num_layers):
-                attn_backend.swap_blocks(self.tpu_cache[i], self.cpu_cache[i],
-                                         src_to_dst)
+                tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
+                cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
+                cpu_k_cache[:, dst_indices] = tpu_k_cache[:, src_indices].cpu()
+                cpu_v_cache[:, dst_indices] = tpu_v_cache[:, src_indices].cpu()
+
         if blocks_to_copy:
             src_to_dst = _make_src_to_dst(blocks_to_copy, self.device,
                                           self.device)
@@ -267,3 +275,17 @@ def _make_src_to_dst(
                                device=dst_device,
                                dtype=torch.int64)
     return src_indices, dst_indices
+
+
+@torch.compile(backend="openxla")
+def _insert_kv(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    indices: torch.Tensor,
+    tpu_k_cache: torch.Tensor,
+    tpu_v_cache: torch.Tensor,
+) -> None:
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_k_cache, True)
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_v_cache, True)
+    tpu_k_cache[:, indices] = k
+    tpu_v_cache[:, indices] = v

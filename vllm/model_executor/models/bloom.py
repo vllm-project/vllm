@@ -39,7 +39,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -277,11 +277,10 @@ class BloomForCausalLM(nn.Module):
         self.quant_config = quant_config
         self.transformer = BloomModel(config, cache_config, quant_config)
         if self.config.tie_word_embeddings:
-            self.lm_head_weight = self.transformer.word_embeddings.weight
+            self.lm_head = self.transformer.word_embeddings
         else:
             self.lm_head = ParallelLMHead(self.config.vocab_size,
                                           self.config.hidden_size)
-            self.lm_head_weight = self.lm_head.weight
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -292,6 +291,7 @@ class BloomForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata)
@@ -299,7 +299,7 @@ class BloomForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

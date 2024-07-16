@@ -5,7 +5,7 @@ requires = [
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
-    "torch == 2.3.0",
+    "torch == 2.3.1",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -69,7 +69,5 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "llm: run tests for vLLM API only",
-    "openai: run tests for OpenAI API only",
     "vlm: run tests for vision language models only",
 ]
