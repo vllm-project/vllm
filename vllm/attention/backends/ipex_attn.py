@@ -156,7 +156,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: IpexAttnMetadata,  # type: ignore
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
@@ -170,7 +171,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert kv_scale == 1.0
+        assert k_scale == 1.0 and v_scale == 1.0
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
@@ -192,7 +193,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         if attn_metadata.is_prompt:
@@ -273,7 +275,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    kv_scale,
+                    k_scale,
+                    v_scale,
                 )
             else:
                 # Run PagedAttention V2.
@@ -305,7 +308,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    kv_scale,
+                    k_scale,
+                    v_scale,
                 )
 
             # Reshape the output tensor.
