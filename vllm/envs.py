@@ -106,6 +106,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
 
     # Root directory for VLLM cache files
+    # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
     "VLLM_CACHE_ROOT":
     lambda: os.path.expanduser(
         os.getenv(
@@ -114,6 +115,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         )),
 
     # Root directory for VLLM configuration files
+    # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
     # Note that this not only affects how vllm finds its configuration files
     # during runtime, but also affects how vllm installs its configuration
     # files during **installation**.
@@ -271,7 +273,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
 
     # Path to the cache for storing downloaded assets
-    # Defaults to `~/.cache/vllm/assets` unless `XDG_CACHE_HOME` is set
     "VLLM_ASSETS_CACHE":
     lambda: os.path.expanduser(
         os.getenv(
