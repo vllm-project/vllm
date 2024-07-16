@@ -1,12 +1,5 @@
-import os
-import subprocess
-
-from PIL import Image
-
 from vllm import LLM, SamplingParams
-
-# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
-# You can use `.buildkite/download-images.sh` to download them
+from vllm.assets.image import ImageAsset
 
 
 def run_phi3v():
@@ -24,7 +17,7 @@ def run_phi3v():
         max_num_seqs=5,
     )
 
-    image = Image.open("images/cherry_blossom.jpg")
+    image = ImageAsset("cherry_blossom").pil_image
 
     # single-image prompt
     prompt = "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n"  # noqa: E501
@@ -44,19 +37,4 @@ def run_phi3v():
 
 
 if __name__ == "__main__":
-    s3_bucket_path = "s3://air-example-data-2/vllm_opensource_llava/"
-    local_directory = "images"
-
-    # Make sure the local directory exists or create it
-    os.makedirs(local_directory, exist_ok=True)
-
-    # Use AWS CLI to sync the directory, assume anonymous access
-    subprocess.check_call([
-        "aws",
-        "s3",
-        "sync",
-        s3_bucket_path,
-        local_directory,
-        "--no-sign-request",
-    ])
     run_phi3v()

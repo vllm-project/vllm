@@ -189,10 +189,10 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
     if cuda_visible_devices is None:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
-    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
-    path = os.path.expanduser(
-        f"{VLLM_CONFIG_ROOT}/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json"
-    )
+
+    path = os.path.join(
+        envs.VLLM_CACHE_ROOT,
+        f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     from vllm.distributed.parallel_state import get_world_group
     if ((not is_distributed or get_world_group().local_rank == 0)
