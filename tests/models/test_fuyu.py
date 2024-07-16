@@ -12,9 +12,10 @@ from .utils import check_logprobs_close
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "What's the content of the image?\n",  # noqa: E501
-    "cherry_blossom": "What is the season?\n",
-    "boardwalk": "What's in this image?\n",
+    "stop_sign":
+    "What's the content of the image?\n",
+    "cherry_blossom":
+    "What is the season?\n",
 })
 
 models = ["adept/fuyu-8b"]

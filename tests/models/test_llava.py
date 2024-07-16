@@ -16,8 +16,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
     "cherry_blossom":
     "USER: <image>\nWhat is the season?\nASSISTANT:",
-    "boardwalk":
-    "USER: <image>\nWhat's in this image?\nASSISTANT:",
 })
 
 IMAGE_TOKEN_ID = 32000
