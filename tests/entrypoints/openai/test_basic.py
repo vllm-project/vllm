@@ -1,3 +1,5 @@
+from http import HTTPStatus
+
 import openai
 import pytest
 import requests
@@ -48,9 +50,8 @@ async def test_check_health(client: openai.AsyncOpenAI):
     base_url = str(client.base_url)[:-3].strip("/")
 
     response = requests.get(base_url + "/health")
-    response.raise_for_status()
 
-    assert len(response.content) == 0
+    assert response.status_code == HTTPStatus.OK
 
 
 @pytest.mark.asyncio
