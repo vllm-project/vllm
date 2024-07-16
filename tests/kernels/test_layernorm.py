@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.layernorm import RMSNorm
 import vllm._custom_ops as ops
+from vllm.model_executor.layers.layernorm import RMSNorm
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [3, 7, 83, 4096]  # Arbitrary values for testing

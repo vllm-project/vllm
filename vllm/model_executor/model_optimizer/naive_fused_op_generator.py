@@ -6,17 +6,17 @@
 ###############################################################################
 
 import tempfile
+from typing import Callable, Dict, List, Tuple
+
 import torch
 
-from .utils import node_function_target, extract_node_type, argument_type_str
-from .fused_op_generator import FusionFail, FusedOpGenerator
-from .fused_op_generator_utils import (build_extension, arg_schema_type,
-                                       generate_op_schema,
-                                       generate_meta_function)
-
-from pathlib import Path
-from typing import List, Tuple, Dict, Callable
 from vllm.logger import init_logger
+
+from .fused_op_generator import FusedOpGenerator, FusionFail
+from .fused_op_generator_utils import (arg_schema_type, build_extension,
+                                       generate_meta_function,
+                                       generate_op_schema)
+from .utils import argument_type_str, extract_node_type, node_function_target
 
 logger = init_logger(__name__)
 
@@ -32,18 +32,26 @@ def generate_cxx_sig(n: torch.fx.Node) -> str:
     # Hardcode a bunch of signatures for known ops.
     trg = node_function_target(n)
     if trg == "torch.ops._C.cutlass_scaled_mm":
-        return "void(torch::Tensor& , torch::Tensor const&, torch::Tensor const&, torch::Tensor const&, torch::Tensor const&, c10::optional<torch::Tensor> const& bias)"
-    elif (trg == "torch.ops._C.dynamic_scaled_fp8_quant" or
-          trg == "torch.ops._C.static_scaled_fp8_quant"):
-        return "void(torch::Tensor& out, torch::Tensor& input, torch::Tensor& scale)"
+        return ("void(torch::Tensor& , torch::Tensor const&, "
+                "torch::Tensor const&, torch::Tensor const&, "
+                "torch::Tensor const&, "
+                "c10::optional<torch::Tensor> const& bias)")
+    elif (trg == "torch.ops._C.dynamic_scaled_fp8_quant"
+          or trg == "torch.ops._C.static_scaled_fp8_quant"):
+        return ("void(torch::Tensor& out, torch::Tensor& input, "
+                "torch::Tensor& scale)")
     elif trg == "torch.ops._C.dynamic_scaled_int8_quant":
-        return "void(torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale)"
+        return ("void(torch::Tensor& out, torch::Tensor const& input, "
+                "torch::Tensor& scale)")
     elif trg == "torch.ops._C.static_scaled_int8_quant":
-        return "void(torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale)"
+        return ("void(torch::Tensor& out, torch::Tensor const& input, "
+                "torch::Tensor const& scale)")
     elif trg == "torch.ops._C.fused_add_rms_norm":
-        return "void(torch::Tensor& input, torch::Tensor& residual, torch::Tensor& weight, double epsilon)"
+        return ("void(torch::Tensor& input, torch::Tensor& residual, "
+                "torch::Tensor& weight, double epsilon)")
     elif trg == "torch.ops._C.rms_norm":
-        return "void(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight, double epsilon)"
+        return ("void(torch::Tensor& out, torch::Tensor& input, "
+                "torch::Tensor& weight, double epsilon)")
     elif trg == "torch.ops._C.silu_and_mul":
         return "void(torch::Tensor& out, torch::Tensor& input)"
     else:
@@ -85,7 +93,6 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         super().__init__()
         # base filename for generated code.
         self.filename = "fused_"
-        self.vllm_root = Path(__file__).parent.parent.parent.parent
         self.reset_fused_op()
         self.N = NaiveFusedOpGenerator.N
 
@@ -96,7 +103,6 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         self.fused_op = []
         self.fused_op.append('#include <torch/extension.h>')
-        ops_header = self.vllm_root / "csrc" / "ops.h"
         #self.fused_op.append(f'#include <iostream>')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
         self.fused_op.append('#define _operator_mul(a, b) ((a) * (b))')
@@ -335,7 +341,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             if fn.startswith("torch.ops._C"):
                 fn_name = self.rename(fn)
                 cxx_sig = generate_cxx_sig(n)
-                init = f'  static auto {fn_name} = torch::Dispatcher::singleton().findSchemaOrThrow("_C::{fn_name}", "").typed<{cxx_sig}>();'
+                init = (f'  static auto {fn_name} = '
+                        'torch::Dispatcher::singleton()'
+                        f'.findSchemaOrThrow("_C::{fn_name}", "")'
+                        f'.typed<{cxx_sig}>();')
                 self.fused_op.append(init)
 
         for n, fn in zip(nodes, fn_names):

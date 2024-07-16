@@ -4,10 +4,10 @@
 #
 ###############################################################################
 
-import torch
-
 from abc import ABC, abstractmethod
-from typing import List, Dict, Callable
+from typing import Callable, Dict, List
+
+import torch
 
 
 class FusionFail(Exception):

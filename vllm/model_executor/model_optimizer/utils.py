@@ -6,19 +6,20 @@
 
 import collections
 import copy
+
 import torch
 
 try:
-    from tabulate import tabulate # type: ignore
+    from tabulate import tabulate  # type: ignore
     have_tabulate = True
 except ImportError:
     have_tabulate = False
 
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.passes.tools_common import get_node_target
-from torch._subclasses.fake_tensor import FakeTensorMode
-
-from typing import List, Tuple, Any, Dict, Optional, Callable, Set, Union
 
 from vllm.logger import init_logger
 

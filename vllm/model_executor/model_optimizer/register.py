@@ -4,10 +4,11 @@
 #
 ###############################################################################
 
-import torch
 import types
+from typing import Callable, Dict, Optional, Set, Tuple, Type, Union
 
-from typing import Callable, Optional, Union, Dict, Set, Tuple, Type
+import torch
+
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

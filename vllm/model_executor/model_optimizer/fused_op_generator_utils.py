@@ -1,11 +1,12 @@
 import functools
+from typing import Callable, Dict, List, Optional
+
 import torch
 import torch.utils.cpp_extension
 
-from .utils import get_function_schema
-
-from typing import List, Callable, Dict, Optional
 from vllm.logger import init_logger
+
+from .utils import get_function_schema
 
 logger = init_logger(__name__)
 

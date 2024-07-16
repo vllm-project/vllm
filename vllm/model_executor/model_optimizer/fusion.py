@@ -5,18 +5,19 @@
 ###############################################################################
 
 import operator
+from typing import Callable, Dict, List, Optional, Set
+
 import torch
+from torch.fx.passes.shape_prop import ShapeProp
+
+from vllm.logger import init_logger
 
 from .code_cache import CodeCache
 from .fused_op_generator import FusionFail
 from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
-from .utils import (FlowGraph, node_function_target, SubGraph, is_call,
-                    lazy_graph_print_tabular, mangle_name)
-
-from torch.fx.passes.shape_prop import ShapeProp
-from typing import List, Dict, Optional, Callable, Set
-from vllm.logger import init_logger
+from .utils import (FlowGraph, SubGraph, is_call, lazy_graph_print_tabular,
+                    mangle_name, node_function_target)
 
 logger = init_logger(__name__)
 
@@ -322,7 +323,7 @@ def pointwise_fusion(cc: CodeCache,
             num_compute[fuse_part_id] = num_compute[fuse_part_id] + 1
             node_map[n] = fuse_part_id
 
-    logger.debug("final paritions = %s", dump_partitions(node_map))
+    logger.debug("final partitions = %s", dump_partitions(node_map))
 
     # Make sure all nodes have been assigned a partition.
     assert all([n in node_map for n in mod.graph.nodes])
