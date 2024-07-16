@@ -212,7 +212,7 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
-    key_scale = value_scale = 1.0
+    k_scale = v_scale = 1.0
     tp_rank = 0
 
     # Call the paged attention kernel.
@@ -231,8 +231,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            key_scale,
-            value_scale,
+            k_scale,
+            v_scale,
             tp_rank=tp_rank,
             blocksparse_local_blocks=blocksparse_local_blocks,
             blocksparse_vert_stride=blocksparse_vert_stride,
@@ -268,8 +268,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            key_scale,
-            value_scale,
+            k_scale,
+            v_scale,
             tp_rank=tp_rank,
             blocksparse_local_blocks=blocksparse_local_blocks,
             blocksparse_vert_stride=blocksparse_vert_stride,

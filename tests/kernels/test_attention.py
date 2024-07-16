@@ -175,7 +175,7 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
-    key_scale = value_scale = 1.0
+    k_scale = v_scale = 1.0
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -193,8 +193,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            key_scale,
-            value_scale,
+            k_scale,
+            v_scale,
         )
     elif version == "v2":
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
@@ -225,8 +225,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            key_scale,
-            value_scale,
+            k_scale,
+            v_scale,
         )
     else:
         raise AssertionError(f"Unknown version: {version}")

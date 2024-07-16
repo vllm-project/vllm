@@ -107,9 +107,9 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
                        torch::Tensor& slot_mapping,
-                       const std::string& kv_cache_dtype, double key_scale,
-                       double value_scale) {
-  TORCH_CHECK(key_scale == 1.0f && value_scale == 1.0f);
+                       const std::string& kv_cache_dtype, double k_scale,
+                       double v_scale) {
+  TORCH_CHECK(k_scale == 1.0f && v_scale == 1.0f);
 
   int num_tokens = key.size(0);
   int num_heads = key.size(1);

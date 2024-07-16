@@ -100,7 +100,7 @@ def main(
         start_time = time.perf_counter()
 
         # Using default kv_scale
-        key_scale = value_scale = 1.0
+        k_scale = v_scale = 1.0
 
         for _ in range(num_iters):
             if version == "v1":
@@ -117,8 +117,8 @@ def main(
                     max_seq_len,
                     alibi_slopes,
                     kv_cache_dtype,
-                    key_scale,
-                    value_scale,
+                    k_scale,
+                    v_scale,
                 )
             elif version == "v2":
                 ops.paged_attention_v2(
@@ -137,8 +137,8 @@ def main(
                     max_seq_len,
                     alibi_slopes,
                     kv_cache_dtype,
-                    key_scale,
-                    value_scale,
+                    k_scale,
+                    v_scale,
                 )
             else:
                 raise ValueError(f"Invalid version: {version}")
