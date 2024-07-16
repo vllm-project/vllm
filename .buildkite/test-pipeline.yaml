@@ -7,7 +7,7 @@ steps:
 - label: Regression Test
   mirror_hardwares: [amd]
   command: pytest -v -s test_regression.py
-  working_dir: "/app/vllm/tests" # optional
+  working_dir: "/vllm/tests" # optional
 
 - label: AsyncEngine Test
   #mirror_hardwares: [amd]
@@ -29,12 +29,12 @@ steps:
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
   command: pytest -v -s distributed/test_comm_ops.py
-  working_dir: "/app/vllm/tests"
+  working_dir: "/vllm/tests"
   num_gpus: 2
 
 - label: Distributed Tests
   mirror_hardwares: [amd]
-  working_dir: "/app/vllm/tests"
+  working_dir: "/vllm/tests"
   num_gpus: 2
   commands:
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -49,7 +49,7 @@ steps:
 
 - label: Distributed Tests (Multiple Groups)
   #mirror_hardwares: [amd]
-  working_dir: "/app/vllm/tests"
+  working_dir: "/vllm/tests"
   num_gpus: 4
   commands:
   - pytest -v -s distributed/test_pynccl.py
@@ -67,7 +67,7 @@ steps:
   - pytest -v -s entrypoints -m openai
 
 - label: Examples Test
-  working_dir: "/app/vllm/examples"
+  working_dir: "/vllm/examples"
   mirror_hardwares: [amd]
   commands:
     # install aws cli for llava_example.py
@@ -152,14 +152,14 @@ steps:
   command: pytest -v -s quantization
 
 - label: Benchmarks
-  working_dir: "/app/vllm/.buildkite"
+  working_dir: "/vllm/.buildkite"
   mirror_hardwares: [amd]
   commands:
   - pip install aiohttp
   - bash run-benchmarks.sh
 
 - label: Documentation Build
-  working_dir: "/app/vllm/test_docs/docs"
+  working_dir: "/vllm/test_docs/docs"
   no_gpu: True
   commands:
   - pip install -r requirements-docs.txt
