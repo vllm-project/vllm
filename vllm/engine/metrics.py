@@ -325,8 +325,8 @@ class LoggingStatLogger(StatLoggerBase):
                 f"System efficiency: {metrics.system_efficiency:.3f}, "
                 f"Number of speculative tokens: {metrics.num_spec_tokens}, "
                 f"Number of accepted tokens: {metrics.accepted_tokens}, "
-                f"Number of draft tokens tokens: {metrics.draft_tokens}, "
-                f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
+                f"Number of draft tokens: {metrics.draft_tokens}, "
+                f"Number of emitted tokens: {metrics.emitted_tokens}.")
 
 
 class PrometheusStatLogger(StatLoggerBase):
