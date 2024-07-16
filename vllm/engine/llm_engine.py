@@ -284,7 +284,7 @@ class LLMEngine:
                     "quantization":
                     model_config.quantization,
                     "kv_cache_dtype":
-                    cache_config.cache_dtype,
+                    str(cache_config.cache_dtype),
 
                     # Feature flags
                     "enable_lora":
@@ -874,10 +874,10 @@ class LLMEngine:
                 "as performance will be severely degraded otherwise.")
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
-        finished_requests_ids = self.scheduler[
-            0].get_and_reset_finished_requests_ids()
 
         if not scheduler_outputs.is_empty():
+            finished_requests_ids = self.scheduler[
+                0].get_and_reset_finished_requests_ids()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,

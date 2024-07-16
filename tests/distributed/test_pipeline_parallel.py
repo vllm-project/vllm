@@ -2,11 +2,8 @@ import os
 
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import ray
 
-from ..utils import VLLM_PATH, RemoteOpenAIServer
+from ..utils import RemoteOpenAIServer
 
 # downloading lora to test lora requests
 
@@ -21,14 +18,7 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(ray_ctx):
+def server():
     args = [
         "--model",
         MODEL_NAME,
@@ -50,7 +40,8 @@ def server(ray_ctx):
         args += [
             "--enforce-eager",
         ]
-    return RemoteOpenAIServer(args, num_gpus=PP_SIZE * TP_SIZE)
+    with RemoteOpenAIServer(args) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")

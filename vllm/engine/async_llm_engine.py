@@ -225,11 +225,11 @@ class _AsyncLLMEngine(LLMEngine):
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
-        finished_requests_ids = self.scheduler[
-            virtual_engine].get_and_reset_finished_requests_ids()
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
+            finished_requests_ids = self.scheduler[
+                virtual_engine].get_and_reset_finished_requests_ids()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -558,11 +558,13 @@ class AsyncLLMEngine:
             request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
+        finished = True
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
+            finished = finished and request_output.finished
 
-        return len(request_outputs) > 0
+        return not finished
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
