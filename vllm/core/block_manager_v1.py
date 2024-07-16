@@ -436,6 +436,28 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         """Allocate a physical slot for a new token."""
         n_blocks = seq.n_blocks
         block_table = self.block_tables[seq.seq_id]
+        
+        seqlen = seq.get_len()
+        if seqlen > self.max_blocks * self.block_size:
+            # past context length, attn sinks implied
+            if seqlen % self.block_size == 1:
+                # need to append block
+                new_block = self._allocate_last_physical_block(seq)
+                block_table.append(new_block)
+
+                # Attention sinks logic
+                if len(block_table) > self.max_blocks:
+                    # 0th block is attention sink
+                    self.gpu_allocator.free(block_table[1])
+                    self.block_tables[seq.seq_id] = [block_table[0]] + block_table[2:]
+
+                return []
+            
+            else:
+                # last block still has space, do nothing
+                # TODO: do we need the COW logic below?
+                return []
+
         # If we need to allocate a new physical block
         if len(block_table) < n_blocks:
             # Currently this code only supports adding one physical block
@@ -451,14 +473,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Allocate a new physical block.
                 new_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
-
-                # Attention sinks logic
-                if len(block_table) > self.max_blocks:
-                    # 0th block is attention sink
-                    self.gpu_allocator.free(block_table[1])
-                    seq.logical_token_blocks = [logical_blocks[0]] + logical_blocks[2:]
-                    self.block_tables[seq.seq_id] = [block_table[0]] + block_table[2:]
-
                 return []
 
         # We want to append the token to the last physical block.

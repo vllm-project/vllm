@@ -1155,6 +1155,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         else:
             model_executable = self.model
 
+        # print(f"\texecute model: input_ids={model_input.input_tokens.tolist()}, positions={model_input.input_positions.tolist()}, context_lens={model_input.attn_metadata.context_lens_tensor.tolist()}")
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
