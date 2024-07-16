@@ -1,16 +1,17 @@
 import time
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, List,
-                    Optional, Union)
+                    Optional)
 from typing import Sequence as GenericSequence
+from typing import Union
 
 from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.chat_utils import (load_chat_template,
-                                                parse_chat_message_content,
+from vllm.entrypoints.openai.chat_utils import (ConversationMessage,
                                                 image_token_str,
-                                                ConversationMessage)
+                                                load_chat_template,
+                                                parse_chat_message_content)
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
     ChatCompletionLogProbsContent, ChatCompletionNamedToolChoiceParam,

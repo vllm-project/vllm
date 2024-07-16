@@ -1,16 +1,15 @@
-from typing import (List, Optional)
+from typing import List, Optional
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.openai.chat_utils import (ConversationMessage,
+                                                load_chat_template,
+                                                parse_chat_message_content)
 from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
-
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.chat_utils import (load_chat_template,
-                                                parse_chat_message_content,
-                                                ConversationMessage)
 
 
 class OpenAIServingTokenization(OpenAIServing):

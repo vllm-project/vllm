@@ -1,7 +1,6 @@
 import codecs
 from dataclasses import dataclass, field
-from typing import (Awaitable, Iterable, List, Optional, TypedDict, cast,
-                    final)
+from typing import Awaitable, Iterable, List, Optional, TypedDict, cast, final
 
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
