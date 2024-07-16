@@ -13,7 +13,7 @@ from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -46,8 +46,6 @@ class ChatTtsLlm(nn.Module):
         super().__init__()
         
         # static parameters, put them in config later
-        self.spk_emb_dim = 192
-        self.spk_KL = 8
         self.num_audio_tokens = 626
         self.num_text_tokens = 21178
         self.num_vq = 4
@@ -56,10 +54,9 @@ class ChatTtsLlm(nn.Module):
         self.gpt = LlamaModel(config)
         self.model_dim = self.gpt.config.hidden_size
         self.emb_all = nn.ModuleList([
-            nn.Embedding(self.num_audio_tokens + self.num_text_tokens, self.model_dim) for _ in range(self.num_vq)
+            VocabParallelEmbedding(self.num_audio_tokens + self.num_text_tokens, self.model_dim) for _ in range(self.num_vq)
         ])
         
-        self.head_text = weight_norm(nn.Linear(self.model_dim, self.num_text_tokens, bias=False), name='weight')
         self.lm_head = nn.ModuleList([
             nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_vq)
         ])
