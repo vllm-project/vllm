@@ -24,6 +24,32 @@ EllipsisType = type(...)
 NoneType = type(None)
 
 
+def generate_cxx_sig(n: torch.fx.Node) -> str:
+    # TODO: derive signature from schema
+    #sch = torch.fx.operator_schemas.get_signature_for_torch_op(n.target)
+    #print(sch)
+
+    # Hardcode a bunch of signatures for known ops.
+    trg = node_function_target(n)
+    if trg == "torch.ops._C.cutlass_scaled_mm":
+        return "void(torch::Tensor& , torch::Tensor const&, torch::Tensor const&, torch::Tensor const&, torch::Tensor const&, c10::optional<torch::Tensor> const& bias)"
+    elif (trg == "torch.ops._C.dynamic_scaled_fp8_quant" or
+          trg == "torch.ops._C.static_scaled_fp8_quant"):
+        return "void(torch::Tensor& out, torch::Tensor& input, torch::Tensor& scale)"
+    elif trg == "torch.ops._C.dynamic_scaled_int8_quant":
+        return "void(torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale)"
+    elif trg == "torch.ops._C.static_scaled_int8_quant":
+        return "void(torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale)"
+    elif trg == "torch.ops._C.fused_add_rms_norm":
+        return "void(torch::Tensor& input, torch::Tensor& residual, torch::Tensor& weight, double epsilon)"
+    elif trg == "torch.ops._C.rms_norm":
+        return "void(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight, double epsilon)"
+    elif trg == "torch.ops._C.silu_and_mul":
+        return "void(torch::Tensor& out, torch::Tensor& input)"
+    else:
+        raise FusionFail(f"no C++ signature for: {trg}")
+
+
 class NaiveFusedOpGenerator(FusedOpGenerator):
     """
     The NaiveFusedOpGenerator is a class that is responsible for generating a
@@ -72,7 +98,6 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         self.fused_op.append('#include <torch/extension.h>')
         ops_header = self.vllm_root / "csrc" / "ops.h"
         #self.fused_op.append(f'#include <iostream>')
-        self.fused_op.append(f'#include "{ops_header}"')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
         self.fused_op.append('#define _operator_mul(a, b) ((a) * (b))')
         self.fused_op.append(('#define TORCH_LIBRARY_EXPAND(name, mod) '
@@ -304,6 +329,15 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         #if _default_handler.level == logging.DEBUG:
         #self.fused_op.append(f'  std::cout << "Executing: {op}" << std::endl;')
 
+        # Lookup ops for vllm custom kernels.
+        for n in nodes:
+            fn = node_function_target(n)
+            if fn.startswith("torch.ops._C"):
+                fn_name = self.rename(fn)
+                cxx_sig = generate_cxx_sig(n)
+                init = f'  static auto {fn_name} = torch::Dispatcher::singleton().findSchemaOrThrow("_C::{fn_name}", "").typed<{cxx_sig}>();'
+                self.fused_op.append(init)
+
         for n, fn in zip(nodes, fn_names):
             return_type = extract_node_type(n)
             input_types = [argument_type_str(inp) for inp in n.args]
@@ -322,7 +356,12 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     call_str = (call_str +
                                 f"{self.sanitize(n.args[0].name, '::')}.")
                     first_arg = 1
-                call_str = call_str + f"{self.sanitize(fn, '::')}("
+
+                if node_function_target(n).startswith("torch.ops._C"):
+                    call_str = call_str + f"{self.sanitize(fn, '::')}.call("
+                else:
+                    call_str = call_str + f"{self.sanitize(fn, '::')}("
+
                 sep = ''
                 for i, inp in enumerate(n.args[first_arg:]):
                     # bit of a hack for optional/empty tensor arguments
@@ -438,13 +477,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     out.write(line)
                     out.write('\n')
                 out.close()
-                build_extension(
-                    op_lib,
-                    [str(out.name)],
-                    # TODO: Note: these is a total hack to get naive C++ fused
-                    # ops working.
-                    extra_cflags=[f"-I{self.vllm_root}/csrc"],
-                    extra_ldflags=[f"{self.vllm_root}/vllm/_C.abi3.so"])
+                build_extension(op_lib, [str(out.name)])
                 logger.info("code generation success: %s", out.name)
 
             self.N = NaiveFusedOpGenerator.N

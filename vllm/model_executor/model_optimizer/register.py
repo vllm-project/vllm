@@ -113,7 +113,7 @@ def register_defaults():
     register_fusable('torch.narrow', is_trivial=True)
     register_fusable('torch.nn.functional.silu')
     register_fusable('torch.matmul', is_compute=True)
-    # register_fusable('torch.ops._C.silu_and_mul') # TODO: fix this
+    register_fusable('torch.ops._C.silu_and_mul')
     register_fusable('torch.ops._C.static_scaled_int8_quant')
     register_fusable('torch.ops._C.static_scaled_fp8_quant')
     register_fusable('torch.ops._C.dynamic_scaled_int8_quant')

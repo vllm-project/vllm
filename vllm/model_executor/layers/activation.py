@@ -33,7 +33,8 @@ class SiluAndMul(CustomOp):
 
         d = x.shape[-1] // 2
         # TODO: support silu_and_mul properly.
-        if torch._utils.is_compiling():
+        # this doesn't work for fp16 for some reason
+        if True and torch._utils.is_compiling():
             return F.silu(x[..., :d]) * x[..., d:]
         else:
             output_shape = (x.shape[:-1] + (d, ))

@@ -15,6 +15,10 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# Bump up cache limits for CUDA graphs
+torch._dynamo.config.cache_size_limit = 128
+torch._dynamo.config.accumulated_cache_size_limit = 128
+
 ###############################################################################
 #
 # Backend
@@ -131,6 +135,7 @@ def optimizer(_func: Optional[Callable] = None,
               fullgraph: bool = False):
 
     def body(fn: Callable) -> Callable:
+        # TODO use backend='eager' to get the graph instead?
         return torch.compile(fn,
                              backend=make_backend(backend=backend),
                              fullgraph=fullgraph)

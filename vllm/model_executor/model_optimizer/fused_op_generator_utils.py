@@ -17,7 +17,7 @@ def compose2(f: Callable, g: Callable) -> Callable:
     return lambda *a, **kw: g(f(*a, **kw))
 
 
-def compose(*fs: List[Callable]) -> Callable:
+def compose(fs: List[Callable]) -> Callable:
     """
     Compose a list of functions.
     """
@@ -125,8 +125,7 @@ def generate_meta_function(
     op takes all the inputs and chains the rest to subsequent ops.
     See functools.partial and inspect.signature().parameters
     """
-    fns = [n.target for n in nodes]
-    return compose(*fns)
+    return compose([n.target for n in nodes])
 
 
 def register_op_schema(library: str, op: str, sig: str):
