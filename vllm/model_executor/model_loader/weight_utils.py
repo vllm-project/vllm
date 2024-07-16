@@ -432,11 +432,6 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
 def default_weight_loader(param: torch.Tensor,
                           loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
-    # If the weight on disk does not have a shape, give it one
-    # (such scales for AutoFp8).
-    if len(loaded_weight.shape) == 0:
-        loaded_weight = loaded_weight.reshape(1)
-
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
 
@@ -484,11 +479,11 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
     """
     if name.endswith(".kv_scale"):
         print_warning_once(
-            f"DEPRECATED. Found kv_scale in the checkpoint (e.g. {name}). "
+            "DEPRECATED. Found kv_scale in the checkpoint. "
             "This format is deprecated in favor of separate k_scale and "
             "v_scale tensors and will be removed in a future release. "
-            "Functionally for now, we will remap kv_scale to k_scale and "
-            "duplicate k_scale to v_scale")
+            "Functionally, we will remap kv_scale to k_scale and duplicate "
+            "k_scale to v_scale")
         # NOTE: we remap the deprecated kv_scale to k_scale
         remapped_name = name.replace(".kv_scale", ".attn.k_scale")
         if remapped_name not in params_dict:
