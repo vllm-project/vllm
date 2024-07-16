@@ -132,10 +132,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Confirm weight scheme is supported.
         is_symmetric_weight = weight_quant.symmetric
         is_static_weight = not weight_quant.dynamic
-        is_per_tensor_weight = (
-            weight_quant.strategy == QuantizationStrategy.TENSOR)
+        is_per_tensor_or_channel_weight = (
+            weight_quant.strategy == QuantizationStrategy.TENSOR or
+            weight_quant.strategy == QuantizationStrategy.CHANNEL)
         if not (is_symmetric_weight and is_static_weight
-                and is_per_tensor_weight):
+                and is_per_tensor_or_channel_weight):
             return False
 
         # Dynamic quantization is always supported if weights supported.
@@ -166,7 +167,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def _get_schema(self, weight_quant: BaseModel,
                     input_quant: BaseModel) -> "CompressedTensorsScheme":
-
+        
+        # Detect If Mixed Precision
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             self._check_gptq_and_marlin_can_run()
             if (self.quant_format == CompressionFormat.marlin_24.value
@@ -181,12 +183,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
                     group_size=weight_quant.group_size)
-
-        if (self.quant_format == CompressionFormat.int_quantized.value or
-                self.quant_format == CompressionFormat.float_quantized.value):
+    
+        # Detect If Activation Quantization.
+        if (self.quant_format == CompressionFormat.naive_quantized.value or
+            self.quant_format == CompressionFormat.int_quantized.value or
+            self.quant_format == CompressionFormat.float_quantized.value):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Fp8(
-                    input_dynamic=input_quant.dynamic)
+                    strategy=weight_quant.strategy,
+                    is_static_input_scheme=(not input_quant.dynamic))
 
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Int8(
