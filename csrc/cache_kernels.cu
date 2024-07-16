@@ -159,8 +159,8 @@ __global__ void reshape_and_cache_kernel(
                                          // block_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
-    const int head_size, const int block_size, const int x,
-    const float kv_scale) {
+    const int head_size, const int block_size, const int x, const float k_scale,
+    const float v_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -196,9 +196,9 @@ __global__ void reshape_and_cache_kernel(
       value_cache[tgt_value_idx] = tgt_value;
     } else {
       key_cache[tgt_key_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, kv_scale);
+          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, k_scale);
       value_cache[tgt_value_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, kv_scale);
+          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, v_scale);
     }
   }
 }
@@ -248,7 +248,7 @@ __global__ void reshape_and_cache_flash_kernel(
           reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
           reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
           slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
-          num_heads, head_size, block_size, x, kv_scale);
+          num_heads, head_size, block_size, x, k_scale, v_scale);
 
 void reshape_and_cache(
     torch::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -258,7 +258,8 @@ void reshape_and_cache(
     torch::Tensor&
         value_cache,  // [num_blocks, num_heads, head_size, block_size]
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const std::string& kv_cache_dtype, const double kv_scale) {
+    const std::string& kv_cache_dtype, const double k_scale,
+    const double v_scale) {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -318,13 +319,13 @@ namespace vllm {
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
                                    Tout* __restrict__ dst_cache,
-                                   const float kv_scale,
+                                   const float scale,
                                    const int64_t block_stride) {
   const int64_t block_idx = blockIdx.x;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
     dst_cache[idx] =
-        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], kv_scale);
+        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], scale);
   }
 }
 
@@ -333,11 +334,11 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
 #define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)                                \
   vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE><<<grid, block, 0, stream>>>( \
       reinterpret_cast<Tin*>(src_cache.data_ptr()),                          \
-      reinterpret_cast<Tout*>(dst_cache.data_ptr()), kv_scale, block_stride);
+      reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, block_stride);
 
 // Only for testing.
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
-                 const double kv_scale, const std::string& kv_cache_dtype) {
+                 const double scale, const std::string& kv_cache_dtype) {
   torch::Device src_device = src_cache.device();
   torch::Device dst_device = dst_cache.device();
   TORCH_CHECK(src_device.is_cuda(), "src must be on a GPU")

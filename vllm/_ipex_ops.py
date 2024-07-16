@@ -59,7 +59,8 @@ class ipex_ops:
         max_context_len: int,
         alibi_slopes: Optional[torch.Tensor],
         kv_cache_dtype: str,
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -99,7 +100,8 @@ class ipex_ops:
         max_context_len: int,
         alibi_slopes: Optional[torch.Tensor],
         kv_cache_dtype: str,
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -227,7 +229,8 @@ class ipex_ops:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
     ) -> None:
         assert kv_cache_dtype == "auto"
         ipex.llm.modules.PagedAttention.reshape_and_cache(
