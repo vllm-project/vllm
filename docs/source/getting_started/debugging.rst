@@ -67,3 +67,6 @@ Here are some common issues that can cause hangs:
     If the script runs successfully, you should see the message ``sanity check is successful!``.
 
 If the problem persists, feel free to `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_, with a detailed description of the issue, your environment, and the logs.
+
+  .. warning::
+    After you find the root cause and solve the issue, remember to turn off all the debugging environment variables defined above, or simply start a new shell to avoid being affected by the debugging settings. If you don't do this, the system might be slow because many debugging functionalities are turned on.
