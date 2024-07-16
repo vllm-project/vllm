@@ -4,7 +4,6 @@
 #
 ###############################################################################
 
-import collections
 import copy
 
 import torch
@@ -15,6 +14,7 @@ try:
 except ImportError:
     have_tabulate = False
 
+from collections import OrderedDict, deque
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from torch._subclasses.fake_tensor import FakeTensorMode
@@ -316,9 +316,10 @@ def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
 
 
 def dump_inputs_users(
-        nodes: List[torch.fx.Node], all_input_nodes: Dict[torch.fx.Node,
-                                                          List[torch.fx.Node]],
-        all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]]) -> str:
+    nodes: List[torch.fx.Node],
+    all_input_nodes: Dict[torch.fx.Node, List[torch.fx.Node]],
+    all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]]
+) -> str:
     """
     Pretty print inputs/users info for a set of nodes and tag where
     they differ from node.all_input_nodes and node.users.
@@ -342,8 +343,8 @@ def dump_inputs_users(
 def gather_all_input_nodes(
     nodes: List[torch.fx.Node],
     do_renames: bool = True
-) -> Tuple[Dict[torch.fx.Node, List[torch.fx.Node]], Dict[torch.fx.Node, Dict[
-        torch.fx.Node, None]]]:
+) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]],
+           OrderedDict[torch.fx.Node, OrderedDict[torch.fx.Node, None]]]:
     """
     Collect all def/use information for each node in 'nodes'.  This is different
     than node.all_input_nodes and node.users since it handles in-place
@@ -364,8 +365,8 @@ def gather_all_input_nodes(
 
     Note: this will include Node kwargs
     """
-    all_input_nodes: Dict[torch.fx.Node, List[torch.fx.Node]] = dict()
-    all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]] = dict()
+    all_input_nodes: OrderedDict[torch.fx.Node, List[torch.fx.Node]] = OrderedDict()
+    all_node_users: OrderedDict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = OrderedDict()
     renames: Dict[torch.fx.Node, torch.fx.Node] = dict()
 
     def process_arg(n: torch.fx.Node, arg: torch.fx.node.Argument):
@@ -394,7 +395,7 @@ def gather_all_input_nodes(
     #
     for n in nodes:
         all_input_nodes[n] = n.all_input_nodes
-        all_node_users[n] = copy.copy(n.users)
+        all_node_users[n] = OrderedDict(sorted(n.users.items(), key=lambda kv: kv[0].name))
 
     #
     # process each node
@@ -547,12 +548,12 @@ class SubGraph:
     def topo_sort(self):
         order = []
         in_degree = dict()
-        worklist: collections.deque = collections.deque()
+        worklist: deque = deque()
 
         all_input_nodes, all_node_users = (self.all_renamed_input_nodes,
                                            self.all_renamed_node_users)
 
-        for n in self.nodes:
+        for n in sorted(self.nodes, key=lambda n: n.name):
             count = len(
                 [inp for inp in all_input_nodes[n] if self.in_subgraph(inp)])
             in_degree[n] = count
