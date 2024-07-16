@@ -62,7 +62,8 @@ using namespace detail;
 template<
   class ThreadMap,
   class Element,
-  class StrideMNL
+  class StrideMNL,
+  bool EnableNullptr = false
 >
 struct VisitorRowOrScalarBroadcast {
 
@@ -71,6 +72,7 @@ struct VisitorRowOrScalarBroadcast {
   struct Arguments {
     Element const* ptr_row = nullptr;
     bool row_broadcast = true;
+    Element null_default = Element(0);
     StrideMNL dRow = {};
   };
 
@@ -134,6 +136,29 @@ struct VisitorRowOrScalarBroadcast {
       auto coord_v = filter(tC_cRow);
       auto dst_v = filter(tC_rRow);
 
+      // Fill dst_v with the scalar value
+      auto fill_dst = [&](Element const& value) {
+        VecType filled_vec;
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < VecLength; i++) {
+          reinterpret_cast<Element*>(&filled_vec)[i] = value;
+        }
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < size(src_v); ++i) {
+          if (get<1>(coord_v(i)) < n) {
+            dst_v(i) = filled_vec;
+          }
+        }
+      };
+
+      if constexpr(EnableNullptr) {
+        if (params_ptr->ptr_row == nullptr) {
+          fill_dst(params_ptr->null_default);
+          return;
+        }
+      }
+
       if (params_ptr->row_broadcast) {
         // In this case we are loading from a row vector and broadcasting
         CUTLASS_PRAGMA_UNROLL
@@ -144,18 +169,7 @@ struct VisitorRowOrScalarBroadcast {
         }
       } else {
         // In this case we are loading from a scalar and broadcasting
-        VecType filled_vec;
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < VecLength; i++) {
-          reinterpret_cast<Element*>(&filled_vec)[i] = *(params_ptr->ptr_row);
-        }
-
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < size(src_v); ++i) {
-          if (get<1>(coord_v(i)) < n) {
-            dst_v(i) = filled_vec;
-          }
-        }
+        fill_dst(*params_ptr->ptr_row);
       }
     }
 

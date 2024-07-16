@@ -90,10 +90,11 @@ struct ScaledEpilogueBase {
       cutlass::epilogue::threadblock::VisitorColOrScalarBroadcast<
           OutputTileThreadMap, T, Stride<Int<1>, Int<0>, Int<0>>>;
 
-  template <typename T>
+  template <typename T, bool EnableNullptr = false>
   using RowOrScalarLoad =
       cutlass::epilogue::threadblock::VisitorRowOrScalarBroadcast<
-          OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
+          OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>,
+          EnableNullptr>;
 
   template <typename T>
   using ColLoad = cutlass::epilogue::threadblock::VisitorColBroadcast<
@@ -113,6 +114,17 @@ struct ScaledEpilogueBase {
     } else {
       return Arguments{data_ptr};
     }
+  }
+
+  template <typename Descriptor, typename T>
+  static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
+    using Arguments = typename Descriptor::Arguments;
+    auto* data_ptr = tensor ? static_cast<T*>(tensor->data_ptr()) : nullptr;
+    static_assert( // TODO std::is_same_v<Descriptor, ColOrScalarLoad<T, true>> ||
+                  std::is_same_v<Descriptor, RowOrScalarLoad<T, true>>);
+
+    bool is_scalar = tensor && tensor->numel() != 1;  // ignored if null
+    return Arguments{data_ptr, is_scalar};
   }
 };
 
@@ -226,7 +238,7 @@ struct ScaledEpilogueBiasAzp
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowOrScalarLoad<ElementD>;
+  using Bias = typename SUPER::template RowOrScalarLoad<ElementD, true>;
 
   // This is the full AZP term, azp * J @ B, shape (1,n)
   using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
@@ -260,7 +272,7 @@ struct ScaledEpilogueBiasAzp
 
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
-                                   torch::Tensor const& bias,
+                                   c10::optional<torch::Tensor> const& bias,
                                    torch::Tensor const& azp_adj) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
@@ -289,7 +301,7 @@ struct ScaledEpilogueBiasAzpToken
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowOrScalarLoad<ElementD>;
+  using Bias = typename SUPER::template RowOrScalarLoad<ElementD, true>;
 
   // Per-token azp term, shape (m,1)
   using Azp = typename SUPER::template ColLoad<int32_t>;
@@ -326,7 +338,7 @@ struct ScaledEpilogueBiasAzpToken
 
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
-                                   torch::Tensor const& bias,
+                                   c10::optional<torch::Tensor> const& bias,
                                    torch::Tensor const& azp,
                                    torch::Tensor const& azp_adj) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
@@ -660,12 +672,12 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                torch::Tensor const& bias,
+                                c10::optional<torch::Tensor> const& bias,
                                 c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(bias.dtype() == out.dtype(),
+  TORCH_CHECK(!bias || bias->dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
@@ -719,12 +731,12 @@ void cutlass_scaled_mm_azp_sm80(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                torch::Tensor const& bias,
+                                c10::optional<torch::Tensor> const& bias,
                                 c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(bias.dtype() == out.dtype(),
+  TORCH_CHECK(!bias || bias->dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
@@ -805,12 +817,12 @@ void cutlass_scaled_mm_azp_sm89(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                torch::Tensor const& bias,
+                                c10::optional<torch::Tensor> const& bias,
                                 c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(bias.dtype() == out.dtype(),
+  TORCH_CHECK(!bias || bias->dtype() == out.dtype(),
               "currently bias dtype must match output dtype ", out.dtype());
   TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 

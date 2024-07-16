@@ -33,7 +33,7 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                torch::Tensor const& bias,
+                                c10::optional<torch::Tensor> const& bias,
                                 c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj);
 
@@ -41,7 +41,7 @@ void cutlass_scaled_mm_azp_sm80(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                torch::Tensor const& bias,
+                                c10::optional<torch::Tensor> const& bias,
                                 c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj);
 
@@ -49,7 +49,7 @@ void cutlass_scaled_mm_azp_sm89(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                torch::Tensor const& bias,
+                                c10::optional<torch::Tensor> const& bias,
                                 c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj);
 
@@ -58,7 +58,7 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                torch::Tensor const& bias,
+                                c10::optional<torch::Tensor> const& bias,
                                 c10::optional<torch::Tensor> const& azp,
                                 torch::Tensor const& azp_adj);
 #endif
@@ -194,10 +194,6 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
     TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
                 bias->dim() == 1);
   }
-
-  static BiasCache bias_cache;
-  auto const& bias_ = bias ? bias.value() : bias_cache.get(c);
-
   if (azp) {
     TORCH_CHECK(azp->numel() == a.size(0) && azp->is_contiguous() &&
                 azp->dim() == 1);
@@ -211,24 +207,19 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
 
     // Guard against compilation issues for sm90 kernels
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
-    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, bias_, azp,
-                               azp_adj);
+    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
 #else
-    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias_, azp,
-                               azp_adj);
+    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
 #endif
   } else if (version_num == 89) {
     // Ada Lovelace
-    cutlass_scaled_mm_azp_sm89(c, a, b, a_scales, b_scales, bias_, azp,
-                               azp_adj);
+    cutlass_scaled_mm_azp_sm89(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
   } else if (version_num >= 80) {
     // Ampere
-    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias_, azp,
-                               azp_adj);
+    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
   } else {
     // Turing
     TORCH_CHECK(version_num >= 75);
-    cutlass_scaled_mm_azp_sm75(c, a, b, a_scales, b_scales, bias_, azp,
-                               azp_adj);
+    cutlass_scaled_mm_azp_sm75(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
   }
 }
