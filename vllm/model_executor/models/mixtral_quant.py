@@ -112,7 +112,6 @@ class MixtralMoE(nn.Module):
         if not self.expert_indicies:
             raise ValueError(
                 f"Rank {self.rank} has no experts assigned to it.")
-
         self.experts = nn.ModuleList([
             MixtralMLP(self.num_total_experts,
                        config.hidden_size,
@@ -155,8 +154,11 @@ class MixtralMoE(nn.Module):
                 else:
                     final_hidden_states.add_(current_hidden_states)
 
-        if not hasattr(self, "ipex_moe") and hasattr(self.experts[0].w1, "ipex_qlinear"):
-            self.ipex_moe = ipex.llm.modules.LinearMOE(experts_module=self.experts)
+        if not hasattr(self, "ipex_moe"):#and hasattr(self.experts[0].w1, "ipex_qlinear"):
+            if self.tp_size > 1 :
+                self.ipex_moe = ipex.llm.modules.LinearMOETP(experts_module=self.experts, expert_indicies=self.expert_indicies)
+            else:
+                self.ipex_moe = ipex.llm.modules.LinearMOE(experts_module=self.experts)
 
         return tensor_model_parallel_all_reduce(final_hidden_states).view(
             num_tokens, hidden_dim)

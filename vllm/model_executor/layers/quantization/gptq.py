@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.parameter import Parameter
-
+import intel_extension_for_pytorch as ipex
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -202,23 +202,41 @@ class GPTQLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = layer.qweight
+        scales = layer.scales
+        qzeros = layer.qzeros
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
-        # exllama needs to shuffle the weight after the weight is loaded
-        # here we do the shuffle on first forward pass
-        if layer.exllama_state == ExllamaState.UNINITIALIZED:
-            if self.quant_config.desc_act:
-                layer.g_idx.data = torch.argsort(layer.g_idx).to(torch.int)
-            else:
-                layer.g_idx.data = torch.empty((0, ),
-                                               device=layer.g_idx.device)
-            layer.exllama_state = ExllamaState.READY
-            ops.gptq_shuffle(layer.qweight, layer.g_idx,
-                             self.quant_config.weight_bits)
-        output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros,
-                               layer.scales, layer.g_idx,
-                               layer.exllama_state == ExllamaState.READY,
-                               self.quant_config.weight_bits)
-        if bias is not None:
-            output.add_(bias)
-        return output.reshape(out_shape)
+        if not hasattr(layer,"ipex_qlinear") :
+            from intel_extension_for_pytorch.quantization import WoqWeightDtype
+            from intel_extension_for_pytorch.utils.weight_only_quantization import (
+                _woq_enable_weight_cache_for_large_batch,
+            )
+
+            weight_dtype = WoqWeightDtype.INT4
+            lowp_mode = ipex.quantization.WoqLowpMode.INT8
+            # lowp_mode = ipex.quantization.WoqLowpMode.NONE
+            # lowp_mode = ipex.quantization.WoqLowpMode.FP16
+            # lowp_mode = ipex.quantization.WoqLowpMode.BF16
+            act_quant_mode_dict = {
+                "PER_TENSOR": ipex.quantization.WoqActQuantMode.PER_TENSOR,
+                "PER_IC_BLOCK": ipex.quantization.WoqActQuantMode.PER_IC_BLOCK,
+                "PER_BATCH": ipex.quantization.WoqActQuantMode.PER_BATCH,
+                "PER_BATCH_IC_BLOCK": ipex.quantization.WoqActQuantMode.PER_BATCH_IC_BLOCK,
+                "PER_TENSOR_SYM": ipex.quantization.WoqActQuantMode.PER_TENSOR_SYM,
+                "PER_IC_BLOCK_SYM": ipex.quantization.WoqActQuantMode.PER_IC_BLOCK_SYM,
+                "PER_BATCH_SYM": ipex.quantization.WoqActQuantMode.PER_BATCH_SYM,
+                "PER_BATCH_IC_BLOCK_SYM": ipex.quantization.WoqActQuantMode.PER_BATCH_IC_BLOCK_SYM,
+            }
+            qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
+                weight_dtype=weight_dtype,
+                lowp_mode=lowp_mode,
+                act_quant_mode=act_quant_mode_dict["PER_IC_BLOCK"],
+                group_size=self.quant_config.group_size,
+            )
+            qconfig = _woq_enable_weight_cache_for_large_batch(
+                qconfig
+            )
+            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size, g_idx = layer.g_idx, is_gptq=True)
+        out = layer.ipex_qlinear(reshaped_x)
+
+        return out.reshape(out_shape)
