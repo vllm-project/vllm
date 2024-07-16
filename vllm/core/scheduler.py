@@ -281,7 +281,7 @@ class Scheduler:
             version = "v2"
         if (self.scheduler_config.embedding_mode
                 or self.scheduler_config.is_attention_free):
-            version = "embedding"
+            version = "placeholder"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
