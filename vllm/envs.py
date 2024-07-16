@@ -17,7 +17,8 @@ if TYPE_CHECKING:
     S3_ACCESS_KEY_ID: Optional[str] = None
     S3_SECRET_ACCESS_KEY: Optional[str] = None
     S3_ENDPOINT_URL: Optional[str] = None
-    VLLM_CONFIG_ROOT: str = ""
+    VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
+    VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
     VLLM_DO_NOT_TRACK: bool = False
@@ -31,11 +32,11 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
-    VLLM_XLA_CACHE_PATH: str = os.path.expanduser("~/.cache/vllm/xla_cache")
+    VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
-    VLLM_ASSETS_CACHE: str = os.path.expanduser("~/.cache/vllm/assets")
+    VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -51,6 +52,13 @@ def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",
         os.path.join(os.path.expanduser("~"), ".cache"),
+    )
+
+
+def get_default_config_root():
+    return os.getenv(
+        "XDG_CONFIG_HOME",
+        os.path.join(os.path.expanduser("~"), ".config"),
     )
 
 
@@ -97,13 +105,24 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
 
+    # Root directory for VLLM cache files
+    "VLLM_CACHE_ROOT":
+    lambda: os.path.expanduser(
+        os.getenv(
+            "VLLM_CACHE_ROOT",
+            os.path.join(get_default_cache_root(), "vllm"),
+        )),
+
     # Root directory for VLLM configuration files
     # Note that this not only affects how vllm finds its configuration files
     # during runtime, but also affects how vllm installs its configuration
     # files during **installation**.
     "VLLM_CONFIG_ROOT":
-    lambda: os.environ.get("VLLM_CONFIG_ROOT", None) or os.getenv(
-        "XDG_CONFIG_HOME", None) or os.path.expanduser("~/.config"),
+    lambda: os.path.expanduser(
+        os.getenv(
+            "VLLM_CONFIG_ROOT",
+            os.path.join(get_default_config_root(), "vllm"),
+        )),
 
     # ================== Runtime Env Vars ==================
 
@@ -284,7 +303,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 # end-env-vars-definition
 
 
-def __getattr__(name):
+def __getattr__(name: str):
     # lazy evaluation of environment variables
     if name in environment_variables:
         return environment_variables[name]()
