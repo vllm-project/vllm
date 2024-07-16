@@ -522,8 +522,11 @@ class SamplingTensors:
             pin_memory=pin_memory,
         )
         if do_penalties:
-            prompt_tensor = torch.from_numpy(prompt_padded_tokens).pin_memory()
-            output_tensor = torch.from_numpy(output_padded_tokens).pin_memory()
+            prompt_tensor = torch.from_numpy(prompt_padded_tokens)
+            output_tensor = torch.from_numpy(output_padded_tokens)
+            if pin_memory:
+                prompt_tensor = prompt_tensor.pin_memory()
+                output_tensor = output_tensor.pin_memory()
         else:
             prompt_tensor = None
             output_tensor = None
