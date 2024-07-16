@@ -133,6 +133,30 @@ class Metrics:
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + [Metrics.labelname_finish_reason])
 
+        # Speculatie decoding stats
+        self.gauge_spec_decode_draft_acceptance_rate = self._base_library.Gauge(
+            name="vllm:spec_decode_draft_acceptance_rate",
+            documentation="Speulative token acceptance rate.",
+            labelnames=labelnames)
+        self.gauge_spec_decode_efficiency = self._base_library.Gauge(
+            name="vllm:spec_decode_efficiency",
+            documentation="Speculative decoding system efficiency.",
+            labelnames=labelnames)
+        self.counter_spec_decode_num_accepted_tokens = (
+            self._base_library.Counter(
+                name="vllm:spec_decode_num_accepted_tokens_total",
+                documentation="Number of accepted tokens.",
+                labelnames=labelnames))
+        self.counter_spec_decode_num_draft_tokens = self._base_library.Counter(
+            name="vllm:spec_decode_num_draft_tokens_total",
+            documentation="Number of draft tokens.",
+            labelnames=labelnames)
+        self.counter_spec_decode_num_emitted_tokens = (
+            self._base_library.Counter(
+                name="vllm:spec_decode_num_emitted_tokens_total",
+                documentation="Number of emitted tokens.",
+                labelnames=labelnames))
+
         # Deprecated in favor of vllm:prompt_tokens_total
         self.gauge_avg_prompt_throughput = self._base_library.Gauge(
             name="vllm:avg_prompt_throughput_toks_per_s",
@@ -453,6 +477,22 @@ class PrometheusStatLogger(StatLoggerBase):
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
+
+            if stats.spec_decode_metrics is not None:
+                self._log_gauge(
+                    self.metrics.gauge_spec_decode_draft_acceptance_rate,
+                    stats.spec_decode_metrics.draft_acceptance_rate)
+                self._log_gauge(self.metrics.gauge_spec_decode_efficiency,
+                                stats.spec_decode_metrics.system_efficiency)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_accepted_tokens,
+                    stats.spec_decode_metrics.accepted_tokens)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_draft_tokens,
+                    stats.spec_decode_metrics.draft_tokens)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_emitted_tokens,
+                    stats.spec_decode_metrics.emitted_tokens)
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
