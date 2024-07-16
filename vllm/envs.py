@@ -105,15 +105,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
 
-    # Root directory for VLLM cache files
-    # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
-    "VLLM_CACHE_ROOT":
-    lambda: os.path.expanduser(
-        os.getenv(
-            "VLLM_CACHE_ROOT",
-            os.path.join(get_default_cache_root(), "vllm"),
-        )),
-
     # Root directory for VLLM configuration files
     # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
     # Note that this not only affects how vllm finds its configuration files
@@ -127,6 +118,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         )),
 
     # ================== Runtime Env Vars ==================
+
+    # Root directory for VLLM cache files
+    # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
+    "VLLM_CACHE_ROOT":
+    lambda: os.path.expanduser(
+        os.getenv(
+            "VLLM_CACHE_ROOT",
+            os.path.join(get_default_cache_root(), "vllm"),
+        )),
 
     # used in distributed environment to determine the master address
     'VLLM_HOST_IP':
