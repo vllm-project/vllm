@@ -15,7 +15,7 @@ ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/li
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
-RUN pip install --proxy http://child-prc.intel.com:913 http://mlpc.intel.com/downloads/cpu/ipex-2.4/rc0/intel_extension_for_pytorch-2.4.0-cp310-cp310-manylinux2014_x86_64.whl
+RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.4.0%2Bgitfbaa4bc-cp310-cp310-linux_x86_64.whl
 
 RUN pip install --upgrade pip \
     && pip install wheel packaging ninja "setuptools>=49.4.0" numpy
