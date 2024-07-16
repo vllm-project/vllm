@@ -29,8 +29,7 @@ from transformers import MixtralConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_pp_group, get_pp_indices,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -49,6 +48,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
+from .utils import is_pp_missing_parameter, make_layers
 
 
 class MixtralMoE(nn.Module):
@@ -256,20 +256,11 @@ class MixtralModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        self.start_layer, self.end_layer = get_pp_indices(
+        self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            get_pp_group().rank_in_group,
-            get_pp_group().world_size)
-        self.layers = nn.ModuleList(
-            [nn.Identity() for _ in range(self.start_layer)] + [
-                MixtralDecoderLayer(config=config,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config)
-                for _ in range(self.start_layer, self.end_layer)
-            ] + [
-                nn.Identity()
-                for _ in range(self.end_layer, config.num_hidden_layers)
-            ])
+            lambda: MixtralDecoderLayer(config=config,
+                                      cache_config=cache_config,
+                                      quant_config=quant_config))
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -426,12 +417,11 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                try:
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                except KeyError:
-                    pass
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 for mapping in expert_params_mapping:
@@ -439,16 +429,15 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
-                    try:
-                        param = params_dict[name]
-                        weight_loader = param.weight_loader
-                        weight_loader(param,
-                                    loaded_weight,
-                                    weight_name,
-                                    shard_id=shard_id,
-                                    expert_id=expert_id)
-                    except KeyError:
-                        pass
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param,
+                                  loaded_weight,
+                                  weight_name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -468,10 +457,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                             continue
                         else:
                             name = remapped_kv_scale_name
-                    try:
-                        param = params_dict[name]
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-                        weight_loader(param, loaded_weight)
-                    except KeyError:
-                        pass
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
