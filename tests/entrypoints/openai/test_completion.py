@@ -6,7 +6,6 @@ from typing import List
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
-import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
@@ -636,51 +635,3 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=sample_regex,
                             guided_json=sample_json_schema))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
-async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
-    base_url = str(client.base_url)[:-3].strip("/")
-    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
-
-    for add_special in [False, True]:
-        prompt = "This is a test prompt."
-        tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
-
-        response = requests.post(base_url + "/tokenize",
-                                 json={
-                                     "add_special_tokens": add_special,
-                                     "model": model_name,
-                                     "prompt": prompt
-                                 })
-        response.raise_for_status()
-        assert response.json() == {
-            "tokens": tokens,
-            "count": len(tokens),
-            "max_model_len": 8192
-        }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
-async def test_detokenize(client: openai.AsyncOpenAI, model_name: str):
-    base_url = str(client.base_url)[:-3]
-    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
-
-    prompt = "This is a test prompt."
-    tokens = tokenizer.encode(prompt, add_special_tokens=False)
-
-    response = requests.post(base_url + "detokenize",
-                             json={
-                                 "model": model_name,
-                                 "tokens": tokens
-                             })
-    response.raise_for_status()
-    assert response.json() == {"prompt": prompt}
