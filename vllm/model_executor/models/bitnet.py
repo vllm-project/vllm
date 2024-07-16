@@ -209,22 +209,22 @@ class BitnetConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if not isinstance(self.rope_scaling, dict) or len(self.rope_scaling) != 2:
+        if not isinstance(self.rope_scaling,
+                          dict) or len(self.rope_scaling) != 2:
             raise ValueError(
                 "`rope_scaling` must be a dictionary with with two fields, `type` and `factor`, "
-                f"got {self.rope_scaling}"
-            )
+                f"got {self.rope_scaling}")
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
+        if rope_scaling_type is None or rope_scaling_type not in [
+                "linear", "dynamic"
+        ]:
             raise ValueError(
                 f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
             )
-        if (
-            rope_scaling_factor is None
-            or not isinstance(rope_scaling_factor, float)
-            or rope_scaling_factor <= 1.0
-        ):
+        if (rope_scaling_factor is None
+                or not isinstance(rope_scaling_factor, float)
+                or rope_scaling_factor <= 1.0):
             raise ValueError(
                 f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}"
             )
@@ -255,12 +255,11 @@ class BitnetMLP(nn.Module):
             quant_config=quant_config,
         )
         if hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. "
-                "Only silu is supported for now."
-            )
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
-        self.ffn_layernorm = BitnetRMSNorm(intermediate_size, eps=config.rms_norm_eps)
+        self.ffn_layernorm = BitnetRMSNorm(intermediate_size,
+                                           eps=config.rms_norm_eps)
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -271,6 +270,7 @@ class BitnetMLP(nn.Module):
 
 
 class BitnetRotaryEmbedding(nn.Module):
+
     def __init__(
         self,
         dim,
@@ -284,29 +284,24 @@ class BitnetRotaryEmbedding(nn.Module):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / (
-            self.base
-            ** (
-                torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device)
-                / self.dim
-            )
-        )
+        inv_freq = 1.0 / (self.base**(torch.arange(
+            0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
         self.register_buffer("inv_freq", inv_freq)
         # For BC we register cos and sin cached
         self.max_seq_len_cached = max_position_embeddings
-        t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=torch.int64
-        ).type_as(self.inv_freq)
+        t = torch.arange(self.max_seq_len_cached,
+                         device=device,
+                         dtype=torch.int64).type_as(self.inv_freq)
         t = t / self.scaling_factor
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer(
-            "_cos_cached", emb.cos().to(torch.get_default_dtype()), persistent=False
-        )
-        self.register_buffer(
-            "_sin_cached", emb.sin().to(torch.get_default_dtype()), persistent=False
-        )
+        self.register_buffer("_cos_cached",
+                             emb.cos().to(torch.get_default_dtype()),
+                             persistent=False)
+        self.register_buffer("_sin_cached",
+                             emb.sin().to(torch.get_default_dtype()),
+                             persistent=False)
 
     @property
     def sin_cached(self):
@@ -327,22 +322,17 @@ class BitnetRotaryEmbedding(nn.Module):
     @torch.no_grad()
     def forward(self, x, position_ids):
         # x: [bs, num_attention_heads, seq_len, head_size]
-        inv_freq_expanded = (
-            self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        )
+        inv_freq_expanded = (self.inv_freq[None, :, None].float().expand(
+            position_ids.shape[0], -1, 1))
         position_ids_expanded = position_ids[:, None, :].float()
         # Force float32 since bfloat16 loses precision on long contexts
         # See https://github.com/huggingface/transformers/pull/29285
         device_type = x.device.type
-        device_type = (
-            device_type
-            if isinstance(device_type, str) and device_type != "mps"
-            else "cpu"
-        )
+        device_type = (device_type if isinstance(device_type, str)
+                       and device_type != "mps" else "cpu")
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (
-                inv_freq_expanded.float() @ position_ids_expanded.float()
-            ).transpose(1, 2)
+            freqs = (inv_freq_expanded.float()
+                     @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
@@ -382,7 +372,8 @@ class BitnetAttention(nn.Module):
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.head_dim = hidden_size // self.total_num_heads
-        self.padded_head_dim = self.find_flash_attn_supported_head_dims(self.head_dim)
+        self.padded_head_dim = self.find_flash_attn_supported_head_dims(
+            self.head_dim)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -435,7 +426,8 @@ class BitnetAttention(nn.Module):
             rope_scaling=rope_scaling,
         )
 
-        self.inner_attn_ln = BitnetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.inner_attn_ln = BitnetRMSNorm(config.hidden_size,
+                                           eps=config.rms_norm_eps)
 
     def find_flash_attn_supported_head_dims(self, head_dim: int) -> int:
         """
@@ -443,14 +435,14 @@ class BitnetAttention(nn.Module):
         """
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
 
-        FLASHATTN_SUPPORTED_HEAD_DIMS = FlashAttentionBackend.get_supported_head_sizes()
+        FLASHATTN_SUPPORTED_HEAD_DIMS = FlashAttentionBackend.get_supported_head_sizes(
+        )
         for supported_head_dim in FLASHATTN_SUPPORTED_HEAD_DIMS:
             if head_dim <= supported_head_dim:
                 return supported_head_dim
         raise ValueError(
             f"Head dimension {head_dim} is not supported by Flash Attention. Supported head dimensions are "
-            f"{FLASHATTN_SUPPORTED_HEAD_DIMS}."
-        )
+            f"{FLASHATTN_SUPPORTED_HEAD_DIMS}.")
 
     def forward(
         self,
@@ -478,15 +470,17 @@ class BitnetAttention(nn.Module):
             (0, self.padded_head_dim - self.head_dim),
         ).view(-1, self.total_num_kv_heads * self.padded_head_dim)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        attn_output = attn_output.view(-1, self.total_num_heads, self.padded_head_dim)[
-            ..., : self.head_dim
-        ].reshape(-1, self.total_num_heads * self.head_dim)
+        attn_output = attn_output.view(
+            -1, self.total_num_heads,
+            self.padded_head_dim)[..., :self.head_dim].reshape(
+                -1, self.total_num_heads * self.head_dim)
         attn_output = self.inner_attn_ln(attn_output)
         output, _ = self.o_proj(attn_output)
         return output
 
 
 class BitnetRMSNorm(nn.Module):
+
     def __init__(self, hidden_size, eps=1e-6):
         """
         BitnetRMSNorm is equivalent to T5LayerNorm
@@ -499,7 +493,8 @@ class BitnetRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * torch.rsqrt(variance +
+                                                    self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
 
@@ -516,22 +511,19 @@ class BitnetDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
+                config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+                config.original_max_position_embeddings)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
 
         attention_bias = getattr(config, "attention_bias", False) or getattr(
-            config, "bias", False
-        )
+            config, "bias", False)
         self.self_attn = BitnetAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=getattr(
-                config, "num_key_value_heads", config.num_attention_heads
-            ),
+            num_kv_heads=getattr(config, "num_key_value_heads",
+                                 config.num_attention_heads),
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
@@ -548,12 +540,10 @@ class BitnetDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             config=config,
         )
-        self.input_layernorm = BitnetRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_attention_layernorm = BitnetRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = BitnetRMSNorm(config.hidden_size,
+                                             eps=config.rms_norm_eps)
+        self.post_attention_layernorm = BitnetRMSNorm(config.hidden_size,
+                                                      eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -598,14 +588,12 @@ class BitnetModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        self.layers = nn.ModuleList(
-            [
-                BitnetDecoderLayer(
-                    config=config, cache_config=cache_config, quant_config=quant_config
-                )
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([
+            BitnetDecoderLayer(config=config,
+                               cache_config=cache_config,
+                               quant_config=quant_config)
+            for _ in range(config.num_hidden_layers)
+        ])
         self.norm = BitnetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -677,9 +665,8 @@ class BitnetForCausalLM(nn.Module):
             self.lm_head.weight = self.model.embed_tokens.weight
 
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
     def forward(
@@ -689,15 +676,14 @@ class BitnetForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata)
         return hidden_states
 
-    def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
-        logits = self.logits_processor(
-            self.lm_head.weight, hidden_states, sampling_metadata
-        )
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
@@ -739,19 +725,20 @@ class BitnetForCausalLM(nn.Module):
                     continue
                 # Remapping the name of FP8 kv-scale.
                 if name.endswith("kv_scale"):
-                    remapped_kv_scale_name = name.replace(".kv_scale", ".attn.kv_scale")
+                    remapped_kv_scale_name = name.replace(
+                        ".kv_scale", ".attn.kv_scale")
                     if remapped_kv_scale_name not in params_dict:
                         print_warning_once(
                             f"Found kv scale in the checkpoint (e.g. {name}), "
                             "but not found the expected name in the model "
                             f"(e.g. {remapped_kv_scale_name}). kv-scale is "
-                            "not loaded."
-                        )
+                            "not loaded.")
                         continue
                     else:
                         name = remapped_kv_scale_name
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
@@ -761,11 +748,11 @@ class BitnetForCausalLM(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
-            quantization_param_path,
-            tp_rank,
-            tp_size,
-            self.config.num_hidden_layers,
-            self.config.__class__.model_type,
+                quantization_param_path,
+                tp_rank,
+                tp_size,
+                self.config.num_hidden_layers,
+                self.config.__class__.model_type,
         ):
             layer_self_attn = self.model.layers[layer_idx].self_attn
 
@@ -778,6 +765,5 @@ class BitnetForCausalLM(nn.Module):
             if hasattr(layer_self_attn, "kv_scale"):
                 layer_self_attn.attn._kv_scale = scaling_factor
             else:
-                raise RuntimeError(
-                    "Self attention has no KV cache scaling " "factor attribute!"
-                )
+                raise RuntimeError("Self attention has no KV cache scaling "
+                                   "factor attribute!")

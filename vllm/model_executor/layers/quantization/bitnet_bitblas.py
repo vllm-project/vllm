@@ -60,7 +60,9 @@ class BITNETBitBLASConfig(QuantizationConfig):
         self.nbits = weight_bits
 
     def __repr__(self) -> str:
-        return (f"BITNETBitBLASConfig(weight_bits={self.weight_bits}, is_sym={self.is_sym})")
+        return (
+            f"BITNETBitBLASConfig(weight_bits={self.weight_bits}, is_sym={self.is_sym})"
+        )
 
     @classmethod
     def get_name(cls) -> str:
@@ -98,10 +100,11 @@ class BITNETBitBLASConfig(QuantizationConfig):
             return cls.get_name()
 
         if can_convert and user_quant == "bitnet":
-            logger.info("Detected that the model can run with bitnet_bitblas"
-                        ", however you specified quantization=bitnet explicitly,"
-                        " so forcing bitnet. Use quantization=bitnet_bitblas for"
-                        " faster inference")
+            logger.info(
+                "Detected that the model can run with bitnet_bitblas"
+                ", however you specified quantization=bitnet explicitly,"
+                " so forcing bitnet. Use quantization=bitnet_bitblas for"
+                " faster inference")
         return None
 
     def get_quant_method(
@@ -289,7 +292,9 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET, enable_tuning=False)
+            bitblas_matmul = Matmul(config,
+                                    target=BITBLAS_TARGET,
+                                    enable_tuning=False)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
@@ -319,18 +324,26 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
         result = (x * s).round().clamp(Qn, Qp)
         return result.type(torch.int8)
 
-    def repack_bitblas_from_bitnet(self, b_q_weight: torch.Tensor, is_qkv_packed: bool=False):
+    def repack_bitblas_from_bitnet(self,
+                                   b_q_weight: torch.Tensor,
+                                   is_qkv_packed: bool = False):
         if is_qkv_packed:
             hidden_size = b_q_weight.size(0)
-            sw_q = 1 / b_q_weight[:hidden_size // 3].abs().mean().clamp(min=1e-5)
-            sw_k = 1 / b_q_weight[hidden_size // 3:2 * hidden_size // 3].abs().mean().clamp(min=1e-5)
-            sw_v = 1 / b_q_weight[2 * hidden_size // 3:].abs().mean().clamp(min=1e-5)
+            sw_q = 1 / b_q_weight[:hidden_size //
+                                  3].abs().mean().clamp(min=1e-5)
+            sw_k = 1 / b_q_weight[hidden_size // 3:2 * hidden_size //
+                                  3].abs().mean().clamp(min=1e-5)
+            sw_v = 1 / b_q_weight[2 * hidden_size //
+                                  3:].abs().mean().clamp(min=1e-5)
             self.sw_q = sw_q
             self.sw_k = sw_k
             self.sw_v = sw_v
-            qweight_q = self.weight_quant(b_q_weight[:hidden_size // 3]).detach()
-            qweight_k = self.weight_quant(b_q_weight[hidden_size // 3:2 * hidden_size // 3]).detach()
-            qweight_v = self.weight_quant(b_q_weight[2 * hidden_size // 3:]).detach()
+            qweight_q = self.weight_quant(b_q_weight[:hidden_size //
+                                                     3]).detach()
+            qweight_k = self.weight_quant(
+                b_q_weight[hidden_size // 3:2 * hidden_size // 3]).detach()
+            qweight_v = self.weight_quant(b_q_weight[2 * hidden_size //
+                                                     3:]).detach()
             qweight = torch.cat([qweight_q, qweight_k, qweight_v], dim=0)
         else:
             sw = 1 / b_q_weight.abs().mean().clamp(min=1e-5)
@@ -348,8 +361,9 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
 
         part_size_n = layer.output_size_per_partition
         out_shape = x.shape[:-1] + (part_size_n, )
-        quant_input = self.activation_quant(x, self.quant_config.input_bits).detach()
-        
+        quant_input = self.activation_quant(
+            x, self.quant_config.input_bits).detach()
+
         if layer.bitblas_state == BITNETBitBLASState.REPACK:
             layer.bitblas_state = BITNETBitBLASState.READY
 
@@ -358,6 +372,7 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
             def free_tensor(name):
                 # free the original weight tensor
                 delattr(layer, name)
+
             def replace_tensor(name, new_t):
                 # Cannot use copy_() because the storage shape and dtype are different
                 # del layer._parameters[name]
@@ -365,9 +380,7 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
                 setattr(layer, name, new_t)
 
             # Repack weights
-            bitblas_qweight = self.repack_bitblas_from_bitnet(
-                    layer.weight,
-                )
+            bitblas_qweight = self.repack_bitblas_from_bitnet(layer.weight, )
             # free the original weight tensor
             free_tensor("weight")
             replace_tensor("qweight", bitblas_qweight)

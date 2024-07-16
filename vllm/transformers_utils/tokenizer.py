@@ -106,9 +106,9 @@ def get_tokenizer(
                 trust_remote_code=trust_remote_code,
                 revision=revision,
                 **kwargs)
-        elif (not trust_remote_code and
-            ("does not exist or is not currently imported." in str(e)
-             or "requires you to execute the tokenizer file" in str(e))):
+        elif (not trust_remote_code
+              and ("does not exist or is not currently imported." in str(e)
+                   or "requires you to execute the tokenizer file" in str(e))):
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported, suggest using the --trust-remote-code flag.
             err_msg = (

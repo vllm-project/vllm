@@ -1,6 +1,5 @@
 # Adapted from
 # https://github.com/microsoft/BitBLAS/blob/main/integration/BitNet/tokenization_bitnet.py
-
 """Tokenization classes for Bitnet."""
 import os
 from shutil import copyfile
@@ -12,7 +11,6 @@ from transformers.convert_slow_tokenizer import import_protobuf
 from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 from transformers.utils import logging
 
-
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import TextInput
 
@@ -22,10 +20,12 @@ VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
 
 PRETRAINED_VOCAB_FILES_MAP = {
     "vocab_file": {
-        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer.model",
+        "hf-internal-testing/llama-tokenizer":
+        "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer.model",
     },
     "tokenizer_file": {
-        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer_config.json",
+        "hf-internal-testing/llama-tokenizer":
+        "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer_config.json",
     },
 }
 PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
@@ -142,26 +142,14 @@ class BitnetTokenizer(PreTrainedTokenizer):
         **kwargs,
     ):
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
-        bos_token = (
-            AddedToken(bos_token, normalized=False, special=True)
-            if isinstance(bos_token, str)
-            else bos_token
-        )
-        eos_token = (
-            AddedToken(eos_token, normalized=False, special=True)
-            if isinstance(eos_token, str)
-            else eos_token
-        )
-        unk_token = (
-            AddedToken(unk_token, normalized=False, special=True)
-            if isinstance(unk_token, str)
-            else unk_token
-        )
-        pad_token = (
-            AddedToken(pad_token, normalized=False, special=True)
-            if isinstance(pad_token, str)
-            else pad_token
-        )
+        bos_token = (AddedToken(bos_token, normalized=False, special=True)
+                     if isinstance(bos_token, str) else bos_token)
+        eos_token = (AddedToken(eos_token, normalized=False, special=True)
+                     if isinstance(eos_token, str) else eos_token)
+        unk_token = (AddedToken(unk_token, normalized=False, special=True)
+                     if isinstance(unk_token, str) else unk_token)
+        pad_token = (AddedToken(pad_token, normalized=False, special=True)
+                     if isinstance(pad_token, str) else pad_token)
 
         if legacy is None:
             logger.warning_once(
@@ -169,8 +157,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
                 " expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you."
                 " If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it"
                 " means, and thoroughly read the reason why this was added as explained in"
-                " https://github.com/huggingface/transformers/pull/24565"
-            )
+                " https://github.com/huggingface/transformers/pull/24565")
             legacy = True
 
         self.legacy = legacy
@@ -239,7 +226,10 @@ class BitnetTokenizer(PreTrainedTokenizer):
 
     def get_vocab(self):
         """Returns vocab as a dict"""
-        vocab = {self.convert_ids_to_tokens(i): i for i in range(self.vocab_size)}
+        vocab = {
+            self.convert_ids_to_tokens(i): i
+            for i in range(self.vocab_size)
+        }
         vocab.update(self.added_tokens_encoder)
         return vocab
 
@@ -258,11 +248,8 @@ class BitnetTokenizer(PreTrainedTokenizer):
 
         tokens = super().tokenize(text, **kwargs)
 
-        if (
-            len(tokens) > 1
-            and tokens[0] == SPIECE_UNDERLINE
-            and tokens[1] in self.all_special_tokens
-        ):
+        if (len(tokens) > 1 and tokens[0] == SPIECE_UNDERLINE
+                and tokens[1] in self.all_special_tokens):
             tokens = tokens[1:]
         return tokens
 
@@ -284,11 +271,8 @@ class BitnetTokenizer(PreTrainedTokenizer):
         # 1. Encode string + prefix ex: "<unk> Hey"
         tokens = self.sp_model.encode(self.unk_token + text, out_type=str)
         # 2. Remove self.unk_token from ['<','unk','>', '▁Hey']
-        return (
-            tokens[self.unk_token_length :]
-            if len(tokens) >= self.unk_token_length
-            else tokens
-        )
+        return (tokens[self.unk_token_length:]
+                if len(tokens) >= self.unk_token_length else tokens)
 
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
@@ -322,9 +306,9 @@ class BitnetTokenizer(PreTrainedTokenizer):
         out_string += self.sp_model.decode(current_sub_tokens)
         return out_string
 
-    def save_vocabulary(
-        self, save_directory, filename_prefix: Optional[str] = None
-    ) -> Tuple[str]:
+    def save_vocabulary(self,
+                        save_directory,
+                        filename_prefix: Optional[str] = None) -> Tuple[str]:
         """
         Save the vocabulary and special tokens file to a directory.
 
@@ -336,24 +320,24 @@ class BitnetTokenizer(PreTrainedTokenizer):
             `Tuple(str)`: Paths to the files saved.
         """
         if not os.path.isdir(save_directory):
-            logger.error(f"Vocabulary path ({save_directory}) should be a directory")
+            logger.error(
+                f"Vocabulary path ({save_directory}) should be a directory")
             return
         out_vocab_file = os.path.join(
             save_directory,
-            (filename_prefix + "-" if filename_prefix else "")
-            + VOCAB_FILES_NAMES["vocab_file"],
+            (filename_prefix + "-" if filename_prefix else "") +
+            VOCAB_FILES_NAMES["vocab_file"],
         )
 
         if os.path.abspath(self.vocab_file) != os.path.abspath(
-            out_vocab_file
-        ) and os.path.isfile(self.vocab_file):
+                out_vocab_file) and os.path.isfile(self.vocab_file):
             copyfile(self.vocab_file, out_vocab_file)
         elif not os.path.isfile(self.vocab_file):
             with open(out_vocab_file, "wb") as fi:
                 content_spiece_model = self.sp_model.serialized_model_proto()
                 fi.write(content_spiece_model)
 
-        return (out_vocab_file,)
+        return (out_vocab_file, )
 
     def build_inputs_with_special_tokens(self, token_ids_0, token_ids_1=None):
         bos_token_id = [self.bos_token_id] if self.add_bos_token else []
@@ -399,18 +383,13 @@ class BitnetTokenizer(PreTrainedTokenizer):
 
         if token_ids_1 is None:
             return bos_token_id + ([0] * len(token_ids_0)) + eos_token_id
-        return (
-            bos_token_id
-            + ([0] * len(token_ids_0))
-            + eos_token_id
-            + bos_token_id
-            + ([0] * len(token_ids_1))
-            + eos_token_id
-        )
+        return (bos_token_id + ([0] * len(token_ids_0)) + eos_token_id +
+                bos_token_id + ([0] * len(token_ids_1)) + eos_token_id)
 
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
-    ) -> List[int]:
+            self,
+            token_ids_0: List[int],
+            token_ids_1: Optional[List[int]] = None) -> List[int]:
         """
         Creates a mask from the two sequences passed to be used in a sequence-pair classification task. An ALBERT
         sequence pair mask has the following format:
@@ -493,12 +472,12 @@ class BitnetTokenizer(PreTrainedTokenizer):
             "{% elif message['role'] == 'assistant' %}"
             "{{ ' '  + content.strip() + ' ' + eos_token }}"
             "{% endif %}"
-            "{% endfor %}"
-        )
+            "{% endfor %}")
         template = template.replace(
-            "USE_DEFAULT_PROMPT", "true" if self.use_default_system_prompt else "false"
-        )
-        default_message = DEFAULT_SYSTEM_PROMPT.replace("\n", "\\n").replace("'", "\\'")
+            "USE_DEFAULT_PROMPT",
+            "true" if self.use_default_system_prompt else "false")
+        default_message = DEFAULT_SYSTEM_PROMPT.replace("\n", "\\n").replace(
+            "'", "\\'")
         template = template.replace("DEFAULT_SYSTEM_MESSAGE", default_message)
 
         return template

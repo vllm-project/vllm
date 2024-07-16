@@ -403,7 +403,9 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET, enable_tuning=False)
+            bitblas_matmul = Matmul(config,
+                                    target=BITBLAS_TARGET,
+                                    enable_tuning=False)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
