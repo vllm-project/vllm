@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 import torch
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
@@ -14,7 +13,7 @@ from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
-                        print_warning_once, update_environment_variables)
+                        print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -138,12 +137,10 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
-        self.max_context_len_to_capture = max_context_len_to_capture
-        if self.max_context_len_to_capture is not None:
+        if max_context_len_to_capture is not None:
             raise ValueError("`max_context_len_to_capture` is deprecated. "
                              "Use `max_seq_len_to_capture` instead.")
-        self.max_seq_len_to_capture = (max_seq_len_to_capture
-                                       or max_context_len_to_capture)
+        self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
@@ -711,12 +708,6 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
-        # If CUDA_VISIBLE_DEVICES is set on ROCm prior to vLLM init,
-        # propagate changes to HIP_VISIBLE_DEVICES (conversion handled by
-        # the update_environment_variables function)
-        if is_hip() and envs.CUDA_VISIBLE_DEVICES:
-            update_environment_variables(
-                {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
         self.rank = 0
@@ -1303,6 +1294,39 @@ class LoRAConfig:
 
 
 @dataclass
+class PromptAdapterConfig:
+    max_prompt_adapters: int
+    max_prompt_adapter_token: int
+    max_cpu_prompt_adapters: Optional[int] = None
+    prompt_adapter_dtype: Optional[torch.dtype] = None
+
+    def __post_init__(self):
+        library_name = 'peft'
+        try:
+            __import__(library_name)
+        except ImportError as e:
+            raise ImportError(
+                f"'{library_name}' is not installed for prompt adapter support."
+                f"Please install it using 'pip install {library_name}'."
+            ) from e
+
+        if self.max_prompt_adapters < 1:
+            raise ValueError(f"max_prompt_adapters "
+                             f"({self.max_prompt_adapters}) must be >= 1.")
+        if self.max_prompt_adapter_token == 0:
+            raise ValueError("max_prompt_adapter_token must be set.")
+        if self.max_cpu_prompt_adapters is None:
+            self.max_cpu_prompt_adapters = self.max_prompt_adapters
+
+    def verify_with_model_config(self, model_config: ModelConfig):
+        if self.prompt_adapter_dtype in (None, "auto"):
+            self.prompt_adapter_dtype = model_config.dtype
+        elif isinstance(self.prompt_adapter_dtype, str):
+            self.prompt_adapter_dtype = getattr(torch,
+                                                self.prompt_adapter_dtype)
+
+
+@dataclass
 class MultiModalConfig:
     """Configs the input data format and how models should run for
     multimodal models."""
@@ -1535,6 +1559,7 @@ class EngineConfig:
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
     observability_config: Optional[ObservabilityConfig]
+    prompt_adapter_config: Optional[PromptAdapterConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
@@ -1546,6 +1571,9 @@ class EngineConfig:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+        if self.prompt_adapter_config:
+            self.prompt_adapter_config.verify_with_model_config(
+                self.model_config)
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.
