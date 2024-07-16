@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 logger = logging.get_logger(__name__)
 
@@ -709,10 +709,16 @@ class BartForConditionalGeneration(nn.Module):
                                                 config.vocab_size)
         self.sampler = Sampler()
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        encoder_input_ids: torch.Tensor,
+        encoder_positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> torch.Tensor:
         r"""
         Args:
             input_ids

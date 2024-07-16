@@ -25,7 +25,11 @@ decoder_prompts = [
     "",
 ]
 # - Unified prompts
-prompts = [enc_dec for enc_dec in zip(encoder_prompts, decoder_prompts)]
+prompts = [{
+    "encoder_prompt": encoder_prompt,
+    "decoder_prompt": decoder_prompt
+} for (encoder_prompt, decoder_prompt) in zip(encoder_prompts, decoder_prompts)
+           ]
 
 print(prompts)
 

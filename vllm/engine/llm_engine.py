@@ -1,19 +1,8 @@
 import time
 from contextlib import contextmanager
-from typing import (TYPE_CHECKING, 
-                    Any, 
-                    ClassVar, 
-                    Dict, 
-                    Iterable, 
-                    List, 
-                    Optional,
-                    Set, 
-                    Type, 
-                    TypeVar, 
-                    Union, 
-                    Tuple, 
-                    Sequence as GenericSequence,
-                    )
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Type, TypeVar, Union
 
 from transformers import PreTrainedTokenizer
 
@@ -33,12 +22,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, 
-                         LLMInputs, 
-                         PromptInputs, 
-                         get_single_prompt_type, 
-                         is_valid_encoder_decoder_prompt,
-                         )
+from vllm.inputs import (INPUT_REGISTRY, LLMInputs, PromptInputs,
+                         get_single_prompt_type)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
@@ -558,30 +543,15 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
-    _LLMInputComponentsType = Tuple[str, List[int],]
+    _LLMInputComponentsType = Tuple[str, List[int], ]
 
-    # def _process_single_decoder_prompt_to_llm_input_components(self,inputs: PromptInputs,
-    #                                                   ptype: str,
-    #                                                   request_id: str,
-    #                                                   lora_request: Optional[LoRARequest] = None,
-    #                                                   is_decoder_prompt: bool = True,
-    #                                                   ) -> _LLMInputComponentsType:
-    #     assert ptype != "ExplicitEncoderDecoder"
-
-    #     if "prompt_token_ids" in inputs:
-    #         prompt_token_ids = inputs["prompt_token_ids"]
-    #     else:
-
-    #         tokenizer = self.get_tokenizer_group("prompts must be None if "
-    #                                                 "skip_tokenizer_init is True")
-
-    #         prompt_token_ids = tokenizer.encode(request_id=request_id,
-    #                                             prompt=inputs["prompt"],
-    #                                             lora_request=lora_request) 
-
-    #     prompt = (
-    #         inputs["prompt"] if "prompt" in inputs else None
-    #     )
+    def _get_prompt_token_ids_or_tokenize(
+        self,
+        inputs,
+        request_id,
+        lora_request,
+    ) -> List[int]:
+        return [0]
 
     def process_model_inputs(
         self,
@@ -600,18 +570,19 @@ class LLMEngine:
             ptype = get_single_prompt_type(inputs)
 
             if ptype == "ExplicitEncoderDecoder":
-                # User supplied a 
+                # User supplied a
                 pass
             else:
-                # 
+                #
                 pass
 
         else:
             # Decoder-only operation
 
             if "prompt_token_ids" not in inputs:
-                tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                     "skip_tokenizer_init is True")
+                tokenizer = self.get_tokenizer_group(
+                    "prompts must be None if "
+                    "skip_tokenizer_init is True")
 
                 prompt_token_ids = tokenizer.encode(request_id=request_id,
                                                     prompt=inputs["prompt"],
@@ -620,13 +591,15 @@ class LLMEngine:
                 prompt_token_ids = inputs["prompt_token_ids"]
 
             if prompt_adapter_request:
-                prompt_token_ids = \
-                    [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
-                            + prompt_token_ids
+                prompt_token_ids = (
+                    [0] *
+                    prompt_adapter_request.prompt_adapter_num_virtual_tokens +
+                    prompt_token_ids)
 
-            llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
-                                prompt=inputs.get("prompt"),
-                                multi_modal_data=inputs.get("multi_modal_data"))
+            llm_inputs = LLMInputs(
+                prompt_token_ids=prompt_token_ids,
+                prompt=inputs.get("prompt"),
+                multi_modal_data=inputs.get("multi_modal_data"))
 
         return self.input_processor(llm_inputs)
 
