@@ -2,30 +2,27 @@ import enum
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+import bitblas.cache
 import torch
 from torch.nn.parameter import Parameter
 
-import bitblas.cache
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (
-    LinearBase,
-    LinearMethodBase,
-    set_weight_attrs,
-)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               set_weight_attrs)
+from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
+    QuantizationConfig)
 
 logger = init_logger(__name__)
 
 try:
     import bitblas
+    from bitblas.utils import auto_detect_nvidia_target
 except ImportError as e:
     bitblas_import_exception = e
-    raise ValueError(
-        f"Trying to use the bitblas backend, but could not import dependencies with the following error: {bitblas_import_exception}"
-    )
-
-import bitblas
-from bitblas.utils import auto_detect_nvidia_target
+    error_message = (
+        "Trying to use the bitblas backend, but could not import dependencies "
+        f"with the following error: {bitblas_import_exception}")
+    raise ValueError(error_message) from bitblas_import_exception
 
 bitblas.set_log_level("Debug")
 BITBLAS_TARGET = auto_detect_nvidia_target()
@@ -60,9 +57,8 @@ class BITNETBitBLASConfig(QuantizationConfig):
         self.nbits = weight_bits
 
     def __repr__(self) -> str:
-        return (
-            f"BITNETBitBLASConfig(weight_bits={self.weight_bits}, is_sym={self.is_sym})"
-        )
+        return (f"BITNETBitBLASConfig(weight_bits={self.weight_bits}, "
+                f"is_sym={self.is_sym})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -173,28 +169,31 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
     ) -> None:
         """Creates quantized weights for use in linear operations.
 
-        The function initializes and returns a dictionary containing quantized weights, scales, and zeros
-        for performing quantized matrix multiplication operations.
+        The function initializes and returns a dictionary containing 
+        quantized weights, scales, and zeros for performing quantized 
+        matrix multiplication operations.
 
         Args:
             input_size_per_partition: The size of the input partition.
             output_partition_sizes: The size of the output partition.
             input_size: The total size of the input (unused).
             output_size: The total size of the output (unused).
-            params_dtype: The data type of the parameters (expected to be torch.float16).
+            params_dtype: 
+                The data type of the parameters (expected to be torch.float16).
 
         Returns:
-            A dictionary containing the quantized weights ('qweight'), scales ('scales'), and zeros ('zeros').
+            A dictionary containing the quantized weights ('qweight'), 
+            scales ('scales'), and zeros ('zeros').
 
         Raises:
-            ValueError: If `params_dtype` is not `torch.float16` or if the input size per partition
-                        is not divisible by the group size in `quant_config`.
+            ValueError: If `params_dtype` is not `torch.float16` or if the 
+            input size per partition is not divisible by the group size 
+            in `quant_config`.
         """
         del output_size  # Unused arguments.
         if params_dtype != torch.float16:
-            raise ValueError(
-                f"Parameter data type must be torch.float16, but got {params_dtype}"
-            )
+            raise ValueError("Parameter data type must be torch.float16, "
+                             f"but got {params_dtype}")
 
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
@@ -300,14 +299,15 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
                 global_operator_cache.add(config, bitblas_matmul)
                 global_operator_cache.save_into_database(
                     BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
-                logger.info(
-                    "BitBLAS Tuning done, appended operator to global_operator_cache."
-                )
+                logger.info("BitBLAS Tuning done, appended operator to "
+                            "global_operator_cache.")
             else:
-                logger.info(f"BitBLAS Operator {config} created.")
+                _message = (
+                    f"BitBLAS Operator {config} created without tuning. ")
+                logger.info(_message)
         else:
-            logger.info(
-                f"BitBLAS Operator {config} found in global_operator_cache.")
+            _message = (f"BitBLAS Operator {config} retrieved from cache.")
+            logger.info(_message)
         return bitblas_matmul
 
     def weight_quant(self, weight):
@@ -374,13 +374,13 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
                 delattr(layer, name)
 
             def replace_tensor(name, new_t):
-                # Cannot use copy_() because the storage shape and dtype are different
-                # del layer._parameters[name]
+                # Cannot use copy_() as gptq because the storage
+                # shape and dtype are different
                 delattr(layer, name)
                 setattr(layer, name, new_t)
 
             # Repack weights
-            bitblas_qweight = self.repack_bitblas_from_bitnet(layer.weight, )
+            bitblas_qweight = self.repack_bitblas_from_bitnet(layer.weights)
             # free the original weight tensor
             free_tensor("weight")
             replace_tensor("qweight", bitblas_qweight)

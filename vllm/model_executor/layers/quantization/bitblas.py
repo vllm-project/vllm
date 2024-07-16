@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -14,14 +13,13 @@ logger = init_logger(__name__)
 
 try:
     import bitblas
+    from bitblas.utils import auto_detect_nvidia_target
 except ImportError as e:
     bitblas_import_exception = e
     raise ValueError(
-        f"Trying to use the bitblas backend, but could not import dependencies with the following error: {bitblas_import_exception}"
-    )
-
-import bitblas
-from bitblas.utils import auto_detect_nvidia_target
+        "Trying to use the bitblas backend, but could not import dependencies"
+        f"with the following error: {bitblas_import_exception}"
+    ) from bitblas_import_exception
 
 BITBLAS_TARGET = auto_detect_nvidia_target()
 BITBLAS_DATABASE_PATH = bitblas.cache.get_database_path()
@@ -38,7 +36,9 @@ class BitBLASConfig(QuantizationConfig):
     TORCH_DTYPE = torch.float16
     STORAGE_DTYPE = "int8"  # assume int8 storage
     TORCH_STORAGE_DTYPE = getattr(torch, STORAGE_DTYPE)
-    ZEROS_MODE = "quantized"  # "original" or "rescale" or "quantized", the gptq_bitblas prefer "quantized"
+    # "original" or "rescale" or "quantized",
+    # gptq_with_bitblas prefer "quantized implementation"
+    ZEROS_MODE = "quantized"
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
                  is_sym: bool) -> None:
@@ -165,7 +165,8 @@ class BitBLASLinearMethod(LinearMethodBase):
     ):
         """Creates quantized weights for use in linear operations.
 
-        The function initializes and returns a dictionary containing quantized weights, scales, and zeros
+        The function initializes and returns a dictionary containing quantized 
+        weights, scales, and zeros
         for performing quantized matrix multiplication operations.
 
         Args:
@@ -173,28 +174,31 @@ class BitBLASLinearMethod(LinearMethodBase):
             output_size_per_partition: The size of the output partition.
             input_size: The total size of the input (unused).
             output_size: The total size of the output (unused).
-            params_dtype: The data type of the parameters (expected to be torch.float16).
+            params_dtype: 
+                The data type of the parameters (expected to be torch.float16).
 
         Returns:
-            A dictionary containing the quantized weights ('qweight'), scales ('scales'), and zeros ('zeros').
+            A dictionary containing the quantized weights ('qweight'), 
+            scales ('scales'), and zeros ('zeros').
 
         Raises:
-            ValueError: If `params_dtype` is not `torch.float16` or if the input size per partition
-                        is not divisible by the group size in `quant_config`.
+            ValueError: If `params_dtype` is not `torch.float16` or if the 
+            input size per partition is not divisible by the group size in 
+            `quant_config`.
         """
         del input_size, output_size  # Unused arguments.
         if params_dtype != torch.float16:
-            raise ValueError(
-                f"Parameter data type must be torch.float16, but got {params_dtype}"
-            )
+            raise ValueError("Parameter data type must be torch.float16, "
+                             f"but got {params_dtype}")
 
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
         if (self.quant_config.group_size != -1 and
                 input_size_per_partition % self.quant_config.group_size != 0):
             raise ValueError(
-                f"Input size per partition ({input_size_per_partition}) must be divisible by "
-                f"group size ({self.quant_config.group_size}).")
+                f"Input size per partition ({input_size_per_partition}) must "
+                f"be divisible by group size ({self.quant_config.group_size})."
+            )
 
         # Initialize or retrieve the BitBLAS matrix multiplication operator.
         self._configure_bitblas_matmul(
@@ -206,7 +210,8 @@ class BitBLASLinearMethod(LinearMethodBase):
             layout="nt",
             bits=self.quant_config.weight_bits,
         )
-        # Initialize quantized weights with dimensions optimized for BitBLAS operations.
+
+        # Initialize quantized weights with dimensions
 
         qweight = Parameter(
             torch.empty(
@@ -348,14 +353,15 @@ class BitBLASLinearMethod(LinearMethodBase):
                 global_operator_cache.add(config, bitblas_matmul)
                 global_operator_cache.save_into_database(
                     BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
-                logger.info(
-                    "BitBLAS Tuning done, appended operator to global_operator_cache."
-                )
+                logger.info("BitBLAS Tuning done, appended operator to "
+                            "global_operator_cache.")
             else:
-                logger.info(f"BitBLAS Operator {config} created.")
+                _message = f"BitBLAS Operator {config} created."
+                logger.info(_message)
         else:
-            logger.info(
+            _message = (
                 f"BitBLAS Operator {config} found in global_operator_cache.")
+            logger.info(_message)
         return bitblas_matmul
 
     def apply(

@@ -4,23 +4,24 @@ from vllm.model_executor.layers.quantization.aqlm import AQLMConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.bitsandbytes import (
-    BitsAndBytesConfig)
+from vllm.model_executor.layers.quantization.bitblas import BitBLASConfig
 from vllm.model_executor.layers.quantization.bitnet_bitblas import (
     BITNETBitBLASConfig)
+from vllm.model_executor.layers.quantization.bitsandbytes import (
+    BitsAndBytesConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig)
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_bitblas import (
+    GPTQBitBLASConfig)
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQMarlin24Config)
-from vllm.model_executor.layers.quantization.gptq_bitblas import GPTQBitBLASConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
-from vllm.model_executor.layers.quantization.bitblas import BitBLASConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {

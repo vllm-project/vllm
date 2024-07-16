@@ -314,8 +314,11 @@ class ColumnParallelLinear(LinearBase):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert param_data.dtype == loaded_weight.dtype, f"{param.data.dtype} != {loaded_weight.dtype}"
-        assert param_data.shape == loaded_weight.shape, f"{param_data.shape} != {loaded_weight.shape}"
+        assert param_data.dtype == loaded_weight.dtype, (
+            f"{param_data.dtype} != {loaded_weight.dtype}")
+        assert param_data.shape == loaded_weight.shape, (
+            f"{param_data.shape} != {loaded_weight.shape}")
+
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):

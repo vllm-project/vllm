@@ -21,38 +21,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Bitnet model compatible with HuggingFace weights."""
+
+# ruff: noqa: E501
+
 from typing import Dict, Iterable, List, Optional, Tuple
+
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
+
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    kv_cache_scales_loader,
-)
+    default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -435,8 +432,8 @@ class BitnetAttention(nn.Module):
         """
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
 
-        FLASHATTN_SUPPORTED_HEAD_DIMS = FlashAttentionBackend.get_supported_head_sizes(
-        )
+        FLASHATTN_SUPPORTED_HEAD_DIMS = (
+            FlashAttentionBackend.get_supported_head_sizes())
         for supported_head_dim in FLASHATTN_SUPPORTED_HEAD_DIMS:
             if head_dim <= supported_head_dim:
                 return supported_head_dim
@@ -451,7 +448,8 @@ class BitnetAttention(nn.Module):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # QKV projection cannot be grouped as the they do not share the same scaling factor
+        # QKV projection cannot be grouped as the they
+        # do not share the same scaling factor
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
@@ -704,7 +702,8 @@ class BitnetForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue

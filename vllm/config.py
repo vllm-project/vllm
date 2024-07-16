@@ -33,8 +33,8 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
-            It is also used as the content for `model_name` tag in metrics 
-            output when `served_model_name` is not specified. 
+            It is also used as the content for `model_name` tag in metrics
+            output when `served_model_name` is not specified.
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -81,8 +81,8 @@ class ModelConfig:
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
         served_model_name: The model name used in metrics tag `model_name`,
-            matches the model name exposed via the APIs. If multiple model 
-            names provided, the first name will be used. If not specified, 
+            matches the model name exposed via the APIs. If multiple model
+            names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
     """
 
@@ -138,8 +138,14 @@ class ModelConfig:
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling, rope_theta)
+        self.hf_config = get_config(
+            self.model,
+            trust_remote_code,
+            revision,
+            code_revision,
+            rope_scaling,
+            rope_theta,
+        )
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
 
@@ -157,7 +163,8 @@ class ModelConfig:
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window())
+            sliding_window_len=self.get_hf_config_sliding_window(),
+        )
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = multimodal_config
@@ -224,18 +231,25 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
-            if is_hip(
-            ) and self.quantization not in rocm_supported_quantization:
+            if (is_hip()
+                    and self.quantization not in rocm_supported_quantization):
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if (self.quantization
-                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin",
-                            "gptq_bitblas", "bitblas")):
+            if self.quantization not in (
+                    "fp8",
+                    "marlin",
+                    "gptq_marlin_24",
+                    "gptq_marlin",
+                    "gptq_bitblas",
+                    "bitblas",
+            ):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
-                    "non-quantized models.", self.quantization)
+                    "non-quantized models.",
+                    self.quantization,
+                )
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
@@ -283,8 +297,7 @@ class ModelConfig:
         return getattr(self.hf_text_config, "sliding_window", None)
 
     def get_sliding_window(self) -> Optional[int]:
-        """Get the sliding window size, or None if disabled.
-        """
+        """Get the sliding window size, or None if disabled."""
         # If user disables sliding window, return None.
         if self.disable_sliding_window:
             return None
@@ -299,29 +312,32 @@ class ModelConfig:
 
     def find_flash_attn_supported_head_dims(self, head_dim: int) -> int:
         """
-        Find the closest head dimension to the given head dimension that is supported by Flash Attention.
+        Find the closest head dimension to the given head dimension that 
+        is supported by Flash Attention.
         """
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
-        FLASHATTN_SUPPORTED_HEAD_DIMS = FlashAttentionBackend.get_supported_head_sizes(
-        )
+
+        FLASHATTN_SUPPORTED_HEAD_DIMS = (
+            FlashAttentionBackend.get_supported_head_sizes())
 
         for supported_head_dim in FLASHATTN_SUPPORTED_HEAD_DIMS:
             if head_dim <= supported_head_dim:
                 return supported_head_dim
         raise ValueError(
-            f"Head dimension {head_dim} is not supported by Flash Attention. Supported head dimensions are "
-            f"{FLASHATTN_SUPPORTED_HEAD_DIMS}.")
+            f"Head dimension {head_dim} is not supported by Flash Attention."
+            f"Supported head dimensions are {FLASHATTN_SUPPORTED_HEAD_DIMS}.")
 
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+        if (hasattr(self.hf_text_config, "model_type")
+                and self.hf_text_config.model_type == "deepseek_v2"):
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             return 256
-        if hasattr(
-                self.hf_text_config, "architectures"
-        ) and 'BitnetForCausalLM' in self.hf_text_config.architectures:
+        if (hasattr(self.hf_text_config, "architectures")
+                and "BitnetForCausalLM" in self.hf_text_config.architectures):
+            # FlashAttention does not support head_size 100
+            # TODO: implement for head_size 100
             return self.find_flash_attn_supported_head_dims(
                 (self.hf_text_config.hidden_size //
                  self.hf_text_config.num_attention_heads))
@@ -354,8 +370,11 @@ class ModelConfig:
                 return self.hf_config.attn_config["kv_n_heads"]
             return self.hf_config.num_attention_heads
         if self.hf_config.model_type == "dbrx":
-            return getattr(self.hf_config.attn_config, "kv_n_heads",
-                           self.hf_config.num_attention_heads)
+            return getattr(
+                self.hf_config.attn_config,
+                "kv_n_heads",
+                self.hf_config.num_attention_heads,
+            )
 
         attributes = [
             # For Falcon:
@@ -499,6 +518,7 @@ class TokenizerPoolConfig:
             The way the config will be used depends on the
             pool type.
     """
+
     pool_size: int
     pool_type: str
     extra_config: dict
@@ -511,8 +531,10 @@ class TokenizerPoolConfig:
 
     @classmethod
     def create_config(
-        cls, tokenizer_pool_size: int, tokenizer_pool_type: str,
-        tokenizer_pool_extra_config: Optional[Union[str, dict]]
+        cls,
+        tokenizer_pool_size: int,
+        tokenizer_pool_type: str,
+        tokenizer_pool_extra_config: Optional[Union[str, dict]],
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
 
@@ -532,9 +554,11 @@ class TokenizerPoolConfig:
             else:
                 tokenizer_pool_extra_config_parsed = (
                     tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = cls(tokenizer_pool_size,
-                                        tokenizer_pool_type,
-                                        tokenizer_pool_extra_config_parsed)
+            tokenizer_pool_config = cls(
+                tokenizer_pool_size,
+                tokenizer_pool_type,
+                tokenizer_pool_extra_config_parsed,
+            )
         else:
             tokenizer_pool_config = None
         return tokenizer_pool_config
@@ -554,20 +578,20 @@ class LoadFormat(str, enum.Enum):
 @dataclass
 class LoadConfig:
     """
-        download_dir: Directory to download and load the weights, default to the
-            default cache directory of huggingface.
-        load_format: The format of the model weights to load:
-            "auto" will try to load the weights in the safetensors format and
-                fall back to the pytorch bin format if safetensors format is
-                not available.
-            "pt" will load the weights in the pytorch bin format.
-            "safetensors" will load the weights in the safetensors format.
-            "npcache" will load the weights in pytorch format and store
-                a numpy cache to speed up the loading.
-            "dummy" will initialize the weights with random values, which is
-                mainly for profiling.
-            "tensorizer" will use CoreWeave's tensorizer library for
-                fast weight loading.
+    download_dir: Directory to download and load the weights, default to the
+        default cache directory of huggingface.
+    load_format: The format of the model weights to load:
+        "auto" will try to load the weights in the safetensors format and
+            fall back to the pytorch bin format if safetensors format is
+            not available.
+        "pt" will load the weights in the pytorch bin format.
+        "safetensors" will load the weights in the safetensors format.
+        "npcache" will load the weights in pytorch format and store
+            a numpy cache to speed up the loading.
+        "dummy" will initialize the weights with random values, which is
+            mainly for profiling.
+        "tensorizer" will use CoreWeave's tensorizer library for
+            fast weight loading.
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -659,6 +683,7 @@ class ParallelConfig:
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
+
             backend = "mp"
             ray_found = ray_utils.ray is not None
             if cuda_device_count_stateless() < self.world_size:
@@ -671,8 +696,10 @@ class ParallelConfig:
                     backend = "ray"
                 else:
                     from ray import is_initialized as ray_is_initialized
+
                     if ray_is_initialized():
                         from ray.util import get_current_placement_group
+
                         if get_current_placement_group():
                             backend = "ray"
             self.distributed_executor_backend = backend
@@ -732,7 +759,7 @@ class SchedulerConfig:
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
         embedding_mode: Whether the running model is for embedding.
-        preemption_mode: Whether to perform preemption by swapping or 
+        preemption_mode: Whether to perform preemption by swapping or
             recomputation. If not specified, we determine the mode as follows:
             We use recomputation by default since it incurs lower overhead than
             swapping. However, when the sequence group has multiple sequences
@@ -740,16 +767,18 @@ class SchedulerConfig:
             such a case, we use swapping instead.
     """
 
-    def __init__(self,
-                 max_num_batched_tokens: Optional[int],
-                 max_num_seqs: int,
-                 max_model_len: int,
-                 use_v2_block_manager: bool = False,
-                 num_lookahead_slots: int = 0,
-                 delay_factor: float = 0.0,
-                 enable_chunked_prefill: bool = False,
-                 embedding_mode: Optional[bool] = False,
-                 preemption_mode: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        max_num_batched_tokens: Optional[int],
+        max_num_seqs: int,
+        max_model_len: int,
+        use_v2_block_manager: bool = False,
+        num_lookahead_slots: int = 0,
+        delay_factor: float = 0.0,
+        enable_chunked_prefill: bool = False,
+        embedding_mode: Optional[bool] = False,
+        preemption_mode: Optional[str] = None,
+    ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -973,8 +1002,8 @@ class SpeculativeConfig:
                     "Speculative decoding with mlp_speculator models does not "
                     "yet support distributed inferencing (TP > 1).")
 
-            if (num_speculative_tokens is not None
-                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
+            if num_speculative_tokens is not None and hasattr(
+                    draft_hf_config, "num_lookahead_tokens"):
                 draft_hf_config.num_lookahead_tokens = num_speculative_tokens
 
             n_predict = getattr(draft_hf_config, "n_predict", None)
@@ -1000,7 +1029,8 @@ class SpeculativeConfig:
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
                     target_parallel_config,
-                    speculative_draft_tensor_parallel_size))
+                    speculative_draft_tensor_parallel_size,
+                ))
 
         if num_speculative_tokens is None:
             raise ValueError(
@@ -1055,15 +1085,15 @@ class SpeculativeConfig:
     @staticmethod
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int]
+        speculative_draft_tensor_parallel_size: Optional[int],
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         if speculative_draft_tensor_parallel_size is None:
-            speculative_draft_tensor_parallel_size = \
-                  target_parallel_config.tensor_parallel_size
+            speculative_draft_tensor_parallel_size = (
+                target_parallel_config.tensor_parallel_size)
         elif speculative_draft_tensor_parallel_size != 1:
             # TODO(wooyeon): allow tp values larger than 1
             raise ValueError(
@@ -1113,8 +1143,8 @@ class SpeculativeConfig:
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
-        self.speculative_disable_by_batch_size = \
-            speculative_disable_by_batch_size
+        self.speculative_disable_by_batch_size = (
+            speculative_disable_by_batch_size)
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
 
@@ -1187,11 +1217,14 @@ class LoRAConfig:
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
         if model_config.quantization and model_config.quantization not in [
-                "awq", "gptq"
+                "awq",
+                "gptq",
         ]:
             # TODO support marlin and squeezellm
-            logger.warning("%s quantization is not tested with LoRA yet.",
-                           model_config.quantization)
+            logger.warning(
+                "%s quantization is not tested with LoRA yet.",
+                model_config.quantization,
+            )
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:
@@ -1221,6 +1254,7 @@ class VisionLanguageConfig:
         For example, for Llava, PIXEL_VALUES: (1, 3, 336, 336).
         IMAGE_FEATURES: (1, 576, 1024).
         """
+
         PIXEL_VALUES = enum.auto()
         IMAGE_FEATURES = enum.auto()
 
@@ -1246,11 +1280,11 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
-    #TODO(ywang96): make this a cached property once we refactor the
+    # TODO(ywang96): make this a cached property once we refactor the
     # VisionLanguageConfig class.
     def get_image_token_text(
             self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
-        """Get the image token placeholder text to be inserted into the 
+        """Get the image token placeholder text to be inserted into the
         text prompt and the string representation of the image token id.
         """
         image_token_str = tokenizer.decode(self.image_token_id)
@@ -1368,15 +1402,16 @@ def _get_and_verify_max_len(
     for key in possible_keys:
         max_len = getattr(hf_config, key, None)
         if max_len is not None:
-            max_len_key = key if max_len < derived_max_model_len \
-                else max_len_key
+            max_len_key = (key
+                           if max_len < derived_max_model_len else max_len_key)
             derived_max_model_len = min(derived_max_model_len, max_len)
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
     if disable_sliding_window and sliding_window_len is not None:
-        max_len_key = "sliding_window" \
-            if sliding_window_len < derived_max_model_len else max_len_key
+        max_len_key = ("sliding_window"
+                       if sliding_window_len < derived_max_model_len else
+                       max_len_key)
         derived_max_model_len = min(derived_max_model_len, sliding_window_len)
 
     # If none of the keys were found in the config, use a default and
@@ -1390,15 +1425,17 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%s. Assuming the model's maximum length is %d.", possible_keys,
-            default_max_len)
+            "%s. Assuming the model's maximum length is %d.",
+            possible_keys,
+            default_max_len,
+        )
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     # The correct one should be "longrope", kept "su" here
     # to be backward compatible
-    if rope_scaling is not None and rope_scaling["type"] != "su" \
-        and rope_scaling["type"] != "longrope":
+    if (rope_scaling is not None and rope_scaling["type"] != "su"
+            and rope_scaling["type"] != "longrope"):
         if disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.
@@ -1445,10 +1482,10 @@ def _get_and_verify_max_len(
 def get_served_model_name(model: str,
                           served_model_name: Optional[Union[str, List[str]]]):
     """
-    If the input is a non-empty list, the first model_name in 
-    `served_model_name` is taken. 
-    If the input is a non-empty string, it is used directly. 
-    For cases where the input is either an empty string or an 
+    If the input is a non-empty list, the first model_name in
+    `served_model_name` is taken.
+    If the input is a non-empty string, it is used directly.
+    For cases where the input is either an empty string or an
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
@@ -1463,10 +1500,10 @@ class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine"""
 
     # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer'
-    guided_decoding_backend: str = 'outlines'
+    guided_decoding_backend: str = "outlines"
 
     def __post_init__(self):
-        valid_guided_backends = ['outlines', 'lm-format-enforcer']
+        valid_guided_backends = ["outlines", "lm-format-enforcer"]
         backend = self.guided_decoding_backend
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
@@ -1476,6 +1513,7 @@ class DecodingConfig:
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability."""
+
     otlp_traces_endpoint: Optional[str] = None
 
     def __post_init__(self):
@@ -1503,8 +1541,7 @@ class EngineConfig:
     observability_config: Optional[ObservabilityConfig]
 
     def __post_init__(self):
-        """Verify configs are valid & consistent with each other.
-        """
+        """Verify configs are valid & consistent with each other."""
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
@@ -1514,7 +1551,6 @@ class EngineConfig:
                 self.scheduler_config)
 
     def to_dict(self):
-        """Return the configs as a dictionary, for use in **kwargs.
-        """
+        """Return the configs as a dictionary, for use in **kwargs."""
         return dict(
             (field.name, getattr(self, field.name)) for field in fields(self))

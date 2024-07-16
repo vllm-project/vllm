@@ -1,12 +1,13 @@
 # Adapted from
 # https://github.com/microsoft/BitBLAS/blob/main/integration/BitNet/tokenization_bitnet.py
+
+# ruff: noqa: E501
 """Tokenization classes for Bitnet."""
 import os
 from shutil import copyfile
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import sentencepiece as spm
-
 from transformers.convert_slow_tokenizer import import_protobuf
 from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 from transformers.utils import logging
@@ -321,8 +322,8 @@ class BitnetTokenizer(PreTrainedTokenizer):
             `Tuple(str)`: Paths to the files saved.
         """
         if not os.path.isdir(save_directory):
-            logger.error(
-                f"Vocabulary path ({save_directory}) should be a directory")
+            error_message = f"Vocabulary path ({save_directory}) should be a directory"
+            logger.error(error_message)
             return None
         out_vocab_file = os.path.join(
             save_directory,
