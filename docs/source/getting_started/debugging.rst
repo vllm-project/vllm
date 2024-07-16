@@ -19,9 +19,6 @@ If you have already taken care of the above issues, but the vLLM instance still 
 - Set the environment variable ``export NCCL_DEBUG=TRACE`` to turn on more logging for NCCL.
 - Set the environment variable ``export VLLM_TRACE_FUNCTION=1``. All the function calls in vLLM will be recorded. Inspect these log files, and tell which function crashes or hangs.
 
-  .. warning::
-    vLLM function tracing will generate a lot of logs and slow down the system. Only use it for debugging purposes.
-
 With more logging, hopefully you can find the root cause of the issue.
 
 If it crashes, and the error trace shows somewhere around ``self.graph.replay()`` in ``vllm/worker/model_runner.py``, it is a cuda error inside cudagraph. To know the particular cuda operation that causes the error, you can add ``--enforce-eager`` to the command line, or ``enforce_eager=True`` to the ``LLM`` class, to disable the cudagraph optimization. This way, you can locate the exact cuda operation that causes the error.
@@ -67,3 +64,7 @@ Here are some common issues that can cause hangs:
     If the script runs successfully, you should see the message ``sanity check is successful!``.
 
 If the problem persists, feel free to `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_, with a detailed description of the issue, your environment, and the logs.
+
+.. warning::
+
+    After you find the root cause and solve the issue, remember to turn off all the debugging environment variables defined above, or simply start a new shell to avoid being affected by the debugging settings. If you don't do this, the system might be slow because many debugging functionalities are turned on.
