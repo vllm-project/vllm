@@ -245,7 +245,13 @@ class OpenAIServing:
         else:
             return input_ids, input_text
 
-    def _get_decoded_token(self, logprob: Logprob, token_id: int) -> str:
+    def _get_decoded_token(
+            self, logprob: Logprob, token_id: int,
+            ascii_escape_encoding: bool = False) -> str:
         if logprob.decoded_token is not None:
-            return logprob.decoded_token
-        return self.tokenizer.decode(token_id)
+            decoded_token = logprob.decoded_token
+        decoded_token = self.tokenizer.decode(token_id)
+
+        if ascii_escape_encoding:
+            return decoded_token.encode('utf-8').decode('ascii', errors='backslashreplace')
+        return decoded_token
