@@ -159,7 +159,8 @@ struct VisitorRowOrScalarBroadcast {
         }
       }
 
-      if (params_ptr->row_broadcast) {
+      // if nullptr is enabled but not present, always row broadcast
+      if (EnableNullptr || params_ptr->row_broadcast) {
         // In this case we are loading from a row vector and broadcasting
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size(src_v); ++i) {
@@ -317,7 +318,8 @@ struct VisitorColOrScalarBroadcast {
         }
       }
 
-      if (params_ptr->col_broadcast) {
+      // if nullptr is enabled but not present, always col broadcast
+      if (EnableNullptr || params_ptr->col_broadcast) {
         // In this case we are loading from a column vector and broadcasting
         copy_if(pred, tC_gCol, tC_rCol);
       } else {
