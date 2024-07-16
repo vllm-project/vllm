@@ -216,9 +216,11 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
 
                 token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
+                token_logprob = 0.0
+                if seq_output.logprobs is not None:
+                    token_logprob = seq_output.logprobs[token_id].logprob
 
-                seq.append_token_id(token_id, token_logprob.logprob)
+                seq.append_token_id(token_id, token_logprob)
                 seq.update_num_computed_tokens(1)
 
     @staticmethod

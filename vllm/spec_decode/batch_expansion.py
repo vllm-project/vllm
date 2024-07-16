@@ -169,23 +169,29 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_token_ids = target_token_ids.reshape(spec_expanded_bs, k + 1)
         target_probs = target_probs.reshape(*target_token_ids.shape,
                                             self._vocab_size)
-        target_logprobs = target_logprobs.reshape(target_probs.shape)
+        
+        if target_logprobs is not None:
+            target_logprobs = target_logprobs.reshape(target_probs.shape)
 
         all_tokens = target_token_ids.new_full(size=(contracted_bs, k + 1),
                                                fill_value=-1)
         all_probs = target_probs.new_zeros(*all_tokens.shape, self._vocab_size)
-        all_logprobs = target_logprobs.new_full(size=all_probs.shape,
-                                                fill_value=-float("inf"))
+        all_logprobs = None
+        if target_logprobs is not None:
+            all_logprobs = target_logprobs.new_full(
+                size=all_probs.shape, fill_value=-float("inf"))
 
         if non_spec_indices:
             all_tokens[non_spec_indices, :1] = non_spec_target_token_ids
             all_probs[non_spec_indices, :1, :] = non_spec_target_probs
-            all_logprobs[non_spec_indices, :1, :] = non_spec_target_logprobs
+            if all_logprobs is not None:
+                all_logprobs[non_spec_indices, :1, :] = non_spec_target_logprobs
 
         if spec_indices:
             all_tokens[spec_indices] = target_token_ids
             all_probs[spec_indices] = target_probs
-            all_logprobs[spec_indices] = target_logprobs
+            if all_logprobs is not None:
+                all_logprobs[spec_indices] = target_logprobs
 
         return all_tokens, all_probs, all_logprobs
 
@@ -327,10 +333,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
          ) = sampler_output.sampled_token_probs.split(split_sizes)
         (spec_sampled_tokens, non_spec_sampled_tokens
          ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
-        (
-            spec_logprobs,
-            non_spec_logprobs,
-        ) = sampler_output.logprobs.split(split_sizes)
+        if (sampler_output.logprobs is not None):
+            (
+                spec_logprobs,
+                non_spec_logprobs,
+            ) = sampler_output.logprobs.split(split_sizes)
+        else:
+            (
+                spec_logprobs,
+                non_spec_logprobs,
+            ) = (None, None)
 
         # Convert scores to tensors.
         sampler_output.sampled_token_probs = spec_probs

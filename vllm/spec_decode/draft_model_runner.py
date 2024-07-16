@@ -110,9 +110,11 @@ class TP1DraftModelRunner(ModelRunner):
                 seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
 
                 token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
-
-                seq.append_token_id(token_id, token_logprob.logprob)
+                if seq_output.logprobs is not None:
+                    token_logprob = seq_output.logprobs[token_id]
+                    seq.append_token_id(token_id, token_logprob.logprob)
+                else:
+                    seq.append_token_id(token_id, 0.0)
                 seq.update_num_computed_tokens(1)
 
         return self.prepare_model_input(self.cached_seq_group_metadata_list)

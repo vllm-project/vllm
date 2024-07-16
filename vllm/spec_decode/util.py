@@ -68,19 +68,21 @@ def create_sequence_group_output(
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
-    logprobs: Dict[int, Logprob] = {
-        token_id: Logprob(
-            logprob=token_id_logprob,
-            rank=token_id_logprob_rank,
-        ),
-    }
-    logprobs.update({
-        topk_token_ids[topk_logprob_index]: Logprob(
-            logprob=topk_logprobs[topk_logprob_index],
-            rank=topk_logprob_index + 1,
-        )
-        for topk_logprob_index, _ in enumerate(topk_token_ids)
-    })
+    logprobs = None
+    if token_id_logprob >= 0.0:
+        logprobs: Dict[int, Logprob] = {
+            token_id: Logprob(
+                logprob=token_id_logprob,
+                rank=token_id_logprob_rank,
+            ),
+        }
+        logprobs.update({
+            topk_token_ids[topk_logprob_index]: Logprob(
+                logprob=topk_logprobs[topk_logprob_index],
+                rank=topk_logprob_index + 1,
+            )
+            for topk_logprob_index, _ in enumerate(topk_token_ids)
+        })
 
     return CompletionSequenceGroupOutput(
         samples=[
@@ -149,12 +151,15 @@ def sampler_output_to_torch(
         sampled_token_probs = sampled_token_probs.transpose(0, 1)
 
     # shape: [batch_size, num_sampler_output, vocab_size]
-    sampled_token_logprobs = torch.stack(
-        [sampler_output.logprobs for sampler_output in sampler_output_list],
-        dim=0,
-    )
+    if sampler_output_list[0].logprobs is not None:
+        sampled_token_logprobs = torch.stack(
+            [sampler_output.logprobs for sampler_output in sampler_output_list],
+            dim=0,
+        )
+    else:
+        sampled_token_logprobs = None
 
-    if sampler_transposed:
+    if sampler_transposed and sampled_token_logprobs is not None:
         sampled_token_logprobs = sampled_token_logprobs.transpose(0, 1)
 
     # shape: [batch_size, num_sampler_output]

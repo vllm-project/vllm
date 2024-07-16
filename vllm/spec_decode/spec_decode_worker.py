@@ -569,25 +569,31 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         the same number of outputs.
         """
         batch_size, num_steps = accepted_token_ids.shape
-
-        # Organize input tensors by step instead of by sequence.
-        target_logprobs_by_step = target_logprobs.transpose(0, 1)
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
+        if target_logprobs is not None:
+            # Organize input tensors by step instead of by sequence.
+            target_logprobs_by_step = target_logprobs.transpose(0, 1)
 
-        # Get the logprobs/rank of the accepted tokens.
-        (accepted_token_id_ranks_by_step,
-         accepted_token_id_logprobs_by_step) = get_sampled_token_logprobs(
-             logprob_tensor=target_logprobs_by_step,
-             sampled_token_ids=accepted_token_ids_by_step,
-         )
+            # Get the logprobs/rank of the accepted tokens.
+            (accepted_token_id_ranks_by_step,
+            accepted_token_id_logprobs_by_step) = get_sampled_token_logprobs(
+                logprob_tensor=target_logprobs_by_step,
+                sampled_token_ids=accepted_token_ids_by_step,
+            )
 
-        # Get the top-k logprobs (which may or may not include the logprob of
-        # the accepted token).
-        (topk_logprobs_by_step,
-         topk_indices_by_step) = target_logprobs_by_step.topk(
-             k=self.scorer_worker.model_config.max_logprobs,
-             dim=-1,
-         )
+            # Get the top-k logprobs (which may or may not include the logprob of
+            # the accepted token).
+            (topk_logprobs_by_step,
+            topk_indices_by_step) = target_logprobs_by_step.topk(
+                k=self.scorer_worker.model_config.max_logprobs,
+                dim=-1,
+            )
+            accepted_token_id_ranks_by_step = (
+                accepted_token_id_ranks_by_step.tolist())
+            accepted_token_id_logprobs_by_step = (
+                accepted_token_id_logprobs_by_step.tolist())
+            topk_logprobs_by_step = topk_logprobs_by_step.tolist()
+            topk_indices_by_step = topk_indices_by_step.tolist()
 
         # Get the sequence ids and num_logprobs (sampling parameter) in the
         # batch.
@@ -598,12 +604,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Serialize all tensors to CPU Python lists.
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
-        accepted_token_id_ranks_by_step = (
-            accepted_token_id_ranks_by_step.tolist())
-        accepted_token_id_logprobs_by_step = (
-            accepted_token_id_logprobs_by_step.tolist())
-        topk_logprobs_by_step = topk_logprobs_by_step.tolist()
-        topk_indices_by_step = topk_indices_by_step.tolist()
 
         # Construct the output on a per-step, per-sequence basis.
         sampler_output_list: List[SamplerOutput] = []
@@ -616,20 +616,33 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             for sequence_index in range(batch_size):
                 # Each sequence may have a different num_logprobs; retrieve it.
                 num_logprobs = num_logprobs_per_seq[sequence_index]
-                step_output_token_ids.append(
-                    create_sequence_group_output(
-                        token_id=accepted_token_ids_by_step[step_index]
-                        [sequence_index],
-                        token_id_logprob_rank=accepted_token_id_ranks_by_step[
-                            step_index][sequence_index],
-                        token_id_logprob=accepted_token_id_logprobs_by_step[
-                            step_index][sequence_index],
-                        seq_id=seq_ids[sequence_index],
-                        topk_token_ids=topk_indices_by_step[step_index]
-                        [sequence_index][:num_logprobs],
-                        topk_logprobs=topk_logprobs_by_step[step_index]
-                        [sequence_index][:num_logprobs],
-                    ))
+                if target_logprobs is not None:
+                    step_output_token_ids.append(
+                        create_sequence_group_output(
+                            token_id=accepted_token_ids_by_step[step_index]
+                            [sequence_index],
+                            token_id_logprob_rank=accepted_token_id_ranks_by_step[
+                                step_index][sequence_index] ,
+                            token_id_logprob=accepted_token_id_logprobs_by_step[
+                                step_index][sequence_index],
+                            seq_id=seq_ids[sequence_index],
+                            topk_token_ids=topk_indices_by_step[step_index]
+                            [sequence_index][:num_logprobs],
+                            topk_logprobs=topk_logprobs_by_step[step_index]
+                            [sequence_index][:num_logprobs],
+                        ))
+                else:
+                    step_output_token_ids.append(
+                        create_sequence_group_output(
+                            token_id=accepted_token_ids_by_step[step_index]
+                            [sequence_index],
+                            token_id_logprob_rank=-1 ,
+                            token_id_logprob=-1,
+                            seq_id=seq_ids[sequence_index],
+                            topk_token_ids=[],
+                            topk_logprobs=[],
+                        ))
+
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 

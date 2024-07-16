@@ -75,6 +75,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
+        #for output in outputs:
+        #    print('output ' + str(output))
 
         # Since there's only one sequence per sequence group, we can take the
         # first sample.

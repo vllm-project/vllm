@@ -90,7 +90,9 @@ class Sampler(nn.Module):
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities.
-        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+        logprobs = None
+        # TODO(sroy) - Add flag for this.
+        #logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
         sample_results, maybe_sampled_tokens_tensor = _sample(
@@ -109,13 +111,21 @@ class Sampler(nn.Module):
             on_device_tensors = None
 
         # Get the logprobs query results.
+        #print('sample_results ' + str(sample_results))
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
-        return _build_sampler_output(sample_results,
-                                     sampling_metadata,
-                                     prompt_logprobs,
-                                     sample_logprobs,
-                                     on_device_tensors=on_device_tensors)
+        output = _build_sampler_output(sample_results,
+                                       sampling_metadata,
+                                       prompt_logprobs,
+                                       sample_logprobs,
+                                       on_device_tensors=on_device_tensors)
+        #print('output ' + str(output))
+        return output
+        #return _build_sampler_output(sample_results,
+        #                             sampling_metadata,
+        #                             prompt_logprobs,
+        #                             sample_logprobs,
+        #                             on_device_tensors=on_device_tensors)
 
     @property
     def _should_modify_greedy_probs_inplace(self) -> bool:
@@ -472,10 +482,10 @@ def _sample_with_torch(
 
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
-        sampled_token_ids_tensor = torch.empty(logprobs.shape[0],
+        sampled_token_ids_tensor = torch.empty(probs.shape[0],
                                                1,
                                                dtype=torch.long,
-                                               device=logprobs.device)
+                                               device=probs.device)
     else:
         sampled_token_ids_tensor = None
 
@@ -492,7 +502,9 @@ def _sample_with_torch(
         sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(logprobs[long_sample_indices],
+            #greedy_samples = torch.argmax(logprobs[long_sample_indices],
+            #                              dim=-1)
+            greedy_samples = torch.argmax(probs[long_sample_indices],
                                           dim=-1)
 
             if sampled_token_ids_tensor is not None:
@@ -720,6 +732,11 @@ def _get_logprobs(
     Returns:
         A tuple of prompt and sample logprobs per sequence group in a batch.
     """
+    if logprobs is None:
+        empty_sampled_logprob: List[SampleLogprobs] = [[None] * len(sample_results)] *  (
+            len(sampling_metadata.seq_groups))
+        empty_prompt_logprob: List[PromptLogprobs] = [None] * len(sampling_metadata.seq_groups)
+        return empty_prompt_logprob, empty_sampled_logprob
     # The index of query token to calculate logprobs. It includes both
     # prompt and sample logprob indices.
     query_indices: List[int] = []
