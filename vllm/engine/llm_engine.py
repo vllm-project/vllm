@@ -553,6 +553,20 @@ class LLMEngine:
     ) -> List[int]:
         return [0]
 
+    def _tokenize_prompt(self,
+                         request_id,
+                         inputs,
+                         prompt,
+                         lora_request,
+                         ) -> List[int]:
+        tokenizer = self.get_tokenizer_group(
+            "prompts must be None if "
+            "skip_tokenizer_init is True")
+
+        return tokenizer.encode(request_id=request_id,
+                                prompt=inputs["prompt"],
+                                lora_request=lora_request)
+
     def process_model_inputs(
         self,
         request_id: str,
