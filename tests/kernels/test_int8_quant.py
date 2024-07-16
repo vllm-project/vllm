@@ -5,7 +5,7 @@ import torch
 import vllm._C
 from vllm._custom_ops import scaled_int8_quant
 
-from quant_utils import ref_dynamic_per_token_quant
+from tests.kernels.quant_utils import ref_dynamic_per_token_quant
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
@@ -24,14 +24,13 @@ def test_dynamic_scaled_int8_quant(num_tokens: int, hidden_size: int,
                                    dtype: torch.dtype, seed: int) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    int8_traits = torch.iinfo(torch.int8)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
 
     # reference
     ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.int8) 
     # kernel
-    ops_out, ops_scales = scaled_int8_quant(x, scales_out)
+    ops_out, ops_scales = scaled_int8_quant(x)
 
     assert torch.allclose(ops_scales, ref_scales)
     assert torch.allclose(ops_out, ref_out,

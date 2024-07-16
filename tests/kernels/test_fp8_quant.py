@@ -2,7 +2,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from quant_utils import ref_dynamic_per_token_quant 
+from tests.kernels.quant_utils import ref_dynamic_per_token_quant 
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
@@ -39,16 +39,24 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    fp8_traits = torch.iinfo(torch.float8_e4m3fn)
+    fp8_traits = torch.finfo(torch.float8_e4m3fn)
 
-    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
 
     # reference
-    ref_scale = (x.abs().max() / float(fp8_traits.max))[:, None].to(device="cuda",
-            dtype=torch.float32)
-    ref_out = (x / ref_scale).round().clamp(fp8_traits.min, fp8_traits.max).to(torch.float8_e4m3fn)
+    ref_scale = x.abs().max().to(dtype=torch.float32) / float(fp8_traits.max)
+    assert ref_scale.dtype == torch.float32
+    ref_out = (x.to(dtype=torch.float32) / ref_scale).clamp(fp8_traits.min, fp8_traits.max).to(dtype=torch.float8_e4m3fn)
     # kernel
+    assert x.dtype == dtype
     ops_out, ops_scale = ops.scaled_fp8_quant(x)
+    assert ops_out.dtype == torch.float8_e4m3fn
 
     assert torch.allclose(ref_scale, ops_scale)
-    assert torch.allclose(ref_out, ops_scale)
+    # TODO (varun) : For some test cases, the computed scale in the kernel is different
+    # from the reference implementation in the 8th/9th digits. example, 
+    # ref_scales : 0.002223423682153225
+    # ops_scales : 0.0022234234493225813
+    # This precludes an exact match in the outputs. This needs to be investigated further.
+    assert torch.allclose(ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32),
+            atol=1)
