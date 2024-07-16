@@ -117,6 +117,26 @@ def example_prompts() -> List[str]:
 
 
 @pytest.fixture
+def example_encoder_decoder_prompts() -> Tuple[List[str], List[str]]:
+    '''
+    Returns an encoder prompt list and a decoder prompt list, wherein each pair
+    of same-index entries in both lists corresponds to an (encoder prompt,
+    decoder prompt) tuple.
+
+    Returns:
+    * Encoder prompt list
+    * Decoder prompt list (reverse of encoder prompt list)
+    '''
+    encoder_prompts = []
+    for filename in _TEST_PROMPTS:
+        encoder_prompts += _read_prompts(filename)
+
+    # Encoder prompts, decoder prompts
+    return encoder_prompts, \
+           encoder_prompts[::-1]
+
+
+@pytest.fixture
 def example_long_prompts() -> List[str]:
     prompts = []
     for filename in _LONG_PROMPTS:
