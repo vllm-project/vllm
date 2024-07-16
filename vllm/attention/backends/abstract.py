@@ -1,10 +1,14 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from enum import Enum, auto
-from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
+                    Tuple, Type, TypeVar)
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.sequence import SequenceGroupMetadata
+    from vllm.worker.model_runner_base import ModelRunnerInputBuilderBase
 
 
 class AttentionType(Enum):
@@ -128,12 +132,22 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
         raise NotImplementedError
 
     @abstractmethod
-    def add_seq_group(self, *args, **kwargs) -> None:
+    def add_seq_group(self, seq_group_metadata: "SequenceGroupMetadata",
+                      token_lens: List[int], seq_lens: List[int],
+                      curr_seq_lens: List[int], query_lens: List[int],
+                      context_lens: List[int],
+                      curr_sliding_window_blocks: List[int],
+                      prefix_cache_hit: bool, chunked_prefill_enabled: bool):
+        """Add a sequence group to the metadata and update
+        corresponding fields (in Python objects).
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def build(self, runner, seq_lens, query_lens, use_captured_graph: bool,
-              cuda_graph_pad_size: int, batch_size: int) -> T:
+    def build(self, runner: "ModelRunnerInputBuilderBase", seq_lens: List[int],
+              query_lens: List[int], cuda_graph_pad_size: int,
+              batch_size: int) -> T:
+        """Build attention metadata with on-device tensors."""
         raise NotImplementedError
 
 

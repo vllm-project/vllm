@@ -2,6 +2,7 @@ import dataclasses
 import gc
 import time
 import warnings
+import weakref
 from collections import defaultdict
 from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
                     Tuple, Type, TypeVar, Union)
@@ -250,12 +251,20 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             assert n_seqs == 1
             self.decode_only = False
 
+        # Mapping from request IDs to sequence IDs. Used for Jamba models
+        # that manages the cache by itself.
         self.request_ids_to_seq_ids[seq_group_metadata.request_id] = []
-        token_lens = []
-        decode_seq_lens = []
-        context_lens = []
-        curr_sliding_window_blocks = []
-        orig_seq_lens = []
+        # The number of input tokens in each sequence.
+        token_lens: List[int] = []
+        # The number of tokens that are already computed.
+        context_lens: List[int] = []
+        # The current sliding window block for each sequence.
+        curr_sliding_window_blocks: List[int] = []
+        # The original sequence length (before applying sliding window)
+        # for each sequence.
+        orig_seq_lens: List[int] = []
+        # The sequence length (may be capped to the sliding window).
+        curr_seq_lens: List[int] = []
         for seq_id in seq_ids:
             seq_data = seq_group_metadata.seq_data[seq_id]
             self.request_ids_to_seq_ids[seq_group_metadata.request_id].append(
@@ -320,12 +329,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # the attention metadata.
             token_lens.append(len(tokens))
             context_lens.append(context_len)
-            decode_seq_lens.append(sliding_seq_len)
+            curr_seq_lens.append(sliding_seq_len)
             curr_sliding_window_blocks.append(curr_sliding_window_block)
             orig_seq_lens.append(seq_len)
 
+        # Update attention metadata. Note that input builder attributes
+        # (self.xxx) include all added sequences, so we need to slice
+        # the last n_seqs sequences.
         self.attn_metadata_builder.add_seq_group(
-            seq_group_metadata, token_lens, orig_seq_lens, decode_seq_lens,
+            seq_group_metadata, token_lens, orig_seq_lens, curr_seq_lens,
             self.query_lens[-n_seqs:], context_lens,
             curr_sliding_window_blocks, prefix_cache_hit,
             self.chunked_prefill_enabled)
@@ -404,8 +416,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
-            self.runner, self.seq_lens, self.query_lens, use_captured_graph,
-            cuda_graph_pad_size, batch_size)
+            self.runner, self.seq_lens, self.query_lens, cuda_graph_pad_size,
+            batch_size)
 
         # LoRA data.
         if self.enable_lora:
@@ -649,7 +661,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        builder = ModelInputForGPUBuilder(self, finished_requests_ids)
+        builder = ModelInputForGPUBuilder(weakref.proxy(self),
+                                          finished_requests_ids)
         for seq_group_metadata in seq_group_metadata_list:
             builder.add_seq_group(seq_group_metadata)
         return builder.build()  # type: ignore

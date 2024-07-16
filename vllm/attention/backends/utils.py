@@ -90,7 +90,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
-        self.decode_seq_lens: List[int] = []
+        self.curr_seq_lens: List[int] = []
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
@@ -102,7 +102,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                       token_lens: List[int], seq_lens: List[int],
-                      decode_seq_lens: List[int], query_lens: List[int],
+                      curr_seq_lens: List[int], query_lens: List[int],
                       context_lens: List[int],
                       curr_sliding_window_blocks: List[int], prefix_cache_hit,
                       chunked_prefill_enabled):
@@ -110,10 +110,10 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         block_tables = seq_group_metadata.block_tables
         computed_block_nums = seq_group_metadata.computed_block_nums
 
-        for (seq_id, token_len, seq_len, decode_seq_len, query_len,
-             context_len, curr_sliding_window_block) in zip(
+        for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
+             curr_sliding_window_block) in zip(
                  seq_group_metadata.seq_data.keys(), token_lens, seq_lens,
-                 decode_seq_lens, query_lens, context_lens,
+                 curr_seq_lens, query_lens, context_lens,
                  curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
@@ -125,7 +125,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                     "seq_len: {}, context_len: {}, query_len: {}".format(
                         seq_len, context_len, query_len))
                 self.num_decode_tokens += query_len
-                self.decode_seq_lens.append(decode_seq_len)
+                self.curr_seq_lens.append(curr_seq_len)
 
             # Compute block table.
             # TODO(sang): Combine chunked prefill and prefix caching by
@@ -150,9 +150,10 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                  seq_group_metadata.block_tables)
 
     def build(self, runner: "GPUModelRunnerBase", seq_lens: List[int],
-              query_lens: List[int], use_captured_graph: bool,
-              cuda_graph_pad_size: int, batch_size: int):
+              query_lens: List[int], cuda_graph_pad_size: int,
+              batch_size: int):
         device = runner.device
+        use_captured_graph = cuda_graph_pad_size > 0
 
         logits_soft_cap = getattr(runner.model_config.hf_config,
                                   "attn_logit_softcapping", None)
@@ -165,7 +166,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
-        max_decode_seq_len = max(self.decode_seq_lens, default=0)
+        max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
 
         if use_captured_graph:
