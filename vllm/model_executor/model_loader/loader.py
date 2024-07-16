@@ -32,7 +32,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
-from vllm.model_executor.models.interfaces import (supports_lora,
+from vllm.model_executor.models.interfaces import (has_inner_state,
+                                                   supports_lora,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -66,10 +67,10 @@ def _get_quantization_config(
 
 
 def _get_model_initialization_kwargs(
-    model_class: Type[nn.Module],
-    lora_config: Optional[LoRAConfig],
-    multimodal_config: Optional[MultiModalConfig],
-) -> Dict[str, Any]:
+        model_class: Type[nn.Module],
+        lora_config: Optional[LoRAConfig],
+        multimodal_config: Optional[MultiModalConfig],
+        scheduler_config: Optional[SchedulerConfig] = None) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
 
@@ -90,13 +91,19 @@ def _get_model_initialization_kwargs(
 
         extra_kwargs["multimodal_config"] = multimodal_config
 
+    if has_inner_state(model_class) and scheduler_config:
+        extra_kwargs["scheduler_config"] = scheduler_config
+
     return extra_kwargs
 
 
-def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
-                      lora_config: Optional[LoRAConfig],
-                      multimodal_config: Optional[MultiModalConfig],
-                      cache_config: CacheConfig) -> nn.Module:
+def _initialize_model(
+        model_config: ModelConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        multimodal_config: Optional[MultiModalConfig],
+        cache_config: CacheConfig,
+        scheduler_config: Optional[SchedulerConfig] = None) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_class = get_model_architecture(model_config)[0]
     quant_config = _get_quantization_config(model_config, load_config)
@@ -105,7 +112,8 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
                        cache_config=cache_config,
                        quant_config=quant_config,
                        **_get_model_initialization_kwargs(
-                           model_class, lora_config, multimodal_config))
+                           model_class, lora_config, multimodal_config,
+                           scheduler_config))
 
 
 class BaseModelLoader(ABC):
@@ -266,7 +274,7 @@ class DefaultModelLoader(BaseModelLoader):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, multimodal_config,
-                                          cache_config)
+                                          cache_config, scheduler_config)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
                                            model_config.revision,
@@ -302,7 +310,7 @@ class DummyModelLoader(BaseModelLoader):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, multimodal_config,
-                                          cache_config)
+                                          cache_config, scheduler_config)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
