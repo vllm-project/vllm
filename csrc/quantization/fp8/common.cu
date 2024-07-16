@@ -163,3 +163,11 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
             scale.data_ptr<float>(), num_elems);
       });
 }
+
+#if 0
+void dynamic_per_token_fp8_quant(torch::Tensor& out, // [..., d]
+                                 torch::Tensor& input, // [..., d]
+                                 torch::Tensor& scales) 
+{
+}
+#endif
