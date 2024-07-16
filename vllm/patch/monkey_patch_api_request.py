@@ -5,6 +5,7 @@ from packaging import version
 from functools import cache
 from http import HTTPStatus
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, UsageInfo
+from vllm.entrypoints.openai import cli_args
 import importlib
 import time
 
@@ -87,7 +88,16 @@ async def patch_check_model(request) -> Optional[JSONResponse]:
     reset_default_request(request=request)
     return ret
 
+origin_make_arg_parser = cli_args.make_arg_parser
 
+def patch_make_arg_parser():
+    parser = origin_make_arg_parser()
+    parser.add_argument("--default-model-template",
+                        type=str,
+                        default=None,
+                        help="model template")
+    return parser.parse_args()
+    
 async def origin_serving_self_check_model(self, request):
     # if request.model == self.served_model:
     #     return
@@ -212,4 +222,6 @@ def patch_api_server():
     if OpenAIServing:
         OpenAIServing.origin_serving_check_model = origin_serving_self_check_model
         OpenAIServing._check_model = patch_serving_self_check_model
+        
+    cli_args.make_arg_parser = patch_make_arg_parser
 

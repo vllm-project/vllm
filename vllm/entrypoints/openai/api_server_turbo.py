@@ -71,10 +71,6 @@ app = fastapi.FastAPI(lifespan=lifespan)
 
 def parse_args():
     parser = make_arg_parser()
-    parser.add_argument("--default-model-template",
-                        type=str,
-                        default=None,
-                        help="model template")
     return parser.parse_args()
 
 
@@ -122,7 +118,7 @@ async def detokenize(request: DetokenizeRequest):
 
 @app.get("/v1/models")
 async def show_available_models():
-    models = await openai_serving_chat.show_available_models()
+    models = await openai_serving_completion.show_available_models()
     return JSONResponse(content=models.model_dump())
 
 
@@ -219,15 +215,6 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
-    # Enforce pixel values as image input type for vision language models
-    # when serving with API server
-    if engine_args.image_input_type is not None and \
-        engine_args.image_input_type.upper() != "PIXEL_VALUES":
-        raise ValueError(
-            f"Invalid image_input_type: {engine_args.image_input_type}. "
-            "Only --image-input-type 'pixel_values' is supported for serving "
-            "vision language models with the vLLM API server.")
-
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
 
@@ -251,10 +238,19 @@ if __name__ == "__main__":
                                             args.lora_modules,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, args.lora_modules)
+        engine, model_config, served_model_names, args.lora_modules,
+        args.prompt_adapters)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     app.root_path = args.root_path
+
+    logger.info("Available routes are:")
+    for route in app.routes:
+        if not hasattr(route, 'methods'):
+            continue
+        methods = ', '.join(route.methods)
+        logger.info("Route: %s, Methods: %s", route.path, methods)
+
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
