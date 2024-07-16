@@ -57,7 +57,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import DeepSeekMultiModalityConfig
 
 from .clip import dummy_seq_data_for_clip
@@ -2287,6 +2287,7 @@ class DeepSeekMultiModalityCausalLM(nn.Module, SupportsVision):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ):
         pixel_values = kwargs.pop("pixel_values", None)

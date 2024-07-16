@@ -81,7 +81,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         language_config = config.language_config
         self.language_model = LlamaForCausalLM(language_config)
         # this model does not support tie_word_embeddings
-        setattr(self.config, 'tie_word_embeddings', False)
+        self.config.update({'tie_word_embeddings': False})
 
     def prepare_inputs_embeds(
         self,
