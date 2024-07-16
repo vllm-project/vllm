@@ -29,8 +29,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_pp_group, get_pp_indices,
-                              get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -45,12 +44,13 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader)
+    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import is_hip, print_warning_once
+from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
+from .utils import is_pp_missing_parameter, make_layers
 
 
 class LlamaMLP(nn.Module):
@@ -262,20 +262,11 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        self.start_layer, self.end_layer = get_pp_indices(
+        self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            get_pp_group().rank_in_group,
-            get_pp_group().world_size)
-        self.layers = nn.ModuleList(
-            [nn.Identity() for _ in range(self.start_layer)] + [
-                LlamaDecoderLayer(config=config,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config)
-                for _ in range(self.start_layer, self.end_layer)
-            ] + [
-                nn.Identity()
-                for _ in range(self.end_layer, config.num_hidden_layers)
-            ])
+            lambda: LlamaDecoderLayer(config=config,
+                                      cache_config=cache_config,
+                                      quant_config=quant_config))
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -455,37 +446,31 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                try:
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                except KeyError:
-                    pass
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Remapping the name of FP8 kv-scale.
-                if name.endswith("kv_scale"):
-                    remapped_kv_scale_name = name.replace(
-                        ".kv_scale", ".attn.kv_scale")
-                    if remapped_kv_scale_name not in params_dict:
-                        print_warning_once(
-                            f"Found kv scale in the checkpoint (e.g. {name}), "
-                            "but not found the expected name in the model "
-                            f"(e.g. {remapped_kv_scale_name}). kv-scale is "
-                            "not loaded.")
-                        continue
-                    else:
-                        name = remapped_kv_scale_name
-                try:
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                except KeyError:
-                    pass
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

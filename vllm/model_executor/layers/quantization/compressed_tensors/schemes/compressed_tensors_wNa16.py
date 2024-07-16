@@ -148,7 +148,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             group_size=layer.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
+                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+
         return apply_marlin_linear(
             input=x,
             weight=layer.weight_packed,
@@ -159,4 +161,5 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             num_bits=self.num_bits,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
-            is_k_full=True)
+            is_k_full=True,
+            bias=bias)
