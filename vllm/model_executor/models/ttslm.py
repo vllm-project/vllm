@@ -60,8 +60,8 @@ class ChatTtsLlm(nn.Module):
         ])
         
         self.head_text = weight_norm(nn.Linear(self.model_dim, self.num_text_tokens, bias=False), name='weight')
-        self.head_code = nn.ModuleList([
-            weight_norm(nn.Linear(self.model_dim, self.num_audio_tokens, bias=False), name='weight') for _ in range(self.num_vq)
+        self.lm_head = nn.ModuleList([
+            nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_vq)
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
         self.sampler = Sampler()
@@ -108,7 +108,7 @@ class ChatTtsLlm(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = [
-            self.logits_processor(self.head_code[i], hidden_states, sampling_metadata)
+            self.logits_processor(self.lm_head[i], hidden_states, sampling_metadata)
             for i in range(self.num_vq)
         ]
         logits = torch.stack(logits, 0).permute(1, 0, 2)

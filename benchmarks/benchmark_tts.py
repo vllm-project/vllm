@@ -14,8 +14,8 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
-from benchmarks.backend_request_func import RequestFuncInput, RequestFuncOutput
-from benchmarks.benchmark_serving import BenchmarkMetrics
+from backend_request_func import RequestFuncInput, RequestFuncOutput
+from benchmark_serving import BenchmarkMetrics
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
@@ -84,8 +84,8 @@ async def get_request(
     input_requests: List[Tuple[str, int, int]],
     request_rate: float,
 ) -> AsyncGenerator[Tuple[str, int, int], None]:
-    input_requests = iter(input_requests)
-    for request in input_requests:
+    requests = iter(input_requests)
+    for request in requests:
         yield request
 
         if request_rate == float("inf"):
@@ -97,13 +97,14 @@ async def get_request(
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
 
-async def generate_streaming(llm: AsyncLLMEngine, request_func_input: RequestFuncInput, pbar: Optional[tqdm] = None)-> RequestFuncOutput:
+async def generate_streaming(llm: AsyncLLMEngine, request_func_input: RequestFuncInput, request_id:str, pbar: Optional[tqdm] = None)-> RequestFuncOutput:
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
     ttft = 0.0
     st = time.perf_counter()
+    most_recent_timestamp = st
     sampling_params = SamplingParams(n=1, temperature=1, detokenize=False, stop_token_ids=[21803], max_tokens=2048, top_k=1)
-    results_generator = llm.generate(request_func_input.prompt, sampling_params, request_id=id)
+    results_generator = llm.generate(request_func_input.prompt, sampling_params, request_id=request_id)
     async for request_output in results_generator:
         token_ids = request_output.outputs[0].token_ids
         # print(f'{id}  {[x - 21178 for x in token_ids[-1]]}')
@@ -151,9 +152,9 @@ async def run_vllm_async(
     gpu_memory_utilization: float = 0.9,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
-) -> Tuple[float, int]:
+):
 
-    
+    engine_count = 1
     engine_args = AsyncEngineArgs(
         model=model,
         tokenizer=tokenizer,
@@ -163,7 +164,7 @@ async def run_vllm_async(
         trust_remote_code=trust_remote_code,
         dtype=dtype,
         max_model_len=max_model_len,
-        gpu_memory_utilization=gpu_memory_utilization,
+        gpu_memory_utilization=gpu_memory_utilization/engine_count,
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
         quantization_param_path=quantization_param_path,
@@ -178,20 +179,22 @@ async def run_vllm_async(
     llm = AsyncLLMEngine.from_engine_args(engine_args)
     pbar = tqdm(total=len(requests))
     benchmark_start_time = time.perf_counter()
-
+    tasks: List[asyncio.Task] = []
+    request_id = 0
     async for request in get_request(requests, request_rate):
         prompt, prompt_len, output_len = request
         request_func_input = RequestFuncInput(
+            api_url="",
             model=model,
             prompt=prompt,
             prompt_len=prompt_len,
             output_len=output_len,
             use_beam_search=use_beam_search,
         )
+        request_id += 1
         tasks.append(
             asyncio.create_task(
-                generate_streaming(llm, request_func_input=request_func_input,
-                             pbar=pbar)))
+                generate_streaming(llm, request_func_input=request_func_input, request_id=str(request_id), pbar=pbar)))
 
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
@@ -375,8 +378,8 @@ def main(args: argparse.Namespace):
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
-    requests = open(args.dataset).read().splitlines()
-    requests = [(f'[Stts][spk_emb][speed_5]{request}[Ptts]', len(tokenizer(request).input_ids), 2048) for request in requests]
+    lines = open(args.dataset).read().splitlines()
+    requests = [(f'[Stts][spk_emb][speed_5]{line}[Ptts]', len(tokenizer(line).input_ids), 2048) for line in lines]
     requests = requests[:args.num_prompts]
     
     total_input_tokens = sum(count for _, count, _ in requests)
@@ -388,7 +391,7 @@ def main(args: argparse.Namespace):
             args.enforce_eager, args.kv_cache_dtype,
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
-            args.max_num_batched_tokens, args.distributed_executor_backend,
+            args.max_num_batched_tokens, args.distributed_executor_backend, args.request_rate,
             args.gpu_memory_utilization, args.download_dir, args.load_format))
         return
     
@@ -435,6 +438,10 @@ if __name__ == "__main__":
                         choices=["vllm", "hf", "mii"],
                         default="vllm")
     parser.add_argument("--streaming", action="store_true")
+    parser.add_argument("--request-rate",
+                        type=int,
+                        default=None,
+                        help="request rate per second")
     parser.add_argument("--dataset",
                         type=str,
                         default=None,
