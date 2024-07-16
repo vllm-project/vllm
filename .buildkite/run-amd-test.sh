@@ -11,9 +11,6 @@ while true; do
         fi
 done
 
-echo "--- ROCm info"
-rocminfo
-
 # cleanup older docker images
 cleanup_docker() {
   # Get Docker's root directory
