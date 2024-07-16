@@ -66,7 +66,9 @@ def get_max_glmv_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config(ChatGLMConfig)
     vision_config = hf_config.vision_config
 
-    if isinstance(vision_config, dict):
+    if vision_config is None:
+        return 1
+    elif isinstance(vision_config, dict):
         return (vision_config["image_size"] // vision_config["patch_size"] //
                 2)**2
 
@@ -78,7 +80,11 @@ def dummy_data_for_glmv(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(ChatGLMConfig)
     vision_config = hf_config.vision_config
 
-    if isinstance(vision_config, dict):
+    if vision_config is None:
+        token_ids = [0] * seq_len
+        seq_data = SequenceData(token_ids)
+        return seq_data, None
+    elif isinstance(vision_config, dict):
         image_placeholder_length = (vision_config["image_size"] //
                                     vision_config["patch_size"] // 2)**2
         token_ids = [
@@ -106,7 +112,9 @@ def input_processor_for_glmv(ctx: InputContext, llm_inputs: LLMInputs):
     hf_config = ctx.get_hf_config(ChatGLMConfig)
     vision_config = hf_config.vision_config
 
-    if isinstance(vision_config, dict):
+    if vision_config is None:
+        return llm_inputs
+    elif isinstance(vision_config, dict):
         image_placeholder_length = (vision_config["image_size"] //
                                     vision_config["patch_size"] //
                                     2)**2  # 1600
