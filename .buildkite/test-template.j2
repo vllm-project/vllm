@@ -1,5 +1,5 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
-{% set docker_image_amd = "rocmshared/vllm-ci:$BUILDKITE_COMMIT" %}
+{% set docker_image_amd = "rocmshared/vllm-ci-internal:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 
