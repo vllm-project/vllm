@@ -35,7 +35,7 @@ def _bgmv_shrink_kernel(
     SPLIT_K: tl.constexpr,
 ):
     """
-    GroupGEMV,Additionally, introducing SPLIT-K can improve large hidden_size's
+    GroupGEMV, additionally, introducing SPLIT-K can improve large hidden_size's
     performance
     """
     pid_sk = tl.program_id(axis=0)
@@ -93,7 +93,8 @@ def bgmv_shrink(
         lora_a_weights (torch.Tensor): lora'a weight
         output_tensor (torch.Tensor): output tensor
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
-            corresponding to each batch
+            corresponding to each batch. An index of -1 means no lora should be
+            applied.
         batches (int): batch size
         scaling (float):  Scaling factor.
         override_config (Optional[Dict[str, int]], optional): Defaults to None. 

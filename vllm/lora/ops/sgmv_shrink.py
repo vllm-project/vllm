@@ -125,7 +125,8 @@ def sgmv_shrink(
         seq_len_tensor (torch.Tensor): (batch_size,). record the sequence
             length of the sequences  in the batch
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
-            corresponding to each batch
+            corresponding to each batch. An index of -1 means no lora should be
+            applied.
         batches (int): batch size
         max_seq_length (int):  The max sequence lengths of the sequences
             in the batch

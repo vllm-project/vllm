@@ -38,7 +38,7 @@ def _bgmv_expand_slice_kernel(
     CAST_TYPE: tl.constexpr,
 ):
     """
-    GroupGEMV,Additionally, introducing SPLIT_N can improve large hidden_size's
+    GroupGEMV, additionally, introducing SPLIT_N can improve large hidden_size's
     performance
     """
     pid_sn = tl.program_id(axis=0)
@@ -105,7 +105,8 @@ def bgmv_expand_slice(
         lora_b_weights (torch.Tensor): lora'b weight
         output_tensor (torch.Tensor): output tensor
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
-            corresponding to each batch
+            corresponding to each batch, An index of -1 means no lora should be
+            applied.
         slice_offst (int): output_tensor's offst
         slice_size (int): current output_tensor's size
         batches (int): batch size
@@ -136,10 +137,7 @@ def bgmv_expand_slice(
     # TODO tuning this config
 
     N, K = lora_b_weights.shape[-2:]  # K= rank,N=hidden_size
-    # BLOCK_N = 256
     BLOCK_K = triton.next_power_of_2(K)
-
-    # SPLIT_N = 64
     EVEN_K = K % BLOCK_K == 0
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
