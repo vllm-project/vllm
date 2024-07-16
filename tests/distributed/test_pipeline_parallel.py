@@ -38,7 +38,7 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
         "--dtype",
         "bfloat16",
         "--tensor-parallel-size",
-        str(TP_SIZE),
+        str(max(TP_SIZE, 2)),  # use at least TP_SIZE=2 to hold the model
         "--distributed-executor-backend",
         "mp",
     ]
