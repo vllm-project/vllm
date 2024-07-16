@@ -276,6 +276,19 @@ class ModelConfig:
             raise ValueError(
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
+    def is_attention_free(self) -> bool:
+        """Returns True if the model has no attention, i.e. the model has no
+        state that grows with the size of the context.
+        """
+
+        # Return true if the model is mamba.
+        # This check should be augmented with more models in the future,
+        # and made more robust if possible.
+        if hasattr(self.hf_text_config,
+                   "model_type") and self.hf_text_config.model_type == 'mamba':
+            return True
+        return False
+
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
 
@@ -310,10 +323,8 @@ class ModelConfig:
             # we need to pad head_size 192 to 256
             return 256
 
-        if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'mamba':
-            # Is this going to explode
-            return 0 
+        if self.is_attention_free():
+            return 0
 
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
@@ -345,7 +356,8 @@ class ModelConfig:
         if self.hf_config.model_type == "dbrx":
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
-        if self.hf_config.model_type == "mamba":
+
+        if self.is_attention_free():
             return 0
 
         attributes = [
@@ -398,8 +410,9 @@ class ModelConfig:
     def get_layers_block_type(self,
                               parallel_config: "ParallelConfig") -> List[str]:
         num_layers = self.get_num_layers(parallel_config)
-       
-        if self.hf_config.model_type == "mamba":
+
+        if self.is_attention_free():
+            assert (self.hf_config.model_type == "mamba")
             return ["mamba"] * num_layers
 
         # Transformers supports layers_block_type @property
@@ -440,7 +453,7 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
-        cache_grows: bool,
+        is_attention_free: bool,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
@@ -450,7 +463,7 @@ class CacheConfig:
         self.swap_space_bytes = swap_space * _GB
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
-        self.cache_grows = cache_grows
+        self.is_attention_free = is_attention_free
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
         self._verify_args()
@@ -745,6 +758,8 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
+        is_attention_free: True if the running model does not have state that
+            grows as the context size increases.
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
         num_lookahead_slots: The number of slots to allocate per sequence per
             step, beyond the known token ids. This is used in speculative
@@ -767,6 +782,7 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
+                 is_attention_free: bool,
                  use_v2_block_manager: bool = False,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
@@ -791,11 +807,9 @@ class SchedulerConfig:
         if enable_chunked_prefill:
             logger.info("Chunked prefill is enabled (EXPERIMENTAL).")
 
-        #TODO: already perfect
-        self.its_mamba = True
-
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
+        self.is_attention_free = is_attention_free
         self.use_v2_block_manager = use_v2_block_manager
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor

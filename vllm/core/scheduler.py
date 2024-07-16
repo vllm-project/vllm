@@ -279,9 +279,8 @@ class Scheduler:
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
-        if self.scheduler_config.embedding_mode:
-            version = "embedding"
-        if self.scheduler_config.its_mamba:
+        if (self.scheduler_config.embedding_mode
+                or self.scheduler_config.is_attention_free):
             version = "embedding"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
@@ -708,7 +707,6 @@ class Scheduler:
 
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(seq_group)
-            can_allocate = True #TODO HACK TMS
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:

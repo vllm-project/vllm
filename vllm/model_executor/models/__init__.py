@@ -75,7 +75,6 @@ _GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
 }
-
 _MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
 
 # Architecture -> type.

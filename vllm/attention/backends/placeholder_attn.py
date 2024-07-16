@@ -1,12 +1,15 @@
-from dataclasses import dataclass, fields
-from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
-                    TypeVar)
+from dataclasses import dataclass
+from typing import (List, Optional, Tuple, Type)
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 import torch
 
+# Placeholder attention backend for models like Mamba that don't have attention.
+# Mainly exists to sidestep get_attn_backend.
+# The attention metadata is still needed for Mamba.
 
-class NoAttentionBackend(AttentionBackend):
+
+class PlaceholderAttentionBackend(AttentionBackend):
     """Placeholder backend for when no attention is needed."""
 
     @staticmethod
@@ -14,12 +17,12 @@ class NoAttentionBackend(AttentionBackend):
         return "No attention"
 
     @staticmethod
-    def get_impl_cls() -> Type["NoAttentionImpl"]:
-        return NoAttentionImpl
+    def get_impl_cls() -> Type["PlaceholderAttentionImpl"]:
+        return PlaceholderAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["NoAttentionMetadata"]:
-        return NoAttentionMetadata
+    def get_metadata_cls() -> Type["PlaceholderAttentionMetadata"]:
+        return PlaceholderAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -47,7 +50,7 @@ class NoAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class NoAttentionMetadata(AttentionMetadata):
+class PlaceholderAttentionMetadata(AttentionMetadata):
     """Attention metadata for prefill and decode batched together."""
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
@@ -88,11 +91,11 @@ class NoAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
-    _cached_prefill_metadata: Optional["NoAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["NoAttentionMetadata"] = None
+    _cached_prefill_metadata: Optional["PlaceholderAttentionMetadata"] = None
+    _cached_decode_metadata: Optional["PlaceholderAttentionMetadata"] = None
 
     @property
-    def prefill_metadata(self) -> Optional["NoAttentionMetadata"]:
+    def prefill_metadata(self) -> Optional["PlaceholderAttentionMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -106,7 +109,7 @@ class NoAttentionMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.seq_start_loc is not None
 
-        self._cached_prefill_metadata = NoAttentionMetadata(
+        self._cached_prefill_metadata = PlaceholderAttentionMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
@@ -125,7 +128,7 @@ class NoAttentionMetadata(AttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["NoAttentionMetadata"]:
+    def decode_metadata(self) -> Optional["PlaceholderAttentionMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -134,7 +137,7 @@ class NoAttentionMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.seq_lens_tensor is not None
 
-        self._cached_decode_metadata = NoAttentionMetadata(
+        self._cached_decode_metadata = PlaceholderAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
@@ -153,9 +156,10 @@ class NoAttentionMetadata(AttentionMetadata):
         return self._cached_decode_metadata
 
 
-class NoAttentionImpl(AttentionImpl):
+class PlaceholderAttentionImpl(AttentionImpl):
+
     def __init__(self, *args, **kwargs) -> None:
         return
-    
+
     def forward(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError

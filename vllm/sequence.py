@@ -684,7 +684,7 @@ class SequenceGroupMetadata:
         self.cross_block_table = cross_block_table
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
-        
+
         # The number of speculative tokens adopted in this request.
         # None means specuative decoding is not used.
         # Zero means speculative decoding is disabled for some reasons.

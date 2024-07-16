@@ -1,5 +1,9 @@
 # coding=utf-8
 """PyTorch MAMBA model."""
+import pdb
+import traceback
+import inspect
+
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -12,20 +16,25 @@ from torch.nn.parameter import Parameter
 from transformers import MambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
@@ -35,12 +44,18 @@ from vllm.worker.model_runner import _BATCH_SIZES_TO_CAPTURE
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
+def function_in_stack(function_name):
+    stack = traceback.extract_stack()
+    for frame in stack:
+        if frame.name == function_name:
+            return True
+    return False
+
 @dataclass
 class MambaCacheParams:
     is_prompt: bool = False
     conv_state: torch.Tensor = torch.Tensor()
     ssm_state: torch.Tensor = torch.Tensor()
-
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 class MambaMixer(nn.Module):
@@ -127,6 +142,15 @@ class MambaMixer(nn.Module):
         )
         self.activation = config.hidden_act
 
+        # Jamba has layer norms here. Mamba doesn't.
+        # TODO: Leaving these in for now, just as a placeholder in case mamba2 needs them.
+        #self.dt_layernorm = RMSNorm(self.time_step_rank,
+        #                            eps=config.layer_norm_epsilon)
+        #self.b_layernorm = RMSNorm(self.ssm_state_size,
+        #                           eps=config.layer_norm_epsilon)
+        #self.c_layernorm = RMSNorm(self.ssm_state_size,
+        #                           eps=config.layer_norm_epsilon)
+
     def mamba_forward(self,
                       hidden_states: torch.Tensor,
                       cache_params: MambaCacheParams = None):
@@ -171,7 +195,11 @@ class MambaMixer(nn.Module):
             dim=-1,
         )
 
-        # Note that Jamba normalizes B, C, and time_step here but Mamba doesn't.
+        # Jamba has layer norms here. Mamba doesn't.
+        # TODO: Leaving these in for now, just as a placeholder in case mamba2 needs them.
+        # time_step = self.dt_layernorm(time_step.contiguous())
+        # B = self.b_layernorm(B.contiguous())
+        # C = self.c_layernorm(C.contiguous())
 
         discrete_time_step = self.dt_proj(time_step)[0].transpose(1, 2)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
@@ -239,7 +267,6 @@ class MambaMixer(nn.Module):
 
         return hidden_states
 
-
 class MambaMLP(nn.Module):
 
     def __init__(
@@ -270,7 +297,6 @@ class MambaMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
-
 class MambaDecoderLayer(nn.Module):
 
     def __init__(self,
@@ -284,7 +310,8 @@ class MambaDecoderLayer(nn.Module):
         self.mixer = MambaMixer(config, layer_idx)
 
         self.feed_forward = MambaMLP(config, quant_config=quant_config)
-        self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.norm = RMSNorm(config.hidden_size,
+                                       eps=config.layer_norm_epsilon)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
                                         eps=config.layer_norm_epsilon)
 
@@ -301,7 +328,8 @@ class MambaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.norm(hidden_states)
         else:
-            hidden_states, residual = self.norm(hidden_states, residual)
+            hidden_states, residual = self.norm(
+                hidden_states, residual)
 
         hidden_states = self.mixer(hidden_states, attn_metadata, conv_state,
                                    ssm_state)
@@ -310,7 +338,6 @@ class MambaDecoderLayer(nn.Module):
             hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
-
 
 class MambaModel(nn.Module):
 
@@ -339,12 +366,12 @@ class MambaModel(nn.Module):
         for i in range(config.num_hidden_layers):
             decoder_layers.append(
                 MambaDecoderLayer(config,
-                                  layer_idx=i,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config))
+                            layer_idx=i,
+                            cache_config=cache_config,
+                            quant_config=quant_config))
         self.layers = nn.ModuleList(decoder_layers)
         self.norm_f = RMSNorm(config.hidden_size,
-                              eps=config.layer_norm_epsilon)
+                                       eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -373,8 +400,8 @@ class MambaModel(nn.Module):
             )
         hidden_states, _ = self.norm_f(hidden_states, residual)
 
-        return hidden_states
 
+        return hidden_states
 
 class MambaForCausalLM(nn.Module):
     packed_modules_mapping = {
@@ -408,13 +435,24 @@ class MambaForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.backbone = MambaModel(config,
-                                   cache_config=cache_config,
-                                   quant_config=quant_config,
-                                   lora_config=lora_config)
+                                cache_config=cache_config,
+                                quant_config=quant_config,
+                                lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
+        #TODO: this ends up all 0s -- we don't put anything in here when loading weights.
+        #TODO: Does mamba share weights between the lm head and embeddings?
+#        self.lm_head = ParallelLMHead(
+#            self.unpadded_vocab_size,
+#            config.hidden_size,
+#            org_num_embeddings=config.vocab_size,
+#            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+#            # We need bigger padding if using lora for kernel
+#            # compatibility
+#            if not lora_config else lora_config.lora_vocab_padding_size,
+#        )
         self.lm_head = self.backbone.embeddings
         # Current step used indices
         self.current_indices: List[int] = []
@@ -466,9 +504,9 @@ class MambaForCausalLM(nn.Module):
         self.current_indices = indices
 
         hidden_states = self.backbone(input_ids, positions, kv_caches,
-                                      attn_metadata,
-                                      current_seqlen_agnostic_cache[0],
-                                      current_seqlen_agnostic_cache[1])
+                                   attn_metadata,
+                                   current_seqlen_agnostic_cache[0],
+                                   current_seqlen_agnostic_cache[1])
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             self._copy_mamba_cache_by_indices(self.current_indices,
@@ -538,9 +576,9 @@ class MambaForCausalLM(nn.Module):
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """
-        Copy the relevant Mamba cache into the CUDA graph input buffer
-        that was provided during the capture runs
-        (MambaForCausalLM.mamba_gc_cache_buffer).
+        Copy the relevant Mamba cache into the CUDA graph input buffer 
+        that was provided during the capture runs 
+        (MambaForCausalLM.mamba_gc_cache_buffer). 
         """
         assert all(
             key in kwargs
@@ -564,7 +602,7 @@ class MambaForCausalLM(nn.Module):
     def copy_outputs_after_cuda_graphs(self, input_buffers, **kwargs):
         """
         Copy the relevant Mamba cache from the CUDA graph input_buffers
-        back to the MambaForCausalLM.mamba_cache after CUDA
+        back to the MambaForCausalLM.mamba_cache after CUDA 
         graph replay run is done.
         """
         self._copy_mamba_cache_by_indices(
@@ -574,7 +612,7 @@ class MambaForCausalLM(nn.Module):
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
         Provide the CUDA graph capture runs with a buffer in adjusted size.
-        The buffer is used to maintain the Mamba Cache during the CUDA graph
+        The buffer is used to maintain the Mamba Cache during the CUDA graph 
         replay runs.
         """
         return tuple(buffer[:, :batch_size]
@@ -602,6 +640,7 @@ class MambaForCausalLM(nn.Module):
             self
     ) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
         world_size = get_tensor_model_parallel_world_size()
+        hidden_size = self.config.hidden_size
         conv_state_shape = (
             self.config.intermediate_size // world_size,
             self.config.conv_kernel,
@@ -654,6 +693,9 @@ class MambaForCausalLM(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
+        for k, v in params_dict.items():
+            print(k)
+
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
