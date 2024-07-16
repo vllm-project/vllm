@@ -23,8 +23,8 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.attention.backends.placeholder_attn import PlaceholderAttentionBackend
-
+from vllm.attention.backends.placeholder_attn import (
+    PlaceholderAttentionBackend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)

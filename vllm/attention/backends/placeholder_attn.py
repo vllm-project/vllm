@@ -1,8 +1,10 @@
 from dataclasses import dataclass
-from typing import (List, Optional, Tuple, Type)
+from typing import List, Optional, Tuple, Type
+
+import torch
+
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-import torch
 
 # Placeholder attention backend for models like Mamba that don't have attention.
 # Mainly exists to sidestep get_attn_backend.
