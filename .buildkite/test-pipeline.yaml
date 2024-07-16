@@ -12,7 +12,6 @@ steps:
   fast_check_only: true
   commands:
   - pytest -v -s async_engine # Async Engine
-  - bash ../.buildkite/download-images.sh # Inputs 
   - pytest -v -s test_inputs.py
   - pytest -v -s multimodal
   - pytest -v -s test_utils.py # Utils
@@ -82,7 +81,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   commands:
-  - bash ../.buildkite/download-images.sh
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -155,7 +153,6 @@ steps:
 - label: Inputs Test
   #mirror_hardwares: [amd]
   commands:
-    - bash ../.buildkite/download-images.sh
     - pytest -v -s test_inputs.py
     - pytest -v -s multimodal
 
@@ -175,7 +172,6 @@ steps:
 - label: Vision Language Models Test
   mirror_hardwares: [amd]
   commands:
-    - bash ../.buildkite/download-images.sh
     - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
