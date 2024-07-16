@@ -598,11 +598,10 @@ def _get_padded_prefill_len(x: int) -> int:
 
 
 def _get_padded_batch_size(batch_size: int) -> int:
-    if batch_size <= 2:
-        return batch_size
-    elif batch_size <= 4:
-        return 4
-    elif batch_size <= 8:
+    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
+    # To meet this requirement in the simplest way, we set the minimal batch
+    # size to 8.
+    if batch_size <= 8:
         return 8
     else:
         return ((batch_size + 15) // 16) * 16
