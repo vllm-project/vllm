@@ -231,8 +231,8 @@ def get_output_from_llm_generator(
         tokens = [output.outputs[0].text for output in outputs]
 
         # Fetch acceptance rate if logging is enabled.
-        if llm.llm_engine.log_stats:
-            stat_logger = llm.llm_engine.stat_loggers["prometheus"]
+        if stat_loggers := getattr(llm.llm_engine, "stat_loggers", None):
+            stat_logger = stat_loggers["prometheus"]
             acceptance_rate = (stat_logger.metrics.
                                gauge_spec_decode_draft_acceptance_rate.labels(
                                    **stat_logger.labels)._value.get())
