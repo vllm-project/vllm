@@ -31,6 +31,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -102,18 +104,17 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
         return super().forward(positions + self.offset)
 
 
-class BartScaledWordEmbedding(nn.Embedding):
+class BartScaledWordEmbedding(VocabParallelEmbedding):
     """
-    This module overrides nn.Embeddings' 
+    This module overrides VocabParallelEmbedding's 
     forward by multiplying with embeddings scale.
     """
 
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
-                 padding_idx: int,
                  embed_scale: Optional[float] = 1.0):
-        super().__init__(num_embeddings, embedding_dim, padding_idx)
+        super().__init__(num_embeddings, embedding_dim)
         self.embed_scale = embed_scale
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -472,13 +473,11 @@ class BartEncoder(nn.Module):
         self.quant_config = quant_config
         self.lora_config = lora_config
         embed_dim = config.d_model
-        self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_position_embeddings
         embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
         self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
                                                     embed_dim,
-                                                    self.padding_idx,
                                                     embed_scale=embed_scale)
 
         if embed_tokens is not None:
@@ -554,14 +553,12 @@ class BartDecoder(nn.Module):
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.lora_config = lora_config
-        self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
         self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
                                                     config.d_model,
-                                                    self.padding_idx,
                                                     embed_scale=embed_scale)
 
         if embed_tokens is not None:
@@ -703,7 +700,11 @@ class BartForConditionalGeneration(nn.Module):
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        embed_scale = math.sqrt(
+            config.d_model) if config.scale_embedding else 1.0
+        self.lm_head = BartScaledWordEmbedding(config.vocab_size,
+                                               config.d_model,
+                                               embed_scale=embed_scale)
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
@@ -742,7 +743,7 @@ class BartForConditionalGeneration(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
