@@ -8,11 +8,13 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, create_per_tensor_scale_param, create_per_channel_scale_param,
-    cutlass_fp8_supported, requantize_with_max_scale)
+    apply_fp8_linear, create_per_channel_scale_param,
+    create_per_tensor_scale_param, cutlass_fp8_supported,
+    requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
+
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
@@ -20,10 +22,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
         self.cutlass_fp8_supported = cutlass_fp8_supported()
-        
+
         # On Lovelace, fall ba
-        if (not self.cutlass_fp8_supported and 
-            self.strategy == QuantizationStrategy.CHANNEL):
+        if (not self.cutlass_fp8_supported
+                and self.strategy == QuantizationStrategy.CHANNEL):
             raise ValueError(
                 "Channelwise fp8 quantization requires vLLM's custom "
                 "cutlass kernels, which are not supported on your device."
@@ -31,15 +33,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 "to Hopper.")
 
     def process_weights_after_loading(self, layer) -> None:
-        # If per tensor, when we have a fused module (e.g. QKV) with per 
-        # tensor scales (thus N scales being passed to the kernel), 
+        # If per tensor, when we have a fused module (e.g. QKV) with per
+        # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor with torch._scaled_mm
-        if (self.strategy == QuantizationStrategy.TENSOR or 
-            not self.cutlass_fp8_supported):
+        if (self.strategy == QuantizationStrategy.TENSOR
+                or not self.cutlass_fp8_supported):
             max_w_scale, weight = requantize_with_max_scale(
                 weight=layer.weight,
                 weight_scale=layer.weight_scale,
-                logical_widths=layer.logical_widths,)
+                logical_widths=layer.logical_widths,
+            )
 
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
@@ -52,10 +55,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
-        
+
         # INPUT SCALE
         if self.is_static_input_scheme:
-            layer.input_scale = Parameter(layer.input_scale.max(), 
+            layer.input_scale = Parameter(layer.input_scale.max(),
                                           requires_grad=False)
         else:
             layer.input_scale = None
