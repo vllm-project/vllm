@@ -235,6 +235,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
+
+        model_input = self._prepare_encoder_model_input_tensors(
+            seq_group_metadata_list, model_input)
+
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
                                                      model_input.seq_lens,
                                                      model_input.query_lens,
