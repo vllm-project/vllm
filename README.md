@@ -43,8 +43,8 @@ vLLM is fast with:
 - Efficient management of attention key and value memory with **PagedAttention**
 - Continuous batching of incoming requests
 - Fast model execution with CUDA/HIP graph
-- Activaion Quantization: Fp8, Int8 [SmoothQuant](https://arxiv.org/abs/2211.10438)
-- Weight-only Quantization [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [SqueezeLLM](https://arxiv.org/abs/2306.07629), FP8 KV Cache
+- Activaion Quantization with Fp8, Int8 [SmoothQuant](https://arxiv.org/abs/2211.10438)
+- Weight-only Quantization with [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [SqueezeLLM](https://arxiv.org/abs/2306.07629), FP8 KV Cache
 - Optimized CUDA kernels
 
 **Performance benchmark**: We include a [performance benchmark](https://buildkite.com/vllm/performance-benchmark/builds/3924) that compares the performance of vllm against other LLM serving engines ([TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [text-generation-inference](https://github.com/huggingface/text-generation-inference) and [lmdeploy](https://github.com/InternLM/lmdeploy)).
