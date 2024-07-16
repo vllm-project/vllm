@@ -289,7 +289,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         if tokens[0].startswith(SPIECE_UNDERLINE) and self.add_prefix_space:
             tokens[0] = tokens[0][1:]
 
-        current_sub_tokens = []
+        current_sub_tokens: List[str] = []
         out_string = ""
         prev_is_special = False
         for i, token in enumerate(tokens):
@@ -306,9 +306,10 @@ class BitnetTokenizer(PreTrainedTokenizer):
         out_string += self.sp_model.decode(current_sub_tokens)
         return out_string
 
-    def save_vocabulary(self,
-                        save_directory,
-                        filename_prefix: Optional[str] = None) -> Tuple[str]:
+    def save_vocabulary(
+            self,
+            save_directory,
+            filename_prefix: Optional[str] = None) -> Optional[Tuple[str]]:
         """
         Save the vocabulary and special tokens file to a directory.
 
@@ -322,7 +323,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         if not os.path.isdir(save_directory):
             logger.error(
                 f"Vocabulary path ({save_directory}) should be a directory")
-            return
+            return None
         out_vocab_file = os.path.join(
             save_directory,
             (filename_prefix + "-" if filename_prefix else "") +
