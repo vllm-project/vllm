@@ -114,18 +114,11 @@ class Sampler(nn.Module):
         #print('sample_results ' + str(sample_results))
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
-        output = _build_sampler_output(sample_results,
-                                       sampling_metadata,
-                                       prompt_logprobs,
-                                       sample_logprobs,
-                                       on_device_tensors=on_device_tensors)
-        #print('output ' + str(output))
-        return output
-        #return _build_sampler_output(sample_results,
-        #                             sampling_metadata,
-        #                             prompt_logprobs,
-        #                             sample_logprobs,
-        #                             on_device_tensors=on_device_tensors)
+        return _build_sampler_output(sample_results,
+                                     sampling_metadata,
+                                     prompt_logprobs,
+                                     sample_logprobs,
+                                     on_device_tensors=on_device_tensors)
 
     @property
     def _should_modify_greedy_probs_inplace(self) -> bool:
@@ -502,8 +495,6 @@ def _sample_with_torch(
         sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.GREEDY:
-            #greedy_samples = torch.argmax(logprobs[long_sample_indices],
-            #                              dim=-1)
             greedy_samples = torch.argmax(probs[long_sample_indices],
                                           dim=-1)
 
