@@ -385,7 +385,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size, logit_scale)
+                                                config.vocab_size, logit_scale)
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
