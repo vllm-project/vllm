@@ -74,6 +74,14 @@ class ModelInputForXPU(ModelRunnerInputBase):
                 attn_backend, tensor_dict)
         return cls(**tensor_dict)
 
+# ipex (Both CPU and XPU) will have some optimization on model weight layout 
+# to fully leverage hardware potential. We want to add cpu quant optimization
+# cpu would performs best with a specific weight layout (which is different to cuda device layout), 
+# so a repack api should be called.
+def IpexXPUModelQuantWeightWrapper():
+    # todo: for quant model, call ipex repack API. 
+    # eg: return ipex.repack_awq(model)
+    pass
 
 class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
@@ -143,6 +151,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
+
+        self.model = IpexXPUModelQuantWeightWrapper(self.model)
 
     @property
     def vocab_size(self) -> int:

@@ -283,8 +283,6 @@ class DefaultModelLoader(BaseModelLoader):
                 # to use quant_method.
                 if hasattr(module, "process_weights_after_loading"):
                     module.process_weights_after_loading()
-            if use_ipex():
-                model = ipex_load_post_process_module.process_weights_after_loading(model) # eg: ipex could replacelinear 
         return model.eval()
 
 
