@@ -160,7 +160,7 @@ AllPromptInputs = Union[PromptInputs, ExplicitEncoderDecoderPromptStrict]
 """All possible input prompt options, strict or non-strict"""
 
 
-def get_single_prompt_type(prompt: AllPromptInputs, ) -> str:
+def get_prompt_type(prompt: AllPromptInputs, ) -> str:
     """
     Get the type-name of the prompt argument instance, given that
     isinstance() cannot apply to TypedDict subclasses directly.
@@ -200,7 +200,7 @@ def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs, ) -> bool:
     # does not understand that
     # get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder' narrows
     # down the possible types
-    if (get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder' and
+    if (get_prompt_type(prompt) == 'ExplicitEncoderDecoder' and
         (prompt['encoder_prompt'] is None  # type: ignore
          or prompt['decoder_prompt']['multi_modal_data']  # type: ignore
          is not None)):

@@ -23,9 +23,10 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, LLMInputs, PromptInputs,
-                         get_single_prompt_type)
+                         get_prompt_type)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -545,29 +546,137 @@ class LLMEngine:
 
     _LLMInputComponentsType = Tuple[str, List[int], ]
 
-    def _get_prompt_token_ids_or_tokenize(
+    def _tokenize_prompt(
         self,
-        inputs,
         request_id,
+        inputs,
         lora_request,
     ) -> List[int]:
-        return [0]
-
-    def _tokenize_prompt(self,
-                         request_id,
-                         inputs,
-                         prompt,
-                         lora_request,
-                         ) -> List[int]:
-        tokenizer = self.get_tokenizer_group(
-            "prompts must be None if "
-            "skip_tokenizer_init is True")
+        tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                             "skip_tokenizer_init is True")
 
         return tokenizer.encode(request_id=request_id,
                                 prompt=inputs["prompt"],
                                 lora_request=lora_request)
 
-    def process_model_inputs(
+    def _extract_single_prompt(
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        lora_request: Optional[LoRARequest],
+        is_encoder_prompt: bool = False,
+    ) -> Tuple[str, List[int], Optional["MultiModalDataDict"]]:
+        '''
+        Extract prompt & prompt_token_ids from any single
+        encoder or decoder input prompt. For encoder input prompts
+        in particular, also extract multi-modal data.
+
+        Arguments:
+
+        * request_id
+        * inputs: single encoder or decoder input prompt
+        * lora_request
+        * is_encoder_prompt: True if encoder input prompt
+
+        Returns:
+        * prompt
+        * prompt_token_ids
+        * multi_modal_data (None if is_encoder_prompt)
+        '''
+
+        if isinstance(inputs, str):
+            # prompt = inputs
+            # prompt_token_ids = tokenize(inputs)
+            # no multi-modal data
+            return (inputs,
+                    self._tokenize_prompt(
+                        request_id,
+                        inputs,
+                        lora_request,
+                    ), None)
+
+        # Tokenize
+        prompt_token_ids = (inputs["prompt_token_ids"]
+                            if inputs["prompt_token_ids"] else
+                            self._tokenize_prompt(
+                                request_id,
+                                inputs,
+                                lora_request,
+                            ))
+
+        if is_encoder_prompt:
+            # Only care about multi-modal data associated
+            # with the encoder prompt
+            return (inputs.get('prompt'), prompt_token_ids,
+                    inputs.get("multi_modal_data"))
+        else:
+            # Assume there is no decoder multi-modal data
+            return (inputs.get('prompt'), prompt_token_ids, None)
+
+    def _get_default_decoder_prompt(
+        self,
+        request_id: str,
+        lora_request: Optional[LoRARequest],
+    ) -> Tuple[str, List[int]]:
+        prompt = ""
+        prompt_token_ids = (self._tokenize_prompt(
+            request_id,
+            prompt,
+            lora_request,
+        ))
+        return prompt, prompt_token_ids
+
+    def _process_encoder_decoder_prompt(self, request_id: str,
+                                        inputs: PromptInputs,
+                                        lora_request: Optional[LoRARequest]):
+        ptype = get_prompt_type(inputs)
+
+        # Obtain encoder prompt
+        (
+            encoder_prompt,
+            encoder_prompt_token_ids,
+            multi_modal_data,
+        ) = self._extract_single_prompt(
+            request_id,
+            (inputs.get('encoder_prompt') if get_prompt_type(inputs)
+             == "ExplicitEncoderDecoder" else inputs),
+            lora_request,
+            is_encoder_prompt=True,
+        )
+
+        # Obtain decoder prompt
+        if ptype == "ExplicitEncoderDecoder":
+            # User supplied a dict with explicit
+            # encoder and decoder prompts; extract
+            # decoder prompt
+            (
+                decoder_prompt,
+                decoder_prompt_token_ids,
+                _,
+            ) = self._extract_single_prompt(
+                request_id,
+                inputs.get('decoder_prompt'),
+                lora_request,
+                is_encoder_prompt=False,
+            )
+        else:
+            # User supplied a single prompt (implicitly
+            # the encoder prompt) so default decoder
+            # prompt must be inferred
+            (
+                decoder_prompt,
+                decoder_prompt_token_ids,
+            ) = self._get_default_decoder_prompt(request_id, lora_request)
+
+        return LLMInputs(
+            prompt_token_ids=decoder_prompt_token_ids,
+            prompt=decoder_prompt,
+            encoder_prompt_token_ids=encoder_prompt_token_ids,
+            encoder_prompt=encoder_prompt,
+            multi_modal_data=multi_modal_data,
+        )
+
+    def _process_decoder_only_prompt(
         self,
         request_id: str,
         inputs: PromptInputs,
@@ -577,45 +686,51 @@ class LLMEngine:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 
+        if "prompt_token_ids" not in inputs:
+            prompt_token_ids = self._tokenize_prompt(
+                request_id,
+                inputs,
+                lora_request,
+            )
+        else:
+            prompt_token_ids = inputs["prompt_token_ids"]
+
+        if prompt_adapter_request:
+            prompt_token_ids = (
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
+                + prompt_token_ids)
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=inputs.get("prompt"),
+                         multi_modal_data=inputs.get("multi_modal_data"))
+
+    def process_model_inputs(
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> LLMInputs:
+
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-
-            ptype = get_single_prompt_type(inputs)
-
-            if ptype == "ExplicitEncoderDecoder":
-                # User supplied a
-                pass
-            else:
-                #
-                pass
+            return self.input_processor(
+                self._process_encoder_decoder_prompt(
+                    request_id,
+                    inputs,
+                    lora_request,
+                ))
 
         else:
             # Decoder-only operation
-
-            if "prompt_token_ids" not in inputs:
-                tokenizer = self.get_tokenizer_group(
-                    "prompts must be None if "
-                    "skip_tokenizer_init is True")
-
-                prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                                    prompt=inputs["prompt"],
-                                                    lora_request=lora_request)
-            else:
-                prompt_token_ids = inputs["prompt_token_ids"]
-
-            if prompt_adapter_request:
-                prompt_token_ids = (
-                    [0] *
-                    prompt_adapter_request.prompt_adapter_num_virtual_tokens +
-                    prompt_token_ids)
-
-            llm_inputs = LLMInputs(
-                prompt_token_ids=prompt_token_ids,
-                prompt=inputs.get("prompt"),
-                multi_modal_data=inputs.get("multi_modal_data"))
-
-        return self.input_processor(llm_inputs)
+            return self.input_processor(
+                self._process_decoder_only_prompt(
+                    request_id,
+                    inputs,
+                    lora_request,
+                    prompt_adapter_request,
+                ))
 
     def add_request(
         self,
