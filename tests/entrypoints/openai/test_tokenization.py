@@ -4,8 +4,32 @@ import requests
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from ...utils import RemoteOpenAIServer
+
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+
+
+@pytest.fixture(scope="module")
+def server():
+    with RemoteOpenAIServer([
+            "--model",
+            MODEL_NAME,
+            # use half precision for speed and memory savings in CI environment
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "8192",
+            "--enforce-eager",
+            "--max-num-seqs",
+            "128",
+    ]) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def client(server):
+    return server.get_async_client()
 
 
 @pytest.mark.asyncio
