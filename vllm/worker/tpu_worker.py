@@ -98,8 +98,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): This does not completely eliminate the recompilation
         # overhead because dynamo does not cache the compiled results.
-        xr.initialize_cache(os.path.expanduser(envs.VLLM_XLA_CACHE_PATH),
-                            readonly=False)
+        xr.initialize_cache(envs.VLLM_XLA_CACHE_PATH, readonly=False)
 
     def load_model(self):
         self.model_runner.load_model()
