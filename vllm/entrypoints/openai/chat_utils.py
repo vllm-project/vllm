@@ -1,13 +1,14 @@
 import codecs
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Awaitable, Iterable, List, Optional, TypedDict, cast, final
 
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
 
-from vllm.config import ModelConfig
 from vllm.entrypoints.openai.protocol import (ChatCompletionContentPartParam,
                                               ChatCompletionMessageParam)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import async_get_and_parse_image
@@ -28,7 +29,9 @@ class ChatMessageParseResult:
         default_factory=list)
 
 
-def load_chat_template(tokenizer, chat_template: Optional[str]):
+def load_chat_template(engine: OpenAIServing, chat_template: Optional[str]):
+    tokenizer = engine.tokenizer
+
     if chat_template is not None:
         try:
             with open(chat_template, "r") as f:
@@ -55,10 +58,11 @@ def load_chat_template(tokenizer, chat_template: Optional[str]):
         logger.warning("No chat template provided. Chat API will not work.")
 
 
-def image_token_str(model_config: ModelConfig, tokenizer) -> Optional[str]:
+@lru_cache(maxsize=None)
+def _image_token_str(engine: OpenAIServing) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
-    model_type = model_config.hf_config.model_type
+    model_type = engine.model_config.hf_config.model_type
     if model_type == "phi3_v":
         # Workaround since this token is not defined in the tokenizer
         return "<|image_1|>"
@@ -66,7 +70,8 @@ def image_token_str(model_config: ModelConfig, tokenizer) -> Optional[str]:
         # These models do not use image tokens in the prompt
         return None
     if model_type.startswith("llava"):
-        return tokenizer.decode(model_config.hf_config.image_token_index)
+        return engine.tokenizer.decode(
+            engine.model_config.hf_config.image_token_index)
 
     else:
         raise TypeError("Unknown model type: {model_type}")
@@ -74,7 +79,8 @@ def image_token_str(model_config: ModelConfig, tokenizer) -> Optional[str]:
 
 # TODO: Let user specify how to insert image tokens into prompt
 # (similar to chat template)
-def _get_full_image_text_prompt(image_token_str: str, text_prompt: str) -> str:
+def _get_full_image_text_prompt(engine: OpenAIServing, image_token_str: str,
+                                text_prompt: str) -> str:
     """Combine image and text prompts for vision language model"""
 
     # NOTE: For now we assume all model architectures use the same
@@ -83,9 +89,9 @@ def _get_full_image_text_prompt(image_token_str: str, text_prompt: str) -> str:
 
 
 def _parse_chat_message_content_parts(
+    engine: OpenAIServing,
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
-    image_token_str: Optional[str],
 ) -> ChatMessageParseResult:
     texts: List[str] = []
     mm_futures: List[Awaitable[MultiModalDataDict]] = []
@@ -115,15 +121,19 @@ def _parse_chat_message_content_parts(
 
     text_prompt = "\n".join(texts)
 
-    if mm_futures and image_token_str is not None:
-        if image_token_str in text_prompt:
-            logger.warning("Detected image token string in the text prompt. "
-                           "Skipping prompt formatting.")
-        else:
-            text_prompt = _get_full_image_text_prompt(
-                image_token_str=image_token_str,
-                text_prompt=text_prompt,
-            )
+    if mm_futures:
+        image_token_str = _image_token_str(engine)
+        if image_token_str is not None:
+            if image_token_str in text_prompt:
+                logger.warning(
+                    "Detected image token string in the text prompt. "
+                    "Skipping prompt formatting.")
+            else:
+                text_prompt = _get_full_image_text_prompt(
+                    engine,
+                    image_token_str=image_token_str,
+                    text_prompt=text_prompt,
+                )
 
     messages = [ConversationMessage(role=role, content=text_prompt)]
 
@@ -131,8 +141,9 @@ def _parse_chat_message_content_parts(
 
 
 def parse_chat_message_content(
-        message: ChatCompletionMessageParam,
-        image_token_str: Optional[str] = None) -> ChatMessageParseResult:
+    engine: OpenAIServing,
+    message: ChatCompletionMessageParam,
+) -> ChatMessageParseResult:
     role = message["role"]
     content = message.get("content")
 
@@ -142,4 +153,4 @@ def parse_chat_message_content(
         messages = [ConversationMessage(role=role, content=content)]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
-    return _parse_chat_message_content_parts(role, content, image_token_str)
+    return _parse_chat_message_content_parts(engine, role, content)

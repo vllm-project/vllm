@@ -44,7 +44,7 @@ async def test_tokenize_completions(client: openai.AsyncOpenAI,
 )
 async def test_tokenize_chat(client: openai.AsyncOpenAI, model_name: str):
     base_url = str(client.base_url)[:-3].strip("/")
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
 
     for add_generation in [False, True]:
         for add_special in [False, True]:

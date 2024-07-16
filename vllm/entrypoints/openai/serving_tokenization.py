@@ -24,7 +24,7 @@ class OpenAIServingTokenization(OpenAIServing):
                          served_model_names=served_model_names,
                          lora_modules=None)
 
-        load_chat_template(self.tokenizer, chat_template)
+        load_chat_template(self, chat_template)
 
     async def create_tokenize(self,
                               request: TokenizeRequest) -> TokenizeResponse:
@@ -45,7 +45,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
             for message in request.messages:
                 conversation.extend(
-                    parse_chat_message_content(message).messages)
+                    parse_chat_message_content(self, message).messages)
 
             request.prompt = self.tokenizer.apply_chat_template(
                 add_generation_prompt=request.add_generation_prompt,

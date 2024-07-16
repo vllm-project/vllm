@@ -9,7 +9,6 @@ from fastapi import Request
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.chat_utils import (ConversationMessage,
-                                                image_token_str,
                                                 load_chat_template,
                                                 parse_chat_message_content)
 from vllm.entrypoints.openai.protocol import (
@@ -50,8 +49,7 @@ class OpenAIServingChat(OpenAIServing):
                          lora_modules=lora_modules)
 
         self.response_role = response_role
-        self.image_token_str = image_token_str(model_config, self.tokenizer)
-        load_chat_template(self.tokenizer, chat_template)
+        load_chat_template(self, chat_template)
 
     async def create_chat_completion(
         self,
@@ -77,8 +75,7 @@ class OpenAIServingChat(OpenAIServing):
             mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
             for msg in request.messages:
-                chat_parsed_result = parse_chat_message_content(
-                    msg, self.image_token_str)
+                chat_parsed_result = parse_chat_message_content(self, msg)
 
                 conversation.extend(chat_parsed_result.messages)
                 mm_futures.extend(chat_parsed_result.mm_futures)
