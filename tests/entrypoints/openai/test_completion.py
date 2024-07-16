@@ -1,6 +1,8 @@
 # imports for guided decoding tests
 import json
 import re
+import shutil
+from tempfile import TemporaryDirectory
 from typing import List
 
 import jsonschema
@@ -13,6 +15,7 @@ import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
+from transformers import AutoTokenizer
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -78,6 +81,20 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="module")
+def zephyr_lora_added_tokens_files(zephyr_lora_files):
+    tmp_dir = TemporaryDirectory()
+    tmp_model_dir = f"{tmp_dir.name}/zephyr"
+    shutil.copytree(zephyr_lora_files, tmp_model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # 32000, 32001, 32002
+    tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"], special_tokens=True)
+    tokenizer.save_pretrained(tmp_model_dir)
+    #TODO added_embeddings.safetensors?
+    yield tmp_model_dir
+    tmp_dir.cleanup()
+
+
+@pytest.fixture(scope="module")
 def ray_ctx():
     ray.init(runtime_env={"working_dir": VLLM_PATH})
     yield
@@ -85,7 +102,7 @@ def ray_ctx():
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files, ray_ctx):
+def server(zephyr_lora_files, zephyr_lora_added_tokens_files, ray_ctx):
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
@@ -99,7 +116,7 @@ def server(zephyr_lora_files, ray_ctx):
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_files}",
+        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -137,12 +154,37 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
     )
     assert len(completion.choices[0].text) >= 5
+
+
+@pytest.mark.asyncio
+async def test_added_lora_tokens(client: openai.AsyncOpenAI):
+    # test using token IDs
+    completion = await client.completions.create(
+        model="zephyr-lora2",
+        prompt=[0, 0, 32000, 32001, 32002],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    assert len(completion.choices[0].text) >= 5
+
+
+@pytest.mark.asyncio
+async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
+    with pytest.raises(
+            (openai.BadRequestError, openai.APIError)):  # test using token IDs
+        completion = await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 32000, 32001, 32002],
+            max_tokens=5,
+            temperature=0.0,
+        )
+        assert len(completion.choices[0].text) >= 5
 
 
 @pytest.mark.asyncio
@@ -154,7 +196,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
@@ -173,7 +215,7 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
 async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
@@ -194,7 +236,7 @@ async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
 async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=[0, 0, 0, 0, 0],
         max_tokens=5,
         temperature=0.0,
@@ -218,7 +260,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
     with pytest.raises(
         (openai.BadRequestError, openai.APIError)):  # test using token IDs
         await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt=[0, 0, 0, 0, 0],
             max_tokens=5,
             temperature=0.0,
@@ -230,7 +272,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
     with pytest.raises(
         (openai.BadRequestError, openai.APIError)):  # test using token IDs
         stream = await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt=[0, 0, 0, 0, 0],
             max_tokens=5,
             temperature=0.0,
@@ -679,11 +721,11 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME],
+    [MODEL_NAME, "zephyr-lora2"],
 )
 async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
     base_url = str(client.base_url)[:-3].strip("/")
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
 
     for add_special in [False, True]:
         prompt = "This is a test prompt."
@@ -706,11 +748,11 @@ async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME],
+    [MODEL_NAME, "zephyr-lora2"],
 )
 async def test_detokenize(client: openai.AsyncOpenAI, model_name: str):
     base_url = str(client.base_url)[:-3]
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
 
     prompt = "This is a test prompt."
     tokens = tokenizer.encode(prompt, add_special_tokens=False)
