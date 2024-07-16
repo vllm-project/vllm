@@ -3,8 +3,8 @@
 import triton
 
 
-
 class LibEntry(triton.KernelInterface):
+
     def __init__(
         self,
         fn,
@@ -55,9 +55,10 @@ class LibEntry(triton.KernelInterface):
             else:
                 # compiled
                 for v, heur in self.fn.values.items():
-                    config[v] = heur(
-                        {**dict(zip(self.arg_names, args)), **kwargs}
-                    )
+                    config[v] = heur({
+                        **dict(zip(self.arg_names, args)),
+                        **kwargs
+                    })
                 kernel = self.kernel_cache[entry_key]
         # JitFunction
         else:
@@ -69,8 +70,7 @@ class LibEntry(triton.KernelInterface):
             else:
                 # compiled
                 args = tuple([
-                    arg
-                    for i, arg in enumerate(args)
+                    arg for i, arg in enumerate(args)
                     if not self.fn.params[i].is_constexpr
                 ])
                 kernel = self.kernel_cache[entry_key]
