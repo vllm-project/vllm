@@ -1,12 +1,10 @@
 import shutil
 from dataclasses import dataclass
-from functools import cached_property, lru_cache
+from functools import lru_cache
 from typing import Literal
 
 import requests
 from PIL import Image
-
-from vllm.multimodal.utils import fetch_image
 
 from .base import get_cache_dir
 
@@ -35,13 +33,8 @@ def get_air_example_data_2_asset(filename: str) -> Image.Image:
 
 @dataclass(frozen=True)
 class ImageAsset:
-    name: Literal["stop_sign", "cherry_blossom", "boardwalk"]
+    name: Literal["stop_sign", "cherry_blossom"]
 
-    @cached_property
+    @property
     def pil_image(self) -> Image.Image:
-        if self.name == "boardwalk":
-            return fetch_image(
-                "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-            )
-
         return get_air_example_data_2_asset(f"{self.name}.jpg")
