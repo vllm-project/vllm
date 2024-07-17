@@ -419,7 +419,7 @@ def get_max_internvl_image_tokens(ctx: InputContext):
     vision_config = hf_config.vision_config
     image_size = vision_config.image_size
     patch_size = vision_config.patch_size
-    downsample_ratio = model_config.downsample_ratio
+    downsample_ratio = hf_config.downsample_ratio
     num_patches = get_internvl_num_patches(image_size, patch_size,
                                            downsample_ratio)
     return num_patches * 7
@@ -484,18 +484,19 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
     image_feature_size = get_max_internvl_image_tokens(ctx)
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(PretrainedConfig)
+    vision_config = hf_config.vision_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
 
     seq_data = dummy_seq_data_for_clip(
-        hf_config,
+        vision_config,
         seq_len,
         image_token_id=tokenizer.encode(IMG_CONTEXT,
                                         add_special_tokens=False)[0],
         image_feature_size_override=image_feature_size,
     )
     mm_data = dummy_image_for_clip(
-        hf_config,
+        vision_config,
         image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
