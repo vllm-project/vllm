@@ -1,5 +1,6 @@
 # Common dependencies
 -r requirements-common.txt
+-r requirements-adag.txt
 
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
