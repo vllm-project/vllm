@@ -1,4 +1,5 @@
 """A block manager that manages token blocks."""
+import enum
 import math
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
@@ -59,7 +60,10 @@ class BlockAllocatorBase(ABC):
     @abstractmethod
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
         pass
-
+    
+    @abstractmethod
+    def get_migrate_blocks(self)->List[int]:
+        pass
 
 class CachedBlockAllocator(BlockAllocatorBase):
     """Manages free physical token blocks for a device.
@@ -73,11 +77,12 @@ class CachedBlockAllocator(BlockAllocatorBase):
                  device: Device,
                  block_size: int,
                  num_blocks: int,
+                 blocks_for_migrate: int=0,
                  eviction_policy: EvictionPolicy = EvictionPolicy.LRU) -> None:
         self.device = device
         self.block_size = block_size
-        self.num_blocks = num_blocks
-
+        self.num_blocks = num_blocks-blocks_for_migrate
+        self.blocks_for_migrate=blocks_for_migrate
         self.current_num_blocks = 0
         self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
 
@@ -149,6 +154,11 @@ class CachedBlockAllocator(BlockAllocatorBase):
         block.block_hash = block_hash
         del self.cached_blocks[old_hash]
         self.cached_blocks[block_hash] = block
+    def get_migrate_blocks(self)->List[int]:
+        blocks_number=[]
+        for block_number in range(self.num_blocks,self.num_blocks+self.blocks_for_migrate):
+            blocks_number.append(block_number)
+        return blocks_number
 
 
 class UncachedBlockAllocator(BlockAllocatorBase):
@@ -164,6 +174,7 @@ class UncachedBlockAllocator(BlockAllocatorBase):
         device: Device,
         block_size: int,
         num_blocks: int,
+        remote_rank:Optional[int]=0
     ) -> None:
         self.device = device
         self.block_size = block_size
@@ -176,7 +187,8 @@ class UncachedBlockAllocator(BlockAllocatorBase):
                                        block_number=i,
                                        block_size=block_size,
                                        block_hash=-1,
-                                       num_hashed_tokens=0)
+                                       num_hashed_tokens=0,
+                                       remote_rank=remote_rank)
             self.free_blocks.append(block)
 
     def allocate(self,
@@ -184,7 +196,7 @@ class UncachedBlockAllocator(BlockAllocatorBase):
                  num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
         if not self.free_blocks:
             raise ValueError("Out of memory! No free blocks are available.")
-        block = self.free_blocks.pop()
+        block = self.free_blocks.pop(0)
         block.ref_count = 1
         return block
 
@@ -208,7 +220,95 @@ class UncachedBlockAllocator(BlockAllocatorBase):
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
         raise NotImplementedError(
             "Invalid codepath for uncached block allocator.")
-
+    
+    def get_migrate_blocks(self)->List[int]:
+        raise NotImplementedError(
+            "Invalid codepath for uncached block allocator.")
+class SelectionPolicy(enum.Enum):
+    """Enum for eviction policy used by make_evictor to instantiate the correct
+       Evictor subclass.
+    """
+    LRU = enum.auto()
+    ONLYAPPEND=enum.auto()
+    MEANAPPEND=enum.auto()
+class RemoteAllocator:
+    def __init__(
+            self,
+            block_size: int,
+            num_gpu_blocks: int,
+            remote_allocator: int,
+            selection_policy:SelectionPolicy.ONLYAPPEND,
+            )->None:
+        self.block_size=block_size,
+        self.num_gpu_blocks=num_gpu_blocks
+        self.remote_allocator=remote_allocator
+        self.selection_policy=selection_policy
+        self.last_used_rank=1
+        self.allocator_group=[]
+        for i in range(0,self.remote_allocator):
+            allocator=UncachedBlockAllocator(Device.GPU,self.block_size,self.num_gpu_blocks,i+1)
+            self.allocator_group.append(allocator)
+    def get_used_rank(self,block_number:int)->int:
+        used_rank=self.last_used_rank
+        if self.selection_policy==SelectionPolicy.ONLYAPPEND or self.selection_policy==SelectionPolicy.MEANAPPEND:
+            if self.selection_policy==SelectionPolicy.MEANAPPEND:
+                used_rank=used_rank%self.remote_allocator+1
+            find=False
+            while not find:
+                allocator=self.allocator_group[used_rank-1]
+                free_block=allocator.get_num_free_blocks()
+                if free_block>block_number:
+                    find=True
+                else:
+                    used_rank=used_rank%self.remote_allocator+1
+                    if used_rank==self.last_used_rank:
+                        break
+            if not find:
+                raise ValueError(f"No Enough Free blocks!")
+        #need to add more selection_policy handler
+        else:
+            used_rank=used_rank
+        self.last_used_rank=used_rank
+        return used_rank
+    def allocate(self,block_number:int)->List[PhysicalTokenBlock]:
+        used_rank=self.get_used_rank(block_number)
+        allocator=self.allocator_group[used_rank-1]
+        blocks=[]
+        for i in range(0,block_number):
+            block=allocator.allocate()
+            blocks.append(block)
+        return blocks
+    def free_group(self,block_group:List[PhysicalTokenBlock])->None:
+        for block in block_group:
+            if block.remote_rank !=0:
+                allocator=self.allocator_group[block.remote_rank-1]
+                allocator.free(block)
+    def free(self,block:PhysicalTokenBlock)->None:
+        allocator=self.allocator_group[block.remote_rank-1]
+        allocator.free(block)
+    def get_num_free_blocks(self,remote_rank:int=0)->int:
+        if self.remote_allocator==0:
+            return 0
+        allocator=self.allocator_group[remote_rank-1]
+        return allocator.get_num_free_blocks()
+    def get_total_free_blocks(self)->int:
+        total_len=0
+        for allocator in self.allocator_group:
+            total_len+=allocator.get_num_free_blocks()
+        return total_len
+    def get_num_total_blocks(self)->int:
+        total_blocks=0
+        for allocator in self.allocator_group:
+            total_blocks+=allocator.get_num_total_blocks()
+        return total_blocks
+class SequenceSuperBlock:
+    def __init__(self,
+                 seq_id:int,
+                 block_size,
+                 start)->None:
+        self.seq_id=seq_id
+        self.block_size=block_size
+        self.start=start
 
 class BlockSpaceManagerV1(BlockSpaceManager):
     """Manages the mapping between logical and physical token blocks."""
@@ -218,9 +318,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
+        num_remote_blocks: Optional[int]=0,
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
+        remote_allocator: Optional[int]=0,
+        block_migrate_size: Optional[int]=0,
+        block_migrate_threshold: Optional[int]=8192,
+        block_migrate_start:Optional[int]=4096,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -254,6 +359,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 Device.GPU, block_size, num_gpu_blocks)
             self.cpu_allocator = UncachedBlockAllocator(
                 Device.CPU, block_size, num_cpu_blocks)
+        #used for kv cache migrate
+        self.block_migrate_size = block_migrate_size
+        self.block_migrate_threshold = block_migrate_threshold
+        self.block_migrate_start = block_migrate_start
+        self.remote_allocator = RemoteAllocator(block_size,num_remote_blocks,remote_allocator)
+        self.migrate_list: List[SequenceSuperBlock]
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
         # Mapping: req_id -> BlockTable
@@ -491,7 +602,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 continue
-            blocks.update(self.block_tables[seq.seq_id])
+            for block in self.block_tables[seq.seq_id]:
+                if block.remote_rank==0:
+                    blocks.update(block)
         # Cross-attention blocks
         if seq_group.is_encoder_decoder():
             blocks.update(self.cross_block_tables[request_id])
@@ -527,16 +640,19 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         new_block_table = []
 
         for from_block in block_table:
-            if from_block in mapping:
-                to_block = mapping[from_block]
-                to_block.ref_count += 1
-            else:
-                to_block = dest_allocator.allocate(
-                    from_block.block_hash, from_block.num_hashed_tokens)
-                mapping[from_block] = to_block
-            new_block_table.append(to_block)
-            # Free the source block swapped in to destination.
-            src_allocator.free(from_block)
+            if from_block.remote_rank==0:
+                if from_block in mapping:
+                    to_block = mapping[from_block]
+                    to_block.ref_count += 1
+                else:
+                    to_block = dest_allocator.allocate(
+                        from_block.block_hash, from_block.num_hashed_tokens)
+                    mapping[from_block] = to_block
+                new_block_table.append(to_block)
+                # Free the source block swapped in to destination.
+                src_allocator.free(from_block)
+            else :
+                new_block_table.append(from_block)
 
         return new_block_table
 
@@ -601,7 +717,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                           if self.block_sliding_window is not None else
                           block_table)
         for block in set(blocks_to_free):
-            if block.device == Device.GPU:
+            if block.remote_rank!=0:
+                self.remote_allocator.free(block)
+            elif block.device == Device.GPU:
                 self.gpu_allocator.free(block)
             else:
                 self.cpu_allocator.free(block)
@@ -612,6 +730,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return
         block_table = self.block_tables[seq.seq_id]
         self._free_block_table(block_table)
+        self.remove_kvcache_migrate_block(seq.seq_id)
         del self.block_tables[seq.seq_id]
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
@@ -699,3 +818,40 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if self.enable_caching:
             for seq in seq_group.seqs_dict.values():
                 self.compute_full_blocks_in_seq(seq)
+    def add_kvcache_migrate_block(self, seq:Sequence)->None:
+        len=seq.get_len()
+        remain=(len-self.block_migrate_start)%self.block_migrate_size
+        if len>=self.block_migrate_threshold and remain==0 and seq.status==SequenceStatus.RUNNING:
+            block_table=self.block_tables[seq.seq_id]
+            start=self.block_migrate_start
+            migrate_set=set(self.migrate_list)
+            while start<len:
+                block=block_table[start]
+                if block.remote_rank==0:
+                    migrate_set.update(SequenceSuperBlock(seq.seq_id,self.block_migrate_size,start))
+                start+=self.block_migrate_size
+            self.migrate_list=List(migrate_set)
+    def get_kvcache_migrate_block(self,mapping:List[Tuple[int,int,int]])->None:
+        length=len(self.migrate_list)
+        if length>0:
+            migrate_block=self.migrate_list[0]
+            self.migrate_list.pop(0)
+            to_blocks=self.remote_allocator.allocate(self.block_migrate_size/self.block_size)
+            remote_rank=to_blocks[0].remote_rank
+            block_table=self.block_tables[migrate_block.seq_id]
+            for index in range(migrate_block.start,migrate_block.start+migrate_block.block_size):
+                self.gpu_allocator.free(block_table[index])
+                to_block=to_blocks[index-migrate_block.start]
+                mapping.append(Tuple(block_table[index].block_number,remote_rank,to_block.block_number))
+                block_table[index]=to_block
+            self.block_tables[migrate_block.seq_id]=block_table
+    def remove_kvcache_migrate_block(self,seq_id:int)->None:
+        length=len(self.migrate_list)
+        if length>0:
+            for i in range(length-1,-1,-1):
+                if self.migrate_list[i].seq_id==seq_id:
+                    del[self.migrate_list[i]]
+    def format_kvcache_migrate_blocks(self,blocks_to_migrate:List[Tuple[int,int,int]],blocks_to_copy:List[Tuple[int, int]])->None:
+        dest_blocks=self.gpu_allocator.get_migrate_blocks()
+        for from_info,dest_block in zip(blocks_to_migrate,dest_blocks):
+            blocks_to_copy.append(Tuple(from_info[0],dest_block))

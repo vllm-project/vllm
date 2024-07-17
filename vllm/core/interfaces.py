@@ -116,3 +116,19 @@ class BlockSpaceManager(ABC):
     @abstractmethod
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         pass
+    
+    @abstractmethod
+    def add_kvcache_migrate_block(self, seq:Sequence)->None:
+        pass
+
+    @abstractmethod
+    def get_kvcache_migrate_block(self,mapping:List[Tuple[int,int,int]])->None:
+        pass
+
+    @abstractmethod
+    def remove_kvcache_migrate_block(self,seq_id:int)->None:
+        pass
+
+    @abstractmethod
+    def format_kvcache_migrate_blocks(self,blocks_to_migrate:List[Tuple[int,int,int]],blocks_to_copy:List[Tuple[int, int]])->None:
+        pass

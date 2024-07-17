@@ -10,6 +10,7 @@ logger = init_logger(__name__)
 
 # Architecture -> (module, class).
 _GENERATION_MODELS = {
+    "OnlyAttentionModel":("only_attn","OnlyAttentionModel"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b

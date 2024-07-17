@@ -394,6 +394,9 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        block_migrate_size: int=1024,
+        block_migrate_threshold: int=6144,
+        block_migrate_start: int=4096,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -411,7 +414,10 @@ class CacheConfig:
         self.num_cpu_blocks = None
 
         # 4096 tokens per chunk
-        self.chunk_size = 4096 / block_size
+
+        # self.chunk_size = 4096 / block_size
+        self.block_migrate_threshold=block_migrate_threshold
+        self.block_migrate_start=block_migrate_start
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
