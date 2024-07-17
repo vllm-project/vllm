@@ -494,28 +494,24 @@ class LLMEngine:
 
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
-    def _get_decoder_start_token_id(
-            self,
-            ) -> Optional[int]:
+    def _get_decoder_start_token_id(self, ) -> Optional[int]:
         '''
         Obtain the decoder start token id employed by an encoder/decoder
         model. Returns None for non-encoder/decoder models or if the
         model config is unavailable.
         '''
-        
+
         if not self.is_encoder_decoder_model():
             logger.warning("Using None for decoder start token id because "
                            "this is not an encoder/decoder model.")
             return None
 
-        if (self.model_config is None or 
-            self.model_config.hf_config is None):
+        if (self.model_config is None or self.model_config.hf_config is None):
             logger.warning("Using None for decoder start token id because "
                            "model config is not available.")
             return None
 
-        return getattr(self.model_config.hf_config,
-                       'decoder_start_token_id',
+        return getattr(self.model_config.hf_config, 'decoder_start_token_id',
                        None)
 
     def _add_processed_request(
@@ -614,7 +610,7 @@ class LLMEngine:
 
     #     # Cast decoder_input_ids to torch.Tensor, if not already
     #     if isinstance(decoder_input_ids,list):
-    #         assert (len(decoder_input_ids)==0 or 
+    #         assert (len(decoder_input_ids)==0 or
 
     #     # # 1. Check whether the user has defined `decoder_input_ids` manually. To facilitate in terms of input naming,
     #     # # we also allow the user to pass it under `input_ids`, if the encoder does not use it as the main input.
