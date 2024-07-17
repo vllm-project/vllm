@@ -90,6 +90,35 @@ typedef struct __align__(4) {
 float8x4_t;
 
 template <typename scalar_t>
+__device__ float thread_max_vec(scalar_t const* __restrict__ input,
+                             int64_t const num_elems,
+                             int const tid,
+                             int const step) {
+  // Vectorized input/output to better utilize memory bandwidth.
+  vec4_t<scalar_t> const* vectorized_in =
+      reinterpret_cast<vec4_t<scalar_t> const*>(input);
+
+  int const num_vec_elems = num_elems >> 2;
+  float absmax_val = 0.0f;
+
+#pragma unroll 4
+  for (int i = tid; i < num_vec_elems; i += step) {
+    vec4_t<scalar_t> in_vec = vectorized_in[i];
+    absmax_val = max(absmax_val, fabs(in_vec.x));
+    absmax_val = max(absmax_val, fabs(in_vec.y));
+    absmax_val = max(absmax_val, fabs(in_vec.z));
+    absmax_val = max(absmax_val, fabs(in_vec.w));
+  }
+
+  // Handle the remaining elements if num_elems is not divisible by 4
+  for (int i = num_vec_elems * 4 + tid; i < num_elems; i += step) {
+    absmax_val = max(absmax_val, fabs(input[i]));
+  }
+
+  return absmax_val;
+}
+
+template <typename scalar_t>
 __device__ void scaled_fp8_conversion_vec(c10::Float8_e4m3fn* __restrict__ out,
                                           scalar_t const* __restrict__ input,
                                           float const inverted_scale,
@@ -139,13 +168,25 @@ template <typename scalar_t>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
     c10::Float8_e4m3fn* __restrict__ out, float* __restrict__ scale,
     scalar_t const* __restrict__ input, const int hidden_size) {
+
   int const tid = threadIdx.x;
   int const token_idx = blockIdx.x;
-  float absmax_val = 0.0f;
 
-  for (int i = tid; i < hidden_size; i += blockDim.x) {
-    float const x = static_cast<float>(input[token_idx * hidden_size + i]);
-    absmax_val = max(absmax_val, fabs(x));
+  scalar_t const* __restrict__ token_input = &input[token_idx * hidden_size];
+  c10::Float8_e4m3fn* __restrict__ token_output = &out[token_idx * hidden_size];
+
+  // For vectorization, token_input and token_output pointers need to be
+  // aligned at 8-byte and 4-byte addresses respectively.
+  bool const can_vectorize = hidden_size % 4 == 0;
+
+  float absmax_val = 0.0f;
+  if (can_vectorize) {
+    absmax_val = thread_max_vec(token_input, hidden_size, tid, blockDim.x);
+  } else {
+    for (int i = tid; i < hidden_size; i += blockDim.x) {
+      float const x = static_cast<float>(token_input[i]);
+      absmax_val = max(absmax_val, fabs(x));
+    }
   }
 
   float const block_absmax_val_maybe = blockReduceMax(absmax_val);
@@ -157,16 +198,12 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
   __syncthreads();
 
   float const inverted_scale = FP8_E4M3_MAX / block_absmax_val;
-  bool const vectorize_conversions = hidden_size % 4 == 0;
-  if (vectorize_conversions) {
-    scalar_t const* token_input = &input[token_idx * hidden_size];
-    c10::Float8_e4m3fn* token_output = &out[token_idx * hidden_size];
+  if (can_vectorize) {
     scaled_fp8_conversion_vec(token_output, token_input, inverted_scale,
                               hidden_size, tid, blockDim.x);
   } else {
     for (int i = tid; i < hidden_size; i += blockDim.x) {
-      out[token_idx * hidden_size + i] = scaled_fp8_conversion(
-          input[token_idx * hidden_size + i], inverted_scale);
+      token_output[i] = scaled_fp8_conversion(token_input[i], inverted_scale);
     }
   }
 }
@@ -174,8 +211,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
 }  // namespace vllm
 
 void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
-                             torch::Tensor& input,  // [..., d]
-                             torch::Tensor& scale)  // [1]
+                             torch::Tensor const& input,  // [..., d]
+                             torch::Tensor const& scale)  // [1]
 {
   int64_t num_tokens = input.numel() / input.size(-1);
   int64_t num_elems = input.numel();
@@ -192,7 +229,7 @@ void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
 }
 
 void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
-                              torch::Tensor& input,  // [..., d]
+                              torch::Tensor const& input,  // [..., d]
                               torch::Tensor& scale)  // [1]
 {
   int64_t num_tokens = input.numel() / input.size(-1);
@@ -212,7 +249,7 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
 }
 
 void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
-                                        torch::Tensor& input,  // [..., d]
+                                        torch::Tensor const& input,  // [..., d]
                                         torch::Tensor& scales) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
