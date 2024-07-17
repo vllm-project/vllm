@@ -346,7 +346,9 @@ class BlockTable:
         num_token_ids = len(token_ids) + num_lookahead_slots
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
-        num_token_blocks = 1 + math.ceil(num_token_ids-first_chunk_size / self._block_size)
+        num_token_blocks = (
+            1 + math.ceil(num_token_ids-first_chunk_size / self._block_size)
+        )
         return num_token_blocks
 
     def _chunk_token_blocks_for_append(
