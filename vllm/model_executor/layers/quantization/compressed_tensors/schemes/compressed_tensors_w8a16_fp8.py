@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.utils import set_weight_attrs
 
-__all__ = ["CompressedTensorsW8A8Fp8"]
+__all__ = ["CompressedTensorsW8A16Fp"]
 
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
@@ -32,9 +32,9 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         if self.strategy == QuantizationStrategy.TENSOR:
             ws_channelwise = convert_to_channelwise(layer.weight_scale,
                                                     layer.logical_widths)
-            layer.weight_scale = torch.nn.Parameter(ws_channelwise, 
+            layer.weight_scale = torch.nn.Parameter(ws_channelwise,
                                                     requires_grad=False)
-        
+
         prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
     def create_weights(self, layer: torch.nn.Module,
@@ -62,7 +62,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             "weight_loader": weight_loader,
         })
 
-
         # WEIGHT SCALE
         if self.strategy == QuantizationStrategy.CHANNEL:
             weight_scale = create_per_channel_scale_param(
@@ -73,17 +72,15 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                 output_partition_sizes, weight_loader=weight_loader)
         layer.register_parameter("weight_scale", weight_scale)
 
-
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return apply_fp8_marlin_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            bias=bias)
+        return apply_fp8_marlin_linear(input=x,
+                                       weight=layer.weight,
+                                       weight_scale=layer.weight_scale,
+                                       workspace=layer.workspace,
+                                       size_n=layer.output_size_per_partition,
+                                       size_k=layer.input_size_per_partition,
+                                       bias=bias)
