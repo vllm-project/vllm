@@ -22,7 +22,8 @@ from typing import Iterable, List, Optional, Tuple
 import torch
 from torch import nn
 from transformers import BartConfig
-from transformers.activations import ACT2FN
+#from transformers.activations import ACT2FN
+from vllm.model_executor.layers.activation import get_act_fn
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
@@ -38,7 +39,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 logger = logging.get_logger(__name__)
-
 
 def get_bsz_seq_len(input_ids):
     shp = input_ids.shape
@@ -308,7 +308,8 @@ class BartEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config)
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.activation_fn = ACT2FN[config.activation_function]
+        #self.activation_fn = ACT2FN[config.activation_function]
+        self.activation_fn = get_act_fn(config.activation_function, quant_config)
         self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
         self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
