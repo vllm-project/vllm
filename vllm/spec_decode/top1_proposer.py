@@ -138,7 +138,7 @@ class Top1Proposer(SpeculativeProposer):
 
             # Currently only proposal lens of 0 or the global batch proposal len
             # are supported.
-            # If max_proposal_len is defined, then we shall no exccess this
+            # If max_proposal_len is defined, then we shall no exceed this
             # quota for nonzero_proposal
             new_k = 0
             if (self.max_proposal_len is None
@@ -219,7 +219,7 @@ class Top1Proposer(SpeculativeProposer):
         proposal_lens: List[int],
         nonzero_proposal_len_indices: List[int],
         sampler_transposed: bool,
-    ) -> Tuple[torch.Tensor, torch.tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """After speculations are produced, merge the speculation results with
         the skipped sequences.
         """

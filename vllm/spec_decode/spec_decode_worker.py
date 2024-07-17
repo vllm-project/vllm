@@ -206,7 +206,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self.probs_dtype = self.spec_decode_sampler.probs_dtype
         self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
-        # Lazy initiazliation.
+        # Lazy initialization.
         self.scorer: SpeculativeScorer
 
         # Hidden states from target model to pass to proposer
