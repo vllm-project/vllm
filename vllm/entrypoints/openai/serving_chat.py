@@ -389,7 +389,6 @@ class OpenAIServingChat(OpenAIServing):
         assert request.n is not None
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
-        previous_token_ids = [[]] * request.n
         finish_reason_sent = [False] * request.n
 
         tool_parser: ToolParser = self.tool_parser()
@@ -498,7 +497,7 @@ class OpenAIServingChat(OpenAIServing):
                             previous_text=previous_texts[i],
                             current_text=output.text,
                             delta_text=delta_text,
-                            previous_token_ids=previous_token_ids[i],
+                            previous_token_ids=output.token_ids[:-1 * len(delta_token_ids)],
                             current_token_ids=output.token_ids,
                             delta_token_ids=delta_token_ids
                         )
@@ -508,7 +507,6 @@ class OpenAIServingChat(OpenAIServing):
                     # handle setting the previous values for the next iteration
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
-                    previous_token_ids[i] = output.token_ids
 
                     # if the message delta is None (e.g. because it was a "control token" for tool calls, then
                     #   get the next token without streaming a chunk
