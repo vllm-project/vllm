@@ -49,4 +49,3 @@ class CompressedTensorsScheme(ABC):
         needs to occur.
         """
         raise NotImplementedError
-
