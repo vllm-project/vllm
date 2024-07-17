@@ -218,7 +218,7 @@ class InternLM2Model(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-    
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.tok_embeddings(input_ids)
 

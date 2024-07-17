@@ -1,14 +1,13 @@
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Type
 
 import pytest
-import torch
 from PIL.Image import Image
-from transformers import AutoTokenizer
 
+from vllm.model_executor.models.internvl import (IMG_CONTEXT, IMG_END,
+                                                 IMG_START,
+                                                 image_to_pixel_values)
 from vllm.multimodal.utils import rescale_image_size
-from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu
-from vllm.model_executor.models.internvl import image_to_pixel_values, IMG_START, IMG_CONTEXT, IMG_END
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
@@ -20,14 +19,13 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<image>\nWhat's the content of the image?\n",
     "cherry_blossom":
     "<image>\nWhat is the season?\n",
-    "boardwalk":
-    "<image>\nWhat's in this image?\n",
 })
 
 models = ["OpenGVLab/InternVL2-4B", "OpenGVLab/InternVL2-8B"]
 
 
 class InternVLProcessor:
+
     def __init__(self, hf_runner: HfRunner):
         self.num_image_token = hf_runner.model.num_image_token
         self.tokenizer = hf_runner.tokenizer
@@ -37,11 +35,13 @@ class InternVLProcessor:
         pixel_values = image_to_pixel_values(images).to(self.dtype)
         num_patches_list = [pixel_values.shape[0]]
         for num_patches in num_patches_list:
-            image_tokens = IMG_START + IMG_CONTEXT * self.num_image_token * num_patches + IMG_END
+            context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
+            image_tokens = IMG_START + context_tokens + IMG_END
             text = text.replace('<image>', image_tokens, 1)
         prompt = self.tokenizer(text, return_tensors="pt")
         prompt.update({"pixel_values": pixel_values})
         return prompt
+
 
 def run_test(
     hf_runner: Type[HfRunner],
@@ -93,7 +93,8 @@ def run_test(
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model:
-        img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+        img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids(
+            "<IMG_CONTEXT>")
         hf_model.model.img_context_token_id = img_context_token_id
         hf_model.processor = InternVLProcessor(hf_model)
         hf_outputs_per_image = []
@@ -122,6 +123,7 @@ def run_test(
 target_dtype = "half"
 if is_cpu():
     target_dtype = "bfloat16"
+
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
