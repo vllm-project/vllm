@@ -65,7 +65,7 @@ def make_layers(
                                             get_pp_group().world_size)
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)] +
-        [layer_fn() for _ in range(start_layer, end_layer)] +
+        [layer_fn(idx) for idx in range(start_layer, end_layer)] +
         [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
 

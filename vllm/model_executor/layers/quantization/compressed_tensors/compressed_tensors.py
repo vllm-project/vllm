@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsWNA16)
+    CompressedTensorsWNA16, CompressedTensorsUnquantized)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_first_name_or_class_match)
@@ -201,10 +201,20 @@ class CompressedTensorsConfig(QuantizationConfig):
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
 
-    def get_scheme(self, layer: torch.nn.Module) -> "CompressedTensorsScheme":
+    def get_scheme(
+            self,
+            layer: torch.nn.Module,
+            layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
+
+        if layer_name is not None:
+            if layer_name in self.ignore:
+                return CompressedTensorsUnquantized()
+        else:
+            # fall back to 
+            layer_name=""
 
         layer_type_name = find_first_name_or_class_match(
-            name="",
+            name=layer_name,
             module=layer,
             targets=self.layer_quant_details.keys(),
             check_contains=True)

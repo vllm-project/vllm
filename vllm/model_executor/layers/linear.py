@@ -72,7 +72,7 @@ class LinearMethodBase(QuantizeMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       layer_name: Optional[str]=None,
+                       layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
@@ -106,7 +106,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       layer_name: Optional[str]=None,
+                       layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
@@ -699,7 +699,8 @@ class RowParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  reduce_results: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
@@ -717,6 +718,7 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
+            layer_name=layer_name,
             weight_loader=self.weight_loader)
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
