@@ -1,10 +1,10 @@
 import time
-import torch
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, TypeVar, Union
 
+import torch
 from transformers import PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
@@ -579,88 +579,73 @@ class LLMEngine:
 
     _LLMInputComponentsType = Tuple[str, List[int], ]
 
-    # def _prepare_decoder_input_ids_for_generation(
-    #     self,
-    #     batch_size: int,
-    #     model_input_name: str,
-    #     #model_kwargs: Dict[str, torch.Tensor],
-    #     decoder_input_ids: Union[List[int], torch.Tensor],
-    #     decoder_start_token_id: Union[int, List[int], torch.Tensor],
-    #     device: torch.device = None,
-    # ) -> Tuple[torch.LongTensor, Dict[str, torch.Tensor]]:
-    #     """
-    #     Prepares `decoder_input_ids` for generation with encoder-decoder models.
+    def _prepare_decoder_input_ids_for_generation(
+        self,
+        decoder_input_ids: Optional[Union[List[int], torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """
+        Prepares `decoder_input_ids` for generation with encoder-decoder models.
 
-    #     Based on
+        Based on
 
-    #     https://github.com/huggingface/transformers/blob/
-    #     4037a2b5b1278736e566aec12e169100275545ea/
-    #     src/transformers/generation/utils.py
+        https://github.com/huggingface/transformers/blob/
+        4037a2b5b1278736e566aec12e169100275545ea/
+        src/transformers/generation/utils.py
 
-    #     specifically GenerationMixin._prepare_decoder_input_ids_for_generation()
-    #     """
+        specifically GenerationMixin._prepare_decoder_input_ids_for_generation()
+        """
 
-    #     # Cast decoder_start_token_id to torch.Tensor, if not already
-    #     if isinstance(decoder_start_token_id,int):
-    #         decoder_start_token_id=torch.tensor([decoder_start_token_id], dtype=torch.int)
-    #     elif isinstance(decoder_start_token_id,list):
-    #         assert len(decoder_start_token_id) > 0
-    #         assert isinstance(decoder_start_token_id[0],int)
-    #         decoder_start_token_id=torch.tensor(decoder_start_token_id, dtype=torch.int)
+        decoder_start_token_id: Optional[
+            Union[int, List[int],
+                  torch.Tensor]] = (self._get_decoder_start_token_id())
 
-    #     # Cast decoder_input_ids to torch.Tensor, if not already
-    #     if isinstance(decoder_input_ids,list):
-    #         assert (len(decoder_input_ids)==0 or
+        # Cast decoder_start_token_id to torch.Tensor, if not already
+        if isinstance(decoder_start_token_id, int):
+            decoder_start_token_id = torch.tensor([decoder_start_token_id],
+                                                  dtype=torch.int)
+        elif isinstance(decoder_start_token_id, list):
+            assert len(decoder_start_token_id) > 0
+            assert isinstance(decoder_start_token_id[0], int)
+            decoder_start_token_id = torch.tensor(decoder_start_token_id,
+                                                  dtype=torch.int)
+        else:
+            assert isinstance(decoder_start_token_id, torch.Tensor)
 
-    #     # # 1. Check whether the user has defined `decoder_input_ids` manually. To facilitate in terms of input naming,
-    #     # # we also allow the user to pass it under `input_ids`, if the encoder does not use it as the main input.
-    #     # if model_kwargs is not None and "decoder_input_ids" in model_kwargs:
-    #     #     decoder_input_ids = model_kwargs.pop("decoder_input_ids")
-    #     # elif "input_ids" in model_kwargs and model_input_name != "input_ids":
-    #     #     decoder_input_ids = model_kwargs.pop("input_ids")
-    #     # else:
-    #     #     decoder_input_ids = None
+        decoder_start_token_id = decoder_start_token_id.view(-1, 1)
 
-    #     # 2. `decoder_start_token_id` must have shape (batch_size, 1)
-    #     # if device is None:
-    #     #     device = self.device
-    #     if decoder_start_token_id.ndim == 1:
-    #         if decoder_start_token_id.shape[0] != batch_size:
-    #             raise ValueError(
-    #                 f"`decoder_start_token_id` expected to have length {batch_size} but got {decoder_start_token_id.shape[0]}"
-    #             )
-    #         decoder_start_token_id = decoder_start_token_id.view(-1, 1)
-    #     else:
-    #         decoder_start_token_id = (
-    #             torch.ones((batch_size, 1), dtype=torch.long, device=device) * decoder_start_token_id
-    #         )
+        # Cast decoder_input_ids to torch.Tensor, if not already
+        originally_list = False
+        if isinstance(decoder_input_ids, list):
+            assert (len(decoder_input_ids) == 0
+                    or isinstance(decoder_input_ids[0], int))
+            decoder_input_ids = torch.tensor(decoder_input_ids,
+                                             dtype=torch.int)
+            originally_list = True
 
-    #     # 3. Encoder-decoder models expect the `decoder_input_ids` to start with a special token. Let's ensure that.
-    #     # no user input -> use decoder_start_token_id as decoder_input_ids
-    #     if decoder_input_ids is None:
-    #         decoder_input_ids = decoder_start_token_id
-    #     # exception: Donut checkpoints have task-specific decoder starts and don't expect a BOS token. Note that the
-    #     # original checkpoints can't be detected through `self.__class__.__name__.lower()`, needing custom logic.
-    #     # See: https://github.com/huggingface/transformers/pull/31470
-    #     elif "donut" in self.__class__.__name__.lower() or (
-    #         self.config.model_type == "vision-encoder-decoder" and "donut" in self.config.encoder.model_type.lower()
-    #     ):
-    #         pass
-    #     elif self.config.model_type in ["whisper"]:
-    #         pass
-    #     # user input but doesn't start with decoder_start_token_id -> prepend decoder_start_token_id (and adjust
-    #     # decoder_attention_mask if provided)
-    #     elif (decoder_input_ids[:, 0] != decoder_start_token_id[:, 0]).all().item():
-    #         decoder_input_ids = torch.cat([decoder_start_token_id, decoder_input_ids], dim=-1)
-    #         if "decoder_attention_mask" in model_kwargs:
-    #             decoder_attention_mask = model_kwargs["decoder_attention_mask"]
-    #             decoder_attention_mask = torch.cat(
-    #                 (torch.ones_like(decoder_attention_mask)[:, :1], decoder_attention_mask),
-    #                 dim=-1,
-    #             )
-    #             model_kwargs["decoder_attention_mask"] = decoder_attention_mask
+        if decoder_input_ids is not None:
+            assert isinstance(decoder_input_ids, torch.Tensor)
+            # Reshape: (batch_size=1,num_tokens)
+            decoder_input_ids = decoder_input_ids.view(1, -1)
 
-    #     return decoder_input_ids, model_kwargs
+        if decoder_input_ids is None:
+            # no user input -> use decoder_start_token_id as decoder_input_ids
+            decoder_input_ids = decoder_start_token_id
+        elif (decoder_input_ids[:, 0] !=
+              decoder_start_token_id[:, 0]).all().item():
+            # Encoder-decoder models expect the `decoder_input_ids` to start
+            # with a special token. Let's ensure that.
+            decoder_input_ids = (torch.cat(
+                [decoder_start_token_id, decoder_input_ids],
+                dim=-1,
+            ))
+
+        assert isinstance(decoder_input_ids, torch.Tensor)
+        decoder_input_ids = decoder_input_ids.view(-1)
+
+        if originally_list:
+            return decoder_input_ids.tolist()
+        else:
+            return decoder_input_ids
 
     def _tokenize_prompt(
         self,
@@ -672,14 +657,26 @@ class LLMEngine:
         tokenizer = self.get_tokenizer_group("prompts must be None if "
                                              "skip_tokenizer_init is True")
 
+        if is_enc_dec_decoder and prompt == "":
+            # Scenario: enc/dec model, decoder input prompt is ""
+            # => Treat it as None (no decoder input prompt provided)
+            # & obtain default decoder input prompt
+            return self._prepare_decoder_input_ids_for_generation()
+
+        # Scenario:
+        # * Any decoder-only input prompt
+        # * Enc/dec model, non-empty-str decoder input prompt
+        # => Tokenize prompt
         prompt_token_ids = tokenizer.encode(request_id=request_id,
                                             prompt=prompt,
                                             lora_request=lora_request)
 
         if is_enc_dec_decoder:
-            # Tokenizer decoder prompt *in the context
-            # of an encoder/decoder model*
-            pass
+            # Scenario: enc/dec model, non-empty-str decoder input prompt
+            # which was just tokenized
+            # => perform decoder-specific preprocessing
+            return self._prepare_decoder_input_ids_for_generation(
+                prompt_token_ids, )
 
         # Decoder-only tokenized prompt
         return prompt_token_ids
@@ -690,6 +687,7 @@ class LLMEngine:
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest],
         is_encoder_prompt: bool = False,
+        is_enc_dec_model: bool = False,
     ) -> Tuple[str, List[int], Optional["MultiModalDataDict"]]:
         '''
         Extract prompt & prompt_token_ids from any single
@@ -709,6 +707,8 @@ class LLMEngine:
         * multi_modal_data (None if is_encoder_prompt)
         '''
 
+        is_enc_dec_decoder = ((not is_encoder_prompt) and is_enc_dec_model)
+
         if isinstance(inputs, str):
             # prompt = inputs
             # prompt_token_ids = tokenize(inputs)
@@ -718,6 +718,7 @@ class LLMEngine:
                         request_id,
                         inputs,
                         lora_request,
+                        is_enc_dec_decoder=is_enc_dec_decoder,
                     ), None)
 
         # Tokenize
@@ -727,6 +728,7 @@ class LLMEngine:
                                 request_id,
                                 inputs,
                                 lora_request,
+                                is_enc_dec_decoder=is_enc_dec_decoder,
                             ))
 
         if is_encoder_prompt:
@@ -767,6 +769,7 @@ class LLMEngine:
              == "ExplicitEncoderDecoder" else inputs),
             lora_request,
             is_encoder_prompt=True,
+            is_enc_dec_model=True,
         )
 
         # Obtain decoder prompt
@@ -783,6 +786,7 @@ class LLMEngine:
                 inputs.get('decoder_prompt'),
                 lora_request,
                 is_encoder_prompt=False,
+                is_enc_dec_model=True,
             )
         else:
             # User supplied a single prompt (implicitly
