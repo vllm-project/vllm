@@ -5,8 +5,9 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_token_quant, ref_dynamic_per_tensor_fp8_quant
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
+HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
                 8193]  # Arbitrary values for testing
+HIDDEN_SIZES += list(range(1024, 1033)) # vectorized conversion edge cases
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SEEDS = [0]
 
@@ -20,7 +21,7 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") + 1e-6 # avoid nans
 
     ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.float8_e4m3fn)
     ops_out, ops_scales = ops.dynamic_per_token_scaled_fp8_quant(x)
@@ -41,9 +42,7 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
 
-    # reference
     ref_out, ref_scale = ref_dynamic_per_tensor_fp8_quant(x)
-    # kernel
     ops_out, ops_scale = ops.scaled_fp8_quant(x)
 
     assert torch.allclose(ref_scale, ops_scale)
