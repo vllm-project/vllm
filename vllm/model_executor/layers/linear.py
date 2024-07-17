@@ -28,10 +28,12 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 def adjust_bitblas_shard(param, shard_size, shard_offset):
     bitblas_tile_size = getattr(param, "bitblas_tile_size", None)
-    if bitblas_tile_size is None:
-        return shard_size, shard_offset
+    weight_propagation = getattr(param, "weight_propagation", None)
+    if weight_propagation and bitblas_tile_size is not None:
+        return (shard_size // bitblas_tile_size,
+                shard_offset // bitblas_tile_size)
 
-    return shard_size // bitblas_tile_size, shard_offset // bitblas_tile_size
+    return shard_size, shard_offset
 
 
 def adjust_bitsandbytes_shard(param: Parameter,

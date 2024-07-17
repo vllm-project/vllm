@@ -156,6 +156,7 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BITNETBitBLASConfig) -> None:
         self.quant_config = quant_config
         self.Qp = 2**(quant_config.input_bits - 1) - 1
+        self.Qn = -2**(quant_config.input_bits - 1)
 
     def create_weights(
         self,
@@ -318,8 +319,8 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
 
     def activation_quant(self, x, num_bits=8):
         x = x.float()
-        Qn = -(2**(num_bits - 1))
-        Qp = 2**(num_bits - 1) - 1
+        Qn = self.Qn
+        Qp = self.Qp
         s = Qp / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
         result = (x * s).round().clamp(Qn, Qp)
         return result.type(torch.int8)
@@ -380,7 +381,7 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
                 setattr(layer, name, new_t)
 
             # Repack weights
-            bitblas_qweight = self.repack_bitblas_from_bitnet(layer.weights)
+            bitblas_qweight = self.repack_bitblas_from_bitnet(layer.weight)
             # free the original weight tensor
             free_tensor("weight")
             replace_tensor("qweight", bitblas_qweight)
@@ -394,6 +395,7 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
         output = output / sw
         output = output.half()
         output = output.type(x.dtype)
+
         if bias is not None:
             output.add_(bias)  # In-place add
 

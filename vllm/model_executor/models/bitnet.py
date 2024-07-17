@@ -716,6 +716,9 @@ class BitnetForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                # align scaling attr with param
+                if sum(param.data.shape) == 0 or sum(loaded_weight.shape) == 0:
+                    loaded_weight = loaded_weight.view(param.data.shape)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -738,6 +741,9 @@ class BitnetForCausalLM(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
+                # align scaling attr with param
+                if sum(param.data.shape) == 0 or sum(loaded_weight.shape) == 0:
+                    loaded_weight = loaded_weight.view(param.data.shape)
                 weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
