@@ -24,7 +24,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<image>\nWhat's in this image?\n",
 })
 
-models = ["/data/LLM-model/InternVL2-4B"]
+models = ["OpenGVLab/InternVL2-4B", "OpenGVLab/InternVL2-8B"]
 
 
 class InternVLProcessor:
