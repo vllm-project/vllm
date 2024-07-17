@@ -108,6 +108,7 @@ class TP1DraftModelRunner(ModelRunner):
             num_queries, )
         # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed # noqa: E501
 
+        # Verify that all sequences are decodes
         for i in range(num_queries):
             seq_group = sampling_metadata.seq_groups[i]
 
@@ -207,11 +208,11 @@ class TP1DraftModelRunner(ModelRunner):
         if self.attn_backend.get_name() != "flash-attn":
             return False
 
-        # TODO: Understand what is needed for LORA support
+        # TODO: Add support for LORA
         if self.lora_config:
             return False
 
-        # TODO: Add if required
+        # TODO: Add soft-tuning prompt adapter support
         if self.prompt_adapter_config:
             return False
 

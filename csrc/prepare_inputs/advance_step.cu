@@ -1,11 +1,16 @@
 /*
- * TODO: Add doc
+ * The goal of this GPU kernel is to advance input tensors on the GPU directly
+ * PR: https://github.com/vllm-project/vllm/pull/6338
+ * Current restrictions:
+ *     1. Specialized for DraftModelRunner
+ *     2. Supports flash_attn only
  */
 
 #include "advance_step.cuh"
 
 namespace prepare_inputs {
 
+//
 template <int const num_threads>
 __global__ void advance_step_kernel(int num_seqs, int num_queries,
                                     int block_size, long* input_tokens_ptr,

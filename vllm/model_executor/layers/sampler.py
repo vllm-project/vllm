@@ -52,6 +52,10 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ):
+        """The goal here is to reuse sampling tensors between similar decode
+        runs. This is possible because sampling logic does not change between
+        decodes of the same sequences.
+        """
         _, vocab_size = logits.shape
 
         # First free any existing stored sampling tensors.
@@ -86,8 +90,10 @@ class Sampler(nn.Module):
         if not sampling_metadata.reuse_sampling_tensors:
             self._init_sampling_tensors(logits, sampling_metadata)
         elif self._do_penalties:
-            # In this case, we depend on the output tokens
-            # TODO: Check with Cade if this is needed for spec tokens
+            # In this case, the sampling tensors logic depends on
+            # "output_tokens" of a sequence. As a result, we cannot
+            # reuse sampling tensors, since "output_tokens" changes
+            # between decode runs.
             self._init_sampling_tensors(logits, sampling_metadata)
 
         assert self._sampling_tensors is not None
