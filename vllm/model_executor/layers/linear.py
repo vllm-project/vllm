@@ -72,6 +72,7 @@ class LinearMethodBase(QuantizeMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
+                       layer_name: Optional[str]=None,
                        **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
@@ -105,6 +106,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
+                       layer_name: Optional[str]=None,
                        **extra_weight_attrs):
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
@@ -141,6 +143,7 @@ class LinearBase(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        layer_name: Optional[str] = None,
     ):
         super().__init__()
 
@@ -179,15 +182,18 @@ class ReplicatedLinear(LinearBase):
                  bias: bool = True,
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None,
+    ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, layer_name)
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
         self.quant_method.create_weights(self, self.input_size,
                                          [self.output_size], self.input_size,
-                                         self.output_size, self.params_dtype)
+                                         self.output_size, self.params_dtype,
+                                         layer_name=layer_name)
 
         if bias:
             self.bias = Parameter(
@@ -249,7 +255,9 @@ class ColumnParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 output_sizes: Optional[List[int]] = None):
+                 output_sizes: Optional[List[int]] = None,
+                 layer_name: Optional[str] = None,
+    ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
@@ -276,7 +284,8 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=self.weight_loader)
+            layer_name=layer_name,
+            weight_loader=self.weight_loader,)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -357,7 +366,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                  gather_output: bool = False,
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
@@ -497,7 +507,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                  bias: bool = True,
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
