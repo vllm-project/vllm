@@ -94,9 +94,7 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
 .. code-block:: bash
 
-    python -m vllm.entrypoints.openai.api_server \
-        --model llava-hf/llava-1.5-7b-hf \
-        --chat-template template_llava.jinja
+    vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 
 .. important::
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow

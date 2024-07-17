@@ -61,8 +61,7 @@ LoRA adapted models can also be served with the Open-AI compatible vLLM server. 
 
 .. code-block:: bash
 
-    python -m vllm.entrypoints.openai.api_server \
-        --model meta-llama/Llama-2-7b-hf \
+    vllm serve meta-llama/Llama-2-7b-hf \
         --enable-lora \
         --lora-modules sql-lora=$HOME/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/
 

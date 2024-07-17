@@ -15,8 +15,6 @@ from ..utils import RemoteOpenAIServer
     ])
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
     pp_args = [
-        "--model",
-        MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -34,8 +32,6 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
     #  schedule all workers in a node other than the head node,
     #  which can cause the test to fail.
     tp_args = [
-        "--model",
-        MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -53,7 +49,7 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
 
     results = []
     for args in [pp_args, tp_args]:
-        with RemoteOpenAIServer(args) as server:
+        with RemoteOpenAIServer(MODEL_NAME, args) as server:
             client = server.get_client()
 
             # test models list
