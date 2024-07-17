@@ -4,6 +4,7 @@ import torch
 from torch.func import functional_call
 
 from vllm.multimodal import BatchedTensors
+from vllm.utils import is_pin_memory_available
 
 
 def merge_vision_embeddings(input_ids: torch.Tensor,
@@ -55,28 +56,33 @@ class PPMissingLayer(torch.nn.Identity):
 
 def offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     device = next(module.parameters()).device
-    cpu_model = module.cpu()
 
-    state_dict: Dict[str, torch.Tensor] = cpu_model.state_dict()
+    original_state_dict = module.state_dict()
+    pin_memory = is_pin_memory_available()
+    cpu_state_dict = {k: v.cpu() for k, v in original_state_dict.items()}
+    del original_state_dict
+    if pin_memory:
+        cpu_state_dict = {k: v.pin_memory() for k, v in cpu_state_dict.items()}
+    module.load_state_dict(cpu_state_dict)
 
-    original_forward = cpu_model.forward
+    original_forward = module.forward
 
     def forward(*args, **kwargs):
-        cpu_model.forward = original_forward
+        module.forward = original_forward
         device_state = {
             k: v.to(device, non_blocking=True)
-            for k, v in state_dict.items()
+            for k, v in cpu_state_dict.items()
         }
-        output = functional_call(cpu_model,
+        output = functional_call(module,
                                  device_state,
                                  args=args,
                                  kwargs=kwargs)
-        cpu_model.forward = forward
+        module.forward = forward
         return output
 
-    cpu_model.forward = forward
+    module.forward = forward
 
-    return cpu_model
+    return module
 
 
 def make_layers(
