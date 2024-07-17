@@ -36,9 +36,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     def process_weights_after_loading(self, layer) -> None:
         # If per tensor, when we have a fused module (e.g. QKV) with per
         # tensor scales (thus N scales being passed to the kernel),
-        # requantize so we can always run per tensor with torch._scaled_mm
-        if (self.strategy == QuantizationStrategy.TENSOR
-                or not self.cutlass_fp8_supported):
+        # requantize so we can always run per tensor
+        if self.strategy == QuantizationStrategy.TENSOR:
             max_w_scale, weight = requantize_with_max_scale(
                 weight=layer.weight,
                 weight_scale=layer.weight_scale,
