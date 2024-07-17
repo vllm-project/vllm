@@ -379,6 +379,7 @@ class LLMEngine:
         cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -423,6 +424,7 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
         )
         return engine
 
