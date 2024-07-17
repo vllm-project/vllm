@@ -414,7 +414,6 @@ def get_internvl_num_patches(image_size: int, patch_size: int,
 
 
 def get_max_internvl_image_tokens(ctx: InputContext):
-    model_config = ctx.model_config
     hf_config = ctx.get_hf_config(PretrainedConfig)
     vision_config = hf_config.vision_config
     image_size = vision_config.image_size
