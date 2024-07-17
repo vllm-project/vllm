@@ -236,7 +236,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 self.non_driver_workers.append(self.workers[idx])
                 non_driver_worker_ranks.append(rank)
 
-        # Enforce rank order for correct execution order
+        # Enforce rank order for correct rank to return final output.
         self.tp_driver_workers = [
             worker for _, worker in sorted(
                 zip(tp_driver_worker_ranks, self.tp_driver_workers))
