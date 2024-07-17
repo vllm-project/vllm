@@ -4,19 +4,15 @@ from ..utils import RemoteOpenAIServer
 
 
 @pytest.mark.parametrize(
-    "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME",
-    [
+    "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME", [
         (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B"),
         (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B"),
         (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B"),
-        # TODO: figure out why PP=4 tests are flaky
-        # (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B"),
-        # (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B"),
+        (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B"),
+        (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B"),
     ])
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
     pp_args = [
-        "--model",
-        MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -34,8 +30,6 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
     #  schedule all workers in a node other than the head node,
     #  which can cause the test to fail.
     tp_args = [
-        "--model",
-        MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -53,7 +47,7 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
 
     results = []
     for args in [pp_args, tp_args]:
-        with RemoteOpenAIServer(args) as server:
+        with RemoteOpenAIServer(MODEL_NAME, args) as server:
             client = server.get_client()
 
             # test models list
