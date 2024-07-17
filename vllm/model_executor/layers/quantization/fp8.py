@@ -14,9 +14,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    all_close_1d, apply_fp8_linear, create_per_tensor_scale_param,
-    cutlass_fp8_supported, per_tensor_dequantize, 
-    requantize_with_max_scale, convert_to_channelwise)
+    all_close_1d, apply_fp8_linear, convert_to_channelwise,
+    create_per_tensor_scale_param, cutlass_fp8_supported,
+    per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
@@ -178,10 +178,10 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.use_marlin:
                 weight = layer.weight
                 weight_scale = convert_to_channelwise(layer.weight_scale,
-                                                      self.logical_widths)
-            
-            # If using w8a8, torch._scaled_mm needs per tensro, so
-            # requesntize the logical shards as a single weight.
+                                                      layer.logical_widths)
+
+            # If using w8a8, torch._scaled_mm needs per tensor, so
+            # requantize the logical shards as a single weight.
             else:
                 # Dequant -> Quant with max scale so we can run per tensor.
                 weight_scale, weight = requantize_with_max_scale(
