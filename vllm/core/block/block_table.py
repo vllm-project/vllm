@@ -347,7 +347,7 @@ class BlockTable:
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
         num_token_blocks = (
-            1 + math.ceil(num_token_ids-first_chunk_size / self._block_size)
+            1 + math.ceil(num_token_ids - first_chunk_size / self._block_size)
         )
         return num_token_blocks
 
