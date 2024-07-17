@@ -245,13 +245,17 @@ class OpenAIServing:
         else:
             return input_ids, input_text
 
-    def _get_decoded_token(
-            self, logprob: Logprob, token_id: int,
-            ascii_escape_encoding: bool = False) -> str:
+    def _get_decoded_token(self,
+                           logprob: Logprob,
+                           token_id: int,
+                           ascii_escape_encoding: bool = False) -> str:
         if logprob.decoded_token is not None:
             decoded_token = logprob.decoded_token
         decoded_token = self.tokenizer.decode(token_id)
 
+        # Escape non-ASCII characters to enable sending string versions of
+        # non-ASCII tokens
         if ascii_escape_encoding:
-            return decoded_token.encode('utf-8').decode('ascii', errors='backslashreplace')
+            return decoded_token.encode('utf-8').decode(
+                'ascii', errors='backslashreplace')
         return decoded_token

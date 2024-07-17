@@ -440,7 +440,9 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs: Optional[int]) -> List[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(
-                token=self._get_decoded_token(p[1], p[0], ascii_escape_encoding=True),
+                token=self._get_decoded_token(p[1],
+                                              p[0],
+                                              ascii_escape_encoding=True),
                 logprob=max(p[1].logprob, -9999.0),
                 bytes=list(
                     self._get_decoded_token(p[1],

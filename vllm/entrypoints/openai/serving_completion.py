@@ -423,7 +423,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append(None)
             else:
                 token = self._get_decoded_token(step_top_logprobs[token_id],
-                                                token_id, ascii_escape_encoding=True)
+                                                token_id,
+                                                ascii_escape_encoding=True)
                 token_logprob = max(step_top_logprobs[token_id].logprob,
                                     -9999.0)
                 out_tokens.append(token)
@@ -436,7 +437,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append({
                     # Convert float("-inf") to the
                     # JSON-serializable float that OpenAI uses
-                    self._get_decoded_token(top_lp[1], top_lp[0], ascii_escape_encoding=True):
+                    self._get_decoded_token(top_lp[1],
+                                            top_lp[0],
+                                            ascii_escape_encoding=True):
                     max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i
