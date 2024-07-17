@@ -206,13 +206,11 @@ class StreamingAttentionSink(nn.Module):
             original_keys[i] = (full_past_keys.clone(), rem_past_keys.clone())
             
             # use positions within cache (capped by context length)
-            pos_start = 0 if within_context_len else 2 * block_size - 1 - rem
-            pos_end = min(num_past_tokens, model_context_len - 1)
-            pos = torch.arange(pos_start, pos_end, device=device)
-            if not within_context_len:
-                # pos (for context len 4096): [0, 16) + [31 - rem, 4095)
-                pos_sink = torch.arange(0, block_size, device=device)
-                pos = torch.cat((pos_sink, pos))
+            if within_context_len:
+                pos = torch.arange(0, num_past_tokens, device=device)
+            else:
+                # pos (for context len 4096): [0, 4080 + rem)
+                pos = torch.arange(0, model_context_len - block_size + rem, device=device)
             
             # reshape for rotary embedding kernel
             if self.attn_backend == _Backend.FLASH_ATTN:
@@ -254,7 +252,7 @@ class StreamingAttentionSink(nn.Module):
                 # must be decode
                 # => cap number of tokens to consider with model context len
                 attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
-                self.positions[i] = model_context_len - 1
+                self.positions[i] = model_context_len - block_size + rem
 
         if not hasattr(attn_metadata, 'phys_bnums_list'):
             attn_metadata.phys_bnums_list = phys_bnums_list

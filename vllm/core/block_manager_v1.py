@@ -437,17 +437,20 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         n_blocks = seq.n_blocks
         block_table = self.block_tables[seq.seq_id]
         
+        # Attention sinks logic
         seqlen = seq.get_len()
         if seqlen > self.max_blocks * self.block_size:
-            # past context length, attn sinks implied
+            # past context length, implies attn sinks are enabled
             if seqlen % self.block_size == 1:
                 # need to append block
                 new_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
 
-                # Attention sinks logic
                 if len(block_table) > self.max_blocks:
-                    # 0th block is attention sink
+                    # evict only one block
+                    assert len(block_table) == self.max_blocks + 1
+
+                    # block 0 is attention sink
                     self.gpu_allocator.free(block_table[1])
                     self.block_tables[seq.seq_id] = [block_table[0]] + block_table[2:]
 
