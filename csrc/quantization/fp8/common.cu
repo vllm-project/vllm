@@ -91,9 +91,8 @@ float8x4_t;
 
 template <typename scalar_t>
 __device__ float thread_max_vec(scalar_t const* __restrict__ input,
-                             int64_t const num_elems,
-                             int const tid,
-                             int const step) {
+                                int64_t const num_elems, int const tid,
+                                int const step) {
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vectorized_in =
       reinterpret_cast<vec4_t<scalar_t> const*>(input);
@@ -168,7 +167,6 @@ template <typename scalar_t>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
     c10::Float8_e4m3fn* __restrict__ out, float* __restrict__ scale,
     scalar_t const* __restrict__ input, const int hidden_size) {
-
   int const tid = threadIdx.x;
   int const token_idx = blockIdx.x;
 
@@ -210,7 +208,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
 
 }  // namespace vllm
 
-void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
+void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& input,  // [..., d]
                              torch::Tensor const& scale)  // [1]
 {
@@ -228,9 +226,9 @@ void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
       });
 }
 
-void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
+void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                               torch::Tensor const& input,  // [..., d]
-                              torch::Tensor& scale)  // [1]
+                              torch::Tensor& scale)        // [1]
 {
   int64_t num_tokens = input.numel() / input.size(-1);
   int64_t num_elems = input.numel();
@@ -248,7 +246,7 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
       });
 }
 
-void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
+void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                                         torch::Tensor const& input,  // [..., d]
                                         torch::Tensor& scales) {
   TORCH_CHECK(input.is_contiguous());
