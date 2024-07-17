@@ -124,7 +124,8 @@ def node_function_target(node: torch.fx.Node) -> str:
     Get the name of the function being called in a 'call_function' op.
     """
     assert is_call(node)
-    return get_node_target(None, node)
+    mod = None if node.op != 'call_module' else node.graph.owning_module
+    return get_node_target(mod, node)
 
 
 def call_method_class(node: torch.fx.Node):
