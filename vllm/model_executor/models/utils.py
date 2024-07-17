@@ -1,6 +1,7 @@
 from typing import Callable, Dict, List, Tuple
 
 import torch
+from torch.func import functional_call
 
 from vllm.multimodal import BatchedTensors
 
@@ -50,6 +51,32 @@ class PPMissingLayer(torch.nn.Identity):
 
     def __init__(self, *args, **kwargs):
         super().__init__()
+
+
+def offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
+    device = next(module.parameters()).device
+    cpu_model = module.cpu()
+
+    state_dict: Dict[str, torch.Tensor] = cpu_model.state_dict()
+
+    original_forward = cpu_model.forward
+
+    def forward(*args, **kwargs):
+        cpu_model.forward = original_forward
+        device_state = {
+            k: v.to(device, non_blocking=True)
+            for k, v in state_dict.items()
+        }
+        output = functional_call(cpu_model,
+                                 device_state,
+                                 args=args,
+                                 kwargs=kwargs)
+        cpu_model.forward = forward
+        return output
+
+    cpu_model.forward = forward
+
+    return cpu_model
 
 
 def make_layers(
