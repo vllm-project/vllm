@@ -308,7 +308,7 @@ class EngineArgs:
             '--cpu-offload-gb',
             type=float,
             default=0,
-            help='the space in GiB to offload to CPU, per GPU. '
+            help='The space in GiB to offload to CPU, per GPU. '
             'Default is 0, which means no offloading. Intuitively, '
             'this argument can be seen as a virtual way to increase '
             'the GPU memory size. For example, if you have one 24 GB '
