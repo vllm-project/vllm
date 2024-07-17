@@ -84,14 +84,14 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
-    def _check_scheme_supported_on_device(self, min_capability: int):
+    def _check_scheme_supported(self, min_capability: int):
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         if capability < min_capability:
-            raise RuntimeError("Quantization scheme is not supported for ",
-                               f"the current GPU. Min capability: {min_capability}. ",
-                               f"Current capability: {capability}.")
-    
+            raise RuntimeError(
+                "Quantization scheme is not supported for ",
+                f"the current GPU. Min capability: {min_capability}. ",
+                f"Current capability: {capability}.")
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -227,6 +227,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self._check_scheme_supported(scheme.get_min_capability())
 
         return scheme
+
 
 class CompressedTensorsLinearMethod(LinearMethodBase):
 

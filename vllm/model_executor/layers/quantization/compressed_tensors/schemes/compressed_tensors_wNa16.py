@@ -45,7 +45,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def get_min_capability(self) -> int:
         # ampere and up
         return 80
-    
+
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,

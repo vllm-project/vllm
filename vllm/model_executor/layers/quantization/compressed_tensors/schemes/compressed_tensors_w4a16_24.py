@@ -32,7 +32,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
     def get_min_capability(self) -> int:
         # ampere + up
         return 80
-    
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 

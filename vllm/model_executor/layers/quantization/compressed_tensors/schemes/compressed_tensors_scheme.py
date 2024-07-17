@@ -18,7 +18,7 @@ class CompressedTensorsScheme(ABC):
         Get minimum device capability.
         """
         raise NotImplementedError
-    
+
     @abstractmethod
     def create_weights(self, *args, **kwargs):
         """
