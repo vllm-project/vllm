@@ -78,6 +78,10 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
     for p in module.parameters():
+        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
+            # we use per-parameter offloading
+            # one module might have some parameters offloaded and some not
+            break
         p.data = p.data.cpu().pin_memory() if pin_memory else p.data.cpu()
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
 
@@ -88,6 +92,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     def forward(*args, **kwargs):
         module.forward = original_forward
         device_state = {
+            # here we blindly call `to(device)`
+            # if the parameter is already on the device, it will be a no-op
             k: v.to(device, non_blocking=True)
             for k, v in state_dict.items()
         }
