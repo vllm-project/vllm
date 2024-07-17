@@ -1,5 +1,7 @@
 import asyncio
 import os
+import signal
+import weakref
 from functools import partial
 from typing import Any, List, Optional
 
@@ -9,7 +11,9 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.triton_utils import maybe_set_triton_cache_manager
 from vllm.utils import (cuda_device_count_stateless,
+                        error_on_invalid_device_count_status,
                         get_distributed_init_method, get_open_port,
                         get_vllm_instance_id, make_async,
                         update_environment_variables)
@@ -36,8 +40,19 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
+        # Set OMP_NUM_THREADS to 1 if it is not set explicitly, avoids CPU
+        # contention amongst the shards
+        if "OMP_NUM_THREADS" not in os.environ:
+            os.environ["OMP_NUM_THREADS"] = "1"
+
+        # workaround for https://github.com/vllm-project/vllm/issues/6103
+        if world_size > 1:
+            maybe_set_triton_cache_manager()
+
         assert world_size <= cuda_device_count_stateless(), (
             "please set tensor_parallel_size to less than max local gpu count")
+
+        error_on_invalid_device_count_status()
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -65,6 +80,19 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             result_handler.start()
             self.worker_monitor.start()
 
+        # Set up signal handlers to shutdown the executor cleanly
+        # sometimes gc does not work well
+
+        # Use weakref to avoid holding a reference to self
+        ref = weakref.ref(self)
+
+        def shutdown(signum, frame):
+            if executor := ref():
+                executor.shutdown()
+
+        signal.signal(signal.SIGINT, shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+
         self.driver_worker = self._create_worker(
             distributed_init_method=distributed_init_method)
         self._run_workers("init_device")
@@ -91,17 +119,17 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        async_run_remote_workers_only: bool = False,
+        async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
 
         Args:
-            async_run_remote_workers_only: If True the method will be run only
-                in the remote workers, not the driver worker. It will also be
-                run asynchronously and return a list of futures rather than
-                blocking on the results.
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
         """
 
         if max_concurrent_workers:
@@ -114,7 +142,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             for worker in self.workers
         ]
 
-        if async_run_remote_workers_only:
+        if async_run_tensor_parallel_workers_only:
             # Just return futures
             return worker_outputs
 

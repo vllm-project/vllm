@@ -12,6 +12,8 @@ from vllm import SamplingParams
 from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
                                  ENABLE_ARTIFICIAL_PREEMPT)
 
+from ..models.utils import check_outputs_equal
+
 MODELS = [
     "facebook/opt-125m",
 ]
@@ -54,8 +56,8 @@ def test_chunked_prefill_recompute(
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
-                ARTIFICIAL_PREEMPTION_MAX_CNT)
+        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+                < ARTIFICIAL_PREEMPTION_MAX_CNT)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
@@ -89,18 +91,18 @@ def test_preemption(
             disable_log_stats=False,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
-                ARTIFICIAL_PREEMPTION_MAX_CNT)
+        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+                < ARTIFICIAL_PREEMPTION_MAX_CNT)
         total_preemption = (
-            vllm_model.model.llm_engine.scheduler.num_cumulative_preemption)
+            vllm_model.model.llm_engine.scheduler[0].num_cumulative_preemption)
 
-    for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
+
     assert ("is preempted by PreemptionMode.RECOMPUTE mode because there "
             "is not enough KV cache space." in caplog_vllm.text)
     # Ensure the count bucket of request-level histogram metrics matches
@@ -145,10 +147,10 @@ def test_swap(
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_beam_search(example_prompts,
                                                        beam_width, max_tokens)
-        assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
-                ARTIFICIAL_PREEMPTION_MAX_CNT)
+        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+                < ARTIFICIAL_PREEMPTION_MAX_CNT)
         total_preemption = (
-            vllm_model.model.llm_engine.scheduler.num_cumulative_preemption)
+            vllm_model.model.llm_engine.scheduler[0].num_cumulative_preemption)
 
     for i in range(len(example_prompts)):
         hf_output_ids, _ = hf_outputs[i]
@@ -212,8 +214,8 @@ def test_swap_infeasible(
             example_prompts,
             sampling_params=sampling_params,
         )
-        assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
-                ARTIFICIAL_PREEMPTION_MAX_CNT)
+        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+                < ARTIFICIAL_PREEMPTION_MAX_CNT)
 
     # Verify the request is ignored and not hang.
     assert req_outputs[0].outputs[0].finish_reason == "length"
@@ -250,8 +252,8 @@ def test_preemption_infeasible(
             sampling_params=sampling_params,
         )
 
-        assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
-                ARTIFICIAL_PREEMPTION_MAX_CNT)
+        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+                < ARTIFICIAL_PREEMPTION_MAX_CNT)
 
     # Verify the request is ignored and not hang.
     for req_output in req_outputs:

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.ops.blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -327,7 +327,9 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -340,6 +342,12 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "BlocksparseFlashAttentionImpl")
+
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -361,7 +369,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
@@ -398,7 +407,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                k_scale,
+                v_scale,
                 tp_rank=self.tp_rank,
                 blocksparse_local_blocks=self.local_blocks,
                 blocksparse_vert_stride=self.vert_stride,

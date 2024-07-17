@@ -6,8 +6,55 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from vllm._custom_ops import scaled_fp8_quant
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.fp8 import (Fp8KVCacheMethod,
+                                                         Fp8LinearMethod)
+
+MODELS = [
+    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
+    "nm-testing/Phi-3-mini-128k-instruct-FP8",
+]
+
+
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.parametrize("model_id", MODELS)
+def test_model_load_and_run(vllm_runner, model_id: str):
+    with vllm_runner(model_id) as llm:
+        # note: this does not test accuracy, just that we can run through
+        # see lm-eval tests for accuracy
+        outputs = llm.generate_greedy(prompts=["Hello my name is"],
+                                      max_tokens=10)
+        print(outputs[0][1])
+
+
+KV_CACHE_MODELS = [
+    # Deprecated AutoFP8 format using .kv_scale
+    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
+    # AutoFP8 format using separate .k_scale and .v_scale
+    "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
+]
+
+
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.parametrize("model_id", KV_CACHE_MODELS)
+def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
+    with vllm_runner(model_id, kv_cache_dtype="fp8") as llm:
+
+        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        attn = model.model.layers[0].self_attn.attn
+        assert isinstance(attn.quant_method, Fp8KVCacheMethod)
+        # NOTE: it is valid for scales to be 1.0 (default value), but we know
+        # these checkpoints have scales < 1.0
+        assert 0.0 < attn._k_scale < 1.0
+        assert 0.0 < attn._v_scale < 1.0
+
+        # note: this does not test accuracy, just that we can run through
+        # see lm-eval tests for accuracy
+        outputs = llm.generate_greedy(prompts=["Hello my name is"],
+                                      max_tokens=10)
+        print(outputs[0][1])
 
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
@@ -18,7 +65,16 @@ def test_load_fp16_model(vllm_runner) -> None:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         fc1 = model.model.decoder.layers[0].fc1
         assert isinstance(fc1.quant_method, Fp8LinearMethod)
-        assert fc1.weight.dtype == torch.float8_e4m3fn
+
+        capability = torch.cuda.get_device_capability()
+        capability = capability[0] * 10 + capability[1]
+        if capability >= 89:
+            # For GPUs with hardware support, we keep weights in fp8
+            assert fc1.weight.dtype == torch.float8_e4m3fn
+        else:
+            # For GPUs without hardware support, we pack the fp8 weights
+            # for weight-only quantization using Marlin kernels
+            assert fc1.weight.dtype == torch.int32
 
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
@@ -46,7 +102,7 @@ def test_scaled_fp8_quant(dtype) -> None:
     x = (torch.randn(size=(11, 11), device="cuda") * 13).to(dtype)
 
     # Dynamic quantization
-    ref_y, inv_scale = scaled_fp8_quant(x, None)
+    ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
     ref_y = per_tensor_dequantize(ref_y, inv_scale, dtype)
 
     # Reference dynamic quantizaton
@@ -54,11 +110,11 @@ def test_scaled_fp8_quant(dtype) -> None:
     assert torch.allclose(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
     # Static quantization
-    y, _ = scaled_fp8_quant(x, inv_scale)
+    y, _ = ops.scaled_fp8_quant(x, inv_scale)
     assert torch.allclose(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
     # Padding
-    y, _ = scaled_fp8_quant(x, inv_scale, batch_dim_padding=17)
+    y, _ = ops.scaled_fp8_quant(x, inv_scale, batch_dim_padding=17)
     assert y.shape[0] == 17
     assert torch.allclose(
         ref_y,

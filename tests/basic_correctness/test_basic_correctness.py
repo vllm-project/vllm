@@ -2,11 +2,15 @@
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
+import os
 import weakref
 
 import pytest
 
 from vllm import LLM
+from vllm.utils import is_hip
+
+from ..models.utils import check_outputs_equal
 
 MODELS = [
     "facebook/opt-125m",
@@ -25,6 +29,7 @@ def test_vllm_gc_ed():
 
 
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -33,10 +38,17 @@ def test_models(
     vllm_runner,
     example_prompts,
     model: str,
+    backend: str,
     dtype: str,
     max_tokens: int,
     enforce_eager: bool,
 ) -> None:
+
+    if backend == "FLASHINFER" and is_hip():
+        pytest.skip("Flashinfer does not support ROCm/HIP.")
+
+    os.environ["VLLM_ATTENTION_BACKEND"] = backend
+
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
@@ -46,10 +58,9 @@ def test_models(
                      gpu_memory_utilization=0.7) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-    for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
