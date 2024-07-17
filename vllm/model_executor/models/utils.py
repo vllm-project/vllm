@@ -55,11 +55,12 @@ class PPMissingLayer(torch.nn.Identity):
 
 
 _CPU_OFFLOAD_BYTES = 0
-_CPU_OFFLOAD_MAX_BYTES = 40 * 1024**3  # 40 GB
+_CPU_OFFLOAD_MAX_BYTES = 0
 
 
 def set_cpu_offload_max_bytes(max_bytes: int) -> None:
-    global _CPU_OFFLOAD_MAX_BYTES
+    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
+    _CPU_OFFLOAD_BYTES = 0
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
 
 
