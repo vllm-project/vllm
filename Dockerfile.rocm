@@ -161,6 +161,9 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/gradlib/dist/*.whl /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/rocm_patch /rocm_patch
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements*.txt /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
+
 
 # -----------------------
 # Final vLLM image
@@ -238,6 +241,9 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 
 # Copy over the benchmark scripts as well
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
+COPY --from=export_vllm /tests ${COMMON_WORKDIR}/vllm/tests
+COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
+
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false

@@ -1,6 +1,6 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set docker_image_amd = "rocmshared/vllm-ci:$BUILDKITE_COMMIT" %}
-{% set default_working_dir = "vllm-workspace/tests" %}
+{% set default_working_dir = "vllm/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 
 steps:
@@ -32,7 +32,7 @@ steps:
     agents:
       queue: amd
     commands: 
-      - bash .buildkite/run-amd-test.sh "git clone https://github.com/rocm/vllm vllm-workspace ; cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+      - bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
     env:
       DOCKER_BUILDKIT: "1"
     priority: 100
