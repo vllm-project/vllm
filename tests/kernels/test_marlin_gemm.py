@@ -17,7 +17,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    MarlinWorkspace, get_weight_perm, marlin_quantize, marlin_weights)
+    MarlinWorkspace, get_weight_perm, marlin_quantize, marlin_weights,
+    awq_marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -61,8 +62,8 @@ def rand_data(shape, dtype=torch.float16):
 @pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
-                       mnk_factors):
+def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
+                            mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
     size_m = m_factor
@@ -125,7 +126,7 @@ def test_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)
-def test_marlin_gemm(
+def test_gptq_marlin_gemm(
     k_chunk,
     n_chunk,
     num_bits,
@@ -188,7 +189,8 @@ def test_marlin_gemm(
 @pytest.mark.parametrize("num_bits", GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
 @pytest.mark.parametrize("group_size", GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):
+def test_gptq_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size,
+                             mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
     size_m = m_factor
@@ -294,6 +296,69 @@ def test_fp8_marlin_gemm(
         size_k=a_input.shape[1],
     )
     output_ref = torch.matmul(a_input, b_weight)
+
+    torch.cuda.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
+    print("max_diff = {}".format(max_diff))
+
+    assert max_diff < 0.04
+
+
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
+                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
+@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+def test_awq_marlin_gemm(
+    k_chunk,
+    n_chunk,
+    num_bits,
+    group_size,
+    mnk_factors,
+    act_order,
+    is_k_full,
+):
+    m_factor, n_factor, k_factor = mnk_factors
+
+    size_m = m_factor
+    size_k = k_chunk * k_factor
+    size_n = n_chunk * n_factor
+
+    print(f"MNK = {size_m} {size_n} {size_k}")
+    print(f"groupsize = {group_size}")
+
+    if act_order:
+        if group_size == -1:
+            return
+        if group_size == size_k:
+            return
+
+    a_input = rand_data((size_m, size_k))
+    b_weight = rand_data((size_k, size_n))
+
+    w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
+        b_weight, num_bits, group_size)
+
+    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                                GPTQ_MARLIN_MAX_PARALLEL)
+
+    output = ops.gptq_marlin_gemm(
+        a_input,
+        marlin_q_w,
+        marlin_s,
+        g_idx,
+        sort_indices,
+        workspace.scratch,
+        num_bits,
+        a_input.shape[0],
+        b_weight.shape[1],
+        a_input.shape[1],
+        is_k_full,
+    )
+    output_ref = torch.matmul(a_input, w_ref)
 
     torch.cuda.synchronize()
 

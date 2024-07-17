@@ -6,7 +6,8 @@ import numpy
 import torch
 
 from .marlin_utils import GPTQ_MARLIN_TILE, marlin_permute_scales
-from .quant_utils import get_pack_factor, quantize_weights, sort_weights
+from .quant_utils import (get_pack_factor, quantize_weights,
+                          quantize_weights_with_zp, sort_weights, pack_cols)
 
 
 class MarlinWorkspace:
@@ -114,6 +115,32 @@ def marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int,
 
     # Create result
     res_list = [w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, rand_perm]
+    for i in range(len(res_list)):
+        res_list[i] = res_list[i].to(w.device)
+
+    return res_list
+
+
+def awq_marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int):
+    size_k, size_n = w.shape
+
+    # Normalize group_size
+    if group_size == -1:
+        group_size = size_k
+    assert group_size <= size_k
+
+    # Quantize with zp
+    w_ref, q_w, s, zp = quantize_weights_with_zp(w, num_bits, group_size)
+
+    # Reformat to marlin
+    weight_perm = get_weight_perm(num_bits)
+    marlin_q_w = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
+    marlin_s = marlin_permute_scales(s, size_k, size_n, group_size)
+    marlin_zp = marlin_permute_scales(zp, size_k, size_n, group_size)
+    marlin_zp = pack_cols(marlin_zp)
+
+    # Create result
+    res_list = [w_ref, marlin_q_w, marlin_s, marlin_zp]
     for i in range(len(res_list)):
         res_list[i] = res_list[i].to(w.device)
 
