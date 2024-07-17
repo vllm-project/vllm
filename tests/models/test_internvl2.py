@@ -98,7 +98,6 @@ def run_test(
             "<IMG_CONTEXT>")
         hf_model.model.img_context_token_id = img_context_token_id
         hf_model.processor = InternVLProcessor(hf_model)
-        hf_outputs_per_image = []
         hf_model.model.get_output_embeddings = lambda: \
             hf_model.model.language_model.get_output_embeddings()
         hf_outputs_per_image = [
