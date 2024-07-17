@@ -245,7 +245,7 @@ class TP1DraftModelRunner(ModelRunner):
         # advance_step, which runs prepare_inputs on CPU and for each spec
         # iteration invokes this function only once
         # (Look at multi-step-worker code)
-        is_fallback = num_steps > 1
+        is_fallback = num_steps == 1
         if not is_fallback:
             # Since we do not broadcast data inside execute_model anymore,
             # we need to figure out the best way to support TP > 1 in this
