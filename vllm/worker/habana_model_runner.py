@@ -163,8 +163,8 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config, max_blocks):
     return list(sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
 
 
-def next_pow2(value: int):
-    res = 1
+def next_pow2(value: int, base: int):
+    res = base
     while value > 1:
         value = (value + 1) // 2
         res *= 2
@@ -176,12 +176,10 @@ def round_up(value: int, k: int):
 
 
 def find_bucket(value: int, config: Tuple[int, int, int]):
-    _, bstep, _ = config
-    if value < bstep:
-        result = min(next_pow2(value), bstep)
-    else:
-        result = round_up(value, bstep)
-    return result
+    bmin, bstep, _ = config
+    next_step = round_up(value, bstep)
+    next_pow = next_pow2(value, bmin)
+    return max(bmin, min(next_step, next_pow))
 
 
 def align_workers(value, op):
