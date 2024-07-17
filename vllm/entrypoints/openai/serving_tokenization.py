@@ -9,7 +9,8 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 
 
 class OpenAIServingTokenization(OpenAIServing):
@@ -18,11 +19,12 @@ class OpenAIServingTokenization(OpenAIServing):
                  engine: AsyncLLMEngine,
                  model_config: ModelConfig,
                  served_model_names: List[str],
+                 lora_modules: Optional[List[LoRAModulePath]] = None,
                  chat_template: Optional[str] = None):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=None)
+                         lora_modules=lora_modules)
 
         # If this is None we use the tokenizer's default chat template
         self.chat_template = load_chat_template(chat_template)

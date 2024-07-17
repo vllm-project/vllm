@@ -39,10 +39,12 @@ def zephyr_lora_added_tokens_files(zephyr_lora_files):
     tmp_model_dir = f"{tmp_dir.name}/zephyr"
     shutil.copytree(zephyr_lora_files, tmp_model_dir)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # Copy tokenizer to adapter and add some unique tokens
     # 32000, 32001, 32002
-    tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"], special_tokens=True)
+    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
+                                 special_tokens=True)
+    assert added == 3
     tokenizer.save_pretrained(tmp_model_dir)
-    #TODO added_embeddings.safetensors?
     yield tmp_model_dir
     tmp_dir.cleanup()
 
@@ -134,23 +136,26 @@ async def test_added_lora_tokens(client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model="zephyr-lora2",
         prompt=[0, 0, 32000, 32001, 32002],
+        echo=True,
         max_tokens=5,
         temperature=0.0,
     )
-    assert len(completion.choices[0].text) >= 1
+    # Added tokens should appear in tokenized prompt
+    assert completion.choices[0].text.startswith("<unk><unk>vllm1vllm2vllm3")
 
 
 @pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
-    with pytest.raises(
-            (openai.BadRequestError, openai.APIError)):  # test using token IDs
-        completion = await client.completions.create(
-            model=MODEL_NAME,
-            prompt=[0, 0, 32000, 32001, 32002],
-            max_tokens=5,
-            temperature=0.0,
-        )
-        assert len(completion.choices[0].text) >= 1
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 32000, 32001, 32002],
+        echo=True,
+        max_tokens=5,
+        temperature=0.0,
+    )
+    # Added tokens should not appear in tokenized prompt
+    assert "vllm" not in completion.choices[0].text
 
 
 @pytest.mark.asyncio
