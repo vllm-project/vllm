@@ -15,6 +15,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.ops.paged_attn import PagedAttention
 
 
 class FlashInferBackend(AttentionBackend):
@@ -46,14 +47,14 @@ class FlashInferBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        raise NotImplementedError
+        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        raise NotImplementedError
+        PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
