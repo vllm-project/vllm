@@ -5,12 +5,6 @@ from typing import Any, Dict, Iterable, Optional
 from pydantic import BaseModel, Field
 from torch.nn import Module
 
-# fused_name: List[shard_name]
-_FUSED_LAYER_NAME_MAPPING = {
-    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    "gate_up_proj": ["gate_proj", "up_proj"]
-}
-
 class CompressionFormat(Enum):
     dense = "dense"
     sparse_bitmask = "sparse-bitmask"
@@ -82,6 +76,71 @@ class QuantizationArgs(BaseModel):
     )
 
 
+# fused_name: List[shard_name]
+_FUSED_LAYER_NAME_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"]
+}
+
+def should_ignore_layer(layer_name: Optional[str], ignore: Iterable[str]) -> bool:   
+    if layer_name is None:
+        return False
+    
+    # layer_name = model.layers.0.self_attn.qkv_proj
+    # proj_name = qkv_proj
+    proj_name = layer_name.split(".")[-1]
+
+    # Fused layers like gate_up_proj or qkv_proj will not be fused
+    # in the safetensors checkpoint. So, we convert the name
+    # from the fused version to unfused + check to make sure that
+    # each shard of the fused layer has the same scheme.
+    if proj_name in _FUSED_LAYER_NAME_MAPPING:
+        shard_proj_names = _FUSED_LAYER_NAME_MAPPING[proj_name]
+        
+        # Convert fused_name --> [shard_names]
+        shard_names = [
+            layer_name.replace(proj_name, shard_proj_name) for
+            shard_proj_name in shard_proj_names
+        ]
+
+        # Layer should be ignored if shards are ignored.
+        should_ignore_layer = None
+        for shard_name in shard_names:
+            should_ignore_shard = check_equal_or_regex_match(
+                layer_name=shard_name, targets=ignore)
+            
+            # If shard_idx=0, set layer ignore to match shard. 
+            if should_ignore_layer is None:
+                should_ignore_layer = should_ignore_shard
+            
+            # If shard_idx=1+ confirm scheme matches prior shards.
+            elif should_ignore_shard != should_ignore_layer:
+                raise ValueError(
+                    f"Found a different quantization schemes for "
+                    f"{shard_proj_names} in {layer_name}. vLLM "
+                    "requires all to use the same scheme.")
+
+    # Unfused layers like down_proj and o_proj will match
+    # the safetensors checkpoint already.
+    else:
+        should_ignore_layer = check_equal_or_regex_match(
+                layer_name=layer_name, targets=ignore)
+    
+    return should_ignore_layer
+
+
+def check_equal_or_regex_match(layer_name: str, 
+                               targets: Iterable[str]) -> bool:
+    """
+    Checks whether a layer_name is exactly equal or a regex match for 
+    if target starts with 're:' to any target in list.
+    """
+    for target in targets:
+        if _is_equal_or_regex_match(layer_name, target):
+            return True
+    return False
+
+
 def find_first_name_or_class_match(
         name: str,
         module: Module,
@@ -117,13 +176,27 @@ def _find_first_match(value: str,
     """
 
     for target in targets:
-        if target.startswith("re:"):
-            pattern = target[3:]
-            if re.match(pattern, value):
-                return target
-        elif check_contains:
-            if target.lower() in value.lower():
-                return target
-        elif target == value:
+        if _is_equal_or_regex_match(value, target, 
+                                       check_contains=check_contains):
             return target
+
     return None
+
+
+def _is_equal_or_regex_match(value: str, target: str, 
+                             check_contains: bool = False) -> bool:
+    """
+    Checks whether a value is exactly equal or a regex match for target
+    if taget starts with 're:'. If check_contains is set to True,
+    additionally checks if the target string is contained within the value.
+    """
+    
+    if target.startswith("re:"):
+        pattern = target[3:]
+        if re.match(pattern, value):
+            return target
+    elif check_contains:
+        if target.lower() in value.lower():
+            return target
+    elif target == value:
+        return target

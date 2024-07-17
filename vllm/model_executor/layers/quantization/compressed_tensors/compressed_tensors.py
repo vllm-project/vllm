@@ -13,7 +13,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsWNA16, CompressedTensorsUnquantized)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
-    QuantizationType, find_first_name_or_class_match, _FUSED_LAYER_NAME_MAPPING)
+    QuantizationType, find_first_name_or_class_match, 
+    should_ignore_layer)
 from vllm.platforms import current_platform
 
 
@@ -206,38 +207,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             self,
             layer: torch.nn.Module,
             layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
-        
-        if layer_name is not None:
-            # layer_name = model.layers.0.self_attn.qkv_proj
-            # proj_name = qkv_proj
-            proj_name = layer_name.split(".")[-1]
 
-            # Fused layers like gate_up_proj or qkv_proj will not be fused
-            # in the safetensors checkpoint. So, we convert the name
-            # from the fused version to unfused + check to make sure that
-            # each shard of the fused layer has the same scheme.
-            if proj_name in _FUSED_LAYER_NAME_MAPPING:
-                # Convert fused_name --> shard_names
-                shard_names = [
-                    layer_name.replace(proj_name, unfused_proj_name) for
-                    unfused_proj_name in _FUSED_LAYER_NAME_MAPPING[proj_name]]
-
-                # Check if this layer should be skipped.
-                should_ignore_layer = shard_names[0] in self.ignore
-                
-                # Confirm that all the shards are skipped or none are skipped.
-                for shard_name in shard_names:
-                    should_ignore_shard = (shard_name in self.ignore)
-                    if should_ignore_shard != should_ignore_layer:
-                        raise ValueError(
-                            f"Found a different quantization scheme for {shard_name} in "
-                            f"{shard_names[0]} in layer {layer_name}. vLLM requires all "
-                            "shards in fused layers to share the same scheme.")
-            else:
-                should_ignore_layer = layer_name in self.ignore
-
-            if should_ignore_layer:
-                return CompressedTensorsUnquantized()
+        # Check if the layer is ignored (skipped for quantization).
+        if should_ignore_layer(layer_name, ignore=self.ignore):
+            return CompressedTensorsUnquantized()
 
         layer_type_name = find_first_name_or_class_match(
             name="",
