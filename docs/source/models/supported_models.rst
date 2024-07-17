@@ -139,6 +139,10 @@ Decoder-only Language Models
     - Phi-3-Small
     - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
     -
+  * - :code:`PersimmonForCausalLM`
+    - Persimmon
+    - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
+    - 
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
@@ -184,6 +188,10 @@ Vision Language Models
     - BLIP-2
     - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
     -
+  * - :code:`FuyuForCausalLM`
+    - Fuyu
+    - :code:`adept/fuyu-8b` etc.
+    - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.

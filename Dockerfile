@@ -88,6 +88,9 @@ ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
+ARG buildkite_commit
+ENV BUILDKITE_COMMIT=${buildkite_commit}
+
 ARG USE_SCCACHE
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -101,7 +104,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && export SCCACHE_REGION=us-west-2 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
     fi
 
@@ -109,7 +112,7 @@ ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" != "1" ]; then \
-        python3 setup.py bdist_wheel --dist-dir=dist; \
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
 # check the size of the wheel, we cannot upload wheels larger than 100MB
@@ -167,6 +170,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamba \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.9/flashinfer-0.0.9+cu121torch2.3-cp310-cp310-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 

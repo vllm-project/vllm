@@ -42,10 +42,10 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
 
@@ -88,12 +88,13 @@ class MixtralMoE(nn.Module):
                                 tp_size=tp_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_size = hidden_states.shape
+        # NOTE: hidden_states can have either 1D or 2D shape.
+        orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
-        return final_hidden_states.view(num_tokens, hidden_size)
+        return final_hidden_states.view(orig_shape)
 
 
 class MixtralAttention(nn.Module):
@@ -371,31 +372,13 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        expert_params_mapping = [
-            # These are the weight scales for the experts
-            # (param_name, weight_name, expert_id, shard_id)
-            ("experts.w13_scale"
-             if weight_name in ["w1", "w3"] else "experts.w2_scale",
-             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id,
-             shard_id) for expert_id in range(self.config.num_local_experts)
-            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-        ] + [
-            # These are the weights for the experts
-            # (param_name, weight_name, expert_id)
-            ("experts.w13_weight"
-             if weight_name in ["w1", "w3"] else "experts.w2_weight",
-             f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
-            for expert_id in range(self.config.num_local_experts)
-            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-        ] + [
-            # These are the activation scales for the experts
-            # (param_name, weight_name, expert_id)
-            ("experts.a13_scale"
-             if weight_name in ["w1", "w3"] else "experts.a2_scale",
-             f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
-             shard_id) for expert_id in range(self.config.num_local_experts)
-            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-        ]
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts)
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
@@ -432,19 +415,10 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     # Remapping the name of FP8 kv-scale.
-                    if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale")
-                        if remapped_kv_scale_name not in params_dict:
-                            print_warning_once(
-                                "Found kv scale in the checkpoint "
-                                f"(e.g. {name}), but not found the expected "
-                                f"name in the model "
-                                f"(e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
-                            continue
-                        else:
-                            name = remapped_kv_scale_name
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)

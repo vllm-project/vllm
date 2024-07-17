@@ -12,9 +12,10 @@ from .utils import check_logprobs_close
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "caption es",
-    "cherry_blossom": "What is in the picture?",
-    "boardwalk": "What is in the picture?",
+    "stop_sign":
+    "caption es",
+    "cherry_blossom":
+    "What is in the picture?",
 })
 
 IMAGE_TOKEN_ID = 257152
@@ -129,7 +130,7 @@ def run_test(
         [0.25, 0.5, 1.0],
     ],
 )
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["float", "half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
