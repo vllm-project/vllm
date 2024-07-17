@@ -23,7 +23,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.is_static_input_scheme = is_static_input_scheme
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
-        # On Lovelace, fall ba
+        # On Lovelace, fail for now if channelwise.
+        # TODO: (@tms) fallback
         if (not self.cutlass_fp8_supported
                 and self.strategy == QuantizationStrategy.CHANNEL):
             raise ValueError(
