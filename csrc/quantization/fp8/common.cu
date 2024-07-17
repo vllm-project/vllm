@@ -89,13 +89,12 @@ typedef struct __align__(4) {
 }
 float8x4_t;
 
-template<typename scalar_t>
+template <typename scalar_t>
 __device__ void scaled_fp8_conversion_vec(c10::Float8_e4m3fn* __restrict__ out,
                                           scalar_t const* __restrict__ input,
                                           float const inverted_scale,
                                           int64_t const num_elems,
                                           int const tid, int const step) {
-
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vectorized_in =
       reinterpret_cast<vec4_t<scalar_t> const*>(input);
@@ -132,18 +131,15 @@ __global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
   // division.
   const float inverted_scale = 1.0f / (*scale);
 
-  scaled_fp8_conversion_vec(out, input, inverted_scale, num_elems,
-                            tid, blockDim.x * gridDim.x);
+  scaled_fp8_conversion_vec(out, input, inverted_scale, num_elems, tid,
+                            blockDim.x * gridDim.x);
 }
 
 template <typename scalar_t>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
-    c10::Float8_e4m3fn* __restrict__ out,
-    float* __restrict__ scale,
-    scalar_t const* __restrict__ input,
-    const int hidden_size,
+    c10::Float8_e4m3fn* __restrict__ out, float* __restrict__ scale,
+    scalar_t const* __restrict__ input, const int hidden_size,
     bool const vectorize_conversions) {
-
   int const tid = threadIdx.x;
   int const token_idx = blockIdx.x;
   float absmax_val = 0.0f;
@@ -169,7 +165,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
                               hidden_size, tid, blockDim.x);
   } else {
     for (int i = tid; i < hidden_size; i += blockDim.x) {
-      out[token_idx * hidden_size + i] = scaled_fp8_conversion(input[token_idx * hidden_size + i], inverted_scale);
+      out[token_idx * hidden_size + i] = scaled_fp8_conversion(
+          input[token_idx * hidden_size + i], inverted_scale);
     }
   }
 }
@@ -214,25 +211,23 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
       });
 }
 
-void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out, // [..., d]
-                                 torch::Tensor& input, // [..., d]
-                                 torch::Tensor& scales) 
-{
+void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
+                                        torch::Tensor& input,  // [..., d]
+                                        torch::Tensor& scales) {
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
   dim3 const block(std::min(hidden_size, 1024));
-  bool const vectorize_conversions = (hidden_size % 4 == 0) && input.is_contiguous() && out.is_contiguous();
+  bool const vectorize_conversions =
+      (hidden_size % 4 == 0) && input.is_contiguous() && out.is_contiguous();
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_per_token_scaled_fp8_quant_kernel", [&] {
         vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t>
-            <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fn>(),
-                                         scales.data_ptr<float>(),
-                                         input.data_ptr<scalar_t>(),
-                                         hidden_size,
-                                         vectorize_conversions);
+            <<<grid, block, 0, stream>>>(
+                out.data_ptr<c10::Float8_e4m3fn>(), scales.data_ptr<float>(),
+                input.data_ptr<scalar_t>(), hidden_size, vectorize_conversions);
       });
 }

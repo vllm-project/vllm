@@ -3,9 +3,8 @@ import torch
 
 # ruff: noqa: F401
 import vllm._C
-from vllm._custom_ops import scaled_int8_quant
-
 from tests.kernels.quant_utils import ref_dynamic_per_token_quant
+from vllm._custom_ops import scaled_int8_quant
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
@@ -28,7 +27,7 @@ def test_dynamic_scaled_int8_quant(num_tokens: int, hidden_size: int,
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
 
     # reference
-    ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.int8) 
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.int8)
     # kernel
     ops_out, ops_scales = scaled_int8_quant(x)
 
@@ -55,7 +54,7 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 
     out1 = (x / scale).round().clamp(int8_traits.min,
                                      int8_traits.max).to(torch.int8)
-    out2, _ = scaled_int8_quant(x, scale) 
+    out2, _ = scaled_int8_quant(x, scale)
 
     assert torch.allclose(out1, out2,
                           atol=1)  # big atol to account for rounding errors
