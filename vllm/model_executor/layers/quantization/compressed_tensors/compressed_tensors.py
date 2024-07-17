@@ -208,8 +208,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
 
-    def get_scheme(self,
-                   layer: torch.nn.Module,
+    def get_scheme(self, layer: torch.nn.Module,
                    layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
         """
         compressed-tensors supports non uniform in the following way:
@@ -235,6 +234,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to. 
+        # TODO (@robertgshaw): add compressed-tensors as dep
+        # so we do not have to re-write these functions
         matched_target = find_matched_target(
             layer_name=layer_name,
             module=layer,
