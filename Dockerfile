@@ -11,7 +11,7 @@ ARG CUDA_VERSION=12.4.1
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3
+ARG PYTHON_VERSION=3.10
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -28,6 +28,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip git curl sudo
+
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -58,7 +60,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 
-ARG PYTHON_VERSION=3
+ARG PYTHON_VERSION=3.10
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
@@ -172,7 +174,7 @@ RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamb
     python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.9/flashinfer-0.0.9+cu121torch2.3-cp38-cp38-linux_x86_64.whl
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.9/flashinfer-0.0.9+cu121torch2.3-cp310-cp310-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 
