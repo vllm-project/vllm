@@ -16,8 +16,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "Question: What's the content of the image? Answer:",
     "cherry_blossom":
     "Question: What is the season? Answer:",
-    "boardwalk":
-    "Question: What's in this image? Answer:",
 })
 
 
