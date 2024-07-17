@@ -1,3 +1,5 @@
+# adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_intern_vit.py
+# and https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_internvl_chat.py
 # --------------------------------------------------------
 # InternVL
 # Copyright (c) 2023 OpenGVLab
@@ -394,7 +396,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     prompt = llm_inputs["prompt"]
     image_prompt = IMG_START + IMG_CONTEXT * (num_blocks+1) * num_patches + IMG_END
     new_prompt = prompt.replace('<image>', image_prompt, 1)
-    new_prompt_token_ids = tokenizer.encode(new_prompt, add_special_tokens=False)
+    new_prompt_token_ids = tokenizer.encode(new_prompt)
 
     return LLMInputs(prompt=new_prompt,
                      prompt_token_ids=new_prompt_token_ids,
