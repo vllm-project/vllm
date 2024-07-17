@@ -44,13 +44,13 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader)
+    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import is_hip, print_warning_once
+from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
-from .utils import is_pp_missing_parameter, make_layers
+from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 
 class LlamaMLP(nn.Module):
@@ -257,17 +257,24 @@ class LlamaModel(nn.Module):
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-        )
+        if get_pp_group().is_first_rank or (config.tie_word_embeddings
+                                            and get_pp_group().is_last_rank):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda: LlamaDecoderLayer(config=config,
                                       cache_config=cache_config,
                                       quant_config=quant_config))
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -360,26 +367,30 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                                 cache_config,
                                 quant_config,
                                 lora_config=lora_config)
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
-            quant_config=quant_config,
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+        if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = config.vocab_size
+            if lora_config:
+                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
+            )
+            if config.tie_word_embeddings:
+                self.lm_head.weight = self.model.embed_tokens.weight
 
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size, logit_scale)
-        self.sampler = Sampler()
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    logit_scale)
+            self.sampler = Sampler()
+        else:
+            self.lm_head = PPMissingLayer()
 
     def forward(
         self,
@@ -460,18 +471,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Remapping the name of FP8 kv-scale.
-                if name.endswith("kv_scale"):
-                    remapped_kv_scale_name = name.replace(
-                        ".kv_scale", ".attn.kv_scale")
-                    if remapped_kv_scale_name not in params_dict:
-                        print_warning_once(
-                            f"Found kv scale in the checkpoint (e.g. {name}), "
-                            "but not found the expected name in the model "
-                            f"(e.g. {remapped_kv_scale_name}). kv-scale is "
-                            "not loaded.")
-                        continue
-                    else:
-                        name = remapped_kv_scale_name
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
