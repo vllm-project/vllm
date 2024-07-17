@@ -24,10 +24,12 @@ class GPTQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         desc_act: bool,
+        is_intel_autoround=False,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
+        self.is_intel_autoround = is_intel_autoround
         self.pack_factor = Fraction(32, self.weight_bits)
         if self.weight_bits not in [2, 3, 4, 8]:
             raise ValueError(
@@ -60,8 +62,16 @@ class GPTQConfig(QuantizationConfig):
     def from_config(cls, config: Dict[str, Any]) -> "GPTQConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        desc_act = cls.get_from_keys(config, ["desc_act"])
-        return cls(weight_bits, group_size, desc_act)
+        try:
+            desc_act = cls.get_from_keys(config, ["desc_act"])
+        except:
+            desc_act = False
+        try:
+            is_intel_autoround = cls.get_from_keys(config, ["quant_method"]) == "intel/auto-round"
+        except:
+            is_intel_autoround = False
+
+        return cls(weight_bits, group_size, desc_act, is_intel_autoround)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["GPTQLinearMethod"]:
@@ -236,7 +246,8 @@ class GPTQLinearMethod(LinearMethodBase):
             qconfig = _woq_enable_weight_cache_for_large_batch(
                 qconfig
             )
-            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size, g_idx = layer.g_idx, is_gptq=True)
+
+            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size, is_gptq=True, is_intel_autoround=self.quant_config.is_intel_autoround)
         out = layer.ipex_qlinear(reshaped_x)
 
         return out.reshape(out_shape)

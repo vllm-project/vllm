@@ -178,6 +178,8 @@ class ModelConfig:
 
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
+            if quant_method == 'intel/auto-round': # intel/auto-round shares similar format as gptq, workaround here.
+                quant_method = 'gptq'
 
             # Detect which checkpoint is it
             for _, method in QUANTIZATION_METHODS.items():
