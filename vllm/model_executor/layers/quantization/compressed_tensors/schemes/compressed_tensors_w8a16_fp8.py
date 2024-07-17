@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.utils import set_weight_attrs
 
-__all__ = ["CompressedTensorsW8A16Fp"]
+__all__ = ["CompressedTensorsW8A16Fp8"]
 
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
