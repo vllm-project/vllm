@@ -123,9 +123,11 @@ class SchedulerOutputs:
     blocks_to_swap_out: List[Tuple[int, int]]
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]]
+
     # Blocks to migrate. list of GPU -> [GPU, rank].
     blocks_to_migrate: List[Tuple[int, int, int]]
-	# Dest chunk idx and rank. Note: we only set 1 chunk in master
+    # Dest chunk idx and rank. Note: we only set 1 chunk in master
+
     chunk_to_migrate: Tuple[int, int]
     # Sequence groups that are going to be ignored.
     ignored_seq_groups: List[SequenceGroup]
@@ -959,6 +961,7 @@ class Scheduler:
         )
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
+        # TODO: add the code for block to migrate
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.

@@ -414,6 +414,7 @@ class CacheConfig:
         self.num_cpu_blocks = None
 
         # 4096 tokens per chunk
+
         # self.chunk_size = 4096 / block_size
         self.block_migrate_threshold=block_migrate_threshold
         self.block_migrate_start=block_migrate_start

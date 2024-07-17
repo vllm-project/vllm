@@ -871,9 +871,11 @@ class ExecuteModelRequest:
     blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
+
     # Blocks to migrate. list of GPU -> [GPU, rank].
     blocks_to_migrate: List[Tuple[int, int, int]] = field(default_factory=list)
- 	# Dest chunk idx and rank. Note: we only set 1 chunk in master
+  	# Dest chunk idx and rank. Note: we only set 1 chunk in master
+
     chunk_to_migrate: Optional[Tuple[int, int]] = None
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int = 0
