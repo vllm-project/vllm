@@ -17,7 +17,7 @@ from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 
 if TYPE_CHECKING:
-    # avodi circuit import
+    # avoid circuit import
     from vllm.lora.layers import LoRAMapping
     from vllm.lora.models import LongContextLoRAContext
 
