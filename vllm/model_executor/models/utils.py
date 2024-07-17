@@ -83,7 +83,16 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
             # we use per-parameter offloading
             # one module might have some parameters offloaded and some not
             break
-        p.data = p.data.cpu().pin_memory() if pin_memory else p.data.cpu()
+
+        # `torch.empty_like` does not support `pin_memory` argument
+        cpu_data = torch.empty(size=p.data.size(),
+                               memory_format=p.data.storage().memory_format,
+                               dtype=p.data.dtype,
+                               layout=p.data.layout,
+                               device='cpu',
+                               pin_memory=pin_memory)
+        cpu_data.copy_(p.data)
+        p.data = cpu_data
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
 
     state_dict: Dict[str, torch.Tensor] = module.state_dict()
