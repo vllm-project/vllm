@@ -433,6 +433,8 @@ class HfRunner:
                                                return_tensors="pt").input_ids
             decoder_input_ids = self.tokenizer(decoder_prompt,
                                                return_tensors="pt").input_ids
+
+            from transformers.generation.configuration_utils import GenerationConfig
             generation_config = GenerationConfig.from_model_config(self.model.config)
             generation_config.do_sample = False
             generation_config.top_k = None
