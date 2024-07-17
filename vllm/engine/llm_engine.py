@@ -696,8 +696,8 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         if isinstance(inputs, str):
-            prompt = inputs
             inputs = {"prompt": inputs}
+        prompt = inputs.get("prompt")
 
         if "prompt_token_ids" not in inputs:
             prompt_token_ids = self._tokenize_prompt(
@@ -706,7 +706,6 @@ class LLMEngine:
                 lora_request,
             )
         else:
-            prompt = inputs.get("prompt")
             prompt_token_ids = inputs["prompt_token_ids"]
 
         if prompt_adapter_request:
