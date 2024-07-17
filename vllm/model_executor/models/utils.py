@@ -54,20 +54,34 @@ class PPMissingLayer(torch.nn.Identity):
         super().__init__()
 
 
-def offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
+_CPU_OFFLOAD_BYTES = 0
+_CPU_OFFLOAD_MAX_BYTES = 0
+
+
+def set_cpu_offload_max_bytes(max_bytes: int) -> None:
+    global _CPU_OFFLOAD_MAX_BYTES
+    _CPU_OFFLOAD_MAX_BYTES = max_bytes
+
+
+def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     device = next(module.parameters()).device
 
-    original_state_dict = module.state_dict()
-    pin_memory = is_pin_memory_available()
-    cpu_state_dict = {k: v.cpu() for k, v in original_state_dict.items()}
-    del original_state_dict
-    if pin_memory:
-        cpu_state_dict = {k: v.pin_memory() for k, v in cpu_state_dict.items()}
+    if device == torch.device("cpu"):
+        return module
 
-    # torch.nn.Module does not have pin_memory method
-    # we move the state_dict to the meta device to free up memory
-    # and actually hold the state_dict in `cpu_state_dict`
-    module.to(device="meta")
+    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
+    if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
+        return module
+
+    pin_memory = is_pin_memory_available()
+
+    # offload parameters to CPU
+    # use pin_memory if possible, which helps cudagraph capture speed
+    for p in module.parameters():
+        p.data = p.data.cpu().pin_memory() if pin_memory else p.data.cpu()
+        _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
+
+    state_dict: Dict[str, torch.Tensor] = module.state_dict()
 
     original_forward = module.forward
 
@@ -75,7 +89,7 @@ def offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
         module.forward = original_forward
         device_state = {
             k: v.to(device, non_blocking=True)
-            for k, v in cpu_state_dict.items()
+            for k, v in state_dict.items()
         }
         output = functional_call(module,
                                  device_state,
@@ -101,9 +115,10 @@ def make_layers(
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
     modules = torch.nn.ModuleList(
-        [PPMissingLayer() for _ in range(start_layer)] +
-        [layer_fn() for _ in range(start_layer, end_layer)] +
-        [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
+        [PPMissingLayer() for _ in range(start_layer)] + [
+            maybe_offload_to_cpu(layer_fn())
+            for _ in range(start_layer, end_layer)
+        ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
 
 
