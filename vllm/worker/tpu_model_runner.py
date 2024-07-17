@@ -1,7 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
-                    Union)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -14,14 +13,14 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
-                           SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput, IntermediateTensors)
+from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
+                           Logprob, SamplerOutput, SequenceGroupMetadata,
+                           SequenceOutput)
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict)
-from vllm.utils import make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -481,20 +480,44 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             raise ValueError(
                 "TPUModelRunner does not support multi-step execution.")
 
-        # Execute the model.
-        next_token_ids = self.model(model_input.token_ids,
-                                    model_input.position_ids,
-                                    model_input.attn_metadata,
-                                    model_input.input_lens, model_input.t,
-                                    model_input.p, model_input.num_samples,
-                                    kv_caches)
-        # Retrieve the outputs to CPU.
-        next_token_ids = next_token_ids.cpu().tolist()
+        is_prompt = model_input.token_ids.shape[1] > 1
+        if is_prompt:
+            # NOTE(woosuk): To reduce the compilation time, we only compile the
+            # prefill inputs with batch size 1. Because the scheduler is not
+            # aware of this limitation, we need to handle batch size > 1
+            # internally by calling the model multiple times and concatenating
+            # the outputs.
+            # FIXME(woosuk): This is a temporary hack to not change the existing
+            # scheduler. We need to fix this in the future.
+            next_token_ids = []
+            orig_slot_mapping = model_input.attn_metadata.slot_mapping
+            batch_size = model_input.token_ids.shape[0]
+            for i in range(batch_size):
+                # Execute the model.
+                model_input.attn_metadata.slot_mapping = orig_slot_mapping[
+                    i:i + 1]
+                output_token_ids = self.model(
+                    model_input.token_ids[i:i + 1],
+                    model_input.position_ids[i:i + 1],
+                    model_input.attn_metadata, model_input.input_lens[i:i + 1],
+                    model_input.t[i:i + 1], model_input.p[i:i + 1],
+                    model_input.num_samples, kv_caches)
+                # Retrieve the outputs to CPU.
+                next_token_ids += output_token_ids.cpu().tolist()
+        else:
+            # Execute the model.
+            output_token_ids = self.model(model_input.token_ids,
+                                          model_input.position_ids,
+                                          model_input.attn_metadata,
+                                          model_input.input_lens,
+                                          model_input.t, model_input.p,
+                                          model_input.num_samples, kv_caches)
+            # Retrieve the outputs to CPU.
+            next_token_ids = output_token_ids.cpu().tolist()
 
         # NOTE(woosuk): Minimal code to construct the sampler outputs.
         # The TPU backend does not reuse the sampler, since the TPU backend
         # does not support the advanced sampling parameters such as logprobs.
-        is_prompt = model_input.token_ids.shape[1] > 1
         zero_logprob = Logprob(0.0)
         batch_idx = 0
         sampler_outputs = []
@@ -520,26 +543,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             sampler_outputs.append(
                 CompletionSequenceGroupOutput(seq_outputs, None))
         return [SamplerOutput(sampler_outputs)]
-
-        # TODO(woosuk): Cover batch_size > 1 in prefills.
-        # assert seq_group_metadata_list is not None
-        # assert len(seq_group_metadata_list) > 0
-        # if seq_group_metadata_list[0].is_prompt:
-        #     # NOTE(woosuk): To reduce the compilation time, we only compile the
-        #     # prefill inputs with batch size 1. Because the scheduler is not
-        #     # aware of this limitation, we need to handle batch size > 1
-        #     # internally by calling the model multiple times and concatenating
-        #     # the outputs.
-        #     # FIXME(woosuk): This is a temporary hack to not change the existing
-        #     # scheduler. We need to fix this in the future.
-        #     sampler_outputs = []
-        #     for seq_group_metadata in seq_group_metadata_list:
-        #         sampler_outputs += self._execute_model([seq_group_metadata],
-        #                                                kv_caches)
-        # else:
-        #     sampler_outputs = self._execute_model(seq_group_metadata_list,
-        #                                           kv_caches)
-        # return [SamplerOutput(sampler_outputs)]
 
 
 class ModelWrapper(nn.Module):
