@@ -696,15 +696,17 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         if isinstance(inputs, str):
+            prompt = inputs
             inputs = {"prompt": inputs}
 
         if "prompt_token_ids" not in inputs:
             prompt_token_ids = self._tokenize_prompt(
                 request_id,
-                inputs,
+                prompt,
                 lora_request,
             )
         else:
+            prompt = inputs.get("prompt")
             prompt_token_ids = inputs["prompt_token_ids"]
 
         if prompt_adapter_request:
@@ -713,7 +715,7 @@ class LLMEngine:
                 + prompt_token_ids)
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=inputs.get("prompt"),
+                         prompt=prompt,
                          multi_modal_data=inputs.get("multi_modal_data"))
 
     def process_model_inputs(
