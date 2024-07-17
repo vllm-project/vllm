@@ -458,26 +458,3 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
         encoder_input_tokens,
         encoder_input_positions,
     )
-
-    # sampling_metadata = SamplingMetadata.prepare(
-    #     seq_group_metadata_list,
-    #     seq_lens,
-    #     query_lens=seq_lens,
-    #     device=model_runner.device,
-    #     pin_memory=model_runner.pin_memory,
-    # )
-
-    # actual = sampling_metadata.selected_token_indices
-    # expected = torch.tensor(
-    #     expected_selected_token_indices,
-    #     device=actual.device,
-    #     dtype=actual.dtype,
-    # )
-    # torch.testing.assert_close(actual, expected)
-    # torch.allclose(input_tokens, input_positions)
-
-    # actual = sampling_metadata.selected_token_indices
-    # expected = torch.tensor(expected_selected_token_indices,
-    #                         device=actual.device,
-    #                         dtype=actual.dtype)
-    # torch.testing.assert_close(actual, expected)
