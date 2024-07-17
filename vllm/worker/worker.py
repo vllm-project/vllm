@@ -12,6 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
+                              set_allgather_pipeline_comm,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -339,6 +340,7 @@ def init_worker_distributed_environment(
 ) -> None:
     """Initialize the distributed environment."""
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+    set_allgather_pipeline_comm(parallel_config.use_allgather_pipeline_comm)
 
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)

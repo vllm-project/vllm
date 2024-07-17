@@ -60,6 +60,7 @@ class EngineArgs:
     max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
+    use_allgather_pipeline_comm: bool = False
     tokenizer_pool_size: int = 0
     tokenizer_pool_type: str = "ray"
     tokenizer_pool_extra_config: Optional[dict] = None
@@ -381,6 +382,10 @@ class EngineArgs:
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,
                             help='See ParallelConfig.')
+        parser.add_argument('--use-allgather-pipeline-comm',
+                            action='store_true',
+                            default=EngineArgs.use_allgather_pipeline_comm,
+                            help='See ParallelConfig.')
         parser.add_argument('--tokenizer-pool-size',
                             type=int,
                             default=EngineArgs.tokenizer_pool_size,
@@ -673,6 +678,7 @@ class EngineArgs:
             worker_use_ray=self.worker_use_ray,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
+            use_allgather_pipeline_comm=self.use_allgather_pipeline_comm,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
                 self.tokenizer_pool_size,
                 self.tokenizer_pool_type,

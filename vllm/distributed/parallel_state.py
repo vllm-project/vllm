@@ -121,6 +121,7 @@ class GroupCoordinator:
     device_group: ProcessGroup  # group for device communication
     use_pynccl: bool  # a hint of whether to use PyNccl
     use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
+    use_scatter_gather: bool    # a hint of whether to use send-gather for pp
     # communicators are only created for world size > 1
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
@@ -134,6 +135,7 @@ class GroupCoordinator:
         use_pynccl: bool,
         use_custom_allreduce: bool,
         use_message_queue_broadcaster: bool = False,
+        use_scatter_gather: bool = False,
     ):
 
         self.rank = torch.distributed.get_rank()
@@ -164,6 +166,7 @@ class GroupCoordinator:
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+        self.use_scatter_gather = use_scatter_gather
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -592,6 +595,13 @@ class GroupCoordinator:
             if tensor.numel() == 0:
                 # Skip sending empty tensors.
                 continue
+
+            # send-allgather: send only a slice, then do allgather.
+            tp_size = get_tensor_model_parallel_world_size()
+            if self.use_scatter_gather and tensor.numel() % tp_size == 0:
+                tp_rank = get_tensor_model_parallel_rank()
+                tensor = tensor.reshape(tp_size, -1)[tp_rank]
+
             if tensor.is_cpu:
                 # use metadata_group for CPU tensors
                 torch.distributed.send(tensor,
@@ -633,6 +643,16 @@ class GroupCoordinator:
                     # Skip broadcasting empty tensors.
                     _update_nested_dict(tensor_dict, key, tensor)
                     continue
+
+                # send-allgather: send only a slice, then do allgather.
+                tp_size = get_tensor_model_parallel_world_size()
+                if self.use_scatter_gather and tensor.numel() % tp_size == 0:
+                    orig_tensor = tensor
+                    tp_rank = get_tensor_model_parallel_rank()
+                    tensor = orig_tensor.reshape(tp_size, -1)[tp_rank]
+                else:
+                    orig_tensor = None
+
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
                     torch.distributed.recv(tensor,
@@ -643,6 +663,11 @@ class GroupCoordinator:
                     torch.distributed.recv(tensor,
                                            src=self.ranks[src],
                                            group=group)
+                if self.use_scatter_gather and orig_tensor.numel() % tp_size == 0:
+                    # do the allgather
+                    gathered_tensor = get_tp_group().all_gather(tensor, dim=0)
+                    tensor = gathered_tensor.reshape(orig_tensor.shape)
+
                 _update_nested_dict(tensor_dict, key, tensor)
             else:
                 _update_nested_dict(tensor_dict, key, value)
@@ -726,9 +751,12 @@ def init_model_parallel_group(
     backend: str,
     use_custom_allreduce: Optional[bool] = None,
     use_message_queue_broadcaster: bool = False,
+    use_gather_pipeline: Optional[bool] = None,
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+    if use_gather_pipeline is None:
+        use_gather_pipeline = _ENABLE_ALLGATHER_PIPELINE_COMM
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
@@ -736,6 +764,7 @@ def init_model_parallel_group(
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
+        use_scatter_gather=use_gather_pipeline,
     )
 
 
@@ -786,11 +815,17 @@ def graph_capture():
 logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
+_ENABLE_ALLGATHER_PIPELINE_COMM = False
 
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
+def set_allgather_pipeline_comm(enable: bool):
+    global _ENABLE_ALLGATHER_PIPELINE_COMM
+    _ENABLE_ALLGATHER_PIPELINE_COMM = enable
 
 
 def init_distributed_environment(

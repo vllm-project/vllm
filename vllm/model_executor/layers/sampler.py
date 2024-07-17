@@ -1074,3 +1074,119 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     next_prompt_tokens = prompt_tokens[
         next_token_index_start:next_token_index_end]
     return next_prompt_tokens
+
+
+class GreedySampler(Sampler):
+    gen_logprobs: bool = True
+    gen_prompt_logprobs: bool = True
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        """
+        Args:
+            logits: (num_tokens, vocab_size).
+            sampling_metadata: Metadata for sampling.
+        """
+        assert logits is not None
+        _, vocab_size = logits.shape
+
+        logits = _apply_min_tokens_penalty(logits, sampling_metadata)
+
+        # Prepare sampling tensors with pinned memory to avoid blocking.
+        (sampling_tensors, do_penalties, do_top_p_top_k,
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
+
+        # Apply presence and frequency penalties.
+        if do_penalties:
+            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                      sampling_tensors.output_tokens,
+                                      sampling_tensors.presence_penalties,
+                                      sampling_tensors.frequency_penalties,
+                                      sampling_tensors.repetition_penalties)
+
+        # Apply temperature scaling.
+        # Use in-place division to avoid creating a new tensor.
+        logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
+
+        if do_top_p_top_k:
+            logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
+                                        sampling_tensors.top_ks)
+
+        if do_min_p:
+            logits = _apply_min_p(logits, sampling_tensors.min_ps)
+
+        # We use float32 for probabilities and log probabilities.
+        # Compute the log probabilities.
+        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+        greedy_samples = torch.argmax(logprobs, dim=-1)
+        sample_results = _greedy_sample(sampling_metadata.seq_groups,
+                                        greedy_samples)
+
+        if self.gen_logprobs:
+            return self._build_sampler_output_dummy_probs(sample_results,
+                    sampling_metadata, self.gen_prompt_logprobs)
+
+        prompt_logprobs, sample_logprobs = _get_logprobs(
+            logprobs, sampling_metadata, sample_results)
+
+        return _build_sampler_output(sample_results,
+                                     sampling_metadata,
+                                     prompt_logprobs,
+                                     sample_logprobs)
+
+    def _build_sampler_output_dummy_probs(
+        sample_results: SampleResultType,
+        sampling_metadata: SamplingMetadata,
+        gen_prompt_logprobs: bool = True
+    ) -> SamplerOutput:
+        """Construct Python objects with the output of sampling.
+        Args:
+            on_device_tensors: Tuple containing on-device tensors with the
+                probabilities used in sampling and the sampled token ids. This
+                allows post-processing without copies to CPU/serialization, e.g. in
+                speculative decoding rejection sampling.
+        """
+        sampler_output: List[CompletionSequenceGroupOutput] = []
+
+        seq_groups = sampling_metadata.seq_groups
+        dummy_log_prob = Logprob(0.0)
+
+        for (seq_group, sample_result) in zip(seq_groups, sample_results):
+            seq_ids = seq_group.seq_ids
+            next_token_ids, parent_ids = sample_result
+            seq_outputs: List[SequenceOutput] = []
+
+            group_prompt_logprobs = None
+            if (seq_group.is_prompt and
+                seq_group.sampling_params.prompt_logprobs and
+                gen_prompt_logprobs):
+                seq_data = seq_group.seq_data[seq_ids[0]]
+                computed_len = seq_data.get_num_computed_tokens()
+                prompt_tokens = seq_data.prompt_token_ids
+                query_len = seq_data.get_len()
+                # +1 because we are looking for a next prompt token.
+                next_token_index_start = computed_len + 1
+                next_token_index_end = min(computed_len + query_len + 1,
+                                            len(prompt_tokens))
+                group_prompt_logprobs = [
+                    {tok_id: dummy_log_prob} for tok_id in
+                    range(next_token_index_end - next_token_index_start)
+                ]
+
+            for parent_id, next_token_id in zip(parent_ids, next_token_ids):
+                seq_outputs.append(
+                    SequenceOutput(seq_ids[parent_id], next_token_id,
+                                   {next_token_id: dummy_log_prob}))
+            sampler_output.append(
+                CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+
+        return SamplerOutput(
+            outputs=sampler_output,
+            sampled_token_probs=None,
+            sampled_token_ids=None,
+            logprobs=None,
+        )
