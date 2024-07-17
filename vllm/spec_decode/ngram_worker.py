@@ -13,7 +13,7 @@ from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
     """NGramWorker provides a light drafter without need for model.
 
-    Current NGramWorker only implement prompt lookup decoding,
+    Current NGramWorker only implements prompt lookup decoding,
     and in future we may also do RAG type drafter and other scenarios
     which don't rely on LLM model to give proposals.
     """
@@ -37,7 +37,7 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.load_model = lambda *args, **kwargs: None
 
-        # Current only support Top1Proposer
+        # Current NGramWorker only supports Top1Proposer
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
             device=self.device,

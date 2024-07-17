@@ -43,7 +43,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         )
 
     def set_include_gpu_probs_tensor(self) -> None:
-        # Need include_gpu_probs_tensor for multi_step_worker
+        # Need include_gpu_probs_tensor for MultiStepWorker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
 
     @torch.inference_mode()
