@@ -120,7 +120,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         else:
             draft_parallel_config: ParallelConfig = draft_worker_kwargs[
                 'parallel_config']
-
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
