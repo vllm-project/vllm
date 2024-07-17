@@ -14,8 +14,6 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--model",
-        MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -26,7 +24,7 @@ def server():
         "128",
     ]
 
-    with RemoteOpenAIServer(args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
