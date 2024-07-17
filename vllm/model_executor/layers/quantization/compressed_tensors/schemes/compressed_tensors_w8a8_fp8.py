@@ -18,6 +18,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.input_dynamic = input_dynamic
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
+    def get_min_capability(self) -> int:
+        # lovelace and up
+        return 89
+
     # W8A8-Fp8 kernels support only per-tensor and per-channel cases.
     # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
     # scales being passed to the kernel), we requantize with a single scale.
