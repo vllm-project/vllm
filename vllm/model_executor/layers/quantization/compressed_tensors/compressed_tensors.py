@@ -36,7 +36,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        return 70
 
     def get_name(self) -> str:
         return "compressed_tensors"
