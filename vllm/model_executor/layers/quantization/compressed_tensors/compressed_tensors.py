@@ -13,7 +13,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
-    QuantizationType, find_first_name_or_class_match)
+    QuantizationType, find_first_name_or_class_match,
+    is_activation_quantization_format)
 from vllm.platforms import current_platform
 
 
@@ -132,9 +133,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Confirm weight scheme is supported.
         is_symmetric_weight = weight_quant.symmetric
         is_static_weight = not weight_quant.dynamic
-        is_per_tensor_or_channel_weight = (
-            weight_quant.strategy == QuantizationStrategy.TENSOR
-            or weight_quant.strategy == QuantizationStrategy.CHANNEL)
+        is_per_tensor_or_channel_weight = (weight_quant.strategy in [
+            QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
+        ])
         if not (is_symmetric_weight and is_static_weight
                 and is_per_tensor_or_channel_weight):
             return False
@@ -185,10 +186,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size)
 
         # Detect If Activation Quantization.
-        if (self.quant_format == CompressionFormat.naive_quantized.value
-                or self.quant_format == CompressionFormat.int_quantized.value
-                or self.quant_format
-                == CompressionFormat.float_quantized.value):
+        if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Fp8(
                     strategy=weight_quant.strategy,
