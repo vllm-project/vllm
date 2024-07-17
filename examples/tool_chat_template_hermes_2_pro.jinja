@@ -79,7 +79,7 @@
 " }}
 {{- "<tool_call>
 " }}
-{{- '{"arguments": <args-dict>, "name": <function-name>}
+{{- '{"name": <function-name>, "arguments": <args-dict>}
 ' }}
 {{- '</tool_call><|im_end|>' }}
 {%- for message in messages %}
