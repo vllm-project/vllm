@@ -5,6 +5,11 @@ from typing import Any, Dict, Iterable, Optional
 from pydantic import BaseModel, Field
 from torch.nn import Module
 
+# fused_name: List[shard_name]
+_FUSED_LAYER_NAME_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": [""]
+}
 
 class CompressionFormat(Enum):
     dense = "dense"

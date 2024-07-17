@@ -540,7 +540,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                          gather_output=False,
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
-                         quant_config=quant_config)
+                         quant_config=quant_config,
+                         layer_name=layer_name)
 
     def weight_loader(self,
                       param: Parameter,
