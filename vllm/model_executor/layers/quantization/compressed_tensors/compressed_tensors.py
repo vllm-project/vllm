@@ -13,18 +13,21 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsWNA16, CompressedTensorsUnquantized)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
-    QuantizationType, find_first_name_or_class_match, 
-    should_ignore_layer)
+    QuantizationType, find_matched_target, should_ignore_layer)
 from vllm.platforms import current_platform
 
 
 class CompressedTensorsConfig(QuantizationConfig):
 
-    def __init__(self, layer_quant_details: Dict[str, Any], ignore: List[str],
+    def __init__(self,
+                 target_scheme_map: Dict[str, Any],
+                 ignore: List[str],
                  quant_format: str):
+
         self.ignore = ignore
-        self.layer_quant_details = layer_quant_details
         self.quant_format = quant_format
+        # Map from [target -> scheme]
+        self.target_scheme_map = target_scheme_map
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -51,7 +54,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
-        layer_quant_details: Dict[str, Any] = dict()
+        target_scheme_map: Dict[str, Any] = dict()
         ignore: List[str] = config.get("ignore", None)
         quant_format: str = config.get("format", None)
 
@@ -63,21 +66,21 @@ class CompressedTensorsConfig(QuantizationConfig):
         # details follow the structure defined by the QuantizationArgs
         # pydantic model, which is used to verify the structure of the
         # quant_config and also store the details for later use.
-        for key, quant_config in config["config_groups"].items():
+        for _, quant_config in config["config_groups"].items():
             targets = quant_config.get("targets")
             for target in targets:
-                layer_quant_details[target] = {}
-                layer_quant_details[target][
+                target_scheme_map[target] = {}
+                target_scheme_map[target][
                     "weights"] = QuantizationArgs.parse_obj(
                         quant_config.get("weights"))
                 try:
-                    layer_quant_details[target][
+                    target_scheme_map[target][
                         "input_activations"] = QuantizationArgs.parse_obj(
                             quant_config.get("input_activations"))
                 except Exception:
-                    layer_quant_details[target]["input_activations"] = None
+                    target_scheme_map[target]["input_activations"] = None
 
-        return cls(layer_quant_details=layer_quant_details,
+        return cls(target_scheme_map=target_scheme_map,
                    ignore=ignore,
                    quant_format=quant_format)
 
@@ -165,8 +168,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         return (is_channel_group and input_quant_none and is_symmetric
                 and is_static)
 
-    def _get_schema(self, weight_quant: BaseModel,
-                    input_quant: BaseModel) -> "CompressedTensorsScheme":
+    def _get_scheme_from_parts(
+            self, 
+            weight_quant: BaseModel, 
+            input_quant: BaseModel) -> "CompressedTensorsScheme":
 
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             self._check_gptq_and_marlin_can_run()
@@ -203,33 +208,44 @@ class CompressedTensorsConfig(QuantizationConfig):
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
 
-    def get_scheme(
-            self,
-            layer: torch.nn.Module,
-            layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
+    def get_scheme(self,
+                   layer: torch.nn.Module,
+                   layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
+        """
+        compressed-tensors supports non uniform in the following way:
 
-        # Check if the layer is ignored (skipped for quantization).
+        ignore: List of layer_names or nn.Module names to be ignored.
+        targets of config_groups: There can be N config_groups which each
+            have a quantization scheme. Each config_group has a list of targets
+            which can be a full layer_name, a regex for a layer_name, or
+            an nn.Module name.
+
+        We first check whether a layer is in the ignore group and use
+        CompressedTensorsUnquantized (i.e. fp16/bf16) scheme for the layer
+
+        We then detect whether a layer_name is found in any target and
+        use the quantization scheme corresponding to the matched target
+        to select the CompressedTensorsScheme used for infernece.
+        """
+
+        # Check if the layer is skipped for quantization.
+        # TODO (@robertgshaw2): support module names
         if should_ignore_layer(layer_name, ignore=self.ignore):
             return CompressedTensorsUnquantized()
 
-        layer_type_name = find_first_name_or_class_match(
-            name="",
+        # Find the "target" in the compressed-tensors config
+        # that our layer conforms to. 
+        matched_target = find_matched_target(
+            layer_name=layer_name,
             module=layer,
-            targets=self.layer_quant_details.keys(),
-            check_contains=True)
-
-        if layer_type_name is None:
-            raise ValueError(f"Could not matching target for layer {layer}")
-
-        layer_quant_details: Dict[str, Any] = self.layer_quant_details.get(
-            layer_type_name, None)
-        if layer_quant_details is None:
-            raise ValueError(
-                f"Could not find quantization details for {layer}.")
-
-        return self._get_schema(
-            weight_quant=layer_quant_details["weights"],
-            input_quant=layer_quant_details["input_activations"])
+            targets=self.target_scheme_map.keys())
+            
+        # Find the quant_scheme 
+        scheme = self.target_scheme_map[matched_target]
+            
+        return self._get_scheme_from_parts(
+            weight_quant=scheme["weights"],
+            input_quant=scheme["input_activations"])
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):

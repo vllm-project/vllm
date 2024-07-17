@@ -141,25 +141,41 @@ def check_equal_or_regex_match(layer_name: str,
     return False
 
 
-def find_first_name_or_class_match(
-        name: str,
+def find_matched_target(
+        layer_name: Optional[str],
         module: Module,
-        targets: Iterable[str],
-        check_contains: bool = False) -> Optional[str]:
+        targets: Iterable[str]) -> str:
     """
-    Helper function to map the quantization details listed in the config 
-    for a given list of targets against each model layer. First uses the
-    layer name to try and find a match. If no name match is found, uses
-    the layer class name. Returns None otherwise.
+    Helper function to look up which "target" in the compressed-tensors
+    config that a layer corresponds to.
 
-    :param name: layer name
+    Recall that a compressed-tensors configs has a concept of 
+    config_groups, where each layer can be quantized with with a different
+    scheme.
+
+    targets in each config_group will be a list of either layer names 
+    (or regexes corresponding to layer names) or names of torch Modules.
+
+    First, we try to match the layer_name with a target
+    Second, we try to match the module's name with a target
+
+    :param layer_name: layer name
     :param module: torch.nn.Module
     :param targets: list of targets to match the layer against
-    :param check_contains: whether or not to do a substring match
     """
 
-    return _find_first_match(name, targets) or _find_first_match(
-        module.__class__.__name__, targets, check_contains)
+    if layer_name is None:
+        layer_name = ""
+
+    matched_target= (_find_first_match(layer_name, targets) or 
+                     _find_first_match(module.__class__.__name__, targets, True))
+
+    if matched_target is None:
+        raise ValueError(
+            f"Unable to find matching target for {module} in the "
+            "compressed-tensors config.")
+
+    return matched_target
 
 
 def _find_first_match(value: str,
