@@ -86,7 +86,6 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
 
         # `torch.empty_like` does not support `pin_memory` argument
         cpu_data = torch.empty(size=p.data.size(),
-                               memory_format=p.data.storage().memory_format,
                                dtype=p.data.dtype,
                                layout=p.data.layout,
                                device='cpu',
