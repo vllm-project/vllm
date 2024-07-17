@@ -200,6 +200,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     @property
     def do_metadata_broadcast(self) -> bool:
+        # TODO(woosuk): Support TP.
         return False
 
     @property
