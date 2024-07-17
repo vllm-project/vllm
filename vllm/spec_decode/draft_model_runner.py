@@ -67,9 +67,6 @@ class TP1DraftModelRunner(ModelRunner):
             return_hidden_states=return_hidden_states,
         )
 
-        # Used mainly for tests (has no perf penalty)
-        self._num_gpu_runs = 0
-
     def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
                                     num_queries):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
@@ -125,7 +122,6 @@ class TP1DraftModelRunner(ModelRunner):
             self, model_input: ModelInputForGPUWithSamplingMetadata,
             last_output: SamplerOutput
     ) -> ModelInputForGPUWithSamplingMetadata:
-        self._num_gpu_runs += 1
         # Currently, we expect "decode mode" only
         assert not model_input.is_prompt
 
