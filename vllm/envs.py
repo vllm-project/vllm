@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
+    VLLM_USE_RAY_COMPILED_DAG_NCCL: bool = True
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -274,6 +275,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0)),
+
+    # If the env var is set, it uses NCCL for communication in
+    # Ray's compiled DAG.
+    "VLLM_USE_RAY_COMPILED_DAG_NCCL":
+    lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL", 1)),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work

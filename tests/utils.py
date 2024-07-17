@@ -86,7 +86,7 @@ class RemoteOpenAIServer:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
+        self.proc.kill()
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
