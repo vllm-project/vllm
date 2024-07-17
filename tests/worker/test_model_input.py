@@ -3,7 +3,7 @@ from typing import List, Tuple, Type
 
 import torch
 
-from vllm.attention import AttentionMetadata
+from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.pooling_metadata import PoolingMetadata
@@ -25,6 +25,10 @@ class MockAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return AttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
+        raise AttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(

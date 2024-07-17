@@ -5,6 +5,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonMetadataBuilder
 from vllm.attention.ops.blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -92,6 +93,10 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return BlocksparseFlashAttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["BlocksparseFlashAttentionMetadataBuilder"]:
+        return BlocksparseFlashAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -242,6 +247,12 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
+
+
+class BlocksparseFlashAttentionMetadataBuilder(
+        CommonMetadataBuilder[BlocksparseFlashAttentionMetadata]):
+
+    _metadata_cls = BlocksparseFlashAttentionMetadata
 
 
 class BlocksparseFlashAttentionImpl(AttentionImpl):
