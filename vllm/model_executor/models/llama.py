@@ -269,6 +269,7 @@ class LlamaModel(nn.Module):
                 self.vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
+                quant_config=quant_config,
             )
         else:
             self.embed_tokens = PPMissingLayer()
