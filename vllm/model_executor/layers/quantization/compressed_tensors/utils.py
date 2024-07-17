@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, Optional
 from pydantic import BaseModel, Field
 from torch.nn import Module
 
+
 class CompressionFormat(Enum):
     dense = "dense"
     sparse_bitmask = "sparse-bitmask"
@@ -82,10 +83,12 @@ _FUSED_LAYER_NAME_MAPPING = {
     "gate_up_proj": ["gate_proj", "up_proj"]
 }
 
-def should_ignore_layer(layer_name: Optional[str], ignore: Iterable[str]) -> bool:   
+
+def should_ignore_layer(layer_name: Optional[str],
+                        ignore: Iterable[str]) -> bool:
     if layer_name is None:
         return False
-    
+
     # layer_name = model.layers.0.self_attn.qkv_proj
     # proj_name = qkv_proj
     proj_name = layer_name.split(".")[-1]
@@ -96,11 +99,11 @@ def should_ignore_layer(layer_name: Optional[str], ignore: Iterable[str]) -> boo
     # each shard of the fused layer has the same scheme.
     if proj_name in _FUSED_LAYER_NAME_MAPPING:
         shard_proj_names = _FUSED_LAYER_NAME_MAPPING[proj_name]
-        
+
         # Convert fused_name --> [shard_names]
         shard_names = [
-            layer_name.replace(proj_name, shard_proj_name) for
-            shard_proj_name in shard_proj_names
+            layer_name.replace(proj_name, shard_proj_name)
+            for shard_proj_name in shard_proj_names
         ]
 
         # Layer should be ignored if shards are ignored.
@@ -108,28 +111,28 @@ def should_ignore_layer(layer_name: Optional[str], ignore: Iterable[str]) -> boo
         for shard_name in shard_names:
             should_ignore_shard = check_equal_or_regex_match(
                 layer_name=shard_name, targets=ignore)
-            
-            # If shard_idx=0, set layer ignore to match shard. 
+
+            # If shard_idx=0, set layer ignore to match shard.
             if should_ignore_layer is None:
                 should_ignore_layer = should_ignore_shard
-            
+
             # If shard_idx=1+ confirm scheme matches prior shards.
             elif should_ignore_shard != should_ignore_layer:
-                raise ValueError(
-                    f"Found a different quantization schemes for "
-                    f"{shard_proj_names} in {layer_name}. vLLM "
-                    "requires all to use the same scheme.")
+                raise ValueError(f"Found a different quantization schemes for "
+                                 f"{shard_proj_names} in {layer_name}. vLLM "
+                                 "requires all to use the same scheme.")
 
     # Unfused layers like down_proj and o_proj will match
     # the safetensors checkpoint already.
     else:
-        should_ignore_layer = check_equal_or_regex_match(
-                layer_name=layer_name, targets=ignore)
-    
+        should_ignore_layer = check_equal_or_regex_match(layer_name=layer_name,
+                                                         targets=ignore)
+
+    assert should_ignore_layer is not None
     return should_ignore_layer
 
 
-def check_equal_or_regex_match(layer_name: str, 
+def check_equal_or_regex_match(layer_name: str,
                                targets: Iterable[str]) -> bool:
     """
     Checks whether a layer_name is exactly equal or a regex match for 
@@ -141,10 +144,8 @@ def check_equal_or_regex_match(layer_name: str,
     return False
 
 
-def find_matched_target(
-        layer_name: Optional[str],
-        module: Module,
-        targets: Iterable[str]) -> str:
+def find_matched_target(layer_name: Optional[str], module: Module,
+                        targets: Iterable[str]) -> str:
     """
     Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
@@ -167,13 +168,13 @@ def find_matched_target(
     if layer_name is None:
         layer_name = ""
 
-    matched_target= (_find_first_match(layer_name, targets) or 
-                     _find_first_match(module.__class__.__name__, targets, True))
+    matched_target = (_find_first_match(layer_name, targets)
+                      or _find_first_match(module.__class__.__name__, targets,
+                                           True))
 
     if matched_target is None:
-        raise ValueError(
-            f"Unable to find matching target for {module} in the "
-            "compressed-tensors config.")
+        raise ValueError(f"Unable to find matching target for {module} in the "
+                         "compressed-tensors config.")
 
     return matched_target
 
@@ -192,27 +193,29 @@ def _find_first_match(value: str,
     """
 
     for target in targets:
-        if _is_equal_or_regex_match(value, target, 
-                                       check_contains=check_contains):
+        if _is_equal_or_regex_match(value,
+                                    target,
+                                    check_contains=check_contains):
             return target
-
     return None
 
 
-def _is_equal_or_regex_match(value: str, target: str, 
+def _is_equal_or_regex_match(value: str,
+                             target: str,
                              check_contains: bool = False) -> bool:
     """
     Checks whether a value is exactly equal or a regex match for target
-    if taget starts with 're:'. If check_contains is set to True,
+    if target starts with 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
     """
-    
+
     if target.startswith("re:"):
         pattern = target[3:]
         if re.match(pattern, value):
-            return target
+            return True
     elif check_contains:
         if target.lower() in value.lower():
-            return target
+            return True
     elif target == value:
-        return target
+        return True
+    return False

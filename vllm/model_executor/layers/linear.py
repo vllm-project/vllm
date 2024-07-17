@@ -72,7 +72,6 @@ class LinearMethodBase(QuantizeMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
@@ -106,7 +105,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
@@ -143,7 +141,6 @@ class LinearBase(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        layer_name: Optional[str] = None,
     ):
         super().__init__()
 
@@ -176,23 +173,26 @@ class ReplicatedLinear(LinearBase):
         quant_config: Quantization configure.
     """
 
-    def __init__(self,
-                 input_size: int,
-                 output_size: int,
-                 bias: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 layer_name: Optional[str] = None,
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        layer_name: Optional[str] = None,
     ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config, layer_name)
+                         quant_config)
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
-        self.quant_method.create_weights(self, self.input_size,
-                                         [self.output_size], self.input_size,
-                                         self.output_size, self.params_dtype,
+        self.quant_method.create_weights(self,
+                                         self.input_size, [self.output_size],
+                                         self.input_size,
+                                         self.output_size,
+                                         self.params_dtype,
                                          layer_name=layer_name)
 
         if bias:
@@ -247,16 +247,17 @@ class ColumnParallelLinear(LinearBase):
                        the list would be size 3.
     """
 
-    def __init__(self,
-                 input_size: int,
-                 output_size: int,
-                 bias: bool = True,
-                 gather_output: bool = False,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 output_sizes: Optional[List[int]] = None,
-                 layer_name: Optional[str] = None,
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        gather_output: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        output_sizes: Optional[List[int]] = None,
+        layer_name: Optional[str] = None,
     ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
@@ -285,7 +286,8 @@ class ColumnParallelLinear(LinearBase):
             output_size=self.output_size,
             params_dtype=self.params_dtype,
             layer_name=layer_name,
-            weight_loader=self.weight_loader,)
+            weight_loader=self.weight_loader,
+        )
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -371,14 +373,16 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
-        super().__init__(input_size=input_size,
-                         output_size=sum(output_sizes),
-                         bias=bias,
-                         gather_output=gather_output,
-                         skip_bias_add=skip_bias_add,
-                         params_dtype=params_dtype,
-                         quant_config=quant_config,
-                         layer_name=layer_name,)
+        super().__init__(
+            input_size=input_size,
+            output_size=sum(output_sizes),
+            bias=bias,
+            gather_output=gather_output,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            layer_name=layer_name,
+        )
 
     def weight_loader(self,
                       param: Parameter,

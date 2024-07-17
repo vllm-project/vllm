@@ -71,11 +71,12 @@ class LlamaMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             layer_name=f"{parent_name}.gate_up_proj")
-        self.down_proj = RowParallelLinear(input_size=intermediate_size,
-                                           output_size=hidden_size,
-                                           bias=bias,
-                                           quant_config=quant_config,
-                                           layer_name=f"{parent_name}.down_proj")
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            layer_name=f"{parent_name}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -276,11 +277,11 @@ class LlamaModel(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda idx: LlamaDecoderLayer(parent_name=f"model.layers.{idx}",
-                                          config=config,
-                                          cache_config=cache_config,
-                                          quant_config=quant_config))
+            config.num_hidden_layers, lambda layer_idx: LlamaDecoderLayer(
+                parent_name=f"model.layers.{layer_idx}",
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config))
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
