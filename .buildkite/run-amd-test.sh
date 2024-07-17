@@ -2,14 +2,8 @@
 set -ex
 
 # Print ROCm version
-echo "--- Confirming Clean Initial State"
-while true; do
-        sleep 3
-        if grep -q clean /opt/amdgpu/etc/gpu_state; then
-                echo "GPUs state is \"clean\""
-                break
-        fi
-done
+echo "--- ROCm info"
+rocminfo
 
 # cleanup older docker images
 cleanup_docker() {
@@ -51,10 +45,15 @@ while true; do
         fi
 done
 
-echo "--- Pulling container" 
-image_name="rocmshared/vllm-ci:${BUILDKITE_COMMIT}"
-container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
-docker pull ${image_name}
+echo "--- Building container"
+sha=$(git rev-parse --short HEAD)
+image_name=rocm_${sha}
+container_name=rocm_${sha}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)
+docker build \
+        -t ${image_name} \
+        -f Dockerfile.rocm \
+        --progress plain \
+        .
 
 remove_docker_container() {
    docker rm -f ${container_name} || docker image rm -f ${image_name} || true

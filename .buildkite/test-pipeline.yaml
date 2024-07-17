@@ -7,7 +7,7 @@ steps:
 - label: Regression Test
   mirror_hardwares: [amd]
   command: pytest -v -s test_regression.py
-  working_dir: "vllm-workspace/tests" # optional
+  working_dir: "/vllm-workspace/tests" # optional
 
 - label: AsyncEngine Test
   #mirror_hardwares: [amd]
@@ -29,12 +29,12 @@ steps:
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
   command: pytest -v -s distributed/test_comm_ops.py
-  working_dir: "vllm-workspace/tests"
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 2
 
 - label: Distributed Tests
   mirror_hardwares: [amd]
-  working_dir: "vllm-workspace/tests"
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   commands:
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -49,7 +49,7 @@ steps:
 
 - label: Distributed Tests (Multiple Groups)
   #mirror_hardwares: [amd]
-  working_dir: "vllm-workspace/tests"
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
   - pytest -v -s distributed/test_pynccl.py
@@ -67,7 +67,7 @@ steps:
   - pytest -v -s entrypoints -m openai
 
 - label: Examples Test
-  working_dir: "vllm-workspace/examples"
+  working_dir: "/vllm-workspace/examples"
   mirror_hardwares: [amd]
   commands:
     # install aws cli for llava_example.py
@@ -77,7 +77,7 @@ steps:
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
     - python3 llava_example.py
-    - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmpvllm-workspace/facebook/opt-125m/v1/model.tensors
+    - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
 
 - label: Kernels Test %N
   #mirror_hardwares: [amd]
@@ -152,14 +152,14 @@ steps:
   command: pytest -v -s quantization
 
 - label: Benchmarks
-  working_dir: "vllm-workspace/.buildkite"
+  working_dir: "/vllm-workspace/.buildkite"
   mirror_hardwares: [amd]
   commands:
   - pip install aiohttp
   - bash run-benchmarks.sh
 
 - label: Documentation Build
-  working_dir: "vllm-workspace/test_docs/docs"
+  working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
   commands:
   - pip install -r requirements-docs.txt
