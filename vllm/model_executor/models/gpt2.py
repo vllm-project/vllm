@@ -186,7 +186,7 @@ class GPT2Model(nn.Module):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda: GPT2Block(config, cache_config, quant_config))
+            lambda layer_idx: GPT2Block(config, cache_config, quant_config))
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
