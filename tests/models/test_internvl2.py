@@ -25,6 +25,7 @@ models = ["OpenGVLab/InternVL2-4B", "OpenGVLab/InternVL2-8B"]
 
 
 class InternVLProcessor:
+    """A simple processor for InternVL2 HF model which misses a processor."""
 
     def __init__(self, hf_runner: HfRunner):
         self.num_image_token = hf_runner.model.num_image_token

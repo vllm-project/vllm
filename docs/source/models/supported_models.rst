@@ -186,6 +186,10 @@ Vision Language Models
     - Fuyu
     - :code:`adept/fuyu-8b` etc.
     - 
+  * - :code:`InternVLChatModel`
+    - InternVL2
+    - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
