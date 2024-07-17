@@ -138,8 +138,7 @@ __global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
 template <typename scalar_t>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
     c10::Float8_e4m3fn* __restrict__ out, float* __restrict__ scale,
-    scalar_t const* __restrict__ input, const int hidden_size,
-    bool const vectorize_conversions) {
+    scalar_t const* __restrict__ input, const int hidden_size) {
   int const tid = threadIdx.x;
   int const token_idx = blockIdx.x;
   float absmax_val = 0.0f;
@@ -158,6 +157,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
   __syncthreads();
 
   float const inverted_scale = FP8_E4M3_MAX / block_absmax_val;
+  bool const vectorize_conversions = hidden_size % 4 == 0;
   if (vectorize_conversions) {
     scalar_t const* token_input = &input[token_idx * hidden_size];
     c10::Float8_e4m3fn* token_output = &out[token_idx * hidden_size];
@@ -214,12 +214,13 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
 void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
                                         torch::Tensor& input,  // [..., d]
                                         torch::Tensor& scales) {
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
+
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
   dim3 const block(std::min(hidden_size, 1024));
-  bool const vectorize_conversions =
-      (hidden_size % 4 == 0) && input.is_contiguous() && out.is_contiguous();
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -228,6 +229,6 @@ void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
         vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t>
             <<<grid, block, 0, stream>>>(
                 out.data_ptr<c10::Float8_e4m3fn>(), scales.data_ptr<float>(),
-                input.data_ptr<scalar_t>(), hidden_size, vectorize_conversions);
+                input.data_ptr<scalar_t>(), hidden_size);
       });
 }
