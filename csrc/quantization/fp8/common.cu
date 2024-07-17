@@ -7,6 +7,8 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
+#include "../../reduction_utils.cuh"
+
 namespace vllm {
 
 __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
@@ -124,6 +126,36 @@ __global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
   }
 }
 
+template <typename scalar_t>
+__global__ void dynamic_per_token_scaled_fp8_quant_kernel(
+    c10::Float8_e4m3fn* __restrict__ out,
+    float* __restrict__ scale,
+    scalar_t const* __restrict__ input,
+    const int hidden_size) {
+
+  int const tid = threadIdx.x;
+  int const token_idx = blockIdx.x;
+  float absmax_val = 0.0f;
+
+  for (int i = tid; i < hidden_size; i += blockDim.x) {
+    float const x = static_cast<float>(input[token_idx * hidden_size + i]);
+    absmax_val = max(absmax_val, fabs(x));
+  }
+
+  float const block_absmax_val_maybe = blockReduceMax(absmax_val);
+  __shared__ float block_absmax_val;
+  if (tid == 0) {
+    block_absmax_val = block_absmax_val_maybe;
+    scale[token_idx] = block_absmax_val / FP8_E4M3_MAX;
+  }
+  __syncthreads();
+
+  float const inverted_scale = FP8_E4M3_MAX / block_absmax_val;
+  for (int i = tid; i < hidden_size; i += blockDim.x) {
+    out[token_idx * hidden_size + i] = scaled_fp8_conversion(input[token_idx * hidden_size + i], inverted_scale);
+  }
+}
+
 }  // namespace vllm
 
 void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
@@ -164,10 +196,22 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
       });
 }
 
-#if 0
-void dynamic_per_token_fp8_quant(torch::Tensor& out, // [..., d]
+void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out, // [..., d]
                                  torch::Tensor& input, // [..., d]
                                  torch::Tensor& scales) 
 {
+  int const hidden_size = input.size(-1);
+  int const num_tokens = input.numel() / hidden_size;
+  dim3 const grid(num_tokens);
+  dim3 const block(std::min(hidden_size, 1024));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "dynamic_per_token_scaled_fp8_quant_kernel", [&] {
+        vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t>
+            <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fn>(),
+                                         scales.data_ptr<float>(),
+                                         input.data_ptr<scalar_t>(),
+                                         hidden_size);
+      });
 }
-#endif

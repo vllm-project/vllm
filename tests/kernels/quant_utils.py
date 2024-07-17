@@ -12,9 +12,16 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
     # Compute scales
     x_token_max, _ = x.abs().max(dim=-1)
     x_token_max = x_token_max.to(dtype=torch.float32)
-    scales = (x_token_max / float(qtype_traits.max))[:, None].to(device="cuda",
-                                                      dtype=torch.float32)
+    scales = x_token_max / torch.as_tensor([qtype_traits.max], dtype=torch.float32, device='cuda')
+    scales = scales[:, None]
+
     # Quant
-    torch_out = (x / scales).round().clamp(qtype_traits.min, qtype_traits.max).to(quant_dtype)
+    # For fp8, inorder to match the cuda kernel output, we have to do the same operations
+    # to prevent rounding errors.
+    iscales = torch.as_tensor([qtype_traits.max], dtype=torch.float32, device='cuda') / x_token_max
+    iscales = iscales[:, None]
+    torch_out = (x.to(dtype=torch.float32) * iscales).to(device="cuda", dtype=torch.float32)
+    torch_out = torch_out.round() if quant_dtype == torch.int8 else torch_out
+    torch_out = torch_out.clamp(qtype_traits.min, qtype_traits.max).to(quant_dtype)
 
     return torch_out, scales
