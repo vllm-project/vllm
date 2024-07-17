@@ -18,7 +18,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
-    # Print the outputs.
+    # Print the outputs
     generated_texts: List[str] = []
     for output in outputs:
         prompt = output.prompt
