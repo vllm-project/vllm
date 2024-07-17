@@ -42,7 +42,7 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            return self.worker.execute_model(execute_model_req)
+            return self.worker._execute_model_spmd(execute_model_req)
 
     ray_import_err = None
 

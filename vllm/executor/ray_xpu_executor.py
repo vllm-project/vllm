@@ -30,12 +30,7 @@ logger = init_logger(__name__)
 # If the env var is set, it uses the Ray's compiled DAG API
 # which optimizes the control plane overhead.
 # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-# Currently, this is not supported yet.
 USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
-# If the env var is set, then we do not distinguish between the "driver worker"
-# vs other workers. Also, the rank 0 worker will be executed in a remote Ray
-# worker. Currently this is not supported yet.
-USE_SPMD_WORKER = envs.VLLM_USE_SPMD_WORKER
 
 
 class RayXPUExecutor(DistributedGPUExecutor):
@@ -77,7 +72,9 @@ class RayXPUExecutor(DistributedGPUExecutor):
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
-        self.forward_dag: Optional["ray.dag.CompiledDAG"] = None
+        self.forward_dag = None
+        if USE_RAY_COMPILED_DAG:
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         # This is non-None when the execute model loop is running
         # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
@@ -87,10 +84,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self.extra_execute_model_run_workers_kwargs: Dict[str, Any] = {}
 
     def _init_executor(self) -> None:
-        assert not USE_RAY_COMPILED_DAG, (
-            "Compiled DAG is not supported for XPU yet")
-        assert not USE_SPMD_WORKER, (
-            "SPMD worker is not supported for XPU yet")
+        pass
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
@@ -115,10 +109,6 @@ class RayXPUExecutor(DistributedGPUExecutor):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        assert not USE_RAY_COMPILED_DAG, (
-            "Compiled DAG is not supported for XPU yet")
-        assert not USE_SPMD_WORKER, (
-            "SPMD worker is not supported for XPU yet")
         if self.parallel_config.tensor_parallel_size == 1:
             # For single GPU case, we use a ray worker with constrained memory.
             num_gpus = self.cache_config.gpu_memory_utilization
@@ -250,17 +240,8 @@ class RayXPUExecutor(DistributedGPUExecutor):
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        assert not USE_SPMD_WORKER, (
-            "driver_worker does not exist for VLLM_USE_SPMD_WORKER=1")
         return self.driver_worker.execute_method("execute_model",
                                                  execute_model_req)
-
-    def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        assert not USE_SPMD_WORKER, (
-            "SPMD worker is not supported for XPU yet")
-        return super().execute_model(execute_model_req)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -322,7 +303,6 @@ class RayXPUExecutor(DistributedGPUExecutor):
             return ray_worker_outputs
 
         driver_worker_output = []
-        assert not USE_SPMD_WORKER
         driver_args = args if all_args is None else all_args[0]
         driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
         # Start the driver worker after all the ray workers.
@@ -393,25 +373,14 @@ class RayXPUExecutorAsync(RayXPUExecutor, DistributedGPUExecutorAsync):
         super().__init__(*args, **kwargs)
         self.driver_exec_method = make_async(self.driver_worker.execute_method)
 
-    async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        assert not USE_SPMD_WORKER, (
-            "SPMD worker is not supported for XPU yet")
-        return super().execute_model(execute_model_req)
-
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        assert not USE_SPMD_WORKER, (
-            "driver_worker does not exist for VLLM_USE_SPMD_WORKER=1")
         return await self.driver_exec_method("execute_model",
                                              execute_model_req)
 
     async def _start_worker_execution_loop(self):
-        assert not USE_SPMD_WORKER, (
-            "worker loop is disabled for VLLM_USE_SPMD_WORKER=1")
         coros = [
             worker.execute_method.remote("start_worker_execution_loop")
             for worker in self.workers

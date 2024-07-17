@@ -23,7 +23,6 @@ class WorkerBase(ABC):
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
     """
-    use_spmd_worker: bool
 
     @abstractmethod
     def init_device(self) -> None:
@@ -219,23 +218,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
-        if self.use_spmd_worker:
-            assert execute_model_req is not None, (
-                "VLLM_USE_SPMD_WORKER=1 requires each worker to take in an "
-                "ExecuteModelRequest")
-            return self._execute_model_spmd(execute_model_req)
-
-        return self._execute_model_with_nccl_control_plane(execute_model_req)
-
-    def _execute_model_with_nccl_control_plane(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        """
-        Execute model with NCCL control plane. To execute model on all workers,
-        the driver worker first uses NCCL broadcasting primitive to broadcast
-        input data to all other workers.
-        """
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
@@ -307,6 +289,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         All workers take the same request, prepare the input and
         execute the model.
         """
+        assert execute_model_req is not None, (
+            "_execute_model_spmd() requires each worker to take in an "
+            "ExecuteModelRequest")
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
         model_input: ModelRunnerInputBase = (
@@ -335,11 +320,9 @@ class WorkerWrapperBase:
     def __init__(self,
                  worker_module_name: str,
                  worker_class_name: str,
-                 trust_remote_code: bool = False,
-                 use_spmd_worker: bool = False) -> None:
+                 trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
-        self.use_spmd_worker = use_spmd_worker
         self.worker: Optional[WorkerBase] = None
         if trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -367,14 +350,9 @@ class WorkerWrapperBase:
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
-        if self.use_spmd_worker:
-            assert issubclass(worker_class, LocalOrDistributedWorkerBase), (
-                f"VLLM_USE_SPMD_WORKER=1 requires worker class {worker_class}"
-                " to inherit from LocalOrDistributedWorkerBase")
 
         self.worker = worker_class(*args, **kwargs)
         assert self.worker is not None
-        self.worker.use_spmd_worker = self.use_spmd_worker
 
     def execute_method(self, method, *args, **kwargs):
         try:

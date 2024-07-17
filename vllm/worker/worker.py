@@ -101,7 +101,6 @@ class Worker(LocalOrDistributedWorkerBase):
             multimodal_config=multimodal_config,
             **speculative_args,
         )
-        self.use_spmd_worker: bool = False
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]

@@ -22,27 +22,29 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# If the env var is set, it uses the Ray's compiled DAG API
-# which optimizes the control plane overhead.
-# Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-# Currently, this requires USE_SPMD_WORKER=True.
-USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
-# If the env var is set, then we do not distinguish between the "driver worker"
-# vs other workers. Also, the rank 0 worker will be executed in a remote Ray
-# worker. Currently this requires USE_RAY_COMPILED_DAG=True.
-USE_SPMD_WORKER = envs.VLLM_USE_SPMD_WORKER
-
 
 class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
-        if USE_RAY_COMPILED_DAG:
-            assert USE_SPMD_WORKER, (
-                "VLLM_USE_RAY_COMPILED_DAG=1 requires VLLM_USE_SPMD_WORKER=1")
-        if USE_SPMD_WORKER:
+        # If the env var is set, it uses the Ray's compiled DAG API
+        # which optimizes the control plane overhead.
+        # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
+        # Currently, this requires USE_RAY_SPMD_WORKER=True.
+        self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG
+        # If the env var is set, then we do not distinguish between the
+        # "driver worker" vs other workers. Also, the rank 0 worker will
+        # be executed in a remote Ray worker. Currently this requires
+        # USE_RAY_COMPILED_DAG=True.
+        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
+        if self.use_ray_compiled_dag:
+            assert self.use_ray_spmd_worker, (
+                "VLLM_USE_RAY_COMPILED_DAG=1 requires "
+                "VLLM_USE_RAY_SPMD_WORKER=1")
+        if self.use_ray_spmd_worker:
             # TODO: Support SPMD worker for non-DAG Ray executor.
-            assert USE_RAY_COMPILED_DAG, ("VLLM_USE_SPMD_WORKER=1 requires "
-                                          "VLLM_USE_RAY_COMPILED_DAG=1")
+            assert self.use_ray_compiled_dag, (
+                "VLLM_USE_RAY_SPMD_WORKER=1 requires "
+                "VLLM_USE_RAY_COMPILED_DAG=1")
 
         assert self.parallel_config.distributed_executor_backend == "ray"
         placement_group = self.parallel_config.placement_group
@@ -119,10 +121,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 worker_module_name=worker_module_name,
                 worker_class_name=worker_class_name,
                 trust_remote_code=self.model_config.trust_remote_code,
-                use_spmd_worker=USE_SPMD_WORKER,
             )
 
-            if USE_SPMD_WORKER:
+            if self.use_ray_spmd_worker:
                 self.workers.append(worker)
             else:
                 worker_ip = ray.get(worker.get_node_ip.remote())
@@ -139,7 +140,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # Else, added to the list of workers.
                     self.workers.append(worker)
 
-        if not USE_SPMD_WORKER and self.driver_dummy_worker is None:
+        if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
             raise ValueError(
                 "Ray does not allocate any GPUs on the driver node. Consider "
                 "adjusting the Ray placement group or running the driver on a "
@@ -269,15 +270,15 @@ class RayGPUExecutor(DistributedGPUExecutor):
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        assert not USE_SPMD_WORKER, (
-            "driver_worker does not exist for VLLM_USE_SPMD_WORKER=1")
+        assert not self.use_ray_spmd_worker, (
+            "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1")
         return self.driver_worker.execute_method("execute_model",
                                                  execute_model_req)
 
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        if not USE_SPMD_WORKER:
+        if not self.use_ray_spmd_worker:
             return super().execute_model(execute_model_req)
 
         if self.forward_dag is None:
@@ -309,7 +310,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         - all_args/all_kwargs: args/kwargs for each worker are specified
           individually
         """
-        if USE_SPMD_WORKER:
+        if self.use_ray_spmd_worker:
             assert not async_run_tensor_parallel_workers_only, (
                 "async_run_tensor_parallel_workers_only is not supported for "
                 "spmd mode.")
@@ -324,7 +325,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # If using SPMD worker, all workers are the same, so we should execute
         # the args on all workers. Otherwise, we skip the first worker's args
         # because those args will go to the driver worker.
-        first_worker_args_index: int = 0 if USE_SPMD_WORKER else 1
+        first_worker_args_index: int = 0 if self.use_ray_spmd_worker else 1
         all_worker_args = repeat(args, count) if all_args is None \
             else islice(all_args, first_worker_args_index, None)
         all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
@@ -348,7 +349,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # In SPMD mode, the driver worker is the same as any other worker,
         # so we only explicitly execute on the driver worker if using a
         # non-SPMD worker class.
-        if not USE_SPMD_WORKER:
+        if not self.use_ray_spmd_worker:
             driver_args = args if all_args is None else all_args[0]
             driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
 
@@ -400,19 +401,27 @@ class RayGPUExecutor(DistributedGPUExecutor):
             ])
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
 
+    def __del__(self):
+        if self.forward_dag is not None:
+            self.forward_dag.teardown()
+            import ray
+            for worker in self.workers:
+                ray.kill(worker)
+
 
 class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if not USE_SPMD_WORKER:
+        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
+        if not self.use_ray_compiled_dag:
             self.driver_exec_method = make_async(
                 self.driver_worker.execute_method)
 
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        if not USE_SPMD_WORKER:
+        if not self.use_ray_spmd_worker:
             return await super().execute_model_async(execute_model_req)
 
         if self.forward_dag is None:
@@ -426,8 +435,8 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        assert not USE_SPMD_WORKER, (
-            "driver_worker does not exist for VLLM_USE_SPMD_WORKER=1")
+        assert not self.use_ray_spmd_worker, (
+            "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1")
         if self.pp_locks is None:
             # This locks each pipeline parallel stage so multiple virtual
             # engines can't execute on the same stage at the same time
@@ -461,8 +470,8 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         return results[-1]
 
     async def _start_worker_execution_loop(self):
-        assert not USE_SPMD_WORKER, (
-            "worker loop is disabled for VLLM_USE_SPMD_WORKER=1")
+        assert not self.use_ray_spmd_worker, (
+            "worker loop is disabled for VLLM_USE_RAY_SPMD_WORKER=1")
         coros = [
             worker.execute_method.remote("start_worker_execution_loop")
             for worker in self.non_driver_workers

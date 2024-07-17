@@ -49,8 +49,6 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
-USE_SPMD_WORKER = envs.VLLM_USE_SPMD_WORKER
-
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     config = try_get_generation_config(
@@ -417,9 +415,9 @@ class LLMEngine:
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
                 MultiprocessingGPUExecutor)
-            assert not USE_SPMD_WORKER, (
+            assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
                 "multiprocessing distributed executor backend does not "
-                "support VLLM_USE_SPMD_WORKER=1")
+                "support VLLM_USE_RAY_SPMD_WORKER=1")
             executor_class = MultiprocessingGPUExecutor
         else:
             from vllm.executor.gpu_executor import GPUExecutor
