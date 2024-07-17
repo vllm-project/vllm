@@ -183,7 +183,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size)
 
         if (self.quant_format == CompressionFormat.int_quantized.value or
-                self.quant_format == CompressionFormat.float_quantized.value):
+            self.quant_format == CompressionFormat.float_quantized.value or 
+            self.quant_format == CompressionFormat.naive_quantized.value):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Fp8(
                     input_dynamic=input_quant.dynamic)
@@ -207,7 +208,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
         
         if layer_name is not None:
-            
             # layer_name = model.layers.0.self_attn.qkv_proj
             # proj_name = qkv_proj
             proj_name = layer_name.split(".")[-1]
@@ -227,7 +227,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 
                 # Confirm that all the shards are skipped or none are skipped.
                 for shard_name in shard_names:
-                    should_ignore_shard = (shard_name in should_ignore_layer)
+                    should_ignore_shard = (shard_name in self.ignore)
                     if should_ignore_shard != should_ignore_layer:
                         raise ValueError(
                             f"Found a different quantization scheme for {shard_name} in "
@@ -239,11 +239,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             if should_ignore_layer:
                 return CompressedTensorsUnquantized()
 
-        
-        layer_name=""
-
         layer_type_name = find_first_name_or_class_match(
-            name=layer_name,
+            name="",
             module=layer,
             targets=self.layer_quant_details.keys(),
             check_contains=True)

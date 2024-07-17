@@ -8,12 +8,13 @@ from torch.nn import Module
 # fused_name: List[shard_name]
 _FUSED_LAYER_NAME_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    "gate_up_proj": [""]
+    "gate_up_proj": ["gate_proj", "up_proj"]
 }
 
 class CompressionFormat(Enum):
     dense = "dense"
     sparse_bitmask = "sparse-bitmask"
+    naive_quantized = "naive-quantized"
     float_quantized = "float-quantized"
     int_quantized = "int-quantized"
     pack_quantized = "pack-quantized"
