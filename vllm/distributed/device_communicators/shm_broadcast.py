@@ -170,7 +170,7 @@ class MessageQueue:
         self.n_remote_reader = n_remote_reader
 
         if connect_ip is None:
-            connect_ip = get_ip()
+            connect_ip = get_ip() if n_remote_reader > 0 else "127.0.0.1"
 
         context = Context()
 
@@ -229,6 +229,8 @@ class MessageQueue:
             remote_subscribe_port=remote_subscribe_port,
             remote_sync_port=remote_sync_port,
         )
+
+        logger.info("vLLM message queue communication handle: %s", self.handle)
 
     def export_handle(self) -> Handle:
         return self.handle
