@@ -87,6 +87,12 @@ class SamplingMetadata:
             The first tuple is [1, 2] (sampled index within original logit),
             and the second tuple is [0, 1] (sampled index within pruned logit).
         num_prompts: Number of prompt sequence groups in seq_groups.
+        skip_sampler_cpu_output: Indicates if we want to skip the GPU=>CPU 
+            serialization of token outputs.
+        reuse_sampling_tensors: Indicates if we want to reuse sampling 
+            tensors that are part of the sampler forward pass. Currently,
+            it is mainly used for multi-step decode.
+            
     """
 
     def __init__(
@@ -95,11 +101,15 @@ class SamplingMetadata:
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         num_prompts: int,
+        skip_sampler_cpu_output: bool = False,
+        reuse_sampling_tensors: bool = False,
     ) -> None:
         self.seq_groups = seq_groups
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
         self.num_prompts = num_prompts
+        self.skip_sampler_cpu_output = skip_sampler_cpu_output
+        self.reuse_sampling_tensors = reuse_sampling_tensors
 
     @staticmethod
     def prepare(
