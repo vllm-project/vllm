@@ -98,6 +98,7 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 
 
 class ModelRegistry:
+
     @staticmethod
     @functools.lru_cache(maxsize=128)
     def _get_model(model_arch: str):
