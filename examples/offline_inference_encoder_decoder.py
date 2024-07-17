@@ -1,7 +1,8 @@
 from transformers import AutoTokenizer, BartForConditionalGeneration
+from utils import override_backend_env_var_context_manager
 
 from vllm import LLM, SamplingParams
-from vllm.utils import zip_enc_dec_prompt_lists
+from vllm.utils import STR_XFORMERS_ATTN_VAL, zip_enc_dec_prompt_lists
 
 dtype = "float"
 
@@ -30,24 +31,29 @@ prompts = zip_enc_dec_prompt_lists(encoder_prompts, decoder_prompts)
 
 print(prompts)
 
-# Create a sampling params object.
-sampling_params = SamplingParams(
-    temperature=0,
-    top_p=1.0,
-    min_tokens=0,
-    max_tokens=20,
-)
+with override_backend_env_var_context_manager(STR_XFORMERS_ATTN_VAL):
+    # Force usage of XFormers backend which supports
+    # encoder attention & encoder/decoder cross-attention
 
-# Create an LLM.
-llm = LLM(model="facebook/bart-large-cnn", enforce_eager=True, dtype=dtype)
-# Generate texts from the prompts. The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
-outputs = llm.generate(prompts, sampling_params)
-# Print the outputs.
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    # Create a sampling params object.
+    sampling_params = SamplingParams(
+        temperature=0,
+        top_p=1.0,
+        min_tokens=0,
+        max_tokens=20,
+    )
+
+    # Create an LLM.
+    llm = LLM(model="facebook/bart-large-cnn", enforce_eager=True, dtype=dtype)
+    # Generate texts from the prompts. The output is a list of
+    # RequestOutput objects that contain the prompt, generated
+    # text, and other information.
+    outputs = llm.generate(prompts, sampling_params)
+    # Print the outputs.
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn")
 tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-cnn")
