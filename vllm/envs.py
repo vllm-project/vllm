@@ -251,6 +251,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+
+    # Specify the role of current vllm instance
+    # Value can be "prefill", "decode" or None.
+    "VLLM_DISAGG_PREFILL_ROLE":
+    lambda: os.getenv("VLLM_DISAGG_PREFILL_ROLE", None),
 }
 
 # end-env-vars-definition

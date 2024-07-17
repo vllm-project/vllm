@@ -754,6 +754,14 @@ def get_pp_group() -> GroupCoordinator:
         "pipeline model parallel group is not initialized")
     return _PP
 
+    
+_DISAGG: Optional[GroupCoordinator] = None
+
+def get_disagg_group() -> GroupCoordinator:
+    assert _DISAGG is not None, (
+        "disaggregated prefilling parallel group is not initialized")
+    return _DISAGG
+
 
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
@@ -827,6 +835,28 @@ def init_distributed_environment(
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
+        
+        
+def extend_distributed_group_with_offset(
+    groups: List[List[int]],
+    offset: int,
+) -> List[List[int]]:
+    """
+        Extend original distributed group.
+        The extended part will be the original distributed group plus an offset.
+        
+        Arguments:
+            groups: original distributed group
+            offset: the offset we want to apply to the duplicated group.
+                Typically world_size // 2
+    """
+    
+    new_groups = []
+    for group in groups:
+        new_groups.append([rank for rank in group])
+        new_groups.append([rank + offset for rank in group])
+        
+    return new_groups
 
 
 def initialize_model_parallel(
@@ -862,15 +892,24 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
+        
+    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+        # Disaggregated prefilling is enabled
+        # There will be 2 copies of vLLM
+        # One for prefilling and one for decoding
+        disagg_prefill_size = 2
+    else:
+        disagg_prefill_size = 1
+
     if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+            tensor_model_parallel_size * pipeline_model_parallel_size * disagg_prefill_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
             f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
 
     # Build the tensor model-parallel groups.
-    num_tensor_model_parallel_groups: int = (world_size //
+    num_tensor_model_parallel_groups: int = (world_size // disagg_prefill_size //
                                              tensor_model_parallel_size)
     global _TP
     assert _TP is None, ("tensor model parallel group is already initialized")
@@ -880,6 +919,12 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
+    # extend the distributed group if disaggregated prefilling is enabled
+    if disagg_prefill_size > 1:
+        group_ranks = extend_distributed_group_with_offset(
+            group_ranks, 
+            world_size // disagg_prefill_size
+        )
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank, backend)
 
@@ -893,6 +938,12 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
+    # extend the distributed group if disaggregated prefilling is enabled
+    if disagg_prefill_size > 1:
+        group_ranks = extend_distributed_group_with_offset(
+            group_ranks, 
+            world_size // disagg_prefill_size
+        )
     # pipeline parallel does not need custom allreduce
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
