@@ -502,6 +502,22 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt_token_ids
 
     @property
+    def encoder_prompt(self) -> Optional[str]:
+        # There are either 0 or 1 encoder sequences
+        # If one is present, its prompt is distinct
+        # from the decoder's.
+        return (self.encoder_seq.prompt
+                if self.encoder_seq is not None else None)
+
+    @property
+    def encoder_prompt_token_ids(self) -> Optional[List[int]]:
+        # There are either 0 or 1 encoder sequences
+        # If one is present, its prompt token ids are
+        # distinct from the decoder's.
+        return (self.encoder_seq.prompt_token_ids
+                if self.encoder_seq is not None else None)
+
+    @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.

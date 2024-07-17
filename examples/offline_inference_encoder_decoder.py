@@ -52,8 +52,11 @@ with override_backend_env_var_context_manager(STR_XFORMERS_ATTN_VAL):
     # Print the outputs.
     for output in outputs:
         prompt = output.prompt
+        encoder_prompt = output.encoder_prompt
         generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Encoder prompt: {encoder_prompt!r}, "
+              f"Decoder prompt: {prompt!r}, "
+              f"Generated text: {generated_text!r}")
 
 model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn")
 tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-cnn")

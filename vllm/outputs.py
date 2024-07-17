@@ -88,6 +88,8 @@ class RequestOutput:
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
+        encoder_prompt: Optional[str] = None,
+        encoder_prompt_token_ids: Optional[List[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -97,6 +99,8 @@ class RequestOutput:
         self.finished = finished
         self.metrics = metrics
         self.lora_request = lora_request
+        self.encoder_prompt = encoder_prompt
+        self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
@@ -136,6 +140,8 @@ class RequestOutput:
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
         prompt_token_ids = seq_group.prompt_token_ids
+        encoder_prompt = seq_group.encoder_prompt
+        encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
@@ -147,12 +153,16 @@ class RequestOutput:
                    outputs,
                    finished,
                    seq_group.metrics,
-                   lora_request=seq_group.lora_request)
+                   lora_request=seq_group.lora_request,
+                   encoder_prompt=encoder_prompt,
+                   encoder_prompt_token_ids=encoder_prompt_token_ids)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
+                f"encoder_prompt={self.encoder_prompt!r}, "
+                f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
