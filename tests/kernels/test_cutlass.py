@@ -347,8 +347,12 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
                                         out_dtype, None,
                                         azp_with_adj_i32[0, :], func_bias)
 
-    assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
-    assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
+    # bfloat16 precision is 7-bit mantissa -> 2^-8 ~ 0.4%
+    # float16 precision is 10-bit mantissa -> 2^-11 ~ 0.05%
+    rtol = 1e-2 if out_dtype == torch.bfloat16 else 1e-3
+    atol = 1e-3
+    assert torch.allclose(out, baseline_dq, rtol=rtol, atol=atol)
+    assert torch.allclose(out, baseline_q, rtol=rtol, atol=atol)
 
 
 # Test working with a subset of A and B
