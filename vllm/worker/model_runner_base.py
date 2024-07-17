@@ -113,6 +113,21 @@ class ModelRunnerInputBase(ABC):
         raise NotImplementedError
 
 
+class ModelRunnerInputBuilderBase(ABC, Generic[T]):
+    """A builder to create ModelRunnerInputBase objects.
+  """
+
+    @abstractmethod
+    def add_seq_group(self, seq_group_metadata):
+        """TBA"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def build(self, *args, **kwargs) -> T:
+        """Build metadata with on-device tensors."""
+        raise NotImplementedError
+
+
 class ModelRunnerBase(ABC, Generic[T]):
     """
     Model runner interface that abstracts a particular hardware and/or type of
