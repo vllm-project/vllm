@@ -5,6 +5,8 @@ from .code_cache import CodeCache
 # ruff: noqa: E501
 add_residual_rms_norm_quant_name = "torch_P_ops_P__C_P_fused_add_rms_norm_float16_float16_float16_float_1e_05_torch_P_empty_like_float16_torch_P_ops_P__C_P_static_scaled_int8_quant_int8_float16_float32_fused"
 
+register_fused_rms_norm = False
+
 
 def add_residual_rms_norm_quant(input: torch.Tensor, residual: torch.Tensor,
                                 weight: torch.Tensor,
@@ -26,6 +28,10 @@ def add_residual_rms_norm_quant_meta(input: torch.Tensor,
 
 
 def setup_fused_rms_norm(cc: CodeCache):
+    global register_fused_rms_norm
+    if not register_fused_rms_norm:
+        return
+    register_fused_rms_norm = True
     namespace = "dogfood"
     ns_op = f"{namespace}::add_residual_rms_norm_quant"
     sig = "(Tensor hidden_states_158, Tensor! _, Tensor detach_63, Tensor x_scale_126) -> Tensor"
