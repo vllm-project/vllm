@@ -63,7 +63,11 @@ def offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     del original_state_dict
     if pin_memory:
         cpu_state_dict = {k: v.pin_memory() for k, v in cpu_state_dict.items()}
-    module.load_state_dict(cpu_state_dict)
+
+    # torch.nn.Module does not have pin_memory method
+    # we move the state_dict to the meta device to free up memory
+    # and actually hold the state_dict in `cpu_state_dict`
+    module.to(device="meta")
 
     original_forward = module.forward
 
