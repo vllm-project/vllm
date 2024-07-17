@@ -16,8 +16,8 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
     qtype_max = as_float32_tensor(qtype_traits.max)
 
     # For fp8, in order to match the cuda kernel output, we have to do exactly
-    # the same operations as in the corresponding fp8 kernel to prevent rounding
-    # errors.
+    # the same operations as in the corresponding fp8 kernel to prevent
+    # rounding errors.
 
     # Compute scales
     x_token_max, _ = x.abs().max(dim=-1)
@@ -45,8 +45,8 @@ def ref_dynamic_per_tensor_fp8_quant(x: torch.tensor) \
     one = as_float32_tensor(1.0)
 
     # For fp8, in order to match the cuda kernel output, we have to do exactly
-    # the same operations as in the corresponding fp8 kernel to prevent rounding
-    # errors.
+    # the same operations as in the corresponding fp8 kernel to prevent
+    # rounding errors.
 
     x_max = as_float32_tensor(x.abs().max())
     ref_scale = x_max / fp8_max
