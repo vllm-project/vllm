@@ -613,6 +613,8 @@ class LLMEngine:
             decoder_start_token_id=torch.tensor(decoder_start_token_id, dtype=torch.int)
 
         # Cast decoder_input_ids to torch.Tensor, if not already
+        if isinstance(decoder_input_ids,list):
+            assert (len(decoder_input_ids)==0 or 
 
         # # 1. Check whether the user has defined `decoder_input_ids` manually. To facilitate in terms of input naming,
         # # we also allow the user to pass it under `input_ids`, if the encoder does not use it as the main input.
