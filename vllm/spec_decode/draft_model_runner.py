@@ -67,6 +67,9 @@ class TP1DraftModelRunner(ModelRunner):
             return_hidden_states=return_hidden_states,
         )
 
+        # Used mainly for tests (has no perf penalty)
+        self._num_gpu_runs = 0
+
     def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
                                     num_queries):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
@@ -122,6 +125,7 @@ class TP1DraftModelRunner(ModelRunner):
             self, model_input: ModelInputForGPUWithSamplingMetadata,
             last_output: SamplerOutput
     ) -> ModelInputForGPUWithSamplingMetadata:
+        self._num_gpu_runs += 1
         # Currently, we expect "decode mode" only
         assert not model_input.is_prompt
 
@@ -236,22 +240,43 @@ class TP1DraftModelRunner(ModelRunner):
             3. Reuses sampling tensors (since we run only decodes and they have
                 a repeating sampling logic)
         """
-        # Since we do not broadcast data inside execute_model anymore,
-        # we need to figure out the best way to support TP > 1 in this
-        # case, because we will at least need to broadcast the sampled
-        # tokens to all workers.
-        if not self.is_driver_worker:
-            raise ValueError("TP1DraftModelRunner only supports TP=1.")
 
-        # Sanity
-        if self.lora_config is not None:
-            raise ValueError("TP1DraftModelRunner has no support for LORA")
-        if self.prompt_adapter_config is not None:
-            raise ValueError(
-                "TP1DraftModelRunner has no support for prompt_adapter_config")
-        if model_input.multi_modal_kwargs:
-            raise ValueError(
-                "TP1DraftModelRunner has no support for multi_modal_kwargs")
+        # When num_steps == 1, we execute the fallback here for the GPU
+        # advance_step, which runs prepare_inputs on CPU and for each spec
+        # iteration invokes this function only once
+        # (Look at multi-step-worker code)
+        is_fallback = num_steps > 1
+        if not is_fallback:
+            # Since we do not broadcast data inside execute_model anymore,
+            # we need to figure out the best way to support TP > 1 in this
+            # case, because we will at least need to broadcast the sampled
+            # tokens to all workers.
+            if not self.is_driver_worker:
+                raise ValueError("TP1DraftModelRunner only supports TP=1.")
+
+            # Sanity
+            if self.lora_config is not None:
+                raise ValueError("TP1DraftModelRunner has no support for LORA")
+            if self.prompt_adapter_config is not None:
+                raise ValueError("TP1DraftModelRunner has no support for "
+                                 "prompt_adapter_config")
+            if model_input.multi_modal_kwargs:
+                raise ValueError(
+                    "TP1DraftModelRunner has no support for multi_modal_kwargs"
+                )
+        else:
+            if self.lora_config:
+                assert model_input.lora_requests is not None
+                assert model_input.lora_mapping is not None
+                self.set_active_loras(model_input.lora_requests,
+                                      model_input.lora_mapping)
+
+            if self.prompt_adapter_config:
+                assert model_input.prompt_adapter_requests is not None
+                assert model_input.prompt_adapter_mapping is not None
+                self.set_active_prompt_adapters(
+                    model_input.prompt_adapter_requests,
+                    model_input.prompt_adapter_mapping)
 
         # Detect exec mode
         assert model_input.attn_metadata is not None
@@ -266,8 +291,8 @@ class TP1DraftModelRunner(ModelRunner):
             # We can skip CPU samples for spec token generation.
             # (We do allow CPU samples for num_steps == 1 to support the
             # fallback case, where supports_gpu_multi_step(..) does not pass)
-            model_input.sampling_metadata.skip_sampler_cpu_output = (num_steps
-                                                                     > 1)
+            model_input.sampling_metadata.skip_sampler_cpu_output = (
+                not is_fallback)
 
             # Attn attr defines if we use cuda graphs
             use_cuda_graph = model_input.attn_metadata.use_cuda_graph
@@ -282,7 +307,7 @@ class TP1DraftModelRunner(ModelRunner):
 
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
-            multi_modal_kwargs: dict = {}
+            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
             # Run model
             hidden_states = model_executable(
