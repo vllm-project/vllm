@@ -31,7 +31,8 @@ steps:
       - "amd-build"
     agents:
       queue: amd
-    command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+    commands: 
+      - bash .buildkite/run-amd-test.sh "cd vllm && git clone https://github.com/rocm/vllm ; cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
     env:
       DOCKER_BUILDKIT: "1"
     priority: 100
