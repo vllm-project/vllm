@@ -142,6 +142,13 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+
+        if prefill_meta := attn_metadata.prefill_metadata:
+            block_indices = prefill_meta.block_indices
+            block_offsets = prefill_meta.block_offsets
+        if decode_meta := attn_metadata.decode_metadata:
+            block_indices = decode_meta.block_indices
+            block_offsets = decode_meta.block_offsets
         if kv_cache is not None:
             key_cache, value_cache = HabanaPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
@@ -149,9 +156,8 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            block_indices, block_offset = cache_ops.prepare_to_cache(key_cache, attn_metadata.slot_mapping)
-            key_cache = self.key_cache(key, key_cache, block_indices, block_offset)
-            value_cache = self.value_cache(value, value_cache, block_indices, block_offset)
+            key_cache = self.key_cache(key, key_cache, block_indices, block_offsets)
+            value_cache = self.value_cache(value, value_cache, block_indices, block_offsets)
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.

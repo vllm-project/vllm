@@ -198,6 +198,13 @@ def pad_list(l, k, v):
     return l + [v] * padding
 
 
+def precompute_indices_and_offsets(block_size, slot_mapping):
+    slot_mapping = slot_mapping.flatten()
+    indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    offsets = torch.fmod(slot_mapping, block_size)
+    return indices, offsets
+
+
 class HpuModelAdapter():
     def __init__(self, model, block_size):
         self.model = model
@@ -593,10 +600,14 @@ class HabanaModelRunner:
                                        dtype=torch.long,
                                        device=self.device)
 
+        block_indices, block_offsets = precompute_indices_and_offsets(self.block_size, slot_mapping)
+
         attn_metadata = self.attn_backend.make_metadata(
             block_list=None,
             block_mapping=None,
             block_usage=None,
+            block_indices=block_indices,
+            block_offsets=block_offsets,
             attn_bias=None,
             seq_lens_tensor=seq_lens_tensor,
         )
@@ -696,10 +707,14 @@ class HabanaModelRunner:
                                     dtype=torch.long,
                                     device=self.device)
 
+        block_indices, block_offsets = precompute_indices_and_offsets(self.block_size, slot_mapping)
+
         attn_metadata = self.attn_backend.make_metadata(
             block_list=block_list,
             block_mapping=block_mapping,
             block_usage=block_usage,
+            block_indices=block_indices,
+            block_offsets=block_offsets,
             attn_bias=None,
             seq_lens_tensor=None,
         )
@@ -884,10 +899,10 @@ class HabanaModelRunner:
     def trim_attn_metadata(self, metadata: AttentionMetadata) -> object:
         prefill_metadata = subtuple(metadata.prefill_metadata,
                                     "TrimmedPrefillMetadata",
-                                    ['attn_bias', 'seq_lens_tensor'])
+                                    ['attn_bias', 'seq_lens_tensor', 'block_indices', 'block_offsets'])
         decode_metadata = subtuple(metadata.decode_metadata,
                                     "TrimmedDecodeMetadata",
-                                    ['attn_bias', 'block_list', 'block_mapping', 'block_usage'])
+                                    ['attn_bias', 'block_list', 'block_mapping', 'block_usage', 'block_indices', 'block_offsets'])
         return subtuple(metadata,
                         'TrimmedMetadata',
                         ['slot_mapping',

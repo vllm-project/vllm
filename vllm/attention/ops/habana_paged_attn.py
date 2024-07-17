@@ -19,6 +19,8 @@ class HabanaPagedAttentionMetadata:
     block_list: Optional[torch.Tensor]
     block_mapping: Optional[torch.Tensor]
     block_usage: Optional[torch.Tensor]
+    block_indices: Optional[torch.Tensor]
+    block_offsets: Optional[torch.Tensor]
 
 
 class HabanaPagedAttention:
