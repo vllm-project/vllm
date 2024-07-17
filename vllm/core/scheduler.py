@@ -268,7 +268,6 @@ class Scheduler:
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
-        is_encoder_decoder=False,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -276,8 +275,6 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
-
-        self.is_encoder_decoder = is_encoder_decoder
 
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
@@ -394,7 +391,7 @@ class Scheduler:
         Free a sequence group from a cross-attention block table.
         Has no effect on decoder-only models.
         """
-        if self.is_encoder_decoder:
+        if seq_group.is_encoder_decoder():
             self.block_manager.free_cross(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
