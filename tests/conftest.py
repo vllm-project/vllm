@@ -121,6 +121,7 @@ def example_encoder_decoder_prompts() -> Tuple[List[str], List[str]]:
     decoder prompt) tuple.
 
     Returns:
+    
     * Encoder prompt list
     * Decoder prompt list (reverse of encoder prompt list)
     '''
