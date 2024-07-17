@@ -1,3 +1,4 @@
+import inspect
 from typing import Dict, List, Protocol, Tuple
 
 import torch
@@ -140,11 +141,18 @@ def make_layers(
     start_layer, end_layer = get_pp_indices(num_hidden_layers,
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
+
+    include_layer_idx = "layer_idx" in inspect.signature(layer_fn).parameters
+    layer_modules = ([
+        (layer_fn(layer_idx=idx, prefix=f"{prefix}.{idx}")
+         if include_layer_idx else layer_fn(prefix=f"{prefix}.{idx}"))
+        for idx in range(start_layer, end_layer)
+    ])
     modules = torch.nn.ModuleList(
-        [PPMissingLayer() for _ in range(start_layer)] + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
-            for idx in range(start_layer, end_layer)
-        ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
+        [PPMissingLayer() for _ in range(start_layer)] +
+        [maybe_offload_to_cpu(layer_module)
+         for layer_module in layer_modules] +
+        [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
 
 
