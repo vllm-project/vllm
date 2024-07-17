@@ -818,35 +818,6 @@ class BartForConditionalGeneration(nn.Module):
                     "Conflicting embedding weights.")
                 shared_embedding_weight = loaded_weight
                 shared_embedding_shard_id = shard_id
-
-                # encoder_in_param = model_params_dict[
-                #     'encoder.embed_tokens.weight']
-                # encoder_in_weight_loader = getattr(encoder_in_param,
-                #                                    "weight_loader",
-                #                                    default_weight_loader)
-
-                # decoder_in_param = model_params_dict[
-                #     'decoder.embed_tokens.weight']
-                # decoder_in_weight_loader = getattr(decoder_in_param,
-                #                                    "weight_loader",
-                #                                    default_weight_loader)
-
-                # lm_head_in_param = top_params_dict['lm_head.weight']
-                # lm_head_in_weight_loader = getattr(lm_head_in_param,
-                #                                    "weight_loader",
-                #                                    default_weight_loader)
-
-                # if shard_id:
-                #     encoder_in_weight_loader(encoder_in_param, loaded_weight,
-                #                              shard_id)
-                #     decoder_in_weight_loader(decoder_in_param, loaded_weight,
-                #                              shard_id)
-                #     lm_head_in_weight_loader(lm_head_in_param, loaded_weight,
-                #                              shard_id)
-                # else:
-                #     encoder_in_weight_loader(encoder_in_param, loaded_weight)
-                #     decoder_in_weight_loader(decoder_in_param, loaded_weight)
-                #     lm_head_in_weight_loader(lm_head_in_param, loaded_weight)
             else:
                 # Skip the specific downstream task weight.
                 if name.startswith('cls.'):
