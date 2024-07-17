@@ -11,17 +11,17 @@ EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
 @pytest.fixture(scope="module")
 def embedding_server():
-    with RemoteOpenAIServer([
-            "--model",
-            EMBEDDING_MODEL_NAME,
-            # use half precision for speed and memory savings in CI environment
-            "--dtype",
-            "bfloat16",
-            "--enforce-eager",
-            "--max-model-len",
-            "8192",
-            "--enforce-eager",
-    ]) as remote_server:
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--enforce-eager",
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+    ]
+
+    with RemoteOpenAIServer(EMBEDDING_MODEL_NAME, args) as remote_server:
         yield remote_server
 
 

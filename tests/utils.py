@@ -49,7 +49,13 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    def __init__(self, cli_args: List[str], *, auto_port: bool = True) -> None:
+    def __init__(
+        self,
+        model: str,
+        cli_args: List[str],
+        *,
+        auto_port: bool = True,
+    ) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -68,12 +74,10 @@ class RemoteOpenAIServer:
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        self.proc = subprocess.Popen(
-            [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] +
-            cli_args,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr)
+        self.proc = subprocess.Popen(["vllm", "serve"] + [model] + cli_args,
+                                     env=env,
+                                     stdout=sys.stdout,
+                                     stderr=sys.stderr)
         self._wait_for_server(url=self.url_for("health"),
                               timeout=self.MAX_SERVER_START_WAIT_S)
 
