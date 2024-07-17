@@ -44,10 +44,11 @@ with override_backend_env_var_context_manager(STR_XFORMERS_ATTN_VAL):
     )
 
     # Create an LLM.
-    llm = LLM(model="facebook/bart-large-cnn", 
-              enforce_eager=True, 
-              dtype=dtype,
-              )
+    llm = LLM(
+        model="facebook/bart-large-cnn",
+        enforce_eager=True,
+        dtype=dtype,
+    )
     # Generate texts from the prompts. The output is a list of
     # RequestOutput objects that contain the prompt, generated
     # text, and other information.
@@ -74,13 +75,13 @@ inputs = tokenizer([ARTICLE_TO_SUMMARIZE],
 #                    return_tensors="pt")
 
 # Generate Summary
-summary_ids = model.generate(inputs["input_ids"], 
-                            #  decoder_input_ids=decoder_inputs["input_ids"], 
-                             min_length=0, 
-                             max_length=20,
-                             )
+summary_ids = model.generate(
+    inputs["input_ids"],
+    #  decoder_input_ids=decoder_inputs["input_ids"],
+    min_length=0,
+    max_length=20,
+)
 print(
     tokenizer.batch_decode(summary_ids,
                            skip_special_tokens=True,
-                           clean_up_tokenization_spaces=False),
-                           )
+                           clean_up_tokenization_spaces=False), )
