@@ -1,11 +1,6 @@
 # Default ROCm 6.1 base image
 ARG BASE_IMAGE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
 
-# Tested and supported base rocm/pytorch images
-ARG ROCm_5_7_BASE="rocm/pytorch:rocm5.7_ubuntu20.04_py3.9_pytorch_2.0.1" \
-    ROCm_6_0_BASE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" \
-    ROCM_6_1_BASE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
-
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
 
@@ -54,18 +49,6 @@ RUN pip install --upgrade pip
 RUN apt-get purge -y sccache; pip uninstall -y sccache; rm -f "$(which sccache)"
 # Install torch == 2.5.0 on ROCm
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-5.7"*) \
-            pip uninstall -y torch torchaudio torchvision \
-            && pip install --no-cache-dir --pre \
-                torch==2.5.0.dev20240710 torchaudio==2.4.0.dev20240710 \
-                torchvision==0.20.0.dev20240710 \
-               --index-url https://download.pytorch.org/whl/nightly/rocm5.7;; \
-        *"rocm-6.0"*) \
-            pip uninstall -y torch torchaudio torchvision \
-            && pip install --no-cache-dir --pre \
-                torch==2.5.0.dev20240710 torchaudio==2.4.0.dev20240710 \
-                torchvision==0.20.0.dev20240710 \
-               --index-url https://download.pytorch.org/whl/nightly/rocm6.0;; \
         *"rocm-6.1"*) \
             pip uninstall -y torch torchaudio torchvision \
             && pip install --no-cache-dir --pre \
@@ -104,11 +87,6 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
     && cd flash-attention \
     && git checkout "${FA_BRANCH}" \
     && git submodule update --init \
-    && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-5.7"*) \
-            export VLLM_TORCH_PATH="$(python3 -c 'import torch; print(torch.__path__[0])')" \
-            && patch "${VLLM_TORCH_PATH}"/utils/hipify/hipify_python.py hipify_patch.patch;; \
-        *) ;; esac \
     && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
     # Create an empty directory otherwise as later build stages expect one
     else mkdir -p /install; \
@@ -161,12 +139,9 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
     --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
     && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-6.0"*) \
-            patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
         *"rocm-6.1"*) \
             # Bring in upgrades to HIP graph earlier than ROCm 6.2 for vLLM
-            wget -N https://github.com/ROCm/vllm/raw/fa78403/rocm_patch/libamdhip64.so.6 -P rocm_patch \
-            && cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6 \
+            wget -N https://github.com/ROCm/vllm/raw/fa78403/rocm_patch/libamdhip64.so.6 -P /opt/rocm/lib \
             # Prevent interference if torch bundles its own HIP runtime
             && rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so* || true;; \
         *) ;; esac \
