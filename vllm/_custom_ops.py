@@ -69,12 +69,7 @@ def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
 def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_quick(out, x)
 
-# ops.def(
-#       "sequence_block_reducer("
-#       "    Tensor! out, Tensor exp_sums, Tensor max_logits,"
-#       "    Tensor tmp_out, Tensor query,Tensor seq_lens,"
-#       "    int max_seq_len) -> ()");
-# sequence block reducer ops
+
 def sequence_block_reducer(
     out: torch.Tensor,
     exp_sum: torch.Tensor,

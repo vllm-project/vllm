@@ -1,6 +1,7 @@
 import asyncio
 import os
 import pickle
+import copy
 from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -36,6 +37,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
         if ray_usage != "1":
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
+         # Get the model config for the only attn in SP from the input model config.
+        if (self.parallel_config.sequence_parallel_size > 1):
+            self.only_attn_model_config = copy.deepcopy(self.model_config)
+            self.only_attn_model_config.model = "only_attn"
+
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
@@ -44,6 +50,39 @@ class RayGPUExecutor(DistributedGPUExecutor):
             self.forward_dag = self._compiled_ray_dag()
             self.extra_execute_model_run_workers_kwargs[
                 "use_ray_compiled_dag"] = True
+
+    def _get_worker_kwargs(
+            self,
+            local_rank: int = 0,
+            rank: int = 0,
+            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
+        """Return worker init args for a given rank."""
+        assert distributed_init_method is not None
+
+         # Get the final model config.
+        if rank < self.parallel_config.tensor_parallel_size * self.parallel_config.pipeline_parallel_size:
+            model_config = self.model_config
+            is_sp_worker = False
+        else:
+            model_config = self.only_attn_model_config
+            is_sp_worker = True
+
+        return dict(
+            model_config=model_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
+            load_config=self.load_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            speculative_config=self.speculative_config,
+            is_driver_worker=rank == 0,
+            is_sp_worker = is_sp_worker
+        )        
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:

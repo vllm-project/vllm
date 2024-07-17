@@ -81,6 +81,7 @@ class CacheEngine:
                             pin_memory=pin_memory,
                             device=device))
         return kv_cache
+    
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         for i in range(self.num_layers):
@@ -94,9 +95,10 @@ class CacheEngine:
 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
-    #####todo kv cache transfer 
-    def transfer(self,src_to_dsts:torch.Tensor)-> None:
-        pass
+        
+    def get_blocks(self, layer: int, start: int, step: int) -> torch.Tensor:
+        return self.attn_backend.get_blocks(self.gpu_cache[layer], start, step)
+    
 
     @staticmethod
     def get_cache_block_size(

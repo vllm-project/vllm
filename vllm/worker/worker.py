@@ -11,7 +11,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
-                              set_custom_all_reduce)
+                              set_custom_all_reduce,
+                              send_sp_tensor, recv_sp_tensor)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -45,6 +46,7 @@ class Worker(LocalOrDistributedWorkerBase):
         vision_language_config: Optional[VisionLanguageConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
+        is_sp_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
         self.model_config = model_config
@@ -58,6 +60,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
+        self.is_sp_worker = is_sp_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
@@ -101,6 +104,16 @@ class Worker(LocalOrDistributedWorkerBase):
         self.cache_engine: CacheEngine
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[torch.tensor]] = None
+        # initialize CUDA stream for KV migration
+        # SP worker only rx KV cache and master workers just tx KV cache
+        # Note the scheduler should call kv_send_stream.synchronize() before 
+        # the next round, but it is not safe [TODO]. 
+        if is_sp_worker:
+            tp_pp_world = self.parallel_config.pipeline_parallel_size \
+                * self.parallel_config.tensor_parallel_size
+            self.kv_recv_streams = [torch.cuda.Stream() for _ in range(tp_pp_world)]
+        else:
+            self.kv_send_stream = torch.cuda.Stream()
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -130,8 +143,8 @@ class Worker(LocalOrDistributedWorkerBase):
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
-    def load_model(self,only_attention: Optional[int]=1):
-        self.model_runner.load_model(only_attention)
+    def load_model(self):
+        self.model_runner.load_model()
 
     def save_sharded_state(
         self,
@@ -231,10 +244,69 @@ class Worker(LocalOrDistributedWorkerBase):
     @property
     def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
+    
+    @property
+    def do_metadata_sp_broadcast(self) -> bool:
+        return self.parallel_config.sequece_parallel_size > 1
+
 
     @property
     def kv_cache(self) -> Optional[List[torch.Tensor]]:
         return self.gpu_cache
+    
+    @property
+    def get_kv_chunk(self, layer: int) -> Optional[List[torch.Tensor]]:
+        return self.gpu_cache[layer]
+    
+    @torch.inference_mode()
+    def send_chunk(self, sp_group: int = 0, dst: int = 0) -> None:
+        # dst is the local sp rank
+        chunk_size = self.cache_config.chunk_size
+        block_idx = self.cache_config.num_gpu_blocks - chunk_size
+
+        # Use a send stream to do KV migration
+        with torch.cuda.stream(self.kv_send_stream[sp_group]):
+            for i in self.model_config.get_num_layers(self.parallel_config):
+                chunk = self.cache_engine.get_blocks(layer=i, 
+                                                    start=block_idx, 
+                                                    step=chunk_size)
+                send_sp_tensor(chunk, sp_group, dst)
+
+
+    @torch.inference_mode()
+    def recv_chunk(self, sp_group: int, chunk_idx: int) -> None:
+        chunk_size = self.cache_config.chunk_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        paralled_blocks = int(self.cache_config.num_gpu_blocks / (pp_size * tp_size))
+        block_idx = sp_group * paralled_blocks + chunk_size * chunk_idx
+
+         # Use a recv stream to do KV migration
+        with torch.cuda.stream(self.kv_recv_streams[sp_group]):
+            for i in self.model_config.get_num_layers(self.parallel_config):
+                chunk = self.cache_engine.get_blocks(layer=i, 
+                                                    start=block_idx, 
+                                                    step=chunk_size)
+                recv_sp_tensor(chunk, sp_group, src=0)
+
+    @torch.inference_mode()
+    def migrate_chunk(self, dst_chunk: int, dst_rank: int) -> None:
+        """
+        Migrate a KV chunk. Note that dst_rank is a local rank in the SP group
+        """
+        # Temporary method to get the rank in sp group.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        dst_global_rank = dst_rank + pp_size * tp_size - 1
+        
+        # Only the master workers or the target sp workers 
+        # involves in the KV cache migration.
+        for src_global_rank in range(pp_size * tp_size):
+            if self.rank == src_global_rank:
+                self.send_chunk(sp_group=src_global_rank, dst=dst_rank)
+            elif self.rank == dst_global_rank:
+                self.recv_chunk(sp_group=src_global_rank, chunk_idx=dst_chunk)
+
 
     @torch.inference_mode()
     def prepare_worker_input(
@@ -254,12 +326,24 @@ class Worker(LocalOrDistributedWorkerBase):
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
+        
+        # # `blocks_to_migrate` is a gpu tensor. The src blocks are in the local 
+        # # GPU cache, while the tgt blcoks are in the GPU chunk.
+        # blocks_to_migrate = torch.tensor(execute_model_req.blocks_to_migrate,
+        #                               device=self.device,
+        #                               dtype=torch.int64).view(-1, 2)
+        # `chunk_to_migrate` is a gpu tensor which records the dest chunk in a 
+        # remote SP GPU worker        
+        chunk_to_migrate = torch.tensor(execute_model_req.chunk_to_migrate,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1)
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
+            chunk_to_migrate=chunk_to_migrate
         )
 
     @torch.inference_mode()
@@ -274,10 +358,14 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine.copy(worker_input.blocks_to_copy)
-        ####to do kv cache transfer process
-        if  (worker_input.blocks_to_transfer is not None
-             and worker_input.blocks_to_transfer.numel()>0):
-            self.cache_engine.transfer(worker_input.blocks_to_transfer)
+        # Note sequence parallel requires master workers (in sp and tp)
+        # to first copy blocks their chunck memories, and then migrate 
+        # the chunk to the tgt sp worker
+        if (worker_input.chunk_to_migrate is not None
+                and worker_input.chunk_to_migrate.numel() > 0):
+            chunk_to_migrate = chunk_to_migrate.tolist()
+            self.migrate_chunk(dst_chunk=chunk_to_migrate[0],
+                               dst_rank=chunk_to_migrate[1])
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

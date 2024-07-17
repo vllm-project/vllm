@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed import broadcast_tensor_dict, broadcast_sp_tensor_dict
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
@@ -124,6 +124,8 @@ class WorkerInput:
     blocks_to_swap_in: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
+    # blocks_to_migrate: Optional[torch.Tensor] = None
+    chunk_to_migrate: Optional[torch.Tensor] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -139,6 +141,8 @@ class WorkerInput:
             blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
+            # blocks_to_migrate=tensor_dict.pop("blocks_to_migrate"),
+            chunk_to_migrate=tensor_dict.pop("chunk_to_migrate"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -151,9 +155,36 @@ class WorkerInput:
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
+            "blocks_to_migrate": self.blocks_to_migrate,
+            "chunk_to_migrate": self.chunk_to_migrate,
         }
 
         return tensor_dict
+    
+    @classmethod
+    def from_broadcasted_sp_tensor_dict(
+        cls: Type["WorkerInput"],
+        tensor_dict: Dict[str, Any],
+    ) -> "WorkerInput":
+        """
+        Pop fields from the given tensor_dict and populate a new instance of
+        WorkerInput.
+        """
+        return cls(
+            chunk_to_migrate=tensor_dict.pop("chunk_to_migrate"),
+        )
+
+    def as_broadcastable_sp_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        """
+        Extract broadcastable fields.
+        """
+        tensor_dict = {
+            "chunk_to_migrate": self.chunk_to_migrate,
+        }
+
+        return tensor_dict
+    
 
 
 class LocalOrDistributedWorkerBase(WorkerBase):
@@ -166,6 +197,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     model runner cannot inherit from ModelRunnerBase, use WorkerBase instead.
     """
     is_driver_worker: bool
+    # whether workers for sequence parallel
+    is_sp_worker: bool
     model_runner: ModelRunnerBase
 
     @property
@@ -175,6 +208,17 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         Used by the default `execute_model` to check whether broadcast is
         needed to transfer request inputs from the driver worker to other
         workers in the TP group. If WorkerBase subclass only supports
+        single-worker execution, then this method should return False.
+        """
+        raise NotImplementedError
+    
+    @property
+    @abstractmethod
+    def do_metadata_sp_broadcast(self) -> bool:
+        """
+        Used by the default `execute_model` to check whether broadcast is
+        needed to transfer request inputs from the driver worker to other
+        workers in the SP group. If WorkerBase subclass only supports
         single-worker execution, then this method should return False.
         """
         raise NotImplementedError
@@ -205,7 +249,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         Process an execution request.
         """
         raise NotImplementedError
-
+    
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
@@ -213,14 +257,20 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         if self.is_driver_worker:
+            # Note: the driver broadcasts the original `worker_input` to all 
+            # workers in the tp_pp_world (only its tp_group in current version). 
+            # For SP, the driver also broadcast the new `sp_worker_input` to
+            # all workers in its SP group.
             if execute_model_req is None:
-                if self.do_metadata_broadcast:
                     # This signals that there's no more requests to process for
                     # now. All workers are running infinite loop with
                     # broadcast_tensor_dict, and it stops the loop when the
                     # driver broadcasts an empty input. Send an empty input to
                     # notify all other workers to stop their execution loop.
+                if self.do_metadata_broadcast:
                     broadcast_tensor_dict({}, src=0)
+                if self.do_metadata_sp_broadcast:
+                    broadcast_sp_tensor_dict({}, src=0)
                 return None
 
             worker_input: WorkerInput = self.prepare_worker_input(
@@ -230,25 +280,45 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     execute_model_req.seq_group_metadata_list))
             num_steps = execute_model_req.num_steps
 
+            # broadcast inputs for all workers in its tp_group.
             if self.do_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_tensor_dict()
                 broadcast_data.update(
                     model_input.as_broadcastable_tensor_dict())
                 broadcast_data["num_steps"] = num_steps
                 broadcast_tensor_dict(broadcast_data, src=0)
+
+            # broadcast inputs for all workers in its sp_group.
+            if self.do_sp_metadata_broadcast:
+                broadcast_data = worker_input.as_broadcastable_sp_tensor_dict()
+                broadcast_data["num_steps"] = num_steps
+                broadcast_sp_tensor_dict(broadcast_data, src=0)
+
+        elif self.is_sp_worker:
+            assert self.do_sp_metadata_broadcast
+            broadcast_data = broadcast_sp_tensor_dict(src=0)
+            if not broadcast_data:
+                return None
+            num_steps = broadcast_data.pop("num_steps")
+            worker_input = WorkerInput.from_broadcasted_sp_tensor_dict(
+                broadcast_data)
+            model_input = (
+                self.model_runner.
+                make_model_input_from_broadcasted_tensor_dict(broadcast_data))
+
         else:
             assert self.do_metadata_broadcast
             broadcast_data = broadcast_tensor_dict(src=0)
             if not broadcast_data:
                 return None
-
             num_steps = broadcast_data.pop("num_steps")
             worker_input = WorkerInput.from_broadcasted_tensor_dict(
                 broadcast_data)
             model_input = (
                 self.model_runner.
                 make_model_input_from_broadcasted_tensor_dict(broadcast_data))
-
+           
+            
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.

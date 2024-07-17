@@ -136,7 +136,7 @@ class OnlyAttentionLayer(nn.Module):
         self,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> None:
         # Self Attention
         q=self.sequence_parallel_broastcaster()
         attn_output,out_exp_sum,out_max_logits=self.self_attn(q,kv_cache,attn_metadata)
@@ -225,11 +225,11 @@ class OnlyAttentionModel(nn.Module, SupportsLoRA):
         self,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
+    ) -> None:
        self.model(kv_caches,attn_metadata)
 
     def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+                       sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
        pass
     def sample(
         self,

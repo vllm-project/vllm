@@ -106,6 +106,10 @@ class EngineArgs:
 
     otlp_traces_endpoint: Optional[str] = None
 
+    block_migrate_size: int=1024
+    block_migrate_threshold: int=6144
+    block_migrate_start: int=4096
+
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
@@ -311,7 +315,7 @@ class EngineArgs:
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
         parser.add_argument('--sequence-parallel-size',
-                            '-tp',
+                            '-sp',
                             type=int,
                             default=EngineArgs.sequence_parallel_size,
                             help='Number of sequence parallel replicas.')
@@ -624,6 +628,24 @@ class EngineArgs:
             default=None,
             help='Target URL to which OpenTelemetry traces will be sent.')
 
+        parser.add_argument(
+            '--block-migrate-size',
+            type=int,
+            default=EngineArgs.block_migrate_size,
+            help='The superblock size for once kv cache tranfer.')
+        
+        parser.add_argument(
+            '--block-migrate-threshold',
+            type=int,
+            default=EngineArgs.block_migrate_threshold,
+            help='The threshold to start the kvcache migration.')
+        
+        parser.add_argument(
+            '--block-migrate-start',
+            type=int,
+            default=EngineArgs.block_migrate_start,
+            help='The start index of kvcache migration.')
+        
         return parser
 
     @classmethod
@@ -713,10 +735,14 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching)
+            enable_prefix_caching=self.enable_prefix_caching,
+            block_migrate_size=self.block_migrate_size,
+            block_migrate_threshold=self.block_migrate_threshold,
+            block_migrate_start=self.block_migrate_start)
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            sequence_parallel_size=self.sequence_parallel_size,
             worker_use_ray=self.worker_use_ray,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
