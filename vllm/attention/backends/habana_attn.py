@@ -9,7 +9,7 @@ import torch
 
 import vllm.hpu.ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -24,8 +24,8 @@ class HabanaAttentionBackend(AttentionBackend):
         return HabanaAttentionImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "HabanaAttentionMetadata":
-        return HabanaAttentionMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return HabanaAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -146,6 +146,8 @@ class HabanaAttentionImpl(AttentionImpl):
         self.position_bias = None
         self.alibi_slopes = alibi_slopes
         if alibi_slopes is not None:
+            # FIXME(kzawora): Need a general method to set max_seq_len on
+            # per-model basis.
             alibi_slopes_tensor = torch.tensor(alibi_slopes,
                                                dtype=torch.bfloat16)
             self.position_bias = _make_alibi_bias(alibi_slopes_tensor,
@@ -170,6 +172,7 @@ class HabanaAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: HabanaAttentionMetadata,
         kv_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -182,6 +185,11 @@ class HabanaAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "HabanaAttentionImpl")
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 

@@ -1,10 +1,13 @@
+import asyncio
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
 
@@ -25,8 +28,9 @@ class ExecutorBase(ABC):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
+        prompt_adapter_config: Optional[PromptAdapterConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -35,8 +39,9 @@ class ExecutorBase(ABC):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
+        self.prompt_adapter_config = prompt_adapter_config
 
         self._init_executor()
 
@@ -95,6 +100,23 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError  # type: ignore
+
+    @abstractmethod
+    def list_prompt_adapters(self) -> Set[int]:
+        raise NotImplementedError
+
+    @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
@@ -109,6 +131,26 @@ class ExecutorBase(ABC):
 
 
 class ExecutorAsyncBase(ExecutorBase):
+
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        multimodal_config: Optional[MultiModalConfig],
+        speculative_config: Optional[SpeculativeConfig],
+        prompt_adapter_config: Optional[PromptAdapterConfig],
+    ) -> None:
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
+
+        super().__init__(model_config, cache_config, parallel_config,
+                         scheduler_config, device_config, load_config,
+                         lora_config, multimodal_config, speculative_config,
+                         prompt_adapter_config)
 
     @abstractmethod
     async def execute_model_async(

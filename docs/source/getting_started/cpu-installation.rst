@@ -20,7 +20,7 @@ Requirements
 
 * OS: Linux
 * Compiler: gcc/g++>=12.3.0 (optional, recommended)
-* Instruction set architecture (ISA) requirement: AVX512 is required.
+* Instruction set architecture (ISA) requirement: AVX512 (optional, recommended)
 
 .. _cpu_backend_quick_start_dockerfile:
 

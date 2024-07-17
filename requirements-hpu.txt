@@ -2,7 +2,7 @@
 -r requirements-common.txt
 
 # Dependencies for HPU code
-ray == 2.23.0
+ray == 2.32.0
 triton
 pandas
 tabulate

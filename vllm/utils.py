@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -391,16 +392,33 @@ def get_open_port() -> int:
 
 
 def update_environment_variables(envs: Dict[str, str]):
-    if is_hip() and "CUDA_VISIBLE_DEVICES" in envs:
-        # Propagate changes to CUDA_VISIBLE_DEVICES to
-        # ROCm's HIP_VISIBLE_DEVICES as well
-        envs["HIP_VISIBLE_DEVICES"] = envs["CUDA_VISIBLE_DEVICES"]
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
                 "Overwriting environment variable %s "
                 "from '%s' to '%s'", k, os.environ[k], v)
         os.environ[k] = v
+
+
+def init_kmp_env():
+    if not is_cpu():
+        return
+
+    ld_prealod_str = os.getenv("LD_PRELOAD", "")
+    if "libiomp5.so" not in ld_prealod_str:
+        return
+
+    # The time(milliseconds) that a thread should wait after completing the
+    # execution of a parallel region, before sleeping.
+    os.environ['KMP_BLOCKTIME'] = "1"
+    # dump settings on start up
+    os.environ['KMP_SETTINGS'] = "1"
+    # Prevents the CPU to run into low performance state
+    os.environ['KMP_TPAUSE'] = "0"
+    # Provides fine granularity parallelism
+    os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+    os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
 
 
 def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
@@ -914,6 +932,27 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
+def error_on_invalid_device_count_status():
+    cache_entries = 0
+    with contextlib.suppress(Exception):
+        # future pytorch will fix the issue, device_count will not be cached
+        # at that time, `.cache_info().currsize` will error out
+        cache_entries = torch.cuda.device_count.cache_info().currsize
+    if cache_entries != 0:
+        # the function is already called, and the result is cached
+        remembered = torch.cuda.device_count()
+        current = cuda_device_count_stateless()
+        if remembered > current:
+            raise RuntimeError(
+                "The number of CUDA devices has changed since the first "
+                "call to torch.cuda.device_count(). This is not allowed "
+                "and may result in undefined behavior. Please check out "
+                "https://github.com/vllm-project/vllm/issues/6056 to "
+                "find the first call to torch.cuda.device_count() "
+                "and defer it until the engine is up. Or you can set "
+                "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
+
+
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
@@ -962,13 +1001,6 @@ def is_full_nvlink(device_ids: List[int]) -> bool:
                         exc_info=error)
                     return False
     return True
-
-
-@lru_cache(maxsize=8)
-@with_nvml_context
-def get_device_capability_stateless(device_id: int = 0) -> Tuple[int, int]:
-    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-    return pynvml.nvmlDeviceGetCudaComputeCapability(handle)
 
 
 #From: https://stackoverflow.com/a/4104188/2749989

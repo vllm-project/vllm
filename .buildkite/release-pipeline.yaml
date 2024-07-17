@@ -1,21 +1,17 @@
 steps:
-  - block: "Build wheels"
-
-  - label: "Build wheel - Python {{matrix.python_version}}, CUDA {{matrix.cuda_version}}" 
+  - label: "Build wheel - CUDA {{matrix.cuda_version}}"
     agents:
       queue: cpu_queue
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --build-arg PYTHON_VERSION={{matrix.python_version}} --tag vllm-ci:build-image --target build --progress plain ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
-      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image cp -r dist /artifacts_host"
+      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+      # rename the files to change linux -> manylinux1
+      - "for f in artifacts/dist/*.whl; do mv -- \"$$f\" \"$${f/linux/manylinux1}\"; done"
       - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
+      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/nightly/"
     matrix:
       setup:
         cuda_version:
           - "11.8.0"
           - "12.1.0"
-        python_version:
-          - "3.8"
-          - "3.9"
-          - "3.10"
-          - "3.11"
