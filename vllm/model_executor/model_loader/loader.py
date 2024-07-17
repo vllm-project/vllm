@@ -840,6 +840,12 @@ class GGUFModelLoader(BaseModelLoader):
             raise ValueError(f"{model_name_or_path} is not a file.")
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
+        """
+        GGUF uses the following naming convention for their tensors from HF checkpoint:
+        `blk.N.BB.weight` and `blk.N.BB.bias`
+        where N signifies the block number of a layer, and BB signifies the attention/mlp layer components.
+        See https://github.com/ggerganov/ggml/blob/master/docs/gguf.md#standardized-tensor-names for more details.
+        """
         config = model_config.hf_config
         model_type = config.model_type
         # hack: ggufs have a different name than transformers
