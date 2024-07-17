@@ -3,7 +3,6 @@ from typing import Dict, List
 import openai
 import pytest
 import pytest_asyncio
-import ray
 
 from vllm.multimodal.utils import ImageFetchAiohttp, encode_image_base64
 
@@ -23,17 +22,8 @@ TEST_IMAGE_URLS = [
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(ray_ctx):
-    return RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
+def server():
+    args = [
         "--dtype",
         "bfloat16",
         "--max-model-len",
@@ -41,7 +31,10 @@ def server(ray_ctx):
         "--enforce-eager",
         "--chat-template",
         str(LLAVA_CHAT_TEMPLATE),
-    ])
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")
