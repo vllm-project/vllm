@@ -320,17 +320,16 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
     assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a, rtol=1e-4, atol=1e-3)
 
     if use_bias:
-        bias = torch.rand((n, ), device="cuda", dtype=out_dtype) * 10 + 2.5
+        bias = torch.rand((1, n), device="cuda", dtype=out_dtype) * 10 + 2.5
     else:
-        bias = torch.zeros((n, ), device="cuda", dtype=out_dtype)
+        bias = torch.zeros((1, n), device="cuda", dtype=out_dtype)
 
     baseline_dq = (torch.mm(a_dq, b_dq) + bias).to(out_dtype)
 
+    # int32 mm not supported on CUDA
     a_noazp_i32_cpu = (aq_i32 + azp_aq_i8).to(device='cpu')
-    baseline_q = (
-        scale_a * scale_b *
-        (a_noazp_i32_cpu @ bq_i32.to(device='cpu')).to(device='cuda') +
-        bias).to(dtype=out_dtype)
+    cq = (a_noazp_i32_cpu @ bq_i32.to(device='cpu')).to(device='cuda')
+    baseline_q = (scale_a * scale_b * cq + bias).to(dtype=out_dtype)
 
     # Hadamard is just the sum of the cols
     azp_adj_i32 = bq_i32.sum(dim=0, keepdim=True).to(dtype=torch.int32)
@@ -339,13 +338,13 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
 
     if azp_per_token:
         out = ops.cutlass_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b,
-                                        out_dtype, azp_i32[:, 0],
-                                        azp_adj_i32[0, :], func_bias)
+                                        out_dtype, azp_i32, azp_adj_i32,
+                                        func_bias)
     else:
         azp_with_adj_i32 = azp_i32 * azp_adj_i32
         out = ops.cutlass_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b,
-                                        out_dtype, None,
-                                        azp_with_adj_i32[0, :], func_bias)
+                                        out_dtype, None, azp_with_adj_i32,
+                                        func_bias)
 
     # bfloat16 precision is 7-bit mantissa -> 2^-8 ~ 0.4%
     # float16 precision is 10-bit mantissa -> 2^-11 ~ 0.05%

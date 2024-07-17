@@ -142,37 +142,6 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
   }
 }
 
-// To prevent combinatorial explosion for AZP epilogues, bias is always present.
-// If no bias is passed in, we use a 1x1 scalar tensor filled with 0.
-// To avoid re-creating this tensor for every call, we cache it.
-struct BiasCache {
- private:
-  using Key = std::pair<at::Device, caffe2::TypeMeta>;
-  struct Hash {
-    bool operator()(Key const& key) const {
-      return std::hash<at::Device>()(key.first) ^
-             std::hash<caffe2::TypeIdentifier>()(key.second.id());
-    }
-  };
-
-  std::unordered_map<Key, torch::Tensor, Hash> cache;
-
- public:
-  torch::Tensor const& get(at::Device device, caffe2::TypeMeta dtype) {
-    auto key = std::make_pair(device, dtype);
-    auto it = cache.find(key);
-    if (it != cache.end()) {
-      return it->second;
-    }
-    auto opts = torch::TensorOptions().device(device).dtype(dtype);
-    cache[key] = torch::zeros({1}, opts);
-    return cache[key];
-  }
-  torch::Tensor const& get(torch::Tensor const& out) {
-    return get(out.device(), out.dtype());
-  }
-};
-
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,
@@ -197,15 +166,13 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
   // bias, azp, azp_adj are all 1d
   // bias and azp_adj have n elements, azp has m elements
   if (bias) {
-    TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
-                bias->dim() == 1);
+    TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous());
   }
   if (azp) {
-    TORCH_CHECK(azp->numel() == a.size(0) && azp->is_contiguous() &&
-                azp->dim() == 1);
+    TORCH_CHECK(azp->numel() == a.size(0) && azp->is_contiguous());
   }
-  TORCH_CHECK(azp_adj.numel() == b.size(1) && azp_adj.is_contiguous() &&
-              azp_adj.dim() == 1);
+  TORCH_CHECK(azp_adj.numel() == b.size(1) && azp_adj.is_contiguous());
+
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
   int32_t version_num = get_sm_version_num();
   if (version_num >= 90) {
