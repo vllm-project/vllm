@@ -183,7 +183,8 @@ struct ScaledEpilogue
 /*
  * This epilogue performs the same operation as ScaledEpilogue, but adds a bias.
  * This bias can also be used in the per-tensor azp case, where the activation
- * zero point (azp) is folded into the bias.
+ * zero point (azp) is used to compute an azp correction term,
+ * which is folded into the bias.
  *
  * The bias tensor must be per-output channel.
  * ScaleA and ScaleB can be per-tensor or per-token/per-channel.
@@ -228,6 +229,7 @@ struct ScaledEpilogueBias
  * This epilogue directly supports per-tensor azp in int32 form.
  * As opposed to the per-token epilogue below, this epilogue only has an azp_adj
  * term, which should already be multiplied with the scalar azp.
+ * The azp_adj term is a 1D tensor of shape (1,n), computed as azp * J @ B.
  *
  * This epilogue also supports bias, which remains per-channel.
  */
@@ -291,6 +293,9 @@ struct ScaledEpilogueBiasAzp
  * This epilogue directly supports per-token azp by materializing the correction
  * term using an outer product. If the term was precomputed, it would require
  * O(m*n) space, and this way it only requires O(m+n) space.
+ * The azp term is a 1D tensor of shape (m,1), and represents the unscaled zero
+ * point for each row of A.
+ * The azp_adj term is a 1D tensor of shape (1,n), computed as J @ B.
  *
  * This epilogue also supports bias, which remains per-channel.
  */
