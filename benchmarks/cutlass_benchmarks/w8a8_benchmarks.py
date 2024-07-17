@@ -20,18 +20,18 @@ DEFAULT_TP_SIZES = [1]
 # helpers
 
 
-def to_fp8(tensor: torch.tensor) -> torch.tensor:
+def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
     finfo = torch.finfo(torch.float8_e4m3fn)
     return torch.round(tensor.clamp(
         min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
 
 
-def to_int8(tensor: torch.tensor) -> torch.tensor:
+def to_int8(tensor: torch.Tensor) -> torch.Tensor:
     return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
 
 
 def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
-                      k: int) -> Tuple[torch.tensor, torch.tensor]:
+                      k: int) -> Tuple[torch.Tensor, torch.Tensor]:
     a = torch.randn((m, k), device='cuda') * 5
     b = torch.randn((n, k), device='cuda').t() * 5
 

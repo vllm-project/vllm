@@ -1,27 +1,15 @@
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import ray
 
-from ..utils import VLLM_PATH, RemoteOpenAIServer
+from ..utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(ray_ctx):
-    return RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
+def server():
+    args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "float16",
@@ -29,7 +17,10 @@ def server(ray_ctx):
         "2048",
         "--enforce-eager",
         "--engine-use-ray"
-    ])
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")
