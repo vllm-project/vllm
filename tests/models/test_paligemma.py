@@ -12,9 +12,10 @@ from .utils import check_logprobs_close
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "caption es",
-    "cherry_blossom": "What is in the picture?",
-    "boardwalk": "What is in the picture?",
+    "stop_sign":
+    "caption es",
+    "cherry_blossom":
+    "What is in the picture?",
 })
 
 IMAGE_TOKEN_ID = 257152

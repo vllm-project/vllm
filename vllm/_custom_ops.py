@@ -84,7 +84,8 @@ def paged_attention_v1(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    kv_scale: float,
+    k_scale: float,
+    v_scale: float,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -94,8 +95,9 @@ def paged_attention_v1(
     torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
-        kv_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step)
+        k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+        blocksparse_vert_stride, blocksparse_block_size,
+        blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -114,7 +116,8 @@ def paged_attention_v2(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    kv_scale: float,
+    k_scale: float,
+    v_scale: float,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -124,7 +127,7 @@ def paged_attention_v2(
     torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
-        alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
+        alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
 
@@ -374,11 +377,12 @@ def reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
-    kv_scale: float,
+    k_scale: float,
+    v_scale: float,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
                                              value_cache, slot_mapping,
-                                             kv_cache_dtype, kv_scale)
+                                             kv_cache_dtype, k_scale, v_scale)
 
 
 def reshape_and_cache_flash(

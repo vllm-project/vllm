@@ -19,9 +19,8 @@ import vllm.envs as envs
 from vllm.version import __version__ as VLLM_VERSION
 
 _config_home = envs.VLLM_CONFIG_ROOT
-_USAGE_STATS_JSON_PATH = os.path.join(_config_home, "vllm/usage_stats.json")
-_USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home,
-                                              "vllm/do_not_track")
+_USAGE_STATS_JSON_PATH = os.path.join(_config_home, "usage_stats.json")
+_USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home, "do_not_track")
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
 
