@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Awaitable, Iterable, List, Optional, TypedDict, cast, final
 
-from config import ModelConfig
+from vllm.config import ModelConfig
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
 from transformers import PreTrainedTokenizer
