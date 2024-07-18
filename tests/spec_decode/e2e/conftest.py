@@ -1,6 +1,6 @@
 import asyncio
 from itertools import cycle
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import pytest
 import ray
@@ -128,7 +128,9 @@ class AsyncLLM:
         try:
             for i in range(num_requests):
                 prompt = prompts[i] if prompts is not None else None
-                res = asyncio.run(get_output(prompt, sampling_params))
+                params = sampling_params[i] if isinstance(
+                    sampling_params, Sequence) else sampling_params,
+                res = asyncio.run(get_output(prompt, params))
                 outputs.append(res)
         finally:
             ray.shutdown()
@@ -274,7 +276,7 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
                                   max_output_len,
                                   force_output_len,
                                   temperature=0.0,
-                                  seed=None,
+                                  seeded=False,
                                   print_tokens=print_tokens,
                                   ensure_all_accepted=ensure_all_accepted)
 
@@ -285,7 +287,7 @@ def run_equality_correctness_test(baseline_llm_generator,
                                   max_output_len,
                                   force_output_len: bool,
                                   temperature: float,
-                                  seed: Optional[int],
+                                  seeded: bool,
                                   print_tokens: bool = False,
                                   ensure_all_accepted: bool = False):
     """Helper method that compares the outputs of both the baseline LLM and
@@ -310,15 +312,21 @@ def run_equality_correctness_test(baseline_llm_generator,
     # sampling params to ignore eos token.
     ignore_eos = force_output_len
 
-    sampling_params = []
-    for i in range(len(prompts)):
-        sampling_params.append(
+    if seeded:
+        sampling_params = [
             SamplingParams(
                 max_tokens=max_output_len,
                 ignore_eos=ignore_eos,
                 temperature=temperature,
                 seed=i,
-            ))
+            ) for i in range(len(prompts))
+        ]
+    else:
+        sampling_params = SamplingParams(
+            max_tokens=max_output_len,
+            ignore_eos=ignore_eos,
+            temperature=temperature,
+        )
 
     (spec_batch_tokens, spec_batch_token_ids,
      acceptance_rate) = get_output_from_llm_generator(test_llm_generator,
