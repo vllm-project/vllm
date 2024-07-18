@@ -361,11 +361,12 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
-def get_open_port() -> int:
+def get_open_port(is_for_dist_init: bool = True) -> int:
     port = envs.VLLM_PORT
     if port is not None:
-        if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-            # The prefill and decode instance shares the same port
+        if envs.VLLM_DISAGG_PREFILL_ROLE is not None and is_for_dist_init:
+            # When initializing distributed environment for disagg prefill
+            # The prefill and decode instance may share the same port
             # Skip the binding check as the port may be binded by prefill
             return port
         while True:
