@@ -27,7 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
-MARLIN_K_CHUNKS = [128]
+MARLIN_K_CHUNKS = [256]
 # MARLIN_N_CHUNKS = [64, 128, 256]
 MARLIN_N_CHUNKS = [128]
 
@@ -339,6 +339,7 @@ def test_awq_marlin_gemm(
     g_idx = torch.empty(0, dtype=torch.int, device=marlin_q_w.device)
     sort_indices = torch.empty(0, dtype=torch.int, device=marlin_q_w.device)
     is_k_full = True
+    has_zp = True
 
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
@@ -356,6 +357,7 @@ def test_awq_marlin_gemm(
         b_weight.shape[1],
         a_input.shape[1],
         is_k_full,
+        has_zp,
     )
     output_ref = torch.matmul(a_input, w_ref)
 
