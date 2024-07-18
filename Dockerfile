@@ -7,7 +7,7 @@
 
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
-# prepare basic build environment
+# prepare basic build environmentss
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 
 ARG CUDA_VERSION=12.4.1
