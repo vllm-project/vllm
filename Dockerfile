@@ -144,7 +144,7 @@ WORKDIR /usr/src/mamba
 COPY requirements-mamba.txt requirements-mamba.txt
 
 # Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel -r requirements-mamba.txt \
+RUN python3 -m pip --verbose wheel -r requirements-mamba.txt \
     --no-build-isolation --no-deps --no-cache-dir
 
 #################### MAMBA Build IMAGE ####################
@@ -204,7 +204,7 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer 'modelscope!=1.15.0'
+    python3 -m pip install accelerate hf_transfer 'modelscope!=1.15.0'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
