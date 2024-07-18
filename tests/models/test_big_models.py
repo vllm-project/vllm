@@ -17,6 +17,7 @@ MODELS = [
     "EleutherAI/gpt-j-6b",
     # "mosaicml/mpt-7b",  # Broken
     # "Qwen/Qwen1.5-0.5B"  # Broken,
+    "h2oai/h2o-danube3-4b-base",
 ]
 
 #TODO: remove this after CPU float16 support ready
