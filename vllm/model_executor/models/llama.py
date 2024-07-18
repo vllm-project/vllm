@@ -70,12 +70,12 @@ class LlamaMLP(nn.Module):
             output_sizes=[intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
-            layer_name=f"{prefix}.gate_up_proj")
+            prefix=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(input_size=intermediate_size,
                                            output_size=hidden_size,
                                            bias=bias,
                                            quant_config=quant_config,
-                                           layer_name=f"{prefix}.down_proj")
+                                           prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -92,7 +92,6 @@ class LlamaAttention(nn.Module):
 
     def __init__(
         self,
-        prefix: str,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -102,6 +101,7 @@ class LlamaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -133,14 +133,14 @@ class LlamaAttention(nn.Module):
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
-            layer_name=f"{prefix}.qkv_proj",
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
-            layer_name=f"{prefix}.o_proj",
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
