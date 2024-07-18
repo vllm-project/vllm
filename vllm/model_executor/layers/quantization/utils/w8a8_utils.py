@@ -145,7 +145,7 @@ def apply_fp8_linear(
             # Write output in fp32 to allow subsequent ops to happen in-place
 
             # For FP8 quantized GEMM we need to do the equivalent of:
-            # C = (s_x * X) (s_w * W) + bias (by defintion)
+            # C = (s_x * X) (s_w * W) + bias (by definition)
             # Whatever kernel we use will commute things like so:
             # C = s_x * s_w * (X * W) + bias
             # This allows quantized computation.
