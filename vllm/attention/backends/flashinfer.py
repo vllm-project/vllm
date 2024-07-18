@@ -13,15 +13,14 @@ except ImportError:
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, 
-                                              AttentionImpl,
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
-from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
+from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import get_kv_cache_torch_dtype, make_tensor_with_pad
 
