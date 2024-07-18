@@ -84,7 +84,7 @@ class GGUFLinearMethod(LinearMethodBase):
                 "is_gguf_weight":
                 True,
                 "shard_size": {},
-                "shard_id": []
+                "shard_id": [],
             })
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
@@ -101,6 +101,7 @@ class GGUFLinearMethod(LinearMethodBase):
         set_weight_attrs(
             qweight_type, {
                 "is_gguf_weight_type": True,
+                "weight_type": 0,
                 "shard_weight_type": {},
                 "ignore_warning": True
             })
@@ -130,7 +131,7 @@ class GGUFLinearMethod(LinearMethodBase):
             out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
-            qweight_type = layer.qweight_type.data.item()
+            qweight_type = layer.qweight_type.weight_type
             out = self._fuse_mul_mat(x, qweight, qweight_type)
         if bias is not None:
             out.add_(bias)
@@ -180,7 +181,7 @@ class GGUFEmbeddingMethod(EmbeddingMethodBase):
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
-        qweight_type = layer.qweight_type.item()
+        qweight_type = layer.qweight_type.weight_type
 
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         hidden_size = qweight.shape[1] // type_size * block_size
