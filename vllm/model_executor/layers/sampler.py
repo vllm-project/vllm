@@ -844,7 +844,8 @@ def _get_logprobs(
         top_token_ids = top_token_ids.to('cpu')
 
     else:
-        # We do not need these if sampling_params.(prompt_)logprobs is None for all seq_groups
+        # We do not need these if sampling_params.(prompt_)logprobs is None for
+        # all seq_groups
         selected_logprobs, ranks = None, None
         top_logprobs, top_token_ids = None, None
 
