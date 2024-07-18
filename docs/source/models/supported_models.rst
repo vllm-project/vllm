@@ -137,6 +137,10 @@ Decoder-only Language Models
     - Phi-3-Small
     - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
     -
+  * - :code:`PersimmonForCausalLM`
+    - Persimmon
+    - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
+    - 
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
@@ -178,6 +182,10 @@ Vision Language Models
     - Models
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
+  * - :code:`FuyuForCausalLM`
+    - Fuyu
+    - :code:`adept/fuyu-8b` etc.
+    - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
@@ -186,6 +194,10 @@ Vision Language Models
     - LLaVA-NeXT
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
+  * - :code:`PaliGemmaForConditionalGeneration`
+    - PaliGemma
+    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
+    - 
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
