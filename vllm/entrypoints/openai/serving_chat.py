@@ -42,11 +42,13 @@ class OpenAIServingChat(OpenAIServing):
                  served_model_names: List[str],
                  response_role: str,
                  lora_modules: Optional[List[LoRAModulePath]] = None,
-                 chat_template: Optional[str] = None):
+                 chat_template: Optional[str] = None,
+                 return_tokens_as_token_ids: bool = False):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         return_tokens_as_token_ids=return_tokens_as_token_ids)
 
         self.response_role = response_role
         load_chat_template(self, chat_template)
@@ -440,9 +442,10 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs: Optional[int]) -> List[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(
-                token=self._get_decoded_token(p[1],
-                                              p[0],
-                                              ascii_escape_encoding=True),
+                token=self._get_decoded_token(
+                    p[1],
+                    p[0],
+                    return_as_token_id=self.return_tokens_as_token_ids),
                 logprob=max(p[1].logprob, -9999.0),
                 bytes=list(
                     self._get_decoded_token(p[1],

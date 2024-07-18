@@ -250,10 +250,11 @@ def run_server(args, llm_engine=None):
                                             served_model_names,
                                             args.response_role,
                                             args.lora_modules,
-                                            args.chat_template)
+                                            args.chat_template,
+                                            args.return_tokens_as_token_ids)
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules,
-        args.prompt_adapters)
+        args.prompt_adapters, args.return_tokens_as_token_ids)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     openai_serving_tokenization = OpenAIServingTokenization(

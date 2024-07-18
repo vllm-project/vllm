@@ -45,6 +45,7 @@ class OpenAIServing:
         served_model_names: List[str],
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]] = None,
+        return_tokens_as_token_ids: bool = False,
     ):
         super().__init__()
 
@@ -85,6 +86,8 @@ class OpenAIServing:
                         prompt_adapter_id=i,
                         prompt_adapter_local_path=prompt_adapter.local_path,
                         prompt_adapter_num_virtual_tokens=num_virtual_tokens))
+
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -248,14 +251,10 @@ class OpenAIServing:
     def _get_decoded_token(self,
                            logprob: Logprob,
                            token_id: int,
-                           ascii_escape_encoding: bool = False) -> str:
-        if logprob.decoded_token is not None:
-            decoded_token = logprob.decoded_token
-        decoded_token = self.tokenizer.decode(token_id)
+                           return_as_token_id: bool = False) -> str:
+        if return_as_token_id:
+            return f"token_id:{token_id}"
 
-        # Escape non-ASCII characters to enable sending string versions of
-        # non-ASCII tokens
-        if ascii_escape_encoding:
-            return decoded_token.encode('utf-8').decode(
-                'ascii', errors='backslashreplace')
-        return decoded_token
+        if logprob.decoded_token is not None:
+            return logprob.decoded_token
+        return self.tokenizer.decode(token_id)
