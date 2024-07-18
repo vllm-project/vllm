@@ -890,7 +890,8 @@ def init_distributed_environment(
         if all([
             envs.VLLM_DISAGG_PREFILL_ROLE is not None,
             envs.VLLM_DISAGG_PREFILL_ROLE == "decode"]):
-            ranks = offset_distributed_groups(ranks, world_size)
+                ranks = list(range(world_size, 2 * world_size))
+            
         _WORLD = init_world_group(ranks, local_rank, backend)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
