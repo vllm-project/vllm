@@ -50,19 +50,41 @@ You can also additionally specify :code:`--pipeline-parallel-size` to enable pip
 .. note::
     Pipeline parallel is a beta feature. It is only supported for online serving and the ray backend for now, as well as LLaMa and GPT2 style models.
 
+Multi-node Inference and Serving
+--------------------------------
+
+If a single node does not have enough GPUs to hold the model, you can run the model using multiple nodes.
+
 To scale vLLM beyond a single machine, install and start a `Ray runtime <https://docs.ray.io/en/latest/ray-core/starting-ray.html>`_ via CLI before running vLLM:
 
 .. code-block:: console
 
     $ pip install ray
 
-    $ # On head node
+Then organize the nodes into a Ray cluster. Pick one node as the head node, and run:
+
+.. code-block:: console
+
     $ ray start --head
 
-    $ # On worker nodes
+There will be logs like ``To add another node to this Ray cluster, run ray start --address='xxx.xxx.xxx.xxx:6379'```. Copy the address and run the following command on the other nodes:
+
+.. code-block:: console
+
     $ ray start --address=<ray-head-address>
 
-After that, you can run inference and serving on multiple machines by launching the vLLM process on the head node by setting :code:`tensor_parallel_size` multiplied by :code:`pipeline_parallel_size` to the number of GPUs to be the total number of GPUs across all machines.
+On any node, run the following command to check the status of the Ray cluster:
+
+.. code-block:: console
+
+    $ ray status
+
+Make sure all nodes joined the Ray cluster successfully.
+
+After that, on any node, you can use vLLM as usual, just as you have all the GPUs on one node. The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes.
 
 .. warning::
-    Please make sure you downloaded the model to all the nodes, or the model is downloaded to some distributed file system that is accessible by all nodes.
+    After you start the Ray cluster, you'd better also check the GPU-GPU communication between nodes. It can be non-trivial to set up. Please refer to the `sanity check script <https://docs.vllm.ai/en/latest/getting_started/debugging.html>`_ for more information.
+
+.. warning::
+    Please make sure you downloaded the model to all the nodes (with the same path), or the model is downloaded to some distributed file system that is accessible by all nodes.
