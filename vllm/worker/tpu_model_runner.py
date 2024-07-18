@@ -10,7 +10,6 @@ import torch_xla.core.xla_model as xm
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          MultiModalConfig, ParallelConfig, SchedulerConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
