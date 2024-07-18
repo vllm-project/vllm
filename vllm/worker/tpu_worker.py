@@ -210,8 +210,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     @property
     def do_metadata_broadcast(self) -> bool:
-        # TODO(woosuk): Support TP.
-        return False
+        return self.parallel_config.tensor_parallel_size > 1
 
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
