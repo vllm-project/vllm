@@ -688,12 +688,12 @@ class ExtractedToolCallInformation(BaseModel):
 
     # content - per OpenAI spec, content AND tool calls can be returned ALTHOUGH THIS IS VERY RARE
     # But some models will do this intentionally
-    content: Optional[str | None]
+    content: Optional[str] = None
 
 
 class ChatMessage(OpenAIBaseModel):
     role: str
-    content: Optional[str | None]
+    content: Optional[str] = None
     tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
