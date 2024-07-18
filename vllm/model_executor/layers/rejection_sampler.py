@@ -191,11 +191,12 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                                                   device=target_probs.device,
                                                   generator=generators[idx])
 
-            uniform_rand[non_seed_indices, :] = torch.rand(
-                len(non_seed_indices),
-                k,
-                dtype=self.probs_dtype,
-                device=target_probs.device)
+            if non_seed_indices is not None and len(non_seed_indices) > 0:
+                uniform_rand[non_seed_indices, :] = torch.rand(
+                    len(non_seed_indices),
+                    k,
+                    dtype=self.probs_dtype,
+                    device=target_probs.device)
 
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
@@ -275,11 +276,11 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         self,
         generators: List[Optional[torch.Generator]],
         k: int = 1,
-    ) -> Tuple[List[int], List[int]]:
+    ) -> Tuple[List[int], Optional[List[int]]]:
 
         if all(generator is None for generator in generators):
             seed_indices: List[int] = []
-            non_seed_indices: List[int] = list(range(len(generators) * k))
+            non_seed_indices: Optional[List[int]] = None
         else:
             seed_indices, non_seed_indices = [], []
             for i, generator in enumerate(generators):

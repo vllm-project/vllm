@@ -281,12 +281,15 @@ def run_equality_correctness_test(baseline_llm_generator,
     # sampling params to ignore eos token.
     ignore_eos = force_output_len
 
-    sampling_params = SamplingParams(
-        max_tokens=max_output_len,
-        ignore_eos=ignore_eos,
-        temperature=temperature,
-        seed=seed,
-    )
+    sampling_params = []
+    for i in range(len(prompts)):
+        sampling_params.append(
+            SamplingParams(
+                max_tokens=max_output_len,
+                ignore_eos=ignore_eos,
+                temperature=temperature,
+                seed=i,
+            ))
 
     spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
         test_llm_generator, prompts, sampling_params)

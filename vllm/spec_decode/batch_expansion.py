@@ -298,7 +298,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             generator = torch.Generator(
                 device=seq_group_metadata.state.generator.device)
             generator.set_state(seq_group_metadata.state.generator.get_state())
-            state = SequenceGroupState(generator=generator, )
+            state = SequenceGroupState(generator=generator)
         else:
             state = None
 
