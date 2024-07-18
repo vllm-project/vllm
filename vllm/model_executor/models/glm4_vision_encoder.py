@@ -12,6 +12,7 @@ from torch.nn import LayerNorm
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -182,6 +183,42 @@ class GLU(nn.Module):
         in_features,
         quant_config: Optional[QuantizationConfig] = None,
     ):
+        """
+        The original implementation is the same as:
+        ```python
+        self.dense_h_to_4h = ColumnParallelLinear(
+            config.hidden_size,
+            config.ffn_hidden_size,
+            bias=False,
+            quant_config=quant_config
+        )
+
+        self.gate_proj = ColumnParallelLinear(
+            config.hidden_size,
+            config.ffn_hidden_size,
+            bias=False,
+            quant_config=quant_config
+        )
+        ```
+        ```
+        gate_proj_output, _ = self.gate_proj(x)
+        dense_h_to_4h_output, _ = self.dense_h_to_4h(x)
+        x = torch.cat([gate_proj_output, dense_h_to_4h_output], dim=-1)
+        ```
+
+        We merge two ColumnParallelLinear into one MergedColumnParallelLinear:
+        ```
+        self.merged_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.ffn_hidden_size] * 2,
+            bias=False,
+            quant_config=quant_config
+        )
+        ```
+        ```
+        x, _ = self.merged_proj(x)
+        ```
+        """
         super().__init__()
         self.linear_proj = ReplicatedLinear(in_features,
                                             config.hidden_size,
@@ -191,15 +228,10 @@ class GLU(nn.Module):
         self.act1 = nn.GELU()
         self.act2 = SiluAndMul()
 
-        self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
-                                                  config.ffn_hidden_size,
-                                                  bias=False,
-                                                  quant_config=quant_config)
-
-        self.gate_proj = ColumnParallelLinear(config.hidden_size,
-                                              config.ffn_hidden_size,
-                                              bias=False,
-                                              quant_config=quant_config)
+        self.merged_proj = MergedColumnParallelLinear(
+            config.hidden_size, [config.ffn_hidden_size] * 2,
+            bias=False,
+            quant_config=quant_config)
 
         self.dense_4h_to_h = RowParallelLinear(config.ffn_hidden_size,
                                                config.hidden_size,
@@ -209,9 +241,7 @@ class GLU(nn.Module):
     def forward(self, x):
         x, _ = self.linear_proj(x)
         x = self.act1(self.norm1(x))
-        gate_proj_output, _ = self.gate_proj(x)
-        dense_h_to_4h_output, _ = self.dense_h_to_4h(x)
-        x = torch.cat([gate_proj_output, dense_h_to_4h_output], dim=-1)
+        x, _ = self.merged_proj(x)
         x = self.act2(x)
         x, _ = self.dense_4h_to_h(x)
         return x
