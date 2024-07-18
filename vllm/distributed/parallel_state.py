@@ -809,6 +809,29 @@ _ENABLE_CUSTOM_ALL_REDUCE = True
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
+    
+
+def offset_distributed_groups(
+    groups: List[List[int]],
+    offset: int,
+) -> List[List[int]]:
+    """
+        Extend original distributed group.
+        The extended part will be the original distributed group plus an offset.
+        
+        Arguments:
+            groups: original distributed group
+            offset: the offset we want to apply to the duplicated group.
+                Typically world_size // 2
+    """
+    
+    logger.debug("Offset distributed groups with offset %d", offset)
+    
+    new_groups = []
+    for group in groups:
+        new_groups.append([rank + offset for rank in group])
+        
+    return new_groups
 
 
 def init_distributed_environment(
@@ -850,8 +873,6 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=maybe_disagg_world_size,
             rank=maybe_disagg_rank)
-        if envs.VLLM_DISAGG_PREFILL_ROLE == "decode":
-            time.sleep(60)
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -864,34 +885,17 @@ def init_distributed_environment(
             local_rank = rank
     global _WORLD
     if _WORLD is None:
-        ranks = list(range(torch.distributed.get_world_size()))
+        ranks = list(range(world_size))
+        # offset the distributed group
+        if all(
+            [envs.VLLM_DISAGG_PREFILL_ROLE is not None],
+            [envs.VLLM_DISAGG_PREFILL_ROLE == "decode"]):
+            ranks = offset_distributed_groups(ranks, world_size)
         _WORLD = init_world_group(ranks, local_rank, backend)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
         
-        
-def offset_distributed_groups(
-    groups: List[List[int]],
-    offset: int,
-) -> List[List[int]]:
-    """
-        Extend original distributed group.
-        The extended part will be the original distributed group plus an offset.
-        
-        Arguments:
-            groups: original distributed group
-            offset: the offset we want to apply to the duplicated group.
-                Typically world_size // 2
-    """
-    
-    logger.debug("Offset distributed groups with offset %d", offset)
-    
-    new_groups = []
-    for group in groups:
-        new_groups.append([rank + offset for rank in group])
-        
-    return new_groups
 
 
 def initialize_model_parallel(
