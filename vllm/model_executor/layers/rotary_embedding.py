@@ -791,11 +791,6 @@ def get_rope(
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
     if rope_scaling is None:
-        if max_position == 131072:
-            # Note(simon): this is a special case for a model that doesn't
-            # supply rope_scaling. We should remove this once the model is
-            # updated.
-            RotaryEmbedding = ExtendedRotaryEmbedding
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style, dtype)
     else:
@@ -804,7 +799,11 @@ def get_rope(
         # for backward compatible
         if scaling_type != "su" and scaling_type != "longrope":
             scaling_factor = rope_scaling["factor"]
-        if scaling_type == "linear":
+        if scaling_type == "extended":
+            rotary_emb = ExtendedRotaryEmbedding(head_size, rotary_dim,
+                                                 max_position, base,
+                                                 is_neox_style, dtype)
+        elif scaling_type == "linear":
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
                                                       max_position, base,
                                                       is_neox_style,

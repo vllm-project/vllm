@@ -150,6 +150,14 @@ class ModelConfig:
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
 
+        if getattr(self.hf_config, "max_position_embeddings", 0) == 131072:
+            # Note(simon): this is a special case for a model that doesn't
+            # supply rope_scaling. We should remove this once the model is
+            # updated.
+            self.hf_config.update({"rope_scaling": {
+                "type": "extended",
+            }})
+
         if (not self.disable_sliding_window
                 and self.hf_text_config.model_type == "gemma2"
                 and self.hf_text_config.sliding_window is not None):
