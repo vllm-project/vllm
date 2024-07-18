@@ -15,8 +15,12 @@ from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
 
 logger = init_logger(__name__)
 
+# A flag to enable debug prints for the updated input tensors
+# before each step.
 debug_advance_input = False
-enable_gpu_advance_step = True
+# A flag to allow GPU advance step for draft model runner.
+# Set to False for debugging.
+allow_gpu_advance_step = True
 
 
 class TP1DraftModelRunner(ModelRunner):
@@ -196,7 +200,7 @@ class TP1DraftModelRunner(ModelRunner):
             3. No LORA
             4. No prompt_adapter_config
         """
-        if not enable_gpu_advance_step:
+        if not allow_gpu_advance_step:
             return False
 
         # We allow multi-step GPU only in decode mode
