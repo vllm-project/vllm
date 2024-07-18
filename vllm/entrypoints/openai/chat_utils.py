@@ -3,9 +3,10 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Awaitable, Iterable, List, Optional, TypedDict, cast, final
 
+from config import ModelConfig
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
-from transformers import PretrainedConfig, PreTrainedTokenizer
+from transformers import PreTrainedTokenizer
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionContentPartParam,
                                               ChatCompletionMessageParam)
@@ -52,11 +53,11 @@ def load_chat_template(chat_template: Optional[str]) -> Optional[str]:
 
 
 @lru_cache(maxsize=None)
-def _image_token_str(hf_config: PretrainedConfig,
+def _image_token_str(model_config: ModelConfig,
                      tokenizer: PreTrainedTokenizer) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
-    model_type = hf_config.model_type
+    model_type = model_config.hf_config.model_type
     if model_type == "phi3_v":
         # Workaround since this token is not defined in the tokenizer
         return "<|image_1|>"
@@ -64,7 +65,7 @@ def _image_token_str(hf_config: PretrainedConfig,
         # These models do not use image tokens in the prompt
         return None
     if model_type.startswith("llava"):
-        return tokenizer.decode(hf_config.image_token_index)
+        return tokenizer.decode(model_config.hf_config.image_token_index)
 
     raise TypeError("Unknown model type: {model_type}")
 
@@ -82,7 +83,7 @@ def _get_full_image_text_prompt(image_token_str: str, text_prompt: str) -> str:
 def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
-    hf_config: PretrainedConfig,
+    model_config: ModelConfig,
     tokenizer: PreTrainedTokenizer,
 ) -> ChatMessageParseResult:
     texts: List[str] = []
@@ -114,7 +115,7 @@ def _parse_chat_message_content_parts(
     text_prompt = "\n".join(texts)
 
     if mm_futures:
-        image_token_str = _image_token_str(hf_config, tokenizer)
+        image_token_str = _image_token_str(model_config, tokenizer)
         if image_token_str is not None:
             if image_token_str in text_prompt:
                 logger.warning(
@@ -133,7 +134,7 @@ def _parse_chat_message_content_parts(
 
 def parse_chat_message_content(
     message: ChatCompletionMessageParam,
-    hf_config: PretrainedConfig,
+    model_config: ModelConfig,
     tokenizer: PreTrainedTokenizer,
 ) -> ChatMessageParseResult:
     role = message["role"]
@@ -145,5 +146,5 @@ def parse_chat_message_content(
         messages = [ConversationMessage(role=role, content=content)]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
-    return _parse_chat_message_content_parts(role, content, hf_config,
+    return _parse_chat_message_content_parts(role, content, model_config,
                                              tokenizer)

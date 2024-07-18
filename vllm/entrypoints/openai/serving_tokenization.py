@@ -49,8 +49,8 @@ class OpenAIServingTokenization(OpenAIServing):
             conversation: List[ConversationMessage] = []
 
             for message in request.messages:
-                result = parse_chat_message_content(
-                    message, self.model_config.hf_config, tokenizer)
+                result = parse_chat_message_content(message, self.model_config,
+                                                    tokenizer)
                 conversation.extend(result.messages)
 
             request.prompt = tokenizer.apply_chat_template(

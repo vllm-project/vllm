@@ -82,7 +82,7 @@ class OpenAIServingChat(OpenAIServing):
 
             for msg in request.messages:
                 chat_parsed_result = parse_chat_message_content(
-                    msg, self.model_config.hf_config, tokenizer)
+                    msg, self.model_config, tokenizer)
 
                 conversation.extend(chat_parsed_result.messages)
                 mm_futures.extend(chat_parsed_result.mm_futures)
