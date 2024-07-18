@@ -792,8 +792,9 @@ def get_rope(
         return _ROPE_DICT[key]
     if rope_scaling is None:
         if max_position == 131072:
-            # Note(simon): this is a special case for a model that doesn't 
-            # supply rope_scaling. We should remove this once the model is updated.
+            # Note(simon): this is a special case for a model that doesn't
+            # supply rope_scaling. We should remove this once the model is
+            # updated.
             RotaryEmbedding = ExtendedRotaryEmbedding
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style, dtype)
