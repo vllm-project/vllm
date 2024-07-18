@@ -34,7 +34,7 @@ steps:
   mirror_hardwares: [amd]
   fast_check: true
   command: pytest -v -s test_regression.py
-  working_dir: "/vllm-workspace/tests" # optional
+  working_dir: "vllm/tests" # optional
 
 - label: AsyncEngine Test
   #mirror_hardwares: [amd]
@@ -59,14 +59,14 @@ steps:
 
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "vllm/tests"
   num_gpus: 2
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
 - label: 2 Node Tests (4 GPUs in total)
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "vllm/tests"
   num_gpus: 2
   num_nodes: 2
   commands:
@@ -78,7 +78,7 @@ steps:
 
 - label: Distributed Tests (2 GPUs)
   mirror_hardwares: [amd]
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "vllm/tests"
   num_gpus: 2
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
@@ -102,7 +102,7 @@ steps:
 
 - label: Distributed Tests (4 GPUs)
   #mirror_hardwares: [amd]
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "vllm/tests"
   num_gpus: 4
   fast_check: true
   commands:
@@ -115,7 +115,7 @@ steps:
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
 - label: Pipeline Parallelism Test
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "vllm/tests"
   num_gpus: 4
   commands:
   - pytest -v -s distributed/test_pipeline_parallel.py
@@ -136,7 +136,7 @@ steps:
   - pytest -v -s entrypoints/openai
 
 - label: Examples Test
-  working_dir: "/vllm-workspace/examples"
+  working_dir: "vllm/examples"
   mirror_hardwares: [amd]
   commands:
     # install aws cli for llava_example.py
@@ -242,14 +242,14 @@ steps:
     - pytest -v -s tracing
 
 - label: Benchmarks
-  working_dir: "/vllm-workspace/.buildkite"
+  working_dir: "vllm/.buildkite"
   mirror_hardwares: [amd]
   commands:
   - pip install aiohttp
   - bash run-benchmarks.sh
 
 - label: LM Eval Small Models
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  working_dir: "vllm/.buildkite/lm-eval-harness"
   commands:
   - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -258,14 +258,14 @@ steps:
 - label: LM Eval Large Models
   gpu: a100
   num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  working_dir: "vllm/.buildkite/lm-eval-harness"
   commands:
   - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-large.txt -t 4
 
 - label: Documentation Build
-  working_dir: "/vllm-workspace/test_docs/docs"
+  working_dir: "vllm/test_docs/docs"
   fast_check: true
   no_gpu: True
   commands:
