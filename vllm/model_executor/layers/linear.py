@@ -175,16 +175,14 @@ class ReplicatedLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj)
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        bias: bool = True,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: Optional[str] = None,
-    ):
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 bias: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
@@ -378,15 +376,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
-        super().__init__(
-            input_size=input_size,
-            output_size=sum(output_sizes),
-            bias=bias,
-            gather_output=gather_output,
-            skip_bias_add=skip_bias_add,
-            params_dtype=params_dtype,
-            quant_config=quant_config,
-            prefix=prefix)
+        super().__init__(input_size=input_size,
+                         output_size=sum(output_sizes),
+                         bias=bias,
+                         gather_output=gather_output,
+                         skip_bias_add=skip_bias_add,
+                         params_dtype=params_dtype,
+                         quant_config=quant_config,
+                         prefix=prefix)
 
     def weight_loader(self,
                       param: Parameter,
