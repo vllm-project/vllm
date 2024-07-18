@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from torch.nn import LayerNorm
 
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn, SiluAndMul
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -57,12 +58,15 @@ class Attention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.num_heads = config.num_heads
-        head_dim = config.hidden_size // config.num_heads
-        self.scale = head_dim**-0.5
+        self.hidden_size = config.hidden_size
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads_per_rank = config.num_heads // self.tp_size
+        self.head_dim = config.hidden_size // config.num_heads
+        self.scale = self.head_dim**-0.5
+
         self.query_key_value = QKVParallelLinear(
             config.hidden_size,
-            head_dim,
+            self.head_dim,
             config.num_heads,
             quant_config=quant_config,
         )
@@ -76,10 +80,11 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, _ = x.shape
-        qkv, _ = self.query_key_value(x)
-        qkv = qkv.reshape(B, L, 3, self.num_heads,
-                          -1).permute(2, 0, 3, 1, 4)  # 3, B, H, L, D
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.reshape(B, L, self.num_heads_per_rank, self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
+        k = k.reshape(B, L, self.num_heads_per_rank, self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
+        v = v.reshape(B, L, self.num_heads_per_rank, self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
 
         out = torch.nn.functional.scaled_dot_product_attention(
             q,
@@ -89,14 +94,9 @@ class Attention(nn.Module):
             dropout_p=0.,
             is_causal=False
         )
+
         output, _ = self.dense(out.transpose(1, 2).view(B, L, -1))
         output = self.output_dropout(output)
-        return output
-
-    def attention(self, q, k, v):
-        attn_weights = torch.matmul(q * self.scale, k.transpose(-2, -1))
-        attn_weights = attn_weights.softmax(dim=-1)
-        output = torch.matmul(attn_weights, v)
         return output
 
 
