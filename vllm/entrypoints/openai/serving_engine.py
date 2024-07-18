@@ -10,12 +10,18 @@ from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
                                               ModelCard, ModelList,
-                                              ModelPermission, TokenizeRequest)
+                                              ModelPermission,
+                                              TokenizeChatRequest,
+                                              TokenizeCompletionRequest,
+                                              TokenizeRequest)
+# yapf: enable
 from vllm.inputs import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -237,7 +243,8 @@ class OpenAIServing:
 
         # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
         # and does not require model context length validation
-        if isinstance(request, (TokenizeRequest, DetokenizeRequest)):
+        if isinstance(request, (TokenizeCompletionRequest, TokenizeChatRequest,
+                                DetokenizeRequest)):
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
 

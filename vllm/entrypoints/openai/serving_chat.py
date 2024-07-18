@@ -86,6 +86,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
+            model_config = self.model_config
             tokenizer = await self.engine.get_tokenizer(lora_request)
 
             conversation: List[ConversationMessage] = []
@@ -93,7 +94,7 @@ class OpenAIServingChat(OpenAIServing):
 
             for msg in request.messages:
                 chat_parsed_result = parse_chat_message_content(
-                    msg, self.model_config, tokenizer)
+                    msg, model_config, tokenizer)
 
                 conversation.extend(chat_parsed_result.messages)
                 mm_futures.extend(chat_parsed_result.mm_futures)

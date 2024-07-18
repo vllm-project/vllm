@@ -737,12 +737,20 @@ class BatchRequestOutput(OpenAIBaseModel):
     error: Optional[Any]
 
 
-class TokenizeRequest(OpenAIBaseModel):
+class TokenizeCompletionRequest(OpenAIBaseModel):
+    model: str
+    prompt: str
+
+
+class TokenizeChatRequest(OpenAIBaseModel):
+    model: str
+    messages: List[ChatCompletionMessageParam]
+
     add_generation_prompt: bool = Field(default=True)
     add_special_tokens: bool = Field(default=False)
-    prompt: Optional[str] = Field(default=None)
-    messages: Optional[List[ChatCompletionMessageParam]] = Field(default=None)
-    model: str
+
+
+TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
 
 
 class TokenizeResponse(OpenAIBaseModel):

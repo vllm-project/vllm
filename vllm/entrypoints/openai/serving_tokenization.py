@@ -5,10 +5,15 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.chat_utils import (ConversationMessage,
                                                 load_chat_template,
                                                 parse_chat_message_content)
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
-                                              ErrorResponse, TokenizeRequest,
+                                              ErrorResponse,
+                                              TokenizeChatRequest,
+                                              TokenizeRequest,
                                               TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 
@@ -41,21 +46,16 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        if not (request.prompt or request.messages):
-            return self.create_error_response(
-                "Either `prompt` or `messages` should be provided.")
-
-        if (request.prompt and request.messages):
-            return self.create_error_response(
-                "Only one of `prompt` or `messages` should be provided.")
-
         lora_request, _ = self._maybe_get_adapters(request)
         tokenizer = await self.engine.get_tokenizer(lora_request)
-        if request.messages:
+
+        if isinstance(request, TokenizeChatRequest):
+            model_config = self.model_config
+
             conversation: List[ConversationMessage] = []
 
             for message in request.messages:
-                result = parse_chat_message_content(message, self.model_config,
+                result = parse_chat_message_content(message, model_config,
                                                     tokenizer)
                 conversation.extend(result.messages)
 
@@ -65,7 +65,6 @@ class OpenAIServingTokenization(OpenAIServing):
                 tokenize=False,
                 chat_template=self.chat_template)
         else:
-            assert request.prompt is not None
             prompt = request.prompt
 
         prompt_input = self._tokenize_prompt_input(
