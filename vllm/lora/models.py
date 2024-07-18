@@ -461,6 +461,7 @@ class LoRAModelManager(AdapterModelManager):
                                                 self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
+            # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(self.punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):

@@ -80,7 +80,10 @@ class LibEntry(triton.KernelInterface):
             current = dict(**kwargs, **config)
             meta = {**dict(zip(self.arg_names, args)), **current}
             grid = grid(meta)
-        grid = grid + (1, 1)
+        if isinstance(grid, list):
+            grid = grid + [1, 1]
+        elif isinstance(grid, list):
+            grid = grid + (1, 1)
 
         kernel[grid[0:3]](*args)
         return
@@ -89,6 +92,10 @@ class LibEntry(triton.KernelInterface):
 def libentry():
     """
     Decorator for triton library entries.
+    Motivation:
+        The runtime overhead of Triton kernels is the reason for the lower 
+        performance of small kernels, particularly evident with smaller models. 
+        Using this decorator can reduce Triton runtime overhead.
     """
 
     def decorator(fn):

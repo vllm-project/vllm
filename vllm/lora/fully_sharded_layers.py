@@ -15,8 +15,6 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA)
 
-# from vllm.lora.punica import add_expand, add_expand_slice, add_shrink
-
 if TYPE_CHECKING:
     pass
 
