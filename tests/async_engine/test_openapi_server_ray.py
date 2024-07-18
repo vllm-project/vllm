@@ -9,17 +9,17 @@ MODEL_NAME = "facebook/opt-125m"
 
 @pytest.fixture(scope="module")
 def server():
-    with RemoteOpenAIServer([
-            "--model",
-            MODEL_NAME,
-            # use half precision for speed and memory savings in CI environment
-            "--dtype",
-            "float16",
-            "--max-model-len",
-            "2048",
-            "--enforce-eager",
-            "--engine-use-ray"
-    ]) as remote_server:
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--engine-use-ray"
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
