@@ -13,8 +13,8 @@ except ImportError:
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+from vllm.attention.backends.abstract import (AttentionBackend, 
+                                              AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
