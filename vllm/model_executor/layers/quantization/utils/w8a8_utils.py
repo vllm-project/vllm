@@ -143,17 +143,16 @@ def apply_fp8_linear(
             # Fallback for channelwise case, where the weight scales are
             # applied separately.
 
-
             # Symmetric quantized GEMM by definition computes the following:
             #   C = (s_x * X) (s_w * W) + bias
             # This is equivalent to dequantizing the weights and activations
             # before applying a GEMM.
             #
-            # In order to compute quantized operands, a quantized kernel 
+            # In order to compute quantized operands, a quantized kernel
             # will rewrite the above like so:
             #   C = s_w * s_x * (X * W) + bias
             #
-            # For the scaled_mm fallback case, we break this down, since it 
+            # For the scaled_mm fallback case, we break this down, since it
             # does not support s_w being a vector.
 
             # This computes C = sx * (X * W).
