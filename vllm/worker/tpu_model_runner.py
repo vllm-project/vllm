@@ -16,7 +16,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SamplerOutput, SequenceGroupMetadata,
                            SequenceOutput)
-from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -241,10 +240,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
         prompt_lens: List[int] = []
-        slot_mapping: List[List[int]] = []
+        slot_mapping: List[int] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -258,50 +257,46 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
-            input_tokens.append(prompt_tokens)
-            input_positions.append(list(range(prompt_len)))
+            input_tokens.extend(prompt_tokens)
+            input_positions.extend(list(range(prompt_len)))
 
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
-            slot_mapping.append([])
             for i in range(prompt_len):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping[-1].append(slot)
+                slot_mapping.append(slot)
+
+            # Add paddings to EACH prompt to the smallest power of 2 that is
+            # greater than or equal to the prompt length.
+            # We pad the seq_len to reduce the compilation overhead.
+            # We execute each prompt individually (i.e., with batch_size 1)
+            # because the FlashAttention kernel does not support ragged inputs.
+            # TODO(woosuk): Use SplashAttention to support ragged inputs.
+            padded_prompt_len = _get_padded_prefill_len(prompt_len)
+            num_paddings = padded_prompt_len - prompt_len
+            input_tokens += [0] * num_paddings
+            input_positions += [0] * num_paddings
+            slot_mapping += [_PAD_SLOT_ID] * num_paddings
 
         assert len(prompt_lens) > 0
         num_prefills = len(prompt_lens)
-        num_prefill_tokens = sum(prompt_lens)
-
-        # Add paddings to make the shape [batch_size, max_prompt_len] where
-        # max_prompt_len is smallest power of 2 that is greater than or equal
-        # to the maximum prompt length.
-        # We need the 2D input shape because the Pallas FlashAttention kernel
-        # does not support packed 1D inputs.
-        # We pad the seq_len to powers of 2 to reduce the compilation overhead.
-        max_prompt_len = _get_padded_prefill_len(max(prompt_lens))
-        input_tokens = make_tensor_with_pad(input_tokens,
-                                            max_prompt_len,
-                                            pad=0,
-                                            dtype=torch.int32,
-                                            device="cpu")
-        input_positions = make_tensor_with_pad(input_positions,
-                                               max_prompt_len,
-                                               pad=0,
-                                               dtype=torch.int32,
-                                               device="cpu")
-        slot_mapping = make_tensor_with_pad(slot_mapping,
-                                            max_prompt_len,
-                                            pad=_PAD_SLOT_ID,
-                                            dtype=torch.int64,
-                                            device="cpu")
+        input_tokens = torch.tensor(input_tokens,
+                                    dtype=torch.int32,
+                                    device="cpu")
+        input_positions = torch.tensor(input_positions,
+                                       dtype=torch.int32,
+                                       device="cpu")
+        slot_mapping = torch.tensor(slot_mapping,
+                                    dtype=torch.int64,
+                                    device="cpu")
         prompt_lens = torch.tensor(prompt_lens,
                                    dtype=torch.int32,
                                    device="cpu")
         attn_metadata = self.attn_backend.make_metadata(
             num_prefills=num_prefills,
-            num_prefill_tokens=num_prefill_tokens,  # NOTE: This is not used.
+            num_prefill_tokens=0,  # NOTE: This is not used.
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
             block_tables=None,
@@ -480,45 +475,63 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             raise ValueError(
                 "TPUModelRunner does not support multi-step execution.")
 
-        def _execute_model(*args) -> torch.Tensor:
-            """Move input args to device and execute the model."""
+        def _execute_model(*args, clone: bool = False) -> torch.Tensor:
+            """Move input args from CPU to device and execute the model."""
+
+            def _copy_to_device(x: torch.Tensor) -> torch.Tensor:
+                if clone:
+                    # When x is a slice of a CPU tensor, XLA may copy the whole
+                    # original tensor to TPU instead of only copying x.
+                    # To avoid this, we copy x after cloning.
+                    x = x.clone()
+                return x.to(self.device)
+
             new_args = []
             for arg in args:
                 if isinstance(arg, torch.Tensor):
-                    arg = arg.to(self.device)
+                    arg = _copy_to_device(arg)
                 elif isinstance(arg, AttentionMetadata):
-                    arg.slot_mapping = arg.slot_mapping.to(self.device)
+                    arg.slot_mapping = _copy_to_device(arg.slot_mapping)
                     if getattr(arg, "block_tables", None) is not None:
-                        arg.block_tables = arg.block_tables.to(self.device)
+                        arg.block_tables = _copy_to_device(arg.block_tables)
                     if getattr(arg, "context_lens", None) is not None:
-                        arg.context_lens = arg.context_lens.to(self.device)
+                        arg.context_lens = _copy_to_device(arg.context_lens)
                 new_args.append(arg)
             return self.model(*new_args)
 
-        is_prompt = model_input.token_ids.shape[1] > 1
+        num_prefills = model_input.attn_metadata.num_prefills
+        is_prompt = num_prefills > 0
         if is_prompt:
-            # NOTE(woosuk): To reduce the compilation time, we only compile the
-            # prefill inputs with batch size 1. Because the scheduler is not
-            # aware of this limitation, we need to handle batch size > 1
-            # internally by calling the model multiple times and concatenating
-            # the outputs.
-            # FIXME(woosuk): This is a temporary hack to not change the existing
-            # scheduler. We need to fix this in the future.
+            # NOTE(woosuk): Since the FlashAttention kernel does not support
+            # ragged inputs, we split the prompts into different batches and
+            # process them separately. This is a temporary hack that should be
+            # optimized by using SplashAttention.
             next_token_ids = []
             orig_slot_mapping = model_input.attn_metadata.slot_mapping
-            batch_size = model_input.token_ids.shape[0]
+            batch_size = model_input.input_lens.shape[0]
+            start_idx = 0
             for i in range(batch_size):
-                # Execute the model.
+                # Get the actual prefill_len.
+                prefill_len = model_input.input_lens[i:i + 1].item()
+                prefill_len = _get_padded_prefill_len(prefill_len)
+                end_idx = start_idx + prefill_len
+
                 model_input.attn_metadata.slot_mapping = orig_slot_mapping[
-                    i:i + 1]
+                    None, start_idx:end_idx]
+                model_input.attn_metadata.num_prefills = 1
                 output_token_ids = _execute_model(
-                    model_input.token_ids[i:i + 1],
-                    model_input.position_ids[i:i + 1],
-                    model_input.attn_metadata, model_input.input_lens[i:i + 1],
-                    model_input.t[i:i + 1], model_input.p[i:i + 1],
-                    model_input.num_samples, kv_caches)
+                    model_input.token_ids[None, start_idx:end_idx],
+                    model_input.position_ids[None, start_idx:end_idx],
+                    model_input.attn_metadata,
+                    model_input.input_lens[i:i + 1],
+                    model_input.t[i:i + 1],
+                    model_input.p[i:i + 1],
+                    model_input.num_samples,
+                    kv_caches,
+                    clone=True)
                 # Retrieve the outputs to CPU.
                 next_token_ids += output_token_ids.cpu().tolist()
+                start_idx = end_idx
         else:
             # Execute the model.
             output_token_ids = _execute_model(
