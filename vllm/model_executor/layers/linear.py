@@ -195,7 +195,7 @@ class ReplicatedLinear(LinearBase):
                                          self.input_size,
                                          self.output_size,
                                          self.params_dtype,
-                                         layer_name=prefix)
+                                         prefix=prefix)
 
         if bias:
             self.bias = Parameter(
@@ -289,7 +289,7 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            layer_name=prefix,
+            prefix=prefix,
             weight_loader=self.weight_loader,
         )
         if bias:
@@ -714,7 +714,7 @@ class RowParallelLinear(LinearBase):
                  params_dtype: Optional[torch.dtype] = None,
                  reduce_results: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
-                 layer_name: Optional[str] = None):
+                 prefix: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
@@ -732,7 +732,7 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            layer_name=layer_name,
+            prefix=prefix,
             weight_loader=self.weight_loader)
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
