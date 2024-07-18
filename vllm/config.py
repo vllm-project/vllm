@@ -429,7 +429,6 @@ class CacheConfig:
     def __init__(
             self,
             block_size: int,
-            block_bytes_size: int,  # new add for vmm
             gpu_memory_utilization: float,
             swap_space: int,
             cache_dtype: str,
@@ -437,6 +436,7 @@ class CacheConfig:
             sliding_window: Optional[int] = None,
             enable_prefix_caching: bool = False,
             use_vmm: bool = False,  # new add for vmm
+            block_bytes_size: int = 2 * _MB,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization

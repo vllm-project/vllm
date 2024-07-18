@@ -68,17 +68,6 @@ class _Sentinel:
 
 ALL_PINNED_SENTINEL = _Sentinel()
 
-P = ParamSpec('P')
-K = TypeVar("K")
-T = TypeVar("T")
-
-
-class _Sentinel:
-    ...
-
-
-ALL_PINNED_SENTINEL = _Sentinel()
-
 
 class Device(enum.Enum):
     GPU = enum.auto()
@@ -981,8 +970,3 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
-
-
-# new add for vmm
-def get_dtype_size(dtype: torch.dtype) -> int:
-    return torch.tensor([], dtype=dtype).element_size()

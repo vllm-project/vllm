@@ -127,7 +127,7 @@ class WorkerInput:
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     # new add for vmm
-    allocated_block_counts: Optional[dict[int, int]] = None
+    allocated_block_counts: Optional[Dict[int, int]] = None
     free_buffer_ids: Optional[List[int]] = None
 
     @classmethod

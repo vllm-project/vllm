@@ -8,7 +8,6 @@
 #include <unordered_map>
 #include <vector>
 
-
 /*
 ** CacheDevicePtr functions implementation
 */
@@ -34,9 +33,7 @@ void CacheDevicePtr::setPageSize(int64_t num) { pageSize = num * 2 * _MB; }
 CUdeviceptr CacheDevicePtr::get_dptr() { return dptr; }
 
 // get void * type pointer
-void* CacheDevicePtr::get_void_ptr() { return reinterpret_cast<void *>(dptr); }
-
-
+void* CacheDevicePtr::get_void_ptr() { return reinterpret_cast<void*>(dptr); }
 
 /*
 ** CacheAllocator functions implementation
@@ -48,7 +45,7 @@ CacheAllocator::CacheAllocator() {
   auto cudaStatus = cudaGetDevice(&currentDevice);
   TORCH_CHECK(cudaStatus == cudaSuccess, "cudaGetDevice failed!");
 
-  // set memory allocation property struct CUmemAllocationProp, 
+  // set memory allocation property struct CUmemAllocationProp,
   // which is used to control the specific behavior of memory allocation
   prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -79,7 +76,8 @@ int64_t CacheAllocator::getGranurality() {
 void CacheAllocator::setPageSize(int64_t num) { pageSize = num * granurality; }
 
 // reserve function, reserve virtual address space
-int64_t CacheAllocator::reserveCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr, int64_t pageNum) {
+int64_t CacheAllocator::reserveCachePtr(
+    const c10::intrusive_ptr<CacheDevicePtr>& ptr, int64_t pageNum) {
   if (pageNum == 0) {
     return CUDA_SUCCESS;
   }
@@ -97,8 +95,9 @@ int64_t CacheAllocator::reserveCachePtr(const c10::intrusive_ptr<CacheDevicePtr>
 
 // alloc function, allocate physical memory, map to the reserved virtual address
 // space of dptr, and set access permission
-int64_t CacheAllocator::allocCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr,
-                                      int64_t pageNum, int64_t offset) {
+int64_t CacheAllocator::allocCachePtr(
+    const c10::intrusive_ptr<CacheDevicePtr>& ptr, int64_t pageNum,
+    int64_t offset) {
   if (pageNum == 0) {
     return CUDA_SUCCESS;
   }
@@ -137,7 +136,8 @@ int64_t CacheAllocator::allocCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& 
 
 // free function, unmap the virtual address space，release physical memory
 // handles and free virtual address space
-int64_t CacheAllocator::freeCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr) {
+int64_t CacheAllocator::freeCachePtr(
+    const c10::intrusive_ptr<CacheDevicePtr>& ptr) {
   CUresult status = CUDA_SUCCESS;
   if (ptr->dptr != 0) {
     status = cuMemUnmap(ptr->dptr, ptr->reservedPageNum * pageSize);
@@ -165,8 +165,9 @@ int64_t CacheAllocator::freeCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& p
 
 // releaseCachePtrPages function, unmap the virtual address space，release
 // physical memory handles but not free virtual address space
-int64_t CacheAllocator::releaseCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr,
-                                        int64_t pageNum, int64_t offset) {
+int64_t CacheAllocator::releaseCachePtr(
+    const c10::intrusive_ptr<CacheDevicePtr>& ptr, int64_t pageNum,
+    int64_t offset) {
   if (pageNum == 0) {
     return CUDA_SUCCESS;
   }
@@ -191,8 +192,6 @@ int64_t CacheAllocator::releaseCachePtr(const c10::intrusive_ptr<CacheDevicePtr>
   return status;
 }
 
-
-
 /*
 ** vmm other util functions implementation
 */
@@ -208,18 +207,18 @@ torch::Tensor wrap_dptr_to_tensor(CUdeviceptr d_ptr, const std::string dtype,
 
   const std::unordered_map<std::string, c10::ScalarType> typeMap = {
       // float data type
-      {"float64", c10::kDouble},    
+      {"float64", c10::kDouble},
       {"float32", c10::kFloat},
-      {"float16", c10::kHalf},      
+      {"float16", c10::kHalf},
       {"float", c10::kFloat},
-      {"double", c10::kDouble},     
+      {"double", c10::kDouble},
       {"half", c10::kHalf},
-      {"bfloat16", c10::kBFloat16}, 
+      {"bfloat16", c10::kBFloat16},
       // integer data type
       {"int64", c10::kLong},
-      {"int32", c10::kInt},         
+      {"int32", c10::kInt},
       {"int16", c10::kShort},
-      {"int8", c10::kChar},         
+      {"int8", c10::kChar},
       {"int", c10::kInt},
       {"uint8", c10::kByte}};
 
@@ -236,8 +235,8 @@ torch::Tensor wrap_dptr_to_tensor(CUdeviceptr d_ptr, const std::string dtype,
   return tensor;
 }
 
-torch::Tensor wrap_cache_ptr_to_tensor(const c10::intrusive_ptr<CacheDevicePtr>& ptr, 
-                                       const std::string dtype,
-                                       at::ArrayRef<int64_t> shape) {
+torch::Tensor wrap_cache_ptr_to_tensor(
+    const c10::intrusive_ptr<CacheDevicePtr>& ptr, const std::string dtype,
+    at::ArrayRef<int64_t> shape) {
   return wrap_dptr_to_tensor(ptr->dptr, dtype, shape);
 }

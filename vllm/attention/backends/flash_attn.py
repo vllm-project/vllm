@@ -6,7 +6,6 @@ import torch
 from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 from vllm import _custom_ops as ops
-
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 
@@ -123,8 +122,8 @@ class FlashAttentionMetadata(AttentionMetadata):
     # new add for vmm
     use_vmm: bool = False  # whether use vmm
     # cache_batch_idx: # (batch_size, ) the index of batch in cache
-    # cache_cow_mapping: # (num_tokens,)  record key/value write to which seq cow in cache
-    # cache_col_mapping: # (num_tokens,)  record key/value write to which token col in cache
+    # cache_cow_mapping: # (num_tokens,)  key/value cache cow in cache space
+    # cache_col_mapping: # (num_tokens,)  key/value cache col in cache space
     cache_batch_idx: Optional[torch.Tensor] = None
     cache_cow_mapping: Optional[torch.Tensor] = None
     cache_col_mapping: Optional[torch.Tensor] = None
@@ -168,8 +167,9 @@ class FlashAttentionMetadata(AttentionMetadata):
             cache_col_mapping=None,
         )
 
-        # NOTE: slot_mapping / cache_cow_mapping cache_col_mapping only used for cache write
-        #       no need to add them to _prefill_metadata or _decode_metadata
+        # NOTE: slot_mapping / cache_cow_mapping cache_col_mapping only used
+        # for cache write, and no need to add them to _prefill_metadata or
+        # _decode_metadata
         if not self.use_vmm:
             assert self.block_tables is not None
             # self._cached_prefill_metadata.slot_mapping = \
@@ -179,7 +179,7 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         else:  # use_vmm
             self._cached_prefill_metadata.cache_batch_idx = \
-                self.cache_batch_idx[:self.num_prefills]
+                self.cache_batch_idx[:self.num_prefills]  # type: ignore
             # self._cached_prefill_metadata.cache_cow_mapping = \
             #     self.cache_cow_mapping[:self.num_prefills]
             # self._cached_prefill_metadata.cache_col_mapping = \
@@ -212,7 +212,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=None,
             use_cuda_graph=self.use_cuda_graph,
-            use_vmm=self.use_vmm,  # new add for vmm
+            use_vmm=self.use_vmm,
             cache_batch_idx=None,
             cache_cow_mapping=None,
             cache_col_mapping=None,
@@ -228,7 +228,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         else:  # use_vmm
             self._cached_decode_metadata.use_cuda_graph = False
             self._cached_decode_metadata.cache_batch_idx = \
-                self.cache_batch_idx[self.num_prefills:]
+                self.cache_batch_idx[self.num_prefills:]  # type: ignore
             # self._cached_decode_metadata.cache_cow_mapping = \
             #     self.cache_cow_mapping[self.num_prefills:]
             # self._cached_decode_metadata.cache_col_mapping = \
@@ -337,10 +337,10 @@ class FlashAttentionImpl(AttentionImpl):
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
 
+            # Reshape the input keys and values and store them in the cache.
+            # If kv_cache is not provided, the new key and value tensors are
+            # not cached. This happens during the initial memory profiling run.
             if not use_vmm:
-                # Reshape the input keys and values and store them in the cache.
-                # If kv_cache is not provided, the new key and value tensors are
-                # not cached. This happens during the initial memory profiling run.
                 ops.reshape_and_cache_flash(
                     key,
                     value,
@@ -349,15 +349,21 @@ class FlashAttentionImpl(AttentionImpl):
                     attn_metadata.slot_mapping.flatten(),
                     self.kv_cache_dtype,
                 )
-
             else:
-                # fancy / advanced index cache write, a little worse than cuda kernel
-                # key_cache[attn_metadata.cache_cow_mapping, attn_metadata.cache_col_mapping] = key
-                # value_cache[attn_metadata.cache_cow_mapping, attn_metadata.cache_col_mapping] = value
-                ops.reshape_and_cache_vmm(key, value, key_cache, value_cache,
-                                          attn_metadata.cache_cow_mapping,
-                                          attn_metadata.cache_col_mapping,
-                                          self.kv_cache_dtype)
+                # advanced index cache write, little worse than cuda kernel
+                # key_cache[attn_metadata.cache_cow_mapping,
+                #           attn_metadata.cache_col_mapping] = key
+                # value_cache[attn_metadata.cache_cow_mapping,
+                #             attn_metadata.cache_col_mapping] = value
+                ops.reshape_and_cache_vmm(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.cache_cow_mapping,
+                    attn_metadata.cache_col_mapping,
+                    self.kv_cache_dtype,
+                )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens

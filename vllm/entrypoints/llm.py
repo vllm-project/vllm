@@ -18,9 +18,6 @@ from vllm.transformers_utils.tokenizer import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
-import torch
-import time
-
 logger = init_logger(__name__)
 
 
@@ -582,8 +579,8 @@ class LLM:
                         pbar.update(1)
 
         logger.info(
-            f"Generate Over. total_out_toks: {total_out_toks}, Average Generation Speed: {spd:.5f} toks/s"
-        )
+            "Generate Over. total_out_toks: %d, "
+            "Average Generation Speed: %.5f toks/s", total_out_toks, spd)
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.

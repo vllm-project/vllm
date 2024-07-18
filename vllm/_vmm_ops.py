@@ -1,11 +1,13 @@
+from typing import Tuple
+
 import torch
+
 from vllm.logger import init_logger
-from typing import List, Optional, Tuple, Type
 
 logger = init_logger(__name__)
 
 try:
-    import vllm._vmm_C
+    import vllm._vmm_C  # noqa: F401
 except ImportError as e:
     logger.warning("Import vmm error msg: %s", e.msg)
 

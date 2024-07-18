@@ -400,8 +400,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # paged_kv_last_page_len is the length of the last page of each request
         paged_kv_last_page_len: List[int] = []
 
-        # new add for vmm, if use_vmm, we don't need to prepare block_tables & slot_mapping,
-        # but need to prepare cache_batch_idx, cache_cow_mapping, cache_col_mapping
+        # if use_vmm, we don't need to prepare block_tables & slot_mapping, but
+        # need to prepare cache_batch_idx, cache_cow_mapping, cache_col_mapping
         cache_batch_idx: List[int] = []
         cache_cow_mapping: List[int] = []
         cache_col_mapping: List[int] = []
@@ -489,17 +489,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             computed_block_nums) * self.block_size
                         tokens = tokens[context_len:]
 
-                        # need to think what to set it to when we have both sliding
-                        # window and prefix caching...
-                        assert self.sliding_window is None, \
-                            "Prefix caching is not supported with sliding window"
+                        # need to think what to set it to when we have both
+                        # sliding window and prefix caching...
+                        assert self.sliding_window is None, (
+                            "Prefix caching is not supported with "
+                            "sliding window")
                         sliding_context_len = context_len
 
                         if self.attn_backend.get_name() == "flash-attn":
-                            # NOTE(woosuk): For flash-attn, the block table should
-                            # include the entries for the incoming prefill tokens.
-                            # TODO(woosuk): This is a temporary fix. We should
-                            # provide a unified interface for different backends.
+                            # NOTE(woosuk): For flash-attn, the block table
+                            # should include the entries for the incoming
+                            # prefill tokens.
+                            # TODO(woosuk): This is a temporary fix. We
+                            # should provide a unified interface for
+                            # different backends.
                             block_table = seq_group_metadata.block_tables[
                                 seq_id]
                         else:
@@ -521,7 +524,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         block_table = []
                     block_tables.append(block_table)
 
-                # else: # if use_vmm, we don't need to prepare block_tables & slot_mapping,
+                # if use_vmm, no need to prepare block_tables & slot_mapping
+                # else:
+                #     pass
 
                 seq_lens.append(sliding_seq_len)
                 context_lens.append(sliding_context_len)
@@ -533,7 +538,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                 if self.use_vmm:  # new add for vmm
                     cache_batch_id = seq_data.cache_buffer_id
-                    # NOTE: == -1 means it is profile run, all seq come from scheduler cache_buffer_id >= 0
+                    # NOTE: == -1 means it is profile run,
+                    # all seq come from scheduler cache_buffer_id >= 0
                     if cache_batch_id != -1:
                         cache_batch_idx.append(cache_batch_id)
                         cache_cow_mapping.extend([cache_batch_id] * query_len)
@@ -594,11 +600,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         if is_prompt:
                             assert self.scheduler_config.use_v2_block_manager \
                                 or context_len == 0, (
-                                "Prefix caching is currently not supported with "
-                                "sliding window attention in V1 block manager")
-                        # It is an optimization. When it is decoding, it is always
-                        # 0. When prefill, we use it to not write slots to kv cache
-                        # to save memory.
+                                "Prefix caching is currently not supported "
+                                "with sliding window attention in V1 block "
+                                "manager")
+                        # It is an optimization. When it is decoding, it is
+                        # always 0. When prefill, we use it to not write slots
+                        # to kv cache to save memory.
                         start_idx = max(0, query_len - self.sliding_window)
 
                     for i in range(context_len, seq_len):
@@ -611,8 +618,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         slot = block_number * self.block_size + block_offset
                         slot_mapping.append(slot)
 
-                # else: # if use_vmm, we don't need to prepare block_tables & slot_mapping,
-
+                # if use_vmm, no need to prepare block_tables & slot_mapping
+                # else:
+                #     pass
                 # Prepare input tensors for flashinfer
                 if self.attn_backend.get_name() == "flashinfer":
                     seq_len = seq_data.get_len()
@@ -687,7 +695,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     device=self.device,
                 )
         else:  # use_vmm, block_tables is not needed
-            block_tables = None
+            block_tables = None  # type: ignore
 
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
@@ -1147,7 +1155,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_capture_context.stream
                     }
                     if self.has_seqlen_agnostic:
-                        # Only used by Mamba-based models CUDA graph atm (Jamba)
+                        # Only used by Mamba-based models CUDA graph atm (Jamba
                         capture_inputs.update({
                             "seqlen_agnostic_capture_inputs":
                             self.model.get_seqlen_agnostic_capture_inputs(

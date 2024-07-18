@@ -1,21 +1,14 @@
-import math
-from abc import ABC, abstractmethod
-from itertools import count, takewhile
-from os.path import commonprefix
-from typing import Dict, List, Optional
-from typing import Sequence as GenericSequence
-from typing import Set, Tuple
+from collections import deque
+from typing import Dict, List, Optional, Tuple
 
-from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
-from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.utils import Device, Counter
-from collections import deque
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
+
 
 class CacheBufferAllocator:
 
@@ -58,23 +51,20 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
             raise NotImplementedError(
                 "Prefix Caching or Sliding window is not supported in VMM now."
             )
-
+        self.enable_caching = enable_caching
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
         self.num_free_gpu_blocks = num_gpu_blocks
         self.num_free_cpu_blocks = num_cpu_blocks
-
-        self.num_cache_buffers = num_cache_buffers  # == self.scheduler_config.max_num_seqs
-
+        # num_cache_buffers == self.scheduler_config.max_num_seqs
+        self.num_cache_buffers = num_cache_buffers
+        # use to alloc cache buffer id for seq
         self.gpu_allocator = CacheBufferAllocator(num_cache_buffers)
 
         self.watermark = watermark
         assert watermark >= 0.0
-
-        self.enable_caching = enable_caching
-
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         # Mapping from cache buffer ID to the number of allocated blocks.
@@ -87,7 +77,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         self.iter_counter = Counter()
 
         self.init_alloc()
-    
+
     def init_alloc(self) -> None:
         # we init alloc one block for warp in cache_engine_vmm
         self.allocated_block_counts[0] = 1
@@ -132,9 +122,9 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         if seq_group.is_encoder_decoder():
             raise NotImplementedError(
                 "Encoder-decoder is not supported in VMM now.")
-        
+
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
-        
+
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         need_blocks_num = self._get_seq_num_required_blocks(seq)
         need_blocks_num += self.predict_gen_len(seq)
@@ -160,7 +150,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         buffer_id, _ = self.waiting_free_buffers.pop(0)
         allocated_num = self.allocated_block_counts[buffer_id]
         self.waiting_free_blocks -= allocated_num
-        
+
         if allocated_num < need_blocks_num:
             self._allocate_extra_blocks(need_blocks_num - allocated_num)
             allocated_num = need_blocks_num
@@ -194,7 +184,6 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
 
         assert blocks_to_alloc <= 0
         self.num_free_gpu_blocks -= blocks_to_alloc
-
 
     def can_append_slots(self,
                          seq_group: SequenceGroup,
@@ -253,7 +242,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         raise NotImplementedError(
             "Swap-out is not supported in BlockSpaceManagerVMM now.")
- 
+
     def free(self, seq: Sequence) -> None:
         # Here, we just append free seq to waiting_free_buffers.
         waiting_free_id = seq.cache_buffer_id
@@ -263,8 +252,8 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
             return
 
         free_blocks = self.allocated_block_counts[waiting_free_id]
-        self.waiting_free_buffers.append((waiting_free_id, 
-                                          self.iter_counter.counter))
+        self.waiting_free_buffers.append(
+            (waiting_free_id, self.iter_counter.counter))
         self.waiting_free_blocks += free_blocks
 
     def reset(self) -> None:
@@ -279,7 +268,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         # logger.warning("block table is not used in BlockSpaceManagerVMM now.")
-        return None
+        return []
 
     def get_num_free_gpu_blocks(self) -> int:
         return self.num_free_gpu_blocks
@@ -292,16 +281,13 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         seq: Sequence,
         access_time: float,
     ) -> None:
-        # logger.warning("Access all blocks in seq is not supported in BlockSpaceManagerVMM now.")
         pass
 
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
-        # logger.warning("Common computed block ids is not supported in BlockSpaceManagerVMM now.")
         return None  # type: ignore
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup) -> None:
-        # logger.warning("Mark blocks as computed is not supported in BlockSpaceManagerVMM now.")
         pass
 
     def get_allocated_block_count(self, seq_id: int) -> int:

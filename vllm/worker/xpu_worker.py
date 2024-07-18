@@ -83,7 +83,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
+        self.cache_engine: List[CacheEngine]  # type: ignore
         self.gpu_cache: Optional[List[List[torch.Tensor]]]
 
     def init_device(self) -> None:

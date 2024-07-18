@@ -12,6 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -22,9 +23,6 @@ from vllm.worker.cache_engine_vmm import CacheEngineVMM
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
-
-import time
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -308,12 +306,12 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
-        # new add for vmm
+        # new add for vmm, CacheEngineVMM
         if self.use_vmm and worker_input.free_buffer_ids is not None:
-            self.cache_engine[virtual_engine].free_seqs(
+            self.cache_engine[virtual_engine].free_seqs(  # type: ignore
                 worker_input.free_buffer_ids)
         if self.use_vmm and worker_input.allocated_block_counts is not None:
-            self.cache_engine[virtual_engine].alloc_seqs(
+            self.cache_engine[virtual_engine].alloc_seqs(  # type: ignore
                 worker_input.allocated_block_counts)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

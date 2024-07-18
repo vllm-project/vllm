@@ -9,9 +9,10 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig,
                          TokenizerPoolConfig)
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import FlexibleArgumentParser, STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
+                        get_dtype_size)
 
 logger = init_logger(__name__)
 
@@ -671,7 +672,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend)
 
-        # new add for vmm, if use_vmm, block_size = 2MB / single_token_bytes_size
+        # if use_vmm, block_size = 2MB / single_token_bytes_size
         if self.use_vmm:
             if self.kv_cache_dtype == "auto":
                 dtype = model_config.dtype
@@ -690,23 +691,25 @@ class EngineArgs:
                     f"single_token_bytes_size ({single_token_bytes_size}) != 0"
                 )
             self.block_size = self.block_bytes_size // single_token_bytes_size
-            logger.info(f"use vmm 2MB block size: {self.block_size}")
+            logger.info("use vmm 2MB block size: %d", self.block_size)
             # TODO: support swap preemption mode for vmm
             self.preemption_mode = "recompute"
             logger.warning("Preemption only support recompute for vmm now.")
         else:
-            logger.info(f"use normal block size: {self.block_size}")
+            logger.info("use normal block size: %d", self.block_size)
 
         cache_config = CacheConfig(
             block_size=self.block_size,
-            block_bytes_size=self.block_bytes_size,  # new add for vmm
+
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
-            use_vmm=self.use_vmm)  # new add for vmm
+            # new add for vmm
+            use_vmm=self.use_vmm,
+            block_bytes_size=self.block_bytes_size,)
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,

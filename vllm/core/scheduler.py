@@ -1013,12 +1013,6 @@ class Scheduler:
                         seq)
                     self.block_manager.access_all_blocks_in_seq(seq, now)
 
-                # else:
-                #     cache_buffer_id = seq.cache_buffer_id
-                #     assert cache_buffer_id >= 0
-                #     scheduler_outputs.allocated_block_counts[cache_buffer_id] = \
-                #         self.block_manager.get_allocated_block_count(seq.seq_id)
-
             common_computed_block_nums = (
                 self.block_manager.get_common_computed_block_ids(
                     seq_group.get_seqs(status=SequenceStatus.RUNNING)))

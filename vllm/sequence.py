@@ -125,10 +125,9 @@ class SequenceData:
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
-        
+
         # new add for vmm
         self.cache_buffer_id = -1
-
 
         self._update_cached_all_tokens()
 
@@ -270,7 +269,7 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
-        
+
         # new add for vmm
         self.cache_buffer_id = -1
 
@@ -686,7 +685,7 @@ class SequenceGroupMetadata:
         """Return the number of tokens to be processed (chunk size)."""
         assert self._token_chunk_size is not None
         return self._token_chunk_size
-    
+
     def __repr__(self) -> str:
         return (f"SequenceGroupMetadata(\n"
                 f"-- request_id={self.request_id}, \n"
@@ -701,6 +700,7 @@ class SequenceGroupMetadata:
                 f"-- multi_modal_data={self.multi_modal_data}, \n"
                 f"-- encoder_seq_data={self.encoder_seq_data}, \n"
                 f"-- cross_block_table={self.cross_block_table})")
+
 
 class SequenceOutput:
     """The model output associated with a sequence.
@@ -958,7 +958,7 @@ class ExecuteModelRequest:
     # Finished request ids since last step.
     finished_requests_ids: List[str] = field(default_factory=list)
     # new add for vmm
-    allocated_block_counts: Dict[int, int]= field(default_factory=dict)
+    allocated_block_counts: Dict[int, int] = field(default_factory=dict)
     free_buffer_ids: List[int] = field(default_factory=list)
 
     def clone(
