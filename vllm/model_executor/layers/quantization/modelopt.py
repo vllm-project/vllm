@@ -60,8 +60,6 @@ class ModelOptFp8Config(QuantizationConfig):
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             return ModelOptFp8LinearMethod(self)
 
