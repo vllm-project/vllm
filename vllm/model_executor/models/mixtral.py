@@ -252,6 +252,7 @@ class MixtralModel(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.padding_idx = config.pad_token_id
@@ -271,7 +272,7 @@ class MixtralModel(nn.Module):
             lambda prefix: MixtralDecoderLayer(
                 config, cache_config, quant_config=quant_config, prefix=prefix
             ),
-            prefix="model.layers")
+            prefix=f"{prefix}.layers")
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -343,7 +344,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
-                                  lora_config=lora_config)
+                                  lora_config=lora_config,
+                                  prefix="model")
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

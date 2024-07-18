@@ -188,6 +188,7 @@ class GPT2Model(nn.Module):
         config: GPT2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -201,7 +202,7 @@ class GPT2Model(nn.Module):
             config.num_hidden_layers,
             lambda prefix: GPT2Block(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix="transformer.h")
+            prefix=f"{prefix}.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -244,7 +245,8 @@ class GPT2LMHeadModel(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = GPT2Model(config, cache_config, quant_config)
+        self.transformer = GPT2Model(config, cache_config, 
+                                     quant_config, prefix="transformer")
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
