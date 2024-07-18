@@ -5,8 +5,8 @@ from ..utils import RemoteOpenAIServer
 
 
 @pytest.mark.parametrize(
-    "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME",
-    "DIST_BACKEND", [
+    "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME, DIST_BACKEND",
+    [
         (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray"),
         (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
         (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
