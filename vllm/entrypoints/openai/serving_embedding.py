@@ -158,35 +158,3 @@ class OpenAIServingEmbedding(OpenAIServing):
                 "embedding_mode is False. Embedding API will not work.")
         else:
             logger.info("Activating the server engine with embedding enabled.")
-
-    def request_output_to_embedding_response(
-        self,
-        final_res_batch: List[EmbeddingRequestOutput],
-        request_id: str,
-        created_time: int,
-        model_name: str,
-    ) -> EmbeddingResponse:
-        data = []
-        num_prompt_tokens = 0
-        for idx, final_res in enumerate(final_res_batch):
-            assert final_res is not None
-            prompt_token_ids = final_res.prompt_token_ids
-
-            embedding_data = EmbeddingResponseData(
-                index=idx, embedding=final_res.outputs.embedding)
-            data.append(embedding_data)
-
-            num_prompt_tokens += len(prompt_token_ids)
-
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
-
-        return EmbeddingResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            data=data,
-            usage=usage,
-        )
