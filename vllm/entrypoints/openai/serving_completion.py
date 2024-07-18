@@ -16,13 +16,11 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              DetokenizeRequest,
-                                              DetokenizeResponse,
-                                              TokenizeRequest,
-                                              TokenizeResponse, UsageInfo)
+                                              UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
-                                                    OpenAIServing)
+                                                    OpenAIServing,
+                                                    PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -67,11 +65,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+                 lora_modules: Optional[List[LoRAModulePath]],
+                 prompt_adapters: Optional[List[PromptAdapterPath]]):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         prompt_adapters=prompt_adapters)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -101,7 +101,12 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
-            lora_request = self._maybe_get_lora(request)
+            adapter_type, adapter_request = self._maybe_get_adapter(request)
+            lora_request, prompt_adapter_request = None, None
+            if adapter_type == 'LoRA':
+                lora_request, prompt_adapter_request = adapter_request, None
+            elif adapter_type == 'PromptAdapter':
+                lora_request, prompt_adapter_request = None, adapter_request
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
@@ -147,6 +152,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params,
                     f"{request_id}-{i}",
                     lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
                     trace_headers=trace_headers,
                 )
 
@@ -271,16 +277,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_num_tokens[i] = len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
-                    if output.finish_reason is not None:  # return final usage
-                        prompt_tokens = len(res.prompt_token_ids)
-                        completion_tokens = len(output.token_ids)
-                        final_usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=prompt_tokens + completion_tokens,
-                        )
-                    else:
-                        final_usage = None
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -297,9 +293,21 @@ class OpenAIServingCompletion(OpenAIServing):
                         ])
                     if (request.stream_options
                             and request.stream_options.include_usage):
-                        chunk.usage = None
+                        if (request.stream_options.continuous_usage_stats
+                                or output.finish_reason is not None):
+                            prompt_tokens = len(res.prompt_token_ids)
+                            completion_tokens = len(output.token_ids)
+                            usage = UsageInfo(
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=prompt_tokens + completion_tokens,
+                            )
+                        if request.stream_options.continuous_usage_stats:
+                            chunk.usage = usage
+                        else:
+                            chunk.usage = None
 
-                    response_json = chunk.model_dump_json(exclude_unset=True)
+                    response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
 
             if (request.stream_options
@@ -309,10 +317,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     created=created_time,
                     model=model_name,
                     choices=[],
-                    usage=final_usage,
+                    usage=usage,
                 )
                 final_usage_data = (final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True))
+                    exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
         except ValueError as e:
@@ -446,29 +454,3 @@ class OpenAIServingCompletion(OpenAIServing):
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
         )
-
-    async def create_tokenize(self,
-                              request: TokenizeRequest) -> TokenizeResponse:
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        (input_ids, input_text) = self._validate_prompt_and_tokenize(
-            request,
-            prompt=request.prompt,
-            add_special_tokens=request.add_special_tokens)
-
-        return TokenizeResponse(tokens=input_ids,
-                                count=len(input_ids),
-                                max_model_len=self.max_model_len)
-
-    async def create_detokenize(
-            self, request: DetokenizeRequest) -> DetokenizeResponse:
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        (input_ids, input_text) = self._validate_prompt_and_tokenize(
-            request, prompt_ids=request.tokens)
-
-        return DetokenizeResponse(prompt=input_text)

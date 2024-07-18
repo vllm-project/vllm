@@ -3,8 +3,10 @@ from typing import List, Optional, Set, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
 
@@ -27,6 +29,7 @@ class ExecutorBase(ABC):
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
+        prompt_adapter_config: Optional[PromptAdapterConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -37,6 +40,7 @@ class ExecutorBase(ABC):
         self.device_config = device_config
         self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
+        self.prompt_adapter_config = prompt_adapter_config
 
         self._init_executor()
 
@@ -92,6 +96,23 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def list_loras(self) -> Set[int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError  # type: ignore
+
+    @abstractmethod
+    def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError
 
     @abstractmethod

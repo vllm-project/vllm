@@ -103,7 +103,8 @@ class ResponseFormat(OpenAIBaseModel):
 
 
 class StreamOptions(OpenAIBaseModel):
-    include_usage: Optional[bool]
+    include_usage: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = True
 
 
 class FunctionDefinition(OpenAIBaseModel):
@@ -715,7 +716,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Union[ChatCompletionResponse, ]
+    body: Optional[ChatCompletionResponse] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -737,15 +738,17 @@ class BatchRequestOutput(OpenAIBaseModel):
 
 
 class TokenizeRequest(OpenAIBaseModel):
+    add_generation_prompt: bool = Field(default=True)
+    add_special_tokens: bool = Field(default=False)
+    prompt: Optional[str] = Field(default=None)
+    messages: Optional[List[ChatCompletionMessageParam]] = Field(default=None)
     model: str
-    prompt: str
-    add_special_tokens: bool = Field(default=True)
 
 
 class TokenizeResponse(OpenAIBaseModel):
-    tokens: List[int]
     count: int
     max_model_len: int
+    tokens: List[int]
 
 
 class DetokenizeRequest(OpenAIBaseModel):
