@@ -275,7 +275,8 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
                                   force_output_len,
                                   temperature=0.0,
                                   seed=None,
-                                  print_tokens=print_tokens)
+                                  print_tokens=print_tokens,
+                                  ensure_all_accepted=ensure_all_accepted)
 
 
 def run_equality_correctness_test(baseline_llm_generator,
@@ -285,7 +286,8 @@ def run_equality_correctness_test(baseline_llm_generator,
                                   force_output_len: bool,
                                   temperature: float,
                                   seed: Optional[int],
-                                  print_tokens: bool = False):
+                                  print_tokens: bool = False,
+                                  ensure_all_accepted: bool = False):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero (or when temperature is > 0 and seeded).
