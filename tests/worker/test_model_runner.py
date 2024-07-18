@@ -213,6 +213,10 @@ def test_prepare_decode_cuda_graph(batch_size):
     for seq_len in seq_lens:
         start_idx += seq_len
         seq_start_loc.append(start_idx)
+    last_loc = seq_start_loc[-1] + 1
+    for _ in range(expected_bs - (len(start_loc) - 1)):
+        start_loc.append(last_loc)
+        last_loc += 1
     assert torch.allclose(
         attn_metadata.seq_start_loc,
         torch.tensor(seq_start_loc, dtype=torch.int32, device=device))
