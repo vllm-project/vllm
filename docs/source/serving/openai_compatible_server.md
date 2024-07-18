@@ -112,14 +112,61 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 :func: make_arg_parser
 :prog: -m vllm.entrypoints.openai.api_server
 ```
+## Tool Calling in the Chat Completion API
+### Named Function Calling
+vLLM supports only named function calling in the chat completion API by default. It does so using Outlines, so this is 
+enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a 
+high-quality one. 
 
-## Tool calling in the chat completion API
-vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and 
+specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request. 
 
-To use a named function you need to define the function in the `tools` parameter and call it in the `tool_choice` parameter. 
-
-It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt. **This may change in the future.**
+It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
 
 vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
 
-Please refer to the OpenAI API reference documentation for more information.
+
+### Automatic Function Calling
+_This feature is in **beta**. It has limited model support, is not guaranteed to be stable, and does not have 
+well-defined failure modes._ As such, it must be explicitly enabled when desired.
+
+To enable this feature, you must set the following flags:
+* `--enable-api-tools` -- **mandatory** for Auto tool choice. tells vLLM that you want to enable tool templating and extraction.
+* `--enable-auto-toolchoice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its' own tool scalls when it 
+deems appropriate. 
+* `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
+that contain previously generated tool calls.This argument can be set to `tool_use` if your model has a tool use chat 
+template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
+from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here]()
+* `--tool-parser` -- select the tool parser to use - currently either `hermes` or `mistral`. 
+
+If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template! 
+
+#### Hermes Models
+Supported models in this series:
+* `NousResearch/Hermes-2-Pro-Llama-3-8B`
+* `NousResearch/Hermes-2-Theta-Llama-3-70B`
+* `NousResearch/Hermes-2-Pro-Llama-3-70B`
+* `NousResearch/Hermes-2-Theta-Llama-3-8B`
+* `NousResearch/Hermes-2-Pro-Mistral-7B`
+
+_Note that the Hermes 2 **Theta** models are known to have degraded tool call quality & capabilities due to the merge 
+step in their creation_. It is recommended to use the Hermes 2 **Pro** models. 
+
+Recommended flags: `--tool-parser hermes --chat-template examples/tool_chat_template_hermes.jinja`
+
+#### Mistral Models
+Supported models:
+* `mistralai/Mistral-7B-Instruct-v0.3`
+
+There are several known issues with tool-calling in Mistral models:
+* Attempting to generate > 1 tool call at a time usually results in a parser failure, since the model generates the calls
+in an unpredictable format due to the aforementioned chat template issue.
+* Mistral function-calling / tool use generates calls with _single_ quotes `'` instead of double quotes `"`. As a 
+result, tool call generations can't be handled as JSON by the parser automatically without using `eval`, which would 
+present security issues for vLLM users. As a result, to support Mistral tool calls, we find-and-replace single-quotes 
+with double-quotes in mistral-generated tool calls. Therefore, **it is important to ensure that your tool call 
+arguments do not contain single quotes.** Escaped double quotes may be handled properly, but otherwise you should
+expect parser issues. 
+
+Recommended flags: `--tool-parser mistral --chat-template examples/tool_chat_template_mistral.jinja`

@@ -83,6 +83,7 @@ class OpenAIServingChat(OpenAIServing):
                          lora_modules=lora_modules)
 
         self.response_role = response_role
+        self.use_tool_use_model_template = False
         self._load_chat_template(chat_template)
 
         # set up tool use
@@ -102,6 +103,12 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer = self.tokenizer
 
         if chat_template is not None:
+
+            # if `tool_use` is supplied; try to use it as the tool use name for the template
+            if chat_template == 'tool_use':
+                self.use_tool_use_model_template = True
+                logger.info('The "tool_use" chat template was specified. This will be loaded from tokenizer_config.json. Expect runtime errors if this is not present!')
+                return
             try:
                 with open(chat_template, "r") as f:
                     tokenizer.chat_template = f.read()
@@ -121,8 +128,10 @@ class OpenAIServingChat(OpenAIServing):
             logger.info("Using supplied chat template:\n%s",
                         tokenizer.chat_template)
         elif tokenizer.chat_template is not None:
-            logger.info("Using default chat template:\n%s",
-                        tokenizer.chat_template)
+            if self.enable_auto_tools:
+                logger.info('Trying to find a tool_use chat template in tokenizer_config.json! Will use default template otherwise.')
+            else:
+                logger.info("Using default chat template:\n%s",tokenizer.chat_template)
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
@@ -275,12 +284,22 @@ class OpenAIServingChat(OpenAIServing):
             if self.enable_auto_tools and request.tools:
                 tools = [tool.model_dump() for tool in request.tools]
 
-            prompt = self.tokenizer.apply_chat_template(
-                conversation=conversation,
-                tokenize=False,
-                add_generation_prompt=request.add_generation_prompt,
-                tools=tools
-            )
+            # default. use the pre-loaded template not the "tool_use" template option introduced by huggingface
+            if not self.use_tool_use_model_template:
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation=conversation,
+                    tokenize=False,
+                    add_generation_prompt=request.add_generation_prompt,
+                    tools=tools
+                )
+            else:
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation=conversation,
+                    tokenize=False,
+                    add_generation_prompt=request.add_generation_prompt,
+                    tools=tools,
+                    chat_template='tool_use'
+                )
 
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
