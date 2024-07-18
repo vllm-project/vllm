@@ -20,15 +20,15 @@ llm = LLM(
     tensor_parallel_size=8,
 )
 """
+import argparse
 import dataclasses
 import os
 import shutil
 from pathlib import Path
 
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
 
-parser = FlexibleArgumentParser()
+parser = argparse.ArgumentParser()
 EngineArgs.add_cli_args(parser)
 parser.add_argument("--output",
                     "-o",

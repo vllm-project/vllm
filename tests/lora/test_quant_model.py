@@ -25,10 +25,7 @@ MODELS: List[ModelWithQuantization] = [
 ]
 
 
-def do_sample(llm: vllm.LLM,
-              lora_path: str,
-              lora_id: int,
-              max_tokens: int = 256) -> List[str]:
+def do_sample(llm, lora_path: str, lora_id: int, max_tokens=256):
     raw_prompts = [
         "Give me an orange-ish brown color",
         "Give me a neon pink color",
@@ -48,7 +45,7 @@ def do_sample(llm: vllm.LLM,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts: List[str] = []
+    generated_texts = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text

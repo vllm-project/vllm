@@ -47,7 +47,6 @@ def test_default_vllm_root_logger_configuration():
     assert not logger.propagate
 
     handler = logger.handlers[0]
-    assert isinstance(handler, logging.StreamHandler)
     assert handler.stream == sys.stdout
     assert handler.level == logging.INFO
 

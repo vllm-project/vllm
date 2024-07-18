@@ -3,14 +3,13 @@
 Note: these tests will only pass on L4 GPU.
 """
 import os
-from typing import List
 
 import pytest
 import torch
 from transformers import AutoTokenizer
 
-from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -68,16 +67,13 @@ EXPECTED_STRS_MAP = {
     },
 }
 
+capability = torch.cuda.get_device_capability()
+capability = capability[0] * 10 + capability[1]
+fp8_not_supported = (capability <
+                     QUANTIZATION_METHODS["fp8"].get_min_capability())
 
-# This test compares against golden strings for exact match since
-# there is no baseline implementation to compare against
-# and is unstable w.r.t specifics of the fp8 implementation or
-# the hardware being run on.
-# Disabled to prevent it from breaking the build
-@pytest.mark.skip(
-    reason=
-    "Prevent unstable test based on golden strings from breaking the build.")
-@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+
+@pytest.mark.skipif(fp8_not_supported,
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
@@ -101,7 +97,7 @@ def test_models(example_prompts, model_name, kv_cache_dtype) -> None:
     ]
 
     params = SamplingParams(max_tokens=20, temperature=0)
-    generations: List[str] = []
+    generations = []
     # Note: these need to be run 1 at a time due to numerical precision,
     # since the expected strs were generated this way.
     for prompt in formatted_prompts:

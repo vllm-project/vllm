@@ -2,11 +2,8 @@
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
-from typing import List
-
 import pytest
 
-from vllm.block import PhysicalTokenBlock
 from vllm.core.block_manager_v1 import CachedBlockAllocator
 from vllm.utils import Device
 
@@ -46,7 +43,7 @@ def test_block_allocator(
 def test_eviction(num_blocks: int, ):
     block_size = 16
     block_allocator = CachedBlockAllocator(Device.CPU, block_size, num_blocks)
-    blocks: List[PhysicalTokenBlock] = []
+    blocks = []
 
     for i in range(num_blocks):
         # use i as the block_hash

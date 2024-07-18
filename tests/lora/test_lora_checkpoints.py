@@ -1,5 +1,3 @@
-from typing import List
-
 import pytest
 
 from vllm.lora.models import LoRAModel
@@ -19,7 +17,7 @@ def test_load_checkpoints(
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
     embedding_modules = BaiChuanBaseForCausalLM.embedding_modules
     embed_padding_modules = BaiChuanBaseForCausalLM.embedding_padding_modules
-    expected_lora_modules: List[str] = []
+    expected_lora_modules = []
     for module in supported_lora_modules:
         if module in packed_modules_mapping:
             expected_lora_modules.extend(packed_modules_mapping[module])

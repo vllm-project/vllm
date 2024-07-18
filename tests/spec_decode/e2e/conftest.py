@@ -1,4 +1,5 @@
 import asyncio
+import time
 from itertools import cycle
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -6,21 +7,24 @@ import pytest
 import ray
 import torch
 
+from vllm.utils import is_hip
+
+if (not is_hip()):
+    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
+                        nvmlInit)
+
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.utils import set_random_seed
-from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import RequestOutput
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, random_uuid
 
 from ...conftest import cleanup
-from ...utils import wait_for_gpu_memory_to_clear
 
 
 class AsyncLLM:
@@ -72,11 +76,7 @@ class AsyncLLM:
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             max_seq_len_to_capture=max_seq_len_to_capture,
-            # For now use ray for the distributed back-end, since
-            # we rely on the use of engine_use_ray=True to avoid
-            # reinitializing CUDA in the same process (driver worker)
             engine_use_ray=True,
-            distributed_executor_backend="ray",
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
@@ -92,8 +92,7 @@ class AsyncLLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalDataDict] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
 
         if prompts is None:
@@ -114,17 +113,16 @@ class AsyncLLM:
             raise ValueError("The lengths of prompts and "
                              "sampling_params must be the same.")
 
-        async def get_output(prompt, sampling_param) -> RequestOutput:
+        async def get_output(prompt, sampling_param) -> str:
             request_id = random_uuid()
             results_generator = self.llm_engine.generate(
                 prompt, sampling_param, request_id)
             final_output = None
             async for request_output in results_generator:
                 final_output = request_output
-            assert final_output is not None
             return final_output
 
-        outputs: List[RequestOutput] = []
+        outputs = []
         try:
             for i in range(num_requests):
                 prompt = prompts[i] if prompts is not None else None
@@ -162,11 +160,6 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
     }
     test_name = request.node.name
 
-    model = kwargs["model"]
-    draft_model = kwargs.get("speculative_model", None)
-    same_draft_target_model = (draft_model is not None
-                               and draft_model == model)
-
     def generator_inner():
 
         wait_for_gpu_memory_to_clear(
@@ -182,13 +175,6 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
 
         print(f'Creating {baseline_or_test=} LLM for {test_name=}. {kwargs=}')
         llm = AsyncLLM(**kwargs) if use_async else LLM(**kwargs)
-
-        # Override logging interval to 0 for spec decode test run to
-        # log all metrics in time.
-        if (baseline_or_test == "test" and not use_async
-                and llm.llm_engine.log_stats):
-            for sate_logger in llm.llm_engine.stat_loggers.values():
-                sate_logger.local_interval = 0
         set_random_seed(seed)
 
         yield llm
@@ -200,9 +186,6 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
             yield llm
             del llm
 
-    # Set an attribute to the generator_outer function to allow us to
-    # determine whether to further check the acceptance rate in tests.
-    generator_outer.same_draft_target_model = same_draft_target_model  # type: ignore
     return generator_outer
 
 
@@ -219,27 +202,18 @@ def maybe_assert_ngram_worker(llm):
 
 def get_output_from_llm_generator(
         llm_generator, prompts,
-        sampling_params) -> Tuple[List[str], List[List[int]], float]:
-    tokens: List[str] = []
-    token_ids: List[List[int]] = []
-    acceptance_rate: float = -1.0
+        sampling_params) -> Tuple[List[str], List[List[int]]]:
+    tokens = []
+    token_ids = []
     for llm in llm_generator():
         maybe_assert_ngram_worker(llm)
 
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
-
-        # Fetch acceptance rate if logging is enabled.
-        if stat_loggers := getattr(llm.llm_engine, "stat_loggers", None):
-            stat_logger = stat_loggers["prometheus"]
-            acceptance_rate = (stat_logger.metrics.
-                               gauge_spec_decode_draft_acceptance_rate.labels(
-                                   **stat_logger.labels)._value.get())
         del llm
 
-    return tokens, token_ids, acceptance_rate
+    return tokens, token_ids
 
 
 def get_logprobs_from_llm_generator(
@@ -261,8 +235,7 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
                                          batch_size,
                                          max_output_len,
                                          force_output_len: bool,
-                                         print_tokens: bool = False,
-                                         ensure_all_accepted: bool = False):
+                                         print_tokens: bool = False):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
@@ -292,13 +265,12 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         temperature=temperature,
     )
 
-    (spec_batch_tokens, spec_batch_token_ids,
-     acceptance_rate) = get_output_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
+    spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
+        test_llm_generator, prompts, sampling_params)
 
-    (baseline_batch_tokens, baseline_batch_token_ids,
-     _) = get_output_from_llm_generator(baseline_llm_generator, prompts,
-                                        sampling_params)
+    (baseline_batch_tokens,
+     baseline_batch_token_ids) = get_output_from_llm_generator(
+         baseline_llm_generator, prompts, sampling_params)
 
     assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
@@ -314,5 +286,37 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
 
-    if ensure_all_accepted:
-        assert acceptance_rate == 1.0
+
+def wait_for_gpu_memory_to_clear(devices: List[int],
+                                 threshold_bytes: int,
+                                 timeout_s: float = 120) -> None:
+    # Use nvml instead of pytorch to reduce measurement error from torch cuda
+    # context.
+    nvmlInit()
+    start_time = time.time()
+    while True:
+        output = {}
+        output_raw = {}
+        for device in devices:
+            dev_handle = nvmlDeviceGetHandleByIndex(device)
+            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+            gb_used = mem_info.used / 2**30
+            output_raw[device] = gb_used
+            output[device] = f'{gb_used:.02f}'
+
+        print('gpu memory used (GB): ', end='')
+        for k, v in output.items():
+            print(f'{k}={v}; ', end='')
+        print('')
+
+        dur_s = time.time() - start_time
+        if all(v <= (threshold_bytes / 2**30) for v in output_raw.values()):
+            print(f'Done waiting for free GPU memory on devices {devices=} '
+                  f'({threshold_bytes/2**30=}) {dur_s=:.02f}')
+            break
+
+        if dur_s >= timeout_s:
+            raise ValueError(f'Memory of devices {devices=} not free after '
+                             f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
+
+        time.sleep(5)

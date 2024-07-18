@@ -1,10 +1,7 @@
-from typing import List
-
 import pytest
 import torch
 
-from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                             init_distributed_environment)
+from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
@@ -23,7 +20,6 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
         cache_config=engine_config.cache_config,
         load_config=engine_config.load_config,
         lora_config=engine_config.lora_config,
-        prompt_adapter_config=engine_config.prompt_adapter_config,
         is_driver_worker=True,
     )
     return model_runner
@@ -38,8 +34,8 @@ def test_prepare_prompt(batch_size):
         enable_chunked_prefill=False,
     )
 
-    seq_lens: List[int] = []
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens = []
+    seq_group_metadata_list = []
     block_tables = {0: [1]}
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -62,13 +58,12 @@ def test_prepare_prompt(batch_size):
         expected_selected_token_indices.append(selected_token_start_idx +
                                                seq_len - 1)
         selected_token_start_idx += seq_len
-    model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
     input_tokens = model_input.input_tokens
     input_positions = model_input.input_positions
     attn_metadata = model_input.attn_metadata
     return_seq_lens = model_input.seq_lens
-    slot_mapping = attn_metadata.slot_mapping
+    slot_mapping = model_input.slot_mapping
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
 
@@ -155,14 +150,15 @@ def test_prepare_decode_cuda_graph(batch_size):
         enable_chunked_prefill=False,
     )
 
-    context_lens: List[int] = []
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    context_lens = []
+    seq_group_metadata_list = []
     # Assume each seq group finishes prefill.
     for i in range(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = SequenceData(list(range(context_len)))
+        seq_data = list(range(context_len))
+        seq_data = SequenceData(seq_data)
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -176,11 +172,10 @@ def test_prepare_decode_cuda_graph(batch_size):
         assert seq_group_metadata.token_chunk_size == 1
         seq_group_metadata_list.append(seq_group_metadata)
 
-    model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
     input_tokens, input_positions, attn_metadata, slot_mapping = (
         model_input.input_tokens, model_input.input_positions,
-        model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
+        model_input.attn_metadata, model_input.slot_mapping)
     assert len(slot_mapping) == len(input_tokens)
 
     expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
@@ -261,30 +256,33 @@ def test_empty_seq_group():
         dtype="float16",
         enforce_eager=False,
     )
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
-    input_tokens, input_positions, attn_metadata = (
+    seq_group_metadata_list = []
+    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
+    input_tokens, input_positions, attn_metadata, slot_mapping = (
         model_input.input_tokens,
         model_input.input_positions,
         model_input.attn_metadata,
+        model_input.slot_mapping,
     )
-    assert input_tokens is None
-    assert input_positions is None
+    assert len(input_tokens) == 0
+    assert len(input_positions) == 0
     assert attn_metadata is None
+    assert len(slot_mapping) == 0
 
-    model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
-    (input_tokens, input_positions, attn_metadata, return_seq_lens) = (
-        model_input.input_tokens,
-        model_input.input_positions,
-        model_input.attn_metadata,
-        model_input.seq_lens,
-    )
-    assert input_tokens is None
-    assert input_positions is None
+    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
+    (input_tokens, input_positions, attn_metadata, slot_mapping,
+     return_seq_lens) = (
+         model_input.input_tokens,
+         model_input.input_positions,
+         model_input.attn_metadata,
+         model_input.slot_mapping,
+         model_input.seq_lens,
+     )
+    assert len(input_tokens) == 0
+    assert len(input_positions) == 0
     assert attn_metadata is None
-    assert return_seq_lens is None
+    assert len(slot_mapping) == 0
+    assert len(return_seq_lens) == 0
 
 
 @pytest.fixture
@@ -294,7 +292,6 @@ def distributed_init():
         rank=0,
         distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
         local_rank=0)
-    ensure_model_parallel_initialized(1, 1)
 
 
 @pytest.mark.parametrize("batch_size", list(range(2, 128)))
@@ -311,10 +308,10 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     )
 
     # Add prefill requests.
-    seq_lens: List[int] = []
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    prefill_metadata_list: List[SequenceGroupMetadata] = []
-    decode_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens = []
+    seq_group_metadata_list = []
+    prefill_metadata_list = []
+    decode_metadata_list = []
     block_tables = {0: [1]}
     prefill_batch_size = batch_size // 2
     decode_batch_size = batch_size - prefill_batch_size
@@ -353,12 +350,8 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         seq_group_metadata_list.append(seq_group_metadata)
         decode_metadata_list.append(seq_group_metadata)
 
-    model_input = model_runner.prepare_model_input(seq_group_metadata_list)
-    (input_tokens, input_positions, attn_metadata) = (
-        model_input.input_tokens,
-        model_input.input_positions,
-        model_input.attn_metadata,
-    )
+    (input_tokens, input_positions, attn_metadata, _, _, _,
+     _) = model_runner.prepare_input_tensors(seq_group_metadata_list)
 
     prefill_meta_actual = attn_metadata.prefill_metadata
     decode_meta_actual = attn_metadata.decode_metadata
@@ -371,7 +364,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
 
     # Verify attn metadata is consistent. We don't need to test individual
     # values here because they are tested above.
-    attn_metadata = model_runner._prepare_model_input_tensors(
+    attn_metadata = model_runner._prepare_model_input(
         seq_group_metadata_list).attn_metadata
 
     for attr_expected, attr_actual in zip(vars(attn_metadata.prefill_metadata),

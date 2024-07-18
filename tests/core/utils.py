@@ -1,7 +1,5 @@
 import time
-from typing import List, Optional
-from typing import Sequence as GenericSequence
-from typing import Tuple
+from typing import Iterable, Optional, Tuple
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
@@ -48,7 +46,7 @@ def create_dummy_prompt_encoder_decoder(
     lora_request: Optional[LoRARequest] = None,
     use_beam_search: bool = False,
     best_of: int = 1,
-) -> Tuple[Sequence, Sequence, SequenceGroup]:
+) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = decoder_prompt_length
 
@@ -88,7 +86,7 @@ def create_dummy_prompt_encoder_decoder(
 
 def create_seq_group(
         seq_prompt_len: int = 1024,
-        seq_output_lens: GenericSequence[int] = (128, ),
+        seq_output_lens: Iterable[int] = (128, ),
         request_id: str = '0',
         seq_id_start: int = 0,
         sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
@@ -100,7 +98,7 @@ def create_seq_group(
 
     prompt_token_ids = [0] * seq_prompt_len
 
-    seqs: List[Sequence] = []
+    seqs = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,
@@ -127,7 +125,7 @@ def create_seq_group(
 
 def create_seq_group_encoder_decoder(
         seq_prompt_len: int = 1024,
-        seq_output_lens: GenericSequence[int] = (128, ),
+        seq_output_lens: Iterable[int] = (128, ),
         request_id: str = '0',
         seq_id_start: int = 0,
         sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:

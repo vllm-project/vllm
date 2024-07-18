@@ -163,6 +163,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements*.txt /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 
 
 # -----------------------
@@ -243,6 +244,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /tests ${COMMON_WORKDIR}/vllm/tests
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
+COPY --from=export_vllm /.buildkite ${COMMON_WORKDIR}/vllm/.buildkite
 
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
