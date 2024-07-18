@@ -521,7 +521,9 @@ def create_kv_caches_with_random(
 
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
-    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
+    key_cache_shape = (num_blocks, num_heads,
+                       head_size // x + int(bool(head_size % x)), block_size,
+                       x)
     key_caches: List[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
