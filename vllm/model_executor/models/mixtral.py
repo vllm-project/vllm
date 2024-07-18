@@ -78,7 +78,7 @@ class MixtralMoE(nn.Module):
                                      bias=False,
                                      params_dtype=params_dtype,
                                      quant_config=None,
-                                     prefix=prefix)
+                                     prefix=f"{prefix}.gate")
 
         self.experts = FusedMoE(num_experts=num_experts,
                                 top_k=top_k,
@@ -89,7 +89,7 @@ class MixtralMoE(nn.Module):
                                 renormalize=True,
                                 quant_config=quant_config,
                                 tp_size=tp_size,
-                                prefix=prefix)
+                                prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
