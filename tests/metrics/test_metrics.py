@@ -1,11 +1,13 @@
 from typing import List
 
 import pytest
+import ray
 from prometheus_client import REGISTRY
 
 from vllm import EngineArgs, LLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 
 MODELS = [
@@ -241,3 +243,55 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
                                                      labels)
             assert (
                 metric_value == num_requests), "Metrics should be collected"
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [16])
+def test_engine_log_metrics_ray(
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+) -> None:
+    # This test is quite weak - it only checks that we can use
+    # RayPrometheusStatLogger without exceptions.
+    # Checking whether the metrics are actually emitted is unfortunately
+    # non-trivial.
+
+    # We have to run in a Ray task for Ray metrics to be emitted correctly
+    @ray.remote(num_gpus=1)
+    def _inner():
+
+        class _RayPrometheusStatLogger(RayPrometheusStatLogger):
+
+            def __init__(self, *args, **kwargs):
+                self._i = 0
+                super().__init__(*args, **kwargs)
+
+            def log(self, *args, **kwargs):
+                self._i += 1
+                return super().log(*args, **kwargs)
+
+        engine_args = EngineArgs(
+            model=model,
+            dtype=dtype,
+            disable_log_stats=False,
+        )
+        engine = LLMEngine.from_engine_args(engine_args)
+        logger = _RayPrometheusStatLogger(
+            local_interval=0.5,
+            labels=dict(model_name=engine.model_config.served_model_name),
+            max_model_len=engine.model_config.max_model_len)
+        engine.add_logger("ray", logger)
+        for i, prompt in enumerate(example_prompts):
+            engine.add_request(
+                f"request-id-{i}",
+                prompt,
+                SamplingParams(max_tokens=max_tokens),
+            )
+        while engine.has_unfinished_requests():
+            engine.step()
+        assert logger._i > 0, ".log must be called at least once"
+
+    ray.get(_inner.remote())
