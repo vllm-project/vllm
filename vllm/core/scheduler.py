@@ -629,7 +629,10 @@ class Scheduler:
         waiting_queue = deque([s for s in waiting_queue])
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
-        while self._passed_delay(time.time()) and waiting_queue:
+        i = 0
+        max_prefill_batch_size = int(os.getenv("VLLM_PROMPT_BS_BUCKET_MAX", budget.max_num_seqs))
+        while self._passed_delay(time.time()) and waiting_queue and i < max_prefill_batch_size:
+            i += 1
             seq_group = waiting_queue[0]
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
