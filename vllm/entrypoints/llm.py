@@ -69,6 +69,10 @@ class LLM:
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
             Otherwise, too small values may cause out-of-memory (OOM) errors.
+        cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
+            the model weights. This virtually increases the GPU memory space
+            you can use to hold the model weights, at the cost of CPU-GPU data
+            transfer for every forward pass.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -114,6 +118,7 @@ class LLM:
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
+        cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
@@ -141,6 +146,7 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
+            cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
             max_seq_len_to_capture=max_seq_len_to_capture,

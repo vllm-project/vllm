@@ -45,6 +45,7 @@ class EngineArgs:
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
+    cpu_offload_gb: int = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -303,6 +304,20 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU.')
+        parser.add_argument(
+            '--cpu-offload-gb',
+            type=float,
+            default=0,
+            help='The space in GiB to offload to CPU, per GPU. '
+            'Default is 0, which means no offloading. Intuitively, '
+            'this argument can be seen as a virtual way to increase '
+            'the GPU memory size. For example, if you have one 24 GB '
+            'GPU and set this to 10, virtually you can think of it as '
+            'a 34 GB GPU. Then you can load a 13B model with BF16 weight,'
+            'which requires at least 26GB GPU memory. Note that this '
+            'requires fast CPU-GPU interconnect, as part of the model is'
+            'loaded from CPU memory to GPU memory on the fly in each '
+            'model forward pass.')
         parser.add_argument(
             '--gpu-memory-utilization',
             type=float,
@@ -633,6 +648,11 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        assert self.cpu_offload_gb >= 0, (
+            "CPU offload space must be non-negative"
+            f", but got {self.cpu_offload_gb}")
+
         multimodal_config = MultiModalConfig()
 
         device_config = DeviceConfig(device=self.device)
@@ -666,7 +686,9 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching)
+            enable_prefix_caching=self.enable_prefix_caching,
+            cpu_offload_gb=self.cpu_offload_gb,
+        )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
