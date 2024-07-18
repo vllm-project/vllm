@@ -245,8 +245,10 @@ class GPT2LMHeadModel(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = GPT2Model(config, cache_config, 
-                                     quant_config, prefix="transformer")
+        self.transformer = GPT2Model(config,
+                                     cache_config,
+                                     quant_config,
+                                     prefix="transformer")
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
