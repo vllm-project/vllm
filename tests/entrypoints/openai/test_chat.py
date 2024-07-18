@@ -7,11 +7,11 @@ import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import torch
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 from openai import BadRequestError
 
 from ...utils import RemoteOpenAIServer
+from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
+from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -21,12 +21,7 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
-
-
-@pytest.fixture(scope="module")
-def server(zephyr_lora_files):
+def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -38,7 +33,7 @@ def server(zephyr_lora_files):
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_files}",
+        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",

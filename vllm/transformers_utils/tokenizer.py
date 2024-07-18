@@ -88,6 +88,9 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
+    if "truncation_side" not in kwargs:
+        kwargs["truncation_side"] = "left"
+
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
