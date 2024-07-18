@@ -28,6 +28,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN apt-get update -y \
     && apt-get install -y git curl sudo
 
+# Install pip s.t. it will be compatible with our PYTHON_VERSION
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
 RUN python3 -m pip --version
 
@@ -169,6 +170,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN apt-get update -y \
     && apt-get install -y python3-pip git curl
 
+# Install pip s.t. it will be compatible with our PYTHON_VERSION
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
 RUN python3 -m pip --version
 
