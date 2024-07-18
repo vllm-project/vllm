@@ -143,13 +143,24 @@ def apply_fp8_linear(
             # Fallback for channelwise case, where the weight scales are
             # applied separately.
             # Write output in fp32 to allow subsequent ops to happen in-place
+
+            # For FP8 quantized GEMM we need to do the equivalent of:
+            # C = (s_x * X) (s_w * W) + bias (by defintion)
+            # Whatever kernel we use will commute things like so:
+            # C = s_x * s_w * (X * W) + bias
+            # This allows quantized computation. 
+            # For this fallback case, we simply break this down:
+
+            # this computes sx * (X * W)
             output, _ = torch._scaled_mm(qinput,
                                          weight,
                                          out_dtype=torch.float32,
                                          scale_a=x_scale)
 
+            # output = sw * sx * (X * W)
             output = output * weight_scale.t()
             if bias is not None:
+                # output = sw * sx * (X * W) + bias
                 output = output + bias
             output = output.to(dtype=input.dtype)
 
