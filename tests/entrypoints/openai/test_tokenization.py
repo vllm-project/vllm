@@ -34,6 +34,7 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
+
 @pytest.fixture(scope="module")
 def tokenizer_name(model_name: str,
                    zephyr_lora_added_tokens_files: str):  # noqa: F811
