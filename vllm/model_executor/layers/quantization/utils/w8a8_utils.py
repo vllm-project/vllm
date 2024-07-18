@@ -148,7 +148,7 @@ def apply_fp8_linear(
             # C = (s_x * X) (s_w * W) + bias (by defintion)
             # Whatever kernel we use will commute things like so:
             # C = s_x * s_w * (X * W) + bias
-            # This allows quantized computation. 
+            # This allows quantized computation.
             # For this fallback case, we simply break this down:
 
             # this computes sx * (X * W)
