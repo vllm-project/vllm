@@ -23,7 +23,7 @@ class SpeculativeProposals:
     proposal_lens: torch.Tensor
 
     # A flag to mark that there's no available proposals
-    no_proposals: bool
+    no_proposals: bool = False
 
     def __repr__(self):
         return (f"SpeculativeProposals("
