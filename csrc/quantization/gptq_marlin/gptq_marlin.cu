@@ -72,10 +72,11 @@ __global__ void Marlin(
 }  // namespace gptq_marlin
 
 torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& g_idx,
-                               torch::Tensor& perm, torch::Tensor& workspace,
-                               int64_t num_bits, int64_t size_m, int64_t size_n,
-                               int64_t size_k, bool is_k_full) {
+                               torch::Tensor& b_scales, torch::Tensor& b_zeros,
+                               torch::Tensor& g_idx, torch::Tensor& perm,
+                               torch::Tensor& workspace, int64_t num_bits,
+                               int64_t size_m, int64_t size_n, int64_t size_k,
+                               bool is_k_full) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
@@ -265,15 +266,15 @@ dequant_8bit<nv_bfloat16>(int q) {
 }
 
 template <typename scalar_t>
-__device__ inline typename ScalarType<scalar_t>::TileZP dequantize_s4_to_fp16x2(
+__device__ inline typename ScalarType<scalar_t>::FragZP dequantize_s4_to_fp16x2(
     uint32_t const& source) {
   STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
 }
 
 template <>
-__device__ inline typename ScalarType<half>::TileZP
+__device__ inline typename ScalarType<half>::FragZP
 dequantize_s4_to_fp16x2<half>(uint32_t const& source) {
-  typename ScalarType<half>::TileZP result;
+  typename ScalarType<half>::FragZP result;
 
   uint32_t* h = reinterpret_cast<uint32_t*>(&result);
   uint32_t const i4s = reinterpret_cast<uint32_t const&>(source);
@@ -393,13 +394,13 @@ __device__ inline void scale(typename ScalarType<scalar_t>::FragB& frag_b,
 
 template <typename scalar_t>
 __device__ inline void sub_zp(typename ScalarType<scalar_t>::FragB& frag_b,
-                              typename ScalarType<scalar_t>::FragZP& frag_zp,
+                              typename ScalarType<scalar_t>::scalar_t2& frag_zp,
                               int i) {
   using scalar_t2 = typename ScalarType<scalar_t>::scalar_t2;
-  scalar_t2 s =
+  scalar_t2 zp =
       ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_zp)[i]);
-  frag_b[0] = __hsub2(frag_b[0], s);
-  frag_b[1] = __hsub2(frag_b[1], s);
+  frag_b[0] = __hsub2(frag_b[0], zp);
+  frag_b[1] = __hsub2(frag_b[1], zp);
 }
 
 // Same as above, but for act_order (each K is multiplied individually)
@@ -565,7 +566,6 @@ __global__ void Marlin(
   using FragB = typename ScalarType<scalar_t>::FragB;
   using FragC = typename ScalarType<scalar_t>::FragC;
   using FragS = typename ScalarType<scalar_t>::FragS;
-  using TileZP = typename ScalarType<scalar_t>::TileZP;
   using FragZP = typename ScalarType<scalar_t>::FragZP;
 
   constexpr int pack_factor = 32 / num_bits;
@@ -832,7 +832,7 @@ __global__ void Marlin(
   FragS frag_s[2][4];         // No act-order
   FragS act_frag_s[2][4][4];  // For act-order
   int frag_zp[2];             // Zero-points
-  TileZP tile_zps;            // Zero-points in fp16
+  FragZP frag_zp_fp16;        // Zero-points in fp16
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -1131,7 +1131,7 @@ __global__ void Marlin(
       int4* sh_zp_stage =
           sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
                                  (pipe / (group_blocks / thread_k_blocks)));
-      frag_zp[k % 2][0] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
+      frag_zp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
     } else {
       int warp_id = threadIdx.x / 32;
       int n_warps = thread_n_blocks / 4;
@@ -1147,14 +1147,14 @@ __global__ void Marlin(
       int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
       sh_zp_stage += cur_group_id * zp_sh_stride;
-      frag_zp[k % 2][0] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
+      frag_zp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
     }
   };
 
   // Execute the actual tensor core matmul of a sub-tile.
   auto matmul = [&](int k) {
     if constexpr (has_zp) {
-      tile_zps = dequantize_s4_to_fp16x2<scalar_t>(frag_zp[k % 2]);
+      frag_zp_fp16 = dequantize_s4_to_fp16x2<scalar_t>(frag_zp[k % 2]);
     }
 
   // We have the m dimension as the inner loop in order to encourage overlapping
@@ -1187,7 +1187,7 @@ __global__ void Marlin(
 
       // Apply zero-point to frag_b0
       if constexpr (has_zp) {
-        sub_zp<scalar_t>(frag_b0, tile_zps[j], 0);
+        sub_zp<scalar_t>(frag_b0, frag_zp_fp16[j], 0);
       }
 
       // Apply scale to frag_b0
@@ -1203,7 +1203,7 @@ __global__ void Marlin(
 
       // Apply zero-point to frag_b1
       if constexpr (has_zp) {
-        sub_zp<scalar_t>(frag_b1, tile_zps[j], 1);
+        sub_zp<scalar_t>(frag_b1, frag_zp_fp16[j], 1);
       }
 
       // Apply scale to frag_b1
@@ -1818,25 +1818,13 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
 
-  #define AWQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
-                                                                             \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
-                                                                             \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
-                                                                             \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
+  #define AWQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)            \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS) \
+                                                                            \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS) \
+                                                                            \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS) \
+                                                                            \
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)
 
 template <typename scalar_t>
@@ -1971,27 +1959,27 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, void* zp,
     // Define kernel configurations
     if (false) {
     }
-    GPTQ_CALL_IF(4, 32, 2, 256)
-    GPTQ_CALL_IF(4, 16, 4, 256)
-    GPTQ_CALL_IF(4, 8, 8, 256)
-    GPTQ_CALL_IF(4, 8, 4, 128)
-    GPTQ_CALL_IF(4, 4, 8, 128)
-    GPTQ_CALL_IF(8, 32, 2, 256)
-    GPTQ_CALL_IF(8, 16, 4, 256)
-    GPTQ_CALL_IF(8, 8, 8, 256)
-    GPTQ_CALL_IF(8, 8, 4, 128)
-    GPTQ_CALL_IF(8, 4, 8, 128)
+    // GPTQ_CALL_IF(4, 32, 2, 256)
+    // GPTQ_CALL_IF(4, 16, 4, 256)
+    // GPTQ_CALL_IF(4, 8, 8, 256)
+    // GPTQ_CALL_IF(4, 8, 4, 128)
+    // GPTQ_CALL_IF(4, 4, 8, 128)
+    // GPTQ_CALL_IF(8, 32, 2, 256)
+    // GPTQ_CALL_IF(8, 16, 4, 256)
+    // GPTQ_CALL_IF(8, 8, 8, 256)
+    // GPTQ_CALL_IF(8, 8, 4, 128)
+    // GPTQ_CALL_IF(8, 4, 8, 128)
 
     AWQ_CALL_IF(4, 32, 2, 256)
     AWQ_CALL_IF(4, 16, 4, 256)
     AWQ_CALL_IF(4, 8, 8, 256)
     AWQ_CALL_IF(4, 8, 4, 128)
     AWQ_CALL_IF(4, 4, 8, 128)
-    AWQ_CALL_IF(8, 32, 2, 256)
-    AWQ_CALL_IF(8, 16, 4, 256)
-    AWQ_CALL_IF(8, 8, 8, 256)
-    AWQ_CALL_IF(8, 8, 4, 128)
-    AWQ_CALL_IF(8, 4, 8, 128)
+    // AWQ_CALL_IF(8, 32, 2, 256)
+    // AWQ_CALL_IF(8, 16, 4, 256)
+    // AWQ_CALL_IF(8, 8, 8, 256)
+    // AWQ_CALL_IF(8, 8, 4, 128)
+    // AWQ_CALL_IF(8, 4, 8, 128)
     else {
       TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
                              str(prob_n) + ", " + str(prob_k) + "]" +
@@ -2146,14 +2134,15 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, gptq_marlin::max_par);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
-    gptq_marlin::marlin_mm_f16i4<nv_bfloat16>(
-        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
-        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-        workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, gptq_marlin::max_par);
+    // TODO: Add bfloat16 back
+    // gptq_marlin::marlin_mm_f16i4<nv_bfloat16>(
+    //     a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
+    //     c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
+    //     b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
+    //     a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
+    //     workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
+    //     num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
+    //     thread_k, thread_n, sms, gptq_marlin::max_par);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }

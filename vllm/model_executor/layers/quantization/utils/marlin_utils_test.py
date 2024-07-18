@@ -129,15 +129,24 @@ def awq_marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int):
         group_size = size_k
     assert group_size <= size_k
 
+    # Detect num groups
+    assert size_k % group_size == 0
+    num_groups = size_k // group_size
+
     # Quantize with zp
     w_ref, q_w, s, zp = quantize_weights_with_zp(w, num_bits, group_size)
+
+    print("w_ref: shape = {}".format(w_ref.shape))
+    print("q_w: shape = {}".format(q_w.shape))
+    print("s: shape = {}".format(s.shape))
+    print("zp: shape = {}".format(zp.shape))
 
     # Reformat to marlin
     weight_perm = get_weight_perm(num_bits)
     marlin_q_w = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
     marlin_s = marlin_permute_scales(s, size_k, size_n, group_size)
     marlin_zp = marlin_permute_zp(zp, size_k, size_n, group_size, num_bits)
-    marlin_zp = pack_cols(marlin_zp)
+    marlin_zp = pack_cols(marlin_zp, num_bits, num_groups, size_n)
 
     # Create result
     res_list = [w_ref, marlin_q_w, marlin_s, marlin_zp]
