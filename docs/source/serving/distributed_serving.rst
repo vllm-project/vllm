@@ -1,7 +1,10 @@
 .. _distributed_serving:
 
+Distributed Inference and Serving
+=================================
+
 How to decide the distributed inference strategy?
-=================================================
+-------------------------------------------------
 
 Before going into the details of distributed inference and serving, let's first make it clear when to use distributed inference and what are the strategies available. The common practice is:
 
@@ -16,8 +19,8 @@ After adding enough GPUs and nodes to hold the model, you can run vLLM first, wh
 .. note::
     There is one edge case: if the model fits in a single node with multiple GPUs, but the number of GPUs cannot divide the model size evenly, you can use pipeline parallelism, which splits the model along layers and supports uneven splits. In this case, the tensor parallel size should be 1 and the pipeline parallel size should be the number of GPUs.
 
-Distributed Inference and Serving
-=================================
+Details for Distributed Inference and Serving
+----------------------------------------------
 
 vLLM supports distributed tensor-parallel inference and serving. Currently, we support `Megatron-LM's tensor parallel algorithm <https://arxiv.org/pdf/1909.08053.pdf>`_.  We also support pipeline parallel as a beta feature for online serving. We manage the distributed runtime with either `Ray <https://github.com/ray-project/ray>`_ or python native multiprocessing. Multiprocessing can be used when deploying on a single node, multi-node inferencing currently requires Ray.
 
