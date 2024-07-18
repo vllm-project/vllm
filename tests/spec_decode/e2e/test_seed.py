@@ -30,6 +30,7 @@ from .conftest import run_equality_correctness_test
         # Use smaller output len for fast test.
         10,
     ])
+@pytest.mark.parametrize("seed", [1])
 def test_seeded_consistency(baseline_llm_generator, batch_size: int,
                             temperature: float, output_len: int):
     """Verify outputs are consistent across multiple runs with same seed
