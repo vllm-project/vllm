@@ -364,6 +364,10 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 def get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
+        if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+            # The prefill and decode instance shares the same port
+            # Skip the binding check as the port may be binded by prefill
+            return port
         while True:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

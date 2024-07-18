@@ -9,6 +9,10 @@ The typical workflow is:
 - call `init_distributed_environment` to initialize the distributed environment.
 - call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
  initialize the model parallel groups.
+ - In disaggregated prefilling, we will modify:
+  - World size: 2 * tp * pp
+  - Rank: [0, tp * pp) for prefilling, [tp * pp, 2 * tp * pp) for decoding
+  - Local rank: unchanged
 
 - any code dealing with the distributed stuff
 
