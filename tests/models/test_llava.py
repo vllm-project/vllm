@@ -1,107 +1,149 @@
-import gc
-from dataclasses import fields
-from enum import Enum
-from typing import Dict, List, Tuple
+from typing import List, Optional, Tuple, Type
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
-from vllm.config import VisionLanguageConfig
+from vllm.multimodal.utils import rescale_image_size
+from vllm.sequence import SampleLogprobs
 
-model_and_vl_config = [
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 3, 336, 336))),
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.IMAGE_FEATURES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 576, 1024)))
-]
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from .utils import check_logprobs_close
 
+pytestmark = pytest.mark.vlm
 
-def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
-    """Flatten vision language config to pure args.
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
+    "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
+    "cherry_blossom":
+    "USER: <image>\nWhat is the season?\nASSISTANT:",
+})
 
-    Compatible with what llm entrypoint expects.
-    """
-    result = {}
-    for field in fields(vision_language_config):
-        value = getattr(vision_language_config, field.name)
-        if isinstance(value, Enum):
-            result[field.name] = value.name.lower()
-        elif isinstance(value, tuple):
-            result[field.name] = ",".join([str(item) for item in value])
-        else:
-            result[field.name] = value
-    return result
+IMAGE_TOKEN_ID = 32000
+
+models = ["llava-hf/llava-1.5-7b-hf"]
 
 
-def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
-                         vision_language_config: VisionLanguageConfig,
-                         model_id: str):
-    """Sanitize vllm output to be comparable with hf output.
-    The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
-    x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
-    It also reduces `output_str` from "<image><image>bla" to "bla".
-    """
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    image_token_str = tokenizer.decode(vision_language_config.image_token_id)
-    image_token_str_len = len(image_token_str)
-    input_ids, output_str = vllm_output
-    sanitized_input_ids = input_ids[0:2] + input_ids[2 + vision_language_config
-                                                     .image_feature_size - 1:]
-    sanitzied_output_str = output_str[vision_language_config.
-                                      image_feature_size *
-                                      image_token_str_len:]
-    return sanitized_input_ids, sanitzied_output_str
+def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+                                         Optional[SampleLogprobs]],
+                      model: str):
+    """Sanitize vllm output to be comparable with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+
+    hf_output_ids = [
+        token_id for idx, token_id in enumerate(output_ids)
+        if token_id != IMAGE_TOKEN_ID or output_ids[idx - 1] != IMAGE_TOKEN_ID
+    ]
+
+    assert output_str[0] == " "
+    hf_output_str = output_str[1:]
+    if hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+
+    return hf_output_ids, hf_output_str, out_logprobs
 
 
-@pytest.mark.parametrize("worker_use_ray", [False])
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
-                vllm_image_prompts, vllm_images, model_and_config: tuple,
-                dtype: str, max_tokens: int, worker_use_ray: bool) -> None:
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    size_factors: List[float],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
-    For huggingface runner, we provide the raw images as input.
-    For vllm runner, we provide image tensors and corresponding
-    vision language config as input.
+    For huggingface runner, we provide the PIL images as input.
+    For vllm runner, we provide MultiModalDataDict objects 
+    and corresponding vision language config as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    model_id, vision_language_config = model_and_config
-    hf_model = hf_runner(model_id, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(hf_image_prompts,
-                                          max_tokens,
-                                          images=hf_images)
-    del hf_model
+    images = [asset.pil_image for asset in image_assets]
 
-    vllm_model = vllm_runner(model_id,
-                             dtype=dtype,
-                             worker_use_ray=worker_use_ray,
-                             **as_dict(vision_language_config))
-    vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                              max_tokens,
-                                              images=vllm_images)
-    del vllm_model
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
-    gc.collect()
-    torch.cuda.empty_cache()
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
 
-    for i in range(len(hf_image_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = sanitize_vllm_output(
-            vllm_outputs[i], vision_language_config, model_id)
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    # max_model_len should be greater than image_feature_size
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
+        vllm_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
+        hf_outputs_per_image = [
+            hf_model.generate_greedy_logprobs_limit(prompts,
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
+                                        vllm_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=[
+                vllm_to_hf_output(vllm_output, model)
+                for vllm_output in vllm_outputs
+            ],
+            name_0="hf",
+            name_1="vllm",
+        )
+
+
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # No image
+        [],
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ],
+)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+                dtype: str, max_tokens: int, num_logprobs: int) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model,
+        size_factors=size_factors,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )

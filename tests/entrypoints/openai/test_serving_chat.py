@@ -1,14 +1,10 @@
 import asyncio
 from dataclasses import dataclass
 
-import pytest
-
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 
 MODEL_NAME = "openai-community/gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
-
-pytestmark = pytest.mark.openai
 
 
 @dataclass
@@ -42,5 +38,4 @@ async def _async_serving_chat_init():
 
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
-    assert serving_completion.tokenizer is not None
-    assert serving_completion.tokenizer.chat_template == CHAT_TEMPLATE
+    assert serving_completion.chat_template == CHAT_TEMPLATE

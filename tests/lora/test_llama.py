@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 import ray
 
@@ -9,7 +11,7 @@ from .conftest import cleanup
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 
-def do_sample(llm, lora_path: str, lora_id: int):
+def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     prompts = [
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
@@ -27,7 +29,7 @@ def do_sample(llm, lora_path: str, lora_id: int):
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts = []
+    generated_texts: List[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
@@ -36,11 +38,10 @@ def do_sample(llm, lora_path: str, lora_id: int):
     return generated_texts
 
 
-@pytest.mark.parametrize("tp_size", [1])
-def test_llama_lora(sql_lora_files, tp_size):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < tp_size:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_llama_lora(sql_lora_files, tp_size, num_gpus_available):
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
@@ -80,11 +81,9 @@ def test_llama_lora(sql_lora_files, tp_size):
     print("removing lora")
 
 
-@pytest.mark.skip("Requires multiple GPUs")
-def test_llama_tensor_parallel_equality(sql_lora_files):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < 4:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
+def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
+    if num_gpus_available < 4:
+        pytest.skip("Not enough GPUs for tensor parallelism 4")
 
     llm_tp1 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
