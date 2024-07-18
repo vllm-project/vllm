@@ -113,7 +113,8 @@ def apply_fp8_linear(
     #   If static, layer.input_scale is scalar and x_scale is input_scale.
 
     if cutlass_fp8_supported:
-        qinput, x_scale = ops.scaled_fp8_quant(input, input_scale,
+        qinput, x_scale = ops.scaled_fp8_quant(input,
+                                               input_scale,
                                                per_token=True)
 
         # Fused GEMM_DQ
