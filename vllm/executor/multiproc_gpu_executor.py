@@ -59,7 +59,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         assert world_size <= cuda_device_count, (
             f"please ensure that world_size ({world_size}) "
-            f"is less than than max local gpu count ({cuda_device_count}")
+            f"is less than than max local gpu count ({cuda_device_count})")
 
         error_on_invalid_device_count_status()
 

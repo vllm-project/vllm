@@ -1,7 +1,11 @@
+import os
+
 import pytest
 from transformers import AutoTokenizer
 
 from ..utils import RemoteOpenAIServer
+
+VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
 @pytest.mark.parametrize(
@@ -20,6 +24,10 @@ from ..utils import RemoteOpenAIServer
     ])
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
                     DIST_BACKEND):
+    if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
+        pytest.skip("Skipping multi-node pipeline parallel test for "
+                    "multiprocessing distributed backend")
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     pp_args = [
