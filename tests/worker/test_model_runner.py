@@ -240,11 +240,6 @@ def test_prepare_decode_cuda_graph(batch_size):
     torch.allclose(input_tokens, input_positions)
 
     # Verify Sampling
-    expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for _ in context_lens:
-        expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
         seq_lens,
@@ -253,7 +248,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         device=model_runner.device,
         pin_memory=model_runner.pin_memory)
     actual = sampling_metadata.selected_token_indices
-    expected = torch.tensor(expected_selected_token_indices,
+    expected = torch.arange(len(context_lens),
                             device=actual.device,
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)

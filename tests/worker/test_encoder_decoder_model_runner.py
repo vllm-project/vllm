@@ -258,13 +258,10 @@ def test_prepare_prompt(
     # each sequence) in the prefill phase
 
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for seq_len in seq_lens:
+    for idx, seq_len in enumerate(seq_lens):
         # Compute the index offset of the final token in each
         # prompt (recall that the prompts are concatenated)
-        expected_selected_token_indices.append(selected_token_start_idx +
-                                               seq_len - 1)
-        selected_token_start_idx += seq_len
+        expected_selected_token_indices.append(idx + seq_len - 1)
 
     sampling_metadata = model_input.sampling_metadata
     actual = sampling_metadata.selected_token_indices
@@ -464,17 +461,15 @@ def test_prepare_decode(
     # each sequence) in the decode phase
 
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for seq_len in seq_lens:
+    for idx in range(len(seq_lens)):
         # Compute the index offset of the final token in each
         # sequence's decoded outputs; since a single token is
         # decoded per iteration per sequence, then the length
         # of the decoded tokens for a given sequence is 1 and
         # the final index offset into a given sequence's
         # generated tokens is 0 (i.e. the expected sampling index
-        # for a given sequence is just `selected_token_start_idx`)
-        expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
+        # for a given sequence is just `idx`)
+        expected_selected_token_indices.append(idx)
 
     sampling_metadata = model_input.sampling_metadata
     actual = sampling_metadata.selected_token_indices
