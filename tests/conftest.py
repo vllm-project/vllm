@@ -21,7 +21,8 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.sequence import SampleLogprobs
-from vllm.utils import cuda_device_count_stateless, is_cpu
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
+                        is_cpu)
 
 logger = init_logger(__name__)
 
@@ -124,12 +125,6 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-}
-
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
 
@@ -151,8 +146,7 @@ class HfRunner:
         is_vision_model: bool = False,
         is_sparseml_model: bool = False,
     ) -> None:
-        assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
 
