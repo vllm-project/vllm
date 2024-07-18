@@ -23,16 +23,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.is_static_input_scheme = is_static_input_scheme
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
-        # On Lovelace, fail for now if channelwise.
-        # TODO: (@tms) fallback
-        if (not self.cutlass_fp8_supported
-                and self.strategy == QuantizationStrategy.CHANNEL):
-            raise ValueError(
-                "Channelwise fp8 quantization requires vLLM's custom "
-                "cutlass kernels, which are not supported on your device."
-                "Consider quantizing with per tensor scales or upgrading "
-                "to Hopper.")
-
     def get_min_capability(self) -> int:
         # lovelace and up
         return 89
@@ -53,7 +43,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.strategy == QuantizationStrategy.CHANNEL:
-            assert self.cutlass_fp8_supported
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
 
