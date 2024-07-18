@@ -27,6 +27,12 @@ class Fp8RocmConfig(QuantizationConfig):
         self._tuned = {}
         gemm_type = os.getenv("FP8_GEMM", "fp8_16")
         vllm_ops.create_workspace()
+
+        self.shapes = []
+        if os.getenv("TUNE_FP8") == "1" and os.path.isfile(
+                "/tmp/fp8_shapes.csv"):
+            self.shapes = pd.read_csv("/tmp/fp8_shapes.csv").values.tolist()
+
         if gemm_type == "fp8_8":
             self.gemm_method = Fp8RocmLinearMethod.apply_fp8_8
             tuned_filename = "/tmp/tuned_fp8_8.csv"
@@ -81,6 +87,12 @@ class Fp8RocmConfig(QuantizationConfig):
 
     def get_scaled_act_names(self) -> List[str]:
         return []
+
+    def save_shape(self, m, n, k):
+        if os.getenv("TUNE_FP8") == "1" and [m, n, k] not in self.shapes:
+            self.shapes.append([m, n, k])
+            df = pd.DataFrame(self.shapes, columns=["M", "N", "K"])
+            df.to_csv("/tmp/fp8_shapes.csv", index=False)
 
 
 class Fp8RocmLinearMethod(LinearMethodBase):
@@ -227,7 +239,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
 
         algo = self._config._tuned.get((m, n, k))
         if algo is None:
-            _save_shape(m, n, k)
+            self._config.save_shape(m, n, k)
             res, _ = torch._scaled_mm(x8,
                                       weight.t(),
                                       out_dtype=x.dtype,
@@ -256,7 +268,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
 
         algo = self._config._tuned.get((m, n, k))
         if algo is None:
-            _save_shape(m, n, k)
+            self._config.save_shape(m, n, k)
             res, _ = torch._scaled_mm(x8,
                                       weight.t(),
                                       out_dtype=x8.dtype,
@@ -298,17 +310,3 @@ def _per_tensor_dequantize(tensor: torch.Tensor,
     fake_qweight = tensor.to(torch.float16)
     dq_weight = fake_qweight * inv_scale
     return dq_weight
-
-
-def _save_shape(m, n, k):
-    if os.getenv("TUNE_FP8") == "1":
-        try:
-            df = pd.read_csv("/tmp/fp8_shapes.csv")
-        except (IOError, pd.errors.EmptyDataError, pd.errors.ParserError):
-            df = pd.DataFrame(columns=["M", "N", "K"])
-        df = pd.concat([df, pd.DataFrame({
-            "M": [m],
-            "N": [n],
-            "K": [k]
-        })]).drop_duplicates()
-        df.to_csv("/tmp/fp8_shapes.csv", index=False)
