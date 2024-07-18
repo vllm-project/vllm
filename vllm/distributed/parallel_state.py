@@ -22,6 +22,7 @@ If you only need to use the distributed environment without model/pipeline
 """
 import contextlib
 import pickle
+import logging
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -793,6 +794,13 @@ def graph_capture():
 
 
 logger = init_logger(__name__)
+if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+    # disaggregated prefill enabled
+    # indicating if the current instance is prefill or decode
+    class CustomAdapter(logging.LoggerAdapter):
+        def process(self, msg, kwargs):
+            return f"[{envs.VLLM_DISAGG_PREFILL_ROLE}] {msg}", kwargs
+    logger = CustomAdapter(logger)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
@@ -942,11 +950,8 @@ def initialize_model_parallel(
         get_world_group().device_group)        
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
         # Keep the semantics of world_size the same (`tp * pp`)
-        logger.debug("Disaggregated prefill enabled")
+        logger.debug("Disaggregated prefill enabled, the world size obtained from torch.distributed (2 * tp * pp) should be decreased to align with vLLM world size (tp * pp)")
         world_size = world_size // 2
-        logger.debug("Shrink the world size from %d to %d",
-                     world_size * 2,
-                     world_size)
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
