@@ -119,9 +119,10 @@ class ShmRingBuffer:
         )
 
     def __del__(self):
-        self.shared_memory.close()
-        if self.is_creator:
-            self.shared_memory.unlink()
+        if hasattr(self, "shared_memory"):
+            self.shared_memory.close()
+            if self.is_creator:
+                self.shared_memory.unlink()
 
     @contextmanager
     def get_data(self, current_idx: int):
@@ -428,7 +429,6 @@ class MessageQueue:
 
     def dequeue(self):
         if self._is_local_reader:
-            overflow = False
             with self.acquire_read() as buf:
                 overflow = buf[0] == 1
                 if not overflow:
