@@ -37,9 +37,7 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
         "--dtype",
         "bfloat16",
         "--tensor-parallel-size",
-        # Use the same number or at most 8 GPUs to hold the model.
-        # In this test we assume the model can fit in 8 GPUs.
-        str(min(TP_SIZE * PP_SIZE, 8)),
+        str(max(TP_SIZE, 2)),  # We only use 2 GPUs in the CI.
         "--distributed-executor-backend",
         "mp",
     ]
