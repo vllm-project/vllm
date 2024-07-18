@@ -13,7 +13,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
-    QuantizationType, find_matched_target, should_ignore_layer)
+    QuantizationType, is_activation_quantization_format, 
+    find_matched_target, should_ignore_layer)
 from vllm.platforms import current_platform
 
 
@@ -38,7 +39,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        return 70
 
     def get_name(self) -> str:
         return "compressed_tensors"
@@ -86,13 +87,14 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
-    def _check_gptq_and_marlin_can_run(self):
+    def _check_scheme_supported(self, min_capability: int):
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        if capability < 80:
-            raise RuntimeError("The quantization config is not supported for ",
-                               "the current GPU. Minimum capability: 80. ",
-                               f"Current capability: {capability}.")
+        if capability < min_capability:
+            raise RuntimeError(
+                "Quantization scheme is not supported for ",
+                f"the current GPU. Min capability: {min_capability}. ",
+                f"Current capability: {capability}.")
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -134,10 +136,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Confirm weight scheme is supported.
         is_symmetric_weight = weight_quant.symmetric
         is_static_weight = not weight_quant.dynamic
-        is_per_tensor_weight = (
-            weight_quant.strategy == QuantizationStrategy.TENSOR)
+        is_per_tensor_or_channel_weight = (weight_quant.strategy in [
+            QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
+        ])
         if not (is_symmetric_weight and is_static_weight
-                and is_per_tensor_weight):
+                and is_per_tensor_or_channel_weight):
             return False
 
         # Dynamic quantization is always supported if weights supported.
@@ -170,8 +173,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             self, weight_quant: BaseModel,
             input_quant: BaseModel) -> "CompressedTensorsScheme":
 
+        # Detect If Mixed Precision
         if self._is_wNa16_group_channel(weight_quant, input_quant):
-            self._check_gptq_and_marlin_can_run()
             if (self.quant_format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
                 return CompressedTensorsW4A16Sparse24(
@@ -185,13 +188,12 @@ class CompressedTensorsConfig(QuantizationConfig):
                     strategy=weight_quant.strategy,
                     group_size=weight_quant.group_size)
 
-        if (self.quant_format == CompressionFormat.int_quantized.value
-                or self.quant_format == CompressionFormat.float_quantized.value
-                or self.quant_format
-                == CompressionFormat.naive_quantized.value):
+        # Detect If Activation Quantization.
+        if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Fp8(
-                    input_dynamic=input_quant.dynamic)
+                    strategy=weight_quant.strategy,
+                    is_static_input_scheme=(not input_quant.dynamic))
 
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Int8(
@@ -247,6 +249,12 @@ class CompressedTensorsConfig(QuantizationConfig):
         return self._get_scheme_from_parts(
             weight_quant=scheme["weights"],
             input_quant=scheme["input_activations"])
+
+        # Raise error if device does not support the scheme
+        # (e.g. fp8 needs ada lovelace)
+        self._check_scheme_supported(scheme.get_min_capability())
+
+        return scheme
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):

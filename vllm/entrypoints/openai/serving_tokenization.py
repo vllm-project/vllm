@@ -9,7 +9,8 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 
 
 class OpenAIServingTokenization(OpenAIServing):
@@ -18,13 +19,15 @@ class OpenAIServingTokenization(OpenAIServing):
                  engine: AsyncLLMEngine,
                  model_config: ModelConfig,
                  served_model_names: List[str],
+                 lora_modules: Optional[List[LoRAModulePath]] = None,
                  chat_template: Optional[str] = None):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=None)
+                         lora_modules=lora_modules)
 
-        load_chat_template(self, chat_template)
+        # If this is None we use the tokenizer's default chat template
+        self.chat_template = load_chat_template(chat_template)
 
     async def create_tokenize(self,
                               request: TokenizeRequest) -> TokenizeResponse:
@@ -40,20 +43,25 @@ class OpenAIServingTokenization(OpenAIServing):
             return self.create_error_response(
                 "Only one of `prompt` or `messages` should be provided.")
 
+        _, lora_request = self._maybe_get_adapter(request)
+        tokenizer = await self.engine.get_tokenizer(lora_request)
         if request.messages:
             conversation: List[ConversationMessage] = []
 
             for message in request.messages:
-                conversation.extend(
-                    parse_chat_message_content(self, message).messages)
+                result = parse_chat_message_content(message, self.model_config,
+                                                    tokenizer)
+                conversation.extend(result.messages)
 
-            request.prompt = self.tokenizer.apply_chat_template(
+            request.prompt = tokenizer.apply_chat_template(
                 add_generation_prompt=request.add_generation_prompt,
                 conversation=conversation,
-                tokenize=False)
+                tokenize=False,
+                chat_template=self.chat_template)
 
-        (input_ids, input_text) = self._validate_prompt_and_tokenize(
+        (input_ids, input_text) = await self._validate_prompt_and_tokenize(
             request,
+            tokenizer,
             prompt=request.prompt,
             add_special_tokens=request.add_special_tokens)
 
@@ -67,7 +75,9 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        (input_ids, input_text) = self._validate_prompt_and_tokenize(
-            request, prompt_ids=request.tokens)
+        _, lora_request = self._maybe_get_adapter(request)
+        tokenizer = await self.engine.get_tokenizer(lora_request)
+        (input_ids, input_text) = await self._validate_prompt_and_tokenize(
+            request, tokenizer, prompt_ids=request.tokens)
 
         return DetokenizeResponse(prompt=input_text)

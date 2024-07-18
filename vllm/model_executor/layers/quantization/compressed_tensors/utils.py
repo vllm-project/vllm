@@ -77,6 +77,24 @@ class QuantizationArgs(BaseModel):
     )
 
 
+def is_activation_quantization_format(format: str) -> bool:
+    _ACTIVATION_QUANTIZATION_FORMATS = [
+        CompressionFormat.naive_quantized.value,
+        CompressionFormat.int_quantized.value,
+        CompressionFormat.float_quantized.value
+    ]
+    return format in _ACTIVATION_QUANTIZATION_FORMATS
+
+
+def is_activation_quantization_format(format: str) -> bool:
+    _ACTIVATION_QUANTIZATION_FORMATS = [
+        CompressionFormat.naive_quantized.value,
+        CompressionFormat.int_quantized.value,
+        CompressionFormat.float_quantized.value
+    ]
+    return format in _ACTIVATION_QUANTIZATION_FORMATS
+
+
 # fused_name: List[shard_name]
 _FUSED_LAYER_NAME_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],

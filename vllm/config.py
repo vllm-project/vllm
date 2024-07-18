@@ -34,6 +34,7 @@ _PP_SUPPORTED_MODELS = [
     "MistralForCausalLM",
     "Phi3ForCausalLM",
     "GPT2LMHeadModel",
+    "MixtralForCausalLM",
 ]
 
 
@@ -237,7 +238,8 @@ class ModelConfig:
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
             if (self.quantization
-                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin")):
+                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin",
+                            "compressed_tensors")):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -431,6 +433,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        cpu_offload_gb: float = 0,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -439,6 +442,7 @@ class CacheConfig:
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.cpu_offload_gb = cpu_offload_gb
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
