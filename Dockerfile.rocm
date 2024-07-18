@@ -43,7 +43,7 @@ RUN apt-get update && apt-get install -y \
 ARG APP_MOUNT=/vllm-workspace
 WORKDIR ${APP_MOUNT}
 
-RUN pip install --upgrade pip
+RUN python3 -m pip install --upgrade pip
 # Remove sccache so it doesn't interfere with ccache
 # TODO: implement sccache support across components
 RUN apt-get purge -y sccache; pip uninstall -y sccache; rm -f "$(which sccache)"
@@ -137,7 +137,7 @@ ENV TOKENIZERS_PARALLELISM=false
 
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     --mount=type=cache,target=/root/.cache/pip \
-    pip install -U -r requirements-rocm.txt \
+    pip install -Ur requirements-rocm.txt \
     && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-6.1"*) \
             # Bring in upgrades to HIP graph earlier than ROCm 6.2 for vLLM
