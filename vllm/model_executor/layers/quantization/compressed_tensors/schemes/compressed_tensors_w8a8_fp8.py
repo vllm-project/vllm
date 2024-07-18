@@ -33,6 +33,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 "Consider quantizing with per tensor scales or upgrading "
                 "to Hopper.")
 
+    def get_min_capability(self) -> int:
+        # lovelace and up
+        return 89
+
     def process_weights_after_loading(self, layer) -> None:
         # If per tensor, when we have a fused module (e.g. QKV) with per
         # tensor scales (thus N scales being passed to the kernel),
