@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple
 
 import torch
+import numpy
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
@@ -136,6 +137,25 @@ def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
+
+
+def marlin_permute_zp(zp: torch.Tensor, size_k: int, size_n: int,
+                      group_size: int, num_bits: int) -> torch.Tensor:
+    zp = marlin_permute_scales(zp, size_k, size_n, group_size)
+
+    # Zero-points are packed on column dim
+    if num_bits == 4:
+        interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
+    elif num_bits == 8:
+        interleave = numpy.array([0, 2, 1, 3])
+    else:
+        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+
+    zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
+
+    zp = zp.reshape((-1, size_n)).contiguous()
+
+    return zp
 
 
 # Newly generated tensors need to replace existing tensors that are

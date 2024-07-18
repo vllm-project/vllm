@@ -5,7 +5,7 @@ from typing import List
 import numpy
 import torch
 
-from .marlin_utils import GPTQ_MARLIN_TILE, marlin_permute_scales
+from .marlin_utils import GPTQ_MARLIN_TILE, marlin_permute_scales, marlin_permute_zp
 from .quant_utils import (get_pack_factor, quantize_weights,
                           quantize_weights_with_zp, sort_weights, pack_cols)
 
@@ -136,7 +136,7 @@ def awq_marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int):
     weight_perm = get_weight_perm(num_bits)
     marlin_q_w = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
     marlin_s = marlin_permute_scales(s, size_k, size_n, group_size)
-    marlin_zp = marlin_permute_scales(zp, size_k, size_n, group_size)
+    marlin_zp = marlin_permute_zp(zp, size_k, size_n, group_size, num_bits)
     marlin_zp = pack_cols(marlin_zp)
 
     # Create result

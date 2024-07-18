@@ -264,6 +264,120 @@ dequant_8bit<nv_bfloat16>(int q) {
   return frag_b;
 }
 
+template <typename scalar_t>
+__device__ inline typename ScalarType<scalar_t>::TileZP dequantize_s4_to_fp16x2(
+    uint32_t const& source) {
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+}
+
+template <>
+__device__ inline typename ScalarType<half>::TileZP
+dequantize_s4_to_fp16x2<half>(uint32_t const& source) {
+  typename ScalarType<half>::TileZP result;
+
+  uint32_t* h = reinterpret_cast<uint32_t*>(&result);
+  uint32_t const i4s = reinterpret_cast<uint32_t const&>(source);
+
+  // First, we extract the i4s and construct an intermediate fp16 number.
+  static constexpr uint32_t immLut = (0xf0 & 0xcc) | 0xaa;
+  static constexpr uint32_t BOTTOM_MASK = 0x000f000f;
+  static constexpr uint32_t TOP_MASK = 0x00f000f0;
+  static constexpr uint32_t I4s_TO_F16s_MAGIC_NUM = 0x64006400;
+
+  // Note that the entire sequence only requires 1 shift instruction. This is
+  // thanks to the register packing format and the fact that we force our
+  // integers to be unsigned, and account for this in the fp16 subtractions. In
+  // addition, I exploit the fact that sub and fma have the same throughput in
+  // order to convert elt_23 and elt_67 to fp16 without having to shift them to
+  // the bottom bits before hand.
+
+  // Shift right by 8 to now consider elt_45 and elt_67. Issue first to hide RAW
+  // dependency if we issue immediately before required.
+  const uint32_t top_i4s = i4s >> 8;
+  // Extract elt_01 - (i4s & 0x000f000f) | 0x64006400
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[0])
+               : "r"(i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+  // Extract elt_23 (i4s & 0x00f000f0) | 0x64006400
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[1])
+               : "r"(i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+  // Extract elt_45 (top_i4s & 0x000f000f) | 0x64006400
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[2])
+               : "r"(top_i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+  // Extract elt_67 (top_i4s & 0x00f000f0) | 0x64006400
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[3])
+               : "r"(top_i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+
+  // I use inline PTX below because I am not sure if the compiler will emit
+  // float2half instructions if I use the half2 ctor. In this case, I chose
+  // performance reliability over code readability.
+
+  // This is the half2 {1032, 1032} represented as an integer.
+  // static constexpr uint32_t FP16_TOP_MAGIC_NUM = 0x64086408;
+  // Haotian: subtract {1024, 1024} instead, we do not need to map to [-8, 7]
+  static constexpr uint32_t FP16_TOP_MAGIC_NUM = 0x64006400;
+  // This is the half2 {1 / 16, 1 / 16} represented as an integer.
+  static constexpr uint32_t ONE_SIXTEENTH = 0x2c002c00;
+  // This is the half2 {-72, -72} represented as an integer.
+  // static constexpr uint32_t NEG_72 = 0xd480d480;
+  // Haotian: Let's use {-64, -64}.
+  static constexpr uint32_t NEG_64 = 0xd400d400;
+
+  // Finally, we construct the output numbers.
+  // Convert elt_01
+  asm volatile("sub.f16x2 %0, %1, %2;\n"
+               : "=r"(h[0])
+               : "r"(h[0]), "r"(FP16_TOP_MAGIC_NUM));
+  // Convert elt_23
+  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
+               : "=r"(h[1])
+               : "r"(h[1]), "r"(ONE_SIXTEENTH), "r"(NEG_64));
+  // Convert elt_45
+  asm volatile("sub.f16x2 %0, %1, %2;\n"
+               : "=r"(h[2])
+               : "r"(h[2]), "r"(FP16_TOP_MAGIC_NUM));
+  // Convert elt_67
+  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
+               : "=r"(h[3])
+               : "r"(h[3]), "r"(ONE_SIXTEENTH), "r"(NEG_64));
+
+  return result;
+}
+
+template <typename scalar_t>
+__device__ inline typename ScalarType<scalar_t>::FragB dequant_4bit_zp(int q) {
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+}
+
+template <>
+__device__ inline typename ScalarType<half>::FragB dequant_4bit_zp<half>(
+    int q) {
+  const int LO = 0x000f000f;
+  const int HI = 0x00f000f0;
+  const int EX = 0x64006400;
+  // Guarantee that the `(a & b) | c` operations are LOP3s.
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+
+  const int SUB = 0x64006400;
+  const int MUL = 0x2c002c00;
+  const int ADD = 0xd400d400;
+  typename ScalarType<half>::FragB frag_b;
+  frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
+                      *reinterpret_cast<const half2*>(&SUB));
+  frag_b[1] = __hfma2(*reinterpret_cast<half2*>(&hi),
+                      *reinterpret_cast<const half2*>(&MUL),
+                      *reinterpret_cast<const half2*>(&ADD));
+  return frag_b;
+}
+
 // Multiply dequantized values by the corresponding quantization scale; used
 // only for grouped quantization.
 template <typename scalar_t>
@@ -275,6 +389,17 @@ __device__ inline void scale(typename ScalarType<scalar_t>::FragB& frag_b,
       ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
   frag_b[1] = __hmul2(frag_b[1], s);
+}
+
+template <typename scalar_t>
+__device__ inline void sub_zp(typename ScalarType<scalar_t>::FragB& frag_b,
+                              typename ScalarType<scalar_t>::FragZP& frag_zp,
+                              int i) {
+  using scalar_t2 = typename ScalarType<scalar_t>::scalar_t2;
+  scalar_t2 s =
+      ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_zp)[i]);
+  frag_b[0] = __hsub2(frag_b[0], s);
+  frag_b[1] = __hsub2(frag_b[1], s);
 }
 
 // Same as above, but for act_order (each K is multiplied individually)
@@ -440,7 +565,8 @@ __global__ void Marlin(
   using FragB = typename ScalarType<scalar_t>::FragB;
   using FragC = typename ScalarType<scalar_t>::FragC;
   using FragS = typename ScalarType<scalar_t>::FragS;
-  using FragZ = typename ScalarType<scalar_t>::FragZ;
+  using TileZP = typename ScalarType<scalar_t>::TileZP;
+  using FragZP = typename ScalarType<scalar_t>::FragZP;
 
   constexpr int pack_factor = 32 / num_bits;
 
@@ -705,7 +831,8 @@ __global__ void Marlin(
   FragC frag_c[thread_m_blocks][4][2];
   FragS frag_s[2][4];         // No act-order
   FragS act_frag_s[2][4][4];  // For act-order
-  FragZ frag_zp[2];           // Zero-points
+  int frag_zp[2];             // Zero-points
+  TileZP tile_zps;            // Zero-points in fp16
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -1026,6 +1153,10 @@ __global__ void Marlin(
 
   // Execute the actual tensor core matmul of a sub-tile.
   auto matmul = [&](int k) {
+    if constexpr (has_zp) {
+      tile_zps = dequantize_s4_to_fp16x2<scalar_t>(frag_zp[k % 2]);
+    }
+
   // We have the m dimension as the inner loop in order to encourage overlapping
   // dequantization and matmul operations.
   #pragma unroll
@@ -1036,8 +1167,14 @@ __global__ void Marlin(
         int b_quant = frag_b_quant[k % 2][0][j];
         int b_quant_shift = b_quant >> 8;
 
-        frag_b0 = dequant_4bit<scalar_t>(b_quant);
-        frag_b1 = dequant_4bit<scalar_t>(b_quant_shift);
+        if constexpr (has_zp) {
+          frag_b0 = dequant_4bit_zp<scalar_t>(b_quant);
+          frag_b1 = dequant_4bit_zp<scalar_t>(b_quant_shift);
+
+        } else {
+          frag_b0 = dequant_4bit<scalar_t>(b_quant);
+          frag_b1 = dequant_4bit<scalar_t>(b_quant_shift);
+        }
 
       } else {
         int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k % 2]);
@@ -1046,6 +1183,11 @@ __global__ void Marlin(
 
         frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
         frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
+      }
+
+      // Apply zero-point to frag_b0
+      if constexpr (has_zp) {
+        sub_zp<scalar_t>(frag_b0, tile_zps[j], 0);
       }
 
       // Apply scale to frag_b0
@@ -1057,6 +1199,11 @@ __global__ void Marlin(
         if constexpr (group_blocks != -1) {
           scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
         }
+      }
+
+      // Apply zero-point to frag_b1
+      if constexpr (has_zp) {
+        sub_zp<scalar_t>(frag_b1, tile_zps[j], 1);
       }
 
       // Apply scale to frag_b1
@@ -1448,6 +1595,7 @@ __global__ void Marlin(
 
         } else {
           s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
+          zp_gl_rd = zp_sh_stride * slice_col + threadIdx.x;
         }
 
         start_pipes();

@@ -23,7 +23,8 @@ class ScalarType<half> {
   using FragB = Vec<half2, 2>;
   using FragC = Vec<float, 4>;
   using FragS = Vec<half2, 1>;
-  using FragZ = Vec<int, 1>;
+  using TileZP = Vec<half2, 4>;
+  using FragZP = Vec<half2, 1>;
 
   static __device__ float inline num2float(const half x) {
     return __half2float(x);
@@ -52,7 +53,8 @@ class ScalarType<nv_bfloat16> {
   using FragB = Vec<nv_bfloat162, 2>;
   using FragC = Vec<float, 4>;
   using FragS = Vec<nv_bfloat162, 1>;
-  using FragZ = Vec<int, 1>;
+  using FragQZ = Vec<int, 1>;
+  using FragZ = Vec<nv_bfloat162, 4>;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   static __device__ float inline num2float(const nv_bfloat16 x) {
