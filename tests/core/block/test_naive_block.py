@@ -14,11 +14,11 @@ class TestNaiveBlockAllocator:
                                prev_block: Optional[Block],
                                token_ids: List[int]):
         if allocate_type == "immutable":
-            allocate_block = lambda: allocator.allocate_immutable(
+            allocate_block = lambda: allocator.allocate_immutable_block(
                 prev_block=prev_block, token_ids=token_ids)
         elif allocate_type == "mutable":
-            allocate_block = lambda: allocator.allocate_mutable(prev_block=
-                                                                prev_block)
+            allocate_block = lambda: allocator.allocate_mutable_block(
+                prev_block=prev_block)
         else:
             raise ValueError()
 

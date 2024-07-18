@@ -1,13 +1,7 @@
 """An example showing how to use vLLM to serve VLMs.
 
 Launch the vLLM server with the following command:
-python -m vllm.entrypoints.openai.api_server \
-    --model llava-hf/llava-1.5-7b-hf \
-    --image-input-type pixel_values \
-    --image-token-id 32000 \
-    --image-input-shape 1,3,336,336 \
-    --image-feature-size 576 \
-    --chat-template template_llava.jinja
+vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 """
 import base64
 

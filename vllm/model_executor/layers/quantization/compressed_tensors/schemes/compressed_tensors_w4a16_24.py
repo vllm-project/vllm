@@ -29,6 +29,10 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
             raise ValueError(
                 "group_size must be given when using strategy group")
 
+    def get_min_capability(self) -> int:
+        # ampere + up
+        return 80
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
@@ -118,7 +122,9 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                               requires_grad=False)
         layer.workspace = workspace
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
+                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+
         qweight = layer.weight_packed
         meta = layer.meta
         scales = layer.scale_packed
@@ -135,4 +141,8 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                                             size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
+
+        if bias is not None:
+            output.add_(bias)  # In-place add
+
         return output

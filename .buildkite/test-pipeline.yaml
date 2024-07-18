@@ -7,8 +7,32 @@
 
 
 steps:
+- label: Async Engine, Inputs, Utils, Worker Test
+  fast_check: true
+  fast_check_only: true
+  commands:
+  - pytest -v -s async_engine # Async Engine
+  - pytest -v -s test_inputs.py
+  - pytest -v -s multimodal
+  - pytest -v -s test_utils.py # Utils
+  - pytest -v -s worker # Worker
+
+- label: Tensorizer, Metrics, Tracing Test
+  fast_check: true
+  fast_check_only: true
+  commands:
+  - apt-get install curl libsodium23 && pytest -v -s tensorizer_loader # Tensorizer
+  - pytest -v -s metrics # Metrics
+  - "pip install \
+      opentelemetry-sdk \
+      opentelemetry-api \
+      opentelemetry-exporter-otlp \
+      opentelemetry-semantic-conventions-ai" # Tracing
+  - pytest -v -s tracing
+
 - label: Regression Test
   mirror_hardwares: [amd]
+  fast_check: true
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -18,15 +42,17 @@ steps:
 
 - label: Basic Correctness Test
   mirror_hardwares: [amd]
+  fast_check: true
   commands:
-  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
+  - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
+  - pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Core Test
   mirror_hardwares: [amd]
+  fast_check: true
   commands: 
   - pytest -v -s core
   - pytest -v -s distributed/test_parallel_state.py
@@ -39,15 +65,27 @@ steps:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
+- label: 2 Node Tests (4 GPUs in total)
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  num_nodes: 2
+  commands:
+  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+    - pytest -v -s distributed/test_pipeline_parallel.py
+  - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+
 - label: Distributed Tests (2 GPUs)
   mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   commands:
-  - bash ../.buildkite/download-images.sh
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray VLLM_USE_RAY_SPMD_WORKER=1 VLLM_USE_RAY_COMPILED_DAG=1 pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray VLLM_USE_RAY_SPMD_WORKER=1 VLLM_USE_RAY_COMPILED_DAG=1 pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_multimodal_broadcast.py
@@ -66,19 +104,31 @@ steps:
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  fast_check: true
   commands:
   - pytest -v -s distributed/test_pynccl.py
   # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
   # See https://github.com/vllm-project/vllm/pull/5473#issuecomment-2166601837 for context.
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray VLLM_USE_RAY_SPMD_WORKER=1 VLLM_USE_RAY_COMPILED_DAG=1 pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
+- label: Pipeline Parallelism Test
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  commands:
+  - pytest -v -s distributed/test_pipeline_parallel.py
+
 - label: Engine Test
   mirror_hardwares: [amd]
-  command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
+  commands: 
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  # OOM in the CI unless we run this separately
+  - pytest -v -s tokenization
 
 - label: Entrypoints Test
+  fast_check: true
   mirror_hardwares: [amd]
 
   commands:
@@ -93,6 +143,7 @@ steps:
     # install tensorizer for tensorize_vllm_model.py
     - pip install awscli tensorizer
     - python3 offline_inference.py
+    - python3 cpu_offload.py
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
     - python3 llava_example.py
@@ -101,24 +152,25 @@ steps:
 - label: Inputs Test
   #mirror_hardwares: [amd]
   commands:
-    - bash ../.buildkite/download-images.sh
     - pytest -v -s test_inputs.py
     - pytest -v -s multimodal
 
 - label: Kernels Test %N
   #mirror_hardwares: [amd]
-  command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  commands:
+    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
+    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Models Test
   #mirror_hardwares: [amd]
   commands:
+    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
     - pytest -v -s models -m \"not vlm\"
 
 - label: Vision Language Models Test
   mirror_hardwares: [amd]
   commands:
-    - bash ../.buildkite/download-images.sh
     - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
@@ -135,7 +187,9 @@ steps:
   command: pytest -v -s test_logits_processor.py
 
 - label: Utils Test
-  command: pytest -v -s test_utils.py
+  commands:
+    - pytest -v -s test_utils.py
+    - pytest -v -s test_embedded_commit.py
 
 - label: Worker Test
   mirror_hardwares: [amd]
@@ -165,7 +219,10 @@ steps:
 
 - label: Tensorizer Test
   #mirror_hardwares: [amd]
-  command: apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
+  commands:
+    - apt-get install curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s tensorizer_loader
 
 - label: Metrics Test
   mirror_hardwares: [amd]
@@ -209,6 +266,7 @@ steps:
 
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
+  fast_check: true
   no_gpu: True
   commands:
   - pip install -r requirements-docs.txt
@@ -223,7 +281,7 @@ steps:
   - pytest -v -s distributed/test_custom_all_reduce.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
-  - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.5/flashinfer-0.0.5+cu121torch2.3-cp310-cp310-linux_x86_64.whl
+  - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
   - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=meta-llama/Meta-Llama-3-8B DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - pytest -v -s -x lora/test_mixtral.py

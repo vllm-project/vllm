@@ -3,7 +3,6 @@ import base64
 import numpy as np
 import openai
 import pytest
-import ray
 
 from ...utils import RemoteOpenAIServer
 
@@ -11,17 +10,8 @@ EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init()
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def embedding_server(ray_ctx):
-    return RemoteOpenAIServer([
-        "--model",
-        EMBEDDING_MODEL_NAME,
+def embedding_server():
+    args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -29,7 +19,10 @@ def embedding_server(ray_ctx):
         "--max-model-len",
         "8192",
         "--enforce-eager",
-    ])
+    ]
+
+    with RemoteOpenAIServer(EMBEDDING_MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
 @pytest.mark.asyncio
