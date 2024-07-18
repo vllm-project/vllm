@@ -797,7 +797,7 @@ def get_rope(
         scaling_type = rope_scaling["type"]
         # The correct one should be "longrope" but keep "su" here
         # for backward compatible
-        if scaling_type != "su" and scaling_type != "longrope":
+        if not scaling_type in {"su", "longrope", "extended"}:
             scaling_factor = rope_scaling["factor"]
         if scaling_type == "extended":
             rotary_emb = ExtendedRotaryEmbedding(head_size, rotary_dim,
