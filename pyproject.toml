@@ -43,6 +43,9 @@ ignore = [
     "B007",
 ]
 
+[tool.ruff.format]
+exclude = ["collect_env.py"]
+
 [tool.mypy]
 python_version = "3.8"
 
