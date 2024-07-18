@@ -733,6 +733,36 @@ class GemmaRotaryEmbedding(RotaryEmbedding):
         return inv_freq
 
 
+class ExtendedRotaryEmbedding(RotaryEmbedding):
+
+    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
+        inv_freqs = super()._compute_inv_freq(base)
+        return self.apply_scaling(inv_freqs)
+
+    def apply_scaling(self, freqs: torch.Tensor):
+        scale_factor = 8
+        low_freq_factor = 1
+        high_freq_factor = 4
+        old_context_len = 8192
+
+        low_freq_wavelen = old_context_len / low_freq_factor
+        high_freq_wavelen = old_context_len / high_freq_factor
+        new_freqs = []
+        for freq in freqs:
+            wavelen = 2 * math.pi / freq
+            if wavelen < high_freq_wavelen:
+                new_freqs.append(freq)
+            elif wavelen > low_freq_wavelen:
+                new_freqs.append(freq / scale_factor)
+            else:
+                assert low_freq_wavelen != high_freq_wavelen
+                smooth = (old_context_len / wavelen - low_freq_factor) / (
+                    high_freq_factor - low_freq_factor)
+                new_freqs.append((1 - smooth) * freq / scale_factor +
+                                 smooth * freq)
+        return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
+
+
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
 
 
@@ -761,6 +791,10 @@ def get_rope(
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
     if rope_scaling is None:
+        if max_position == 131072:
+            # Note(simon): this is a special case for a model that doesn't supply
+            # rope_scaling. We should remove this once the model is updated.
+            RotaryEmbedding = ExtendedRotaryEmbedding
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style, dtype)
     else:
