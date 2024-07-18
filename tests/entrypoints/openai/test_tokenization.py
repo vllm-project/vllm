@@ -14,26 +14,25 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 @pytest.fixture(scope="module")
 def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
-    with RemoteOpenAIServer([
-            "--model",
-            MODEL_NAME,
-            # use half precision for speed and memory savings in CI environment
-            "--dtype",
-            "bfloat16",
-            "--max-model-len",
-            "8192",
-            "--enforce-eager",
-            "--max-num-seqs",
-            "128",
-            # lora config
-            "--enable-lora",
-            "--lora-modules",
-            f"zephyr-lora2={zephyr_lora_added_tokens_files}",
-            "--max-lora-rank",
-            "64",
-    ]) as remote_server:
-        yield remote_server
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "128",
+        # lora config
+        "--enable-lora",
+        "--lora-modules",
+        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
+        "--max-lora-rank",
+        "64",
+    ]
 
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 @pytest.fixture(scope="module")
 def tokenizer_name(model_name: str,
