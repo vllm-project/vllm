@@ -20,6 +20,7 @@ If you only need to use the distributed environment without model/pipeline
  parallelism, you can skip the model parallel initialization and destruction
  steps.
 """
+import time
 import contextlib
 import pickle
 import logging
@@ -849,6 +850,8 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=maybe_disagg_world_size,
             rank=maybe_disagg_rank)
+        if envs.VLLM_DISAGG_PREFILL_ROLE == "decode":
+            time.sleep(60)
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -883,13 +886,10 @@ def offset_distributed_groups(
     """
     
     logger.debug("Offset distributed groups with offset %d", offset)
-    logger.debug("Before offset:\n%s", str(groups))
     
     new_groups = []
     for group in groups:
         new_groups.append([rank + offset for rank in group])
-
-    logger.debug("After offset:\n%s", str(new_groups))
         
     return new_groups
 
