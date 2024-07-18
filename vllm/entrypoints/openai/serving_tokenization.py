@@ -7,8 +7,7 @@ from vllm.entrypoints.openai.chat_utils import (ConversationMessage,
                                                 parse_chat_message_content)
 from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
-                                              ErrorResponse,
-                                              TokenizeRequest,
+                                              ErrorResponse, TokenizeRequest,
                                               TokenizeResponse)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
@@ -16,7 +15,8 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
 
 class OpenAIServingTokenization(OpenAIServing):
 
-    def __init__(self,
+    def __init__(
+        self,
         engine: AsyncLLMEngine,
         model_config: ModelConfig,
         served_model_names: List[str],
@@ -62,20 +62,22 @@ class OpenAIServingTokenization(OpenAIServing):
                                                     tokenizer)
                 conversation.extend(result.messages)
 
-            request.prompt = tokenizer.apply_chat_template(
+            prompt = tokenizer.apply_chat_template(
                 add_generation_prompt=request.add_generation_prompt,
                 conversation=conversation,
                 tokenize=False,
                 chat_template=self.chat_template)
+        else:
+            assert request.prompt is not None
+            prompt = request.prompt
 
         prompt_input = self._tokenize_prompt_input(
             request,
             tokenizer,
-            request.prompt,
+            prompt,
             add_special_tokens=request.add_special_tokens,
         )
         input_ids = prompt_input["prompt_token_ids"]
-
 
         return TokenizeResponse(tokens=input_ids,
                                 count=len(input_ids),

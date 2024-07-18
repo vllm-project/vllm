@@ -20,8 +20,8 @@ from vllm.inputs import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob
 
 logger = init_logger(__name__)

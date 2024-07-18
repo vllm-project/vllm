@@ -249,7 +249,8 @@ def run_server(args, llm_engine=None):
     global openai_serving_embedding
     global openai_serving_tokenization
 
-    openai_serving_chat = OpenAIServingChat(engine, model_config,
+    openai_serving_chat = OpenAIServingChat(engine,
+                                            model_config,
                                             served_model_names,
                                             args.response_role,
                                             args.lora_modules,
