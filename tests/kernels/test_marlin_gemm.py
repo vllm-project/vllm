@@ -28,19 +28,19 @@ ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
 MARLIN_K_CHUNKS = [256]
-# MARLIN_N_CHUNKS = [64, 128, 256]
-MARLIN_N_CHUNKS = [128]
+MARLIN_N_CHUNKS = [64, 128, 256]
+# MARLIN_N_CHUNKS = [128]
 
 MARLIN_24_K_CHUNKS = [128]
 MARLIN_24_N_CHUNKS = [512]
 
 MNK_FACTORS = [
     (1, 1, 1),
-    # (1, 4, 8),
-    # (1, 7, 5),
-    # (13, 17, 67),
-    # (26, 37, 13),
-    # (67, 13, 11),
+    (1, 4, 8),
+    (1, 7, 5),
+    (13, 17, 67),
+    (26, 37, 13),
+    (67, 13, 11),
 ]
 
 DTYPES = [torch.float16, torch.bfloat16]
