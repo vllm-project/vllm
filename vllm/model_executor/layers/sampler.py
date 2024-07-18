@@ -776,6 +776,8 @@ def _get_logprobs(
     # The largest requested number of logprobs. We find logprobs as many as the
     # largest num logprobs in this API.
     largest_num_logprobs = 0
+    # If beam search is enabled.
+    use_beam_search = False
 
     # Select indices to compute logprob from, ranks of token ids, and the top
     # k token ids from logprobs.
@@ -808,6 +810,8 @@ def _get_logprobs(
                 largest_num_logprobs = max(1, largest_num_logprobs,
                                            sampling_params.logprobs)
 
+            use_beam_search = use_beam_search or sampling_params.use_beam_search
+
         assert len(next_token_ids) == len(query_indices)
 
     if len(query_indices) == 0:
@@ -815,7 +819,10 @@ def _get_logprobs(
         empty_prompt_logprob: Optional[PromptLogprobs] = None
         return [empty_prompt_logprob], [empty_sampled_logprob]
 
-    if largest_num_logprobs > 0:
+    selected_logprobs, ranks = None, None
+    top_logprobs, top_token_ids = None, None
+
+    if largest_num_logprobs > 0 or use_beam_search:
         query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
         next_token_ids_gpu = torch.tensor(next_token_ids,
                                           device=logprobs.device)
@@ -832,22 +839,17 @@ def _get_logprobs(
         )
         assert selected_logprobs.shape[0] == ranks.shape[0]
 
-        # Logprobs of topk tokens for a batch of sequence groups.
-        # (num_query_tokens_across_batch).
-        top_logprobs, top_token_ids = torch.topk(logprobs,
-                                                 largest_num_logprobs,
-                                                 dim=-1)
+        if largest_num_logprobs > 0:
+            # Logprobs of topk tokens for a batch of sequence groups.
+            # (num_query_tokens_across_batch).
+            top_logprobs, top_token_ids = torch.topk(logprobs,
+                                                     largest_num_logprobs,
+                                                     dim=-1)
 
-        selected_logprobs = selected_logprobs.to('cpu')
-        ranks = ranks.to('cpu')
-        top_logprobs = top_logprobs.to('cpu')
-        top_token_ids = top_token_ids.to('cpu')
-
-    else:
-        # We do not need these if sampling_params.(prompt_)logprobs is None for
-        # all seq_groups
-        selected_logprobs, ranks = None, None
-        top_logprobs, top_token_ids = None, None
+            selected_logprobs = selected_logprobs.to('cpu')
+            ranks = ranks.to('cpu')
+            top_logprobs = top_logprobs.to('cpu')
+            top_token_ids = top_token_ids.to('cpu')
 
     # Find prompt/sample logprobs.
     prompt_logprobs_per_seq_group: List[Optional[PromptLogprobs]] = []
@@ -945,12 +947,13 @@ def _get_sampled_logprob_if_needed(
     """Compute the sample logprob if needed."""
     seq_ids = seq_group.seq_ids
     num_logprobs = seq_group.sampling_params.logprobs
+    use_beam_search = seq_group.sampling_params.use_beam_search
     sampled_logprobs: SampleLogprobs = []
     next_token_ids, parent_seq_ids = sample_result
 
     if seq_group.do_sample:
         assert len(next_token_ids) > 0
-        if num_logprobs is None:
+        if num_logprobs is None and not use_beam_search:
             for next_token_id in next_token_ids:
                 # Use a dummy logprob
                 sampled_logprobs.append({next_token_id: Logprob(0.0)})
@@ -969,7 +972,7 @@ def _get_sampled_logprob_if_needed(
                     next_token_id:
                     (selected_logprob_items[idx], rank_items[idx])
                 }
-                if num_logprobs > 0:
+                if num_logprobs is not None and num_logprobs > 0:
                     # Get top K logprobs.
                     top_ids = top_token_ids[top_logprob_idx +
                                             parent_id, :num_logprobs].tolist()
