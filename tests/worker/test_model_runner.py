@@ -199,6 +199,11 @@ def test_prepare_decode_cuda_graph(batch_size):
         # decode has only 1 token for query.
         start_idx += 1
         start_loc.append(start_idx)
+    # start_loc are padded to expected_bs + 1
+    last_loc = start_loc[-1] + 1
+    for _ in range(expected_bs - (len(start_loc) - 1)):
+        start_loc.append(last_loc)
+        last_loc += 1
     assert torch.allclose(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
@@ -374,9 +379,11 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     attn_metadata = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list).attn_metadata
 
-    for attr_expected, attr_actual in zip(vars(attn_metadata.prefill_metadata),
-                                          vars(prefill_meta_actual)):
-        assert attr_expected[1] == attr_actual[1]
-    for attr_expected, attr_actual in zip(vars(attn_metadata.decode_metadata),
-                                          vars(decode_meta_actual)):
-        assert attr_expected[1] == attr_actual[1]
+    if attn_metadata.prefill_metadata:
+        for attr_expected, attr_actual in zip(
+                vars(attn_metadata.prefill_metadata),
+                vars(prefill_meta_actual)):
+            assert attr_expected[1] == attr_actual[1]
+        for attr_expected, attr_actual in zip(
+                vars(attn_metadata.decode_metadata), vars(decode_meta_actual)):
+            assert attr_expected[1] == attr_actual[1]

@@ -421,8 +421,7 @@ class FlashAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
             )
 
-        # This is used during the profiling phase
-        # or TODO
+        # This is used during the profiling or prefill phase.
         if kv_cache is None or (attn_metadata.block_tables is not None
                                 and attn_metadata.block_tables.numel()) == 0:
             k = key

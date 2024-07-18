@@ -1404,15 +1404,3 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _is_block_tables_empty(block_tables: Union[None, Dict]):
-    """
-    Check if block_tables is None or a dictionary with all None values.
-    """
-    if block_tables is None:
-        return True
-    if isinstance(block_tables, dict) and all(
-            value is None for value in block_tables.values()):
-        return True
-    return False
