@@ -167,9 +167,7 @@ class GemmRS(LinearMethodBase):
             # Note: transpose_weight=False means that B is transposed
             transpose_weight=False,
             # Note: bfloat16 requires fuse_reduction=False.
-            # When fuse_reduction=False, I encounter illegal memory accesses in
-            # the kernel, which are hard to track down.
-            fuse_reduction=True,
+            fuse_reduction=False,
         )
 
     def apply(self,
@@ -230,7 +228,6 @@ class AGCook(LinearMethodBase):
         assert bias is None
 
         output = self.ag_gemm_op.forward(x, layer.weight)
-        self.ag_gemm_op.reset_signals()
 
         return output
 
