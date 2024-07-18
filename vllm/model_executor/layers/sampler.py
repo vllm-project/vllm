@@ -944,13 +944,13 @@ def _get_sampled_logprob_if_needed(
 ):
     """Compute the sample logprob if needed."""
     seq_ids = seq_group.seq_ids
-    num_logprobs = seq_group.sampling_params.logprobs or 0
+    num_logprobs = seq_group.sampling_params.logprobs
     sampled_logprobs: SampleLogprobs = []
     next_token_ids, parent_seq_ids = sample_result
 
     if seq_group.do_sample:
         assert len(next_token_ids) > 0
-        if num_logprobs == 0:
+        if num_logprobs is None:
             for next_token_id in next_token_ids:
                 # Use a dummy logprob
                 sampled_logprobs.append({next_token_id: Logprob(0.0)})
@@ -969,19 +969,20 @@ def _get_sampled_logprob_if_needed(
                     next_token_id:
                     (selected_logprob_items[idx], rank_items[idx])
                 }
-                # Get top K logprobs.
-                top_ids = top_token_ids[top_logprob_idx +
-                                        parent_id, :num_logprobs].tolist()
-                top_probs = top_logprobs[top_logprob_idx +
-                                         parent_id, :num_logprobs].tolist()
-                # Top K is already sorted by rank, so we can use 1 ~
-                # num_logprobs + 1 for rank.
-                top_ranks = range(1, num_logprobs + 1)
-                sampled_logprobs_dict.update({
-                    top_id: (top_prob, rank)
-                    for top_id, top_prob, rank in zip(top_ids, top_probs,
-                                                      top_ranks)
-                })
+                if num_logprobs > 0:
+                    # Get top K logprobs.
+                    top_ids = top_token_ids[top_logprob_idx +
+                                            parent_id, :num_logprobs].tolist()
+                    top_probs = top_logprobs[
+                        top_logprob_idx + parent_id, :num_logprobs].tolist()
+                    # Top K is already sorted by rank, so we can use 1 ~
+                    # num_logprobs + 1 for rank.
+                    top_ranks = range(1, num_logprobs + 1)
+                    sampled_logprobs_dict.update({
+                        top_id: (top_prob, rank)
+                        for top_id, top_prob, rank in zip(
+                            top_ids, top_probs, top_ranks)
+                    })
 
                 sampled_logprobs.append({
                     token_id: Logprob(*logprob_and_rank)
