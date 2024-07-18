@@ -455,8 +455,11 @@ class LLMEngine:
 
         return self.tokenizer
 
-    def get_tokenizer(self) -> "PreTrainedTokenizer":
-        return self.get_tokenizer_group().get_lora_tokenizer(None)
+    def get_tokenizer(
+            self,
+            lora_request: Optional[LoRARequest] = None
+    ) -> "PreTrainedTokenizer":
+        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
     def get_tokenizer_for_seq(self,
                               sequence: Sequence) -> "PreTrainedTokenizer":
