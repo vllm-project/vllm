@@ -89,14 +89,11 @@ class OpenAIServingEmbedding(OpenAIServing):
             prompt_is_tokens, prompts = parse_prompt_format(request.input)
             pooling_params = request.to_pooling_params()
 
+            tokenizer = await self.engine.get_tokenizer()
             for i, prompt in enumerate(prompts):
-                if prompt_is_tokens:
-                    prompt_formats = self._validate_prompt_and_tokenize(
-                        request, prompt_ids=prompt)
-                else:
-                    prompt_formats = self._validate_prompt_and_tokenize(
-                        request, prompt=prompt)
-
+                prompt_arg = "prompt_ids" if prompt_is_tokens else "prompt"
+                prompt_formats = await self._validate_prompt_and_tokenize(
+                    request, tokenizer, **{prompt_arg: prompt})
                 prompt_ids, prompt_text = prompt_formats
 
                 generator = self.engine.encode(
