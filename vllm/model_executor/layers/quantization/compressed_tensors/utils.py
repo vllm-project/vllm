@@ -9,6 +9,7 @@ from torch.nn import Module
 class CompressionFormat(Enum):
     dense = "dense"
     sparse_bitmask = "sparse-bitmask"
+    naive_quantized = "naive-quantized"
     float_quantized = "float-quantized"
     int_quantized = "int-quantized"
     pack_quantized = "pack-quantized"
@@ -74,6 +75,15 @@ class QuantizationArgs(BaseModel):
         ("optional dict of kwargs to be passed directly to torch quantization "
          "Observers constructor excluding quantization range or symmetry"),
     )
+
+
+def is_activation_quantization_format(format: str) -> bool:
+    _ACTIVATION_QUANTIZATION_FORMATS = [
+        CompressionFormat.naive_quantized.value,
+        CompressionFormat.int_quantized.value,
+        CompressionFormat.float_quantized.value
+    ]
+    return format in _ACTIVATION_QUANTIZATION_FORMATS
 
 
 def find_first_name_or_class_match(
