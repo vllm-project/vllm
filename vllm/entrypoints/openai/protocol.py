@@ -704,8 +704,8 @@ class BatchRequestInput(OpenAIBaseModel):
     # /v1/chat/completions is supported.
     url: str
 
-    # The parameteters of the request.
-    body: Union[ChatCompletionRequest, ]
+    # The parameters of the request.
+    body: ChatCompletionRequest
 
 
 class BatchResponseData(OpenAIBaseModel):

@@ -81,7 +81,11 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         try:
-            _, lora_request = self._maybe_get_adapter(request)
+            (
+                lora_request,
+                prompt_adapter_request,
+            ) = self._maybe_get_adapters(request)
+
             tokenizer = await self.engine.get_tokenizer(lora_request)
 
             conversation: List[ConversationMessage] = []
@@ -150,7 +154,8 @@ class OpenAIServingChat(OpenAIServing):
             self._log_inputs(request_id,
                              prompt_inputs,
                              sampling_params,
-                             lora_request=lora_request)
+                             lora_request=lora_request,
+                             prompt_adapter_request=prompt_adapter_request)
 
             engine_inputs: PromptInputs = {
                 "prompt_token_ids": prompt_inputs["prompt_token_ids"],
@@ -170,8 +175,9 @@ class OpenAIServingChat(OpenAIServing):
                 engine_inputs,
                 sampling_params,
                 request_id,
-                lora_request,
+                lora_request=lora_request,
                 trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
             )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error

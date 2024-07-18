@@ -49,7 +49,7 @@ class OpenAIServingTokenization(OpenAIServing):
             return self.create_error_response(
                 "Only one of `prompt` or `messages` should be provided.")
 
-        _, lora_request = self._maybe_get_adapter(request)
+        lora_request, _ = self._maybe_get_adapters(request)
         tokenizer = await self.engine.get_tokenizer(lora_request)
         if request.messages:
             conversation: List[ConversationMessage] = []
@@ -88,7 +88,7 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        _, lora_request = self._maybe_get_adapter(request)
+        lora_request, _ = self._maybe_get_adapters(request)
         tokenizer = await self.engine.get_tokenizer(lora_request)
 
         prompt_input = self._tokenize_prompt_input(
