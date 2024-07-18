@@ -440,7 +440,7 @@ class ChatGLMModel(nn.Module):
 
         if config.vision_config is not None:
             self.vision_config = Namespace(**config.vision_config)
-            self.vision = EVA2CLIPModel(self.config)
+            self.vision = EVA2CLIPModel(self.config, quant_config)
         else:
             self.vision = None
 
