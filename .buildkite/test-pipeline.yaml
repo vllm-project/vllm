@@ -140,6 +140,7 @@ steps:
     # install tensorizer for tensorize_vllm_model.py
     - pip install awscli tensorizer
     - python3 offline_inference.py
+    - python3 cpu_offload.py
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
     - python3 llava_example.py
