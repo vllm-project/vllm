@@ -182,11 +182,11 @@ class MessageQueue:
                                         max_chunks)
 
             self.local_socket = context.socket(PUB)
-            local_subscribe_port = get_open_port()
+            local_subscribe_port = get_open_port(is_for_dist_init = False)
             self.local_socket.bind(f"tcp://*:{local_subscribe_port}")
 
             self.local_sync_socket = context.socket(REP)
-            local_sync_port = get_open_port()
+            local_sync_port = get_open_port(is_for_dist_init = False)
             self.local_sync_socket.bind(f"tcp://*:{local_sync_port}")
             self.current_idx = 0
 
@@ -202,11 +202,11 @@ class MessageQueue:
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
             self.remote_socket = context.socket(PUB)
-            remote_subscribe_port = get_open_port()
+            remote_subscribe_port = get_open_port(is_for_dist_init = False)
             self.remote_socket.bind(f"tcp://*:{remote_subscribe_port}")
 
             self.remote_sync_socket = context.socket(REP)
-            remote_sync_port = get_open_port()
+            remote_sync_port = get_open_port(is_for_dist_init = False)
             self.remote_sync_socket.bind(f"tcp://*:{remote_sync_port}")
         else:
             remote_subscribe_port = None
