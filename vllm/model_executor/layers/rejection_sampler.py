@@ -132,7 +132,9 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             k=k,
             generators=generators,
             seed_indices=seed_indices,
-            non_seed_indices=non_seed_indices).reshape(batch_size, k)
+            # this arg is unused when None but torch.jit requires a list
+            non_seed_indices=non_seed_indices or [],
+        ).reshape(batch_size, k)
 
         return accepted, recovered_token_ids
 
@@ -304,7 +306,7 @@ def _multinomial(
     k: int,
     generators: List[Optional[torch.Generator]],
     seed_indices: List[int],
-    non_seed_indices: Optional[List[int]],
+    non_seed_indices: List[int],
 ) -> torch.Tensor:
 
     if num_samples > 1:
