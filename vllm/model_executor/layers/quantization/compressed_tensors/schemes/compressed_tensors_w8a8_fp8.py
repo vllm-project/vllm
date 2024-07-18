@@ -8,7 +8,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear, create_per_tensor_scale_param, cutlass_fp8_supported,
     requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
