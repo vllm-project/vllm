@@ -3,7 +3,7 @@
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
 from argparse import Namespace
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Dict
 
 import torch
 from torch import nn
@@ -547,8 +547,24 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        # Merge two ColumnParallelLinear into one MergedColumnParallelLinear
+        merged_weights_dict: Dict[str, Dict[str, Optional[torch.Tensor]]] = {
+            "transformer.vision.linear_proj.merged_proj.weight": {
+                "transformer.vision.linear_proj.gate_proj.weight": None,
+                "transformer.vision.linear_proj.dense_h_to_4h.weight": None,
+            }
+        }
+
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
+            is_weight_to_be_merge = False
+            for _, merged_weight_dict in merged_weights_dict.items():
+                if name in merged_weight_dict:
+                    assert merged_weight_dict[name] is None
+                    merged_weight_dict[name] = loaded_weight
+                    is_weight_to_be_merge = True
+            if is_weight_to_be_merge:
+                continue
             if "rotary_pos_emb.inv_freq" in name:
                 continue
             if "word_embeddings" in name:
@@ -560,3 +576,10 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
+        for combined_name, merged_weight_dict in merged_weights_dict.items():
+            param = params_dict[combined_name]
+            combined_weight = torch.cat(list(merged_weight_dict.values()), dim=0)
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, combined_weight)
