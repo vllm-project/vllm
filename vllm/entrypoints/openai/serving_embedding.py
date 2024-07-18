@@ -27,7 +27,6 @@ def request_output_to_embedding_response(
     data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
-        assert final_res is not None
         prompt_token_ids = final_res.prompt_token_ids
         embedding = final_res.outputs.embedding
         if encoding_format == "base64":
