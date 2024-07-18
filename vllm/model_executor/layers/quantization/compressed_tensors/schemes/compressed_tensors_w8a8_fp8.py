@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear, create_per_tensor_scale_param, cutlass_fp8_supported,
     requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -18,10 +19,18 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.input_dynamic = input_dynamic
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
+        capability = current_platform.get_device_capability()
+        capability = capability[0] * 10 + capability[1]
+        self.use_marlin = capability < 89
+
     # W8A8-Fp8 kernels support only per-tensor and per-channel cases.
     # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
     # scales being passed to the kernel), we requantize with a single scale.
     def process_weights_after_loading(self, layer) -> None:
+        if self.use_marlin:
+            weight = layer.weight
         # Dequant -> Quant with max scale.
         max_w_scale, weight = requantize_with_max_scale(
             weight=layer.weight,

@@ -57,7 +57,7 @@ class LlamaMLP(nn.Module):
 
     def __init__(
         self,
-        parent_name: str,
+        prefix: str,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
@@ -70,13 +70,13 @@ class LlamaMLP(nn.Module):
             output_sizes=[intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
-            layer_name=f"{parent_name}.gate_up_proj")
+            layer_name=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
-            layer_name=f"{parent_name}.down_proj")
+            layer_name=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -93,7 +93,7 @@ class LlamaAttention(nn.Module):
 
     def __init__(
         self,
-        parent_name: str,
+        prefix: str,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -134,14 +134,14 @@ class LlamaAttention(nn.Module):
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
-            layer_name=f"{parent_name}.qkv_proj",
+            layer_name=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
-            layer_name=f"{parent_name}.o_proj",
+            layer_name=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -177,7 +177,7 @@ class LlamaDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        parent_name: str,
+        prefix: str,
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -197,7 +197,7 @@ class LlamaDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
         self.self_attn = LlamaAttention(
-            parent_name=f"{parent_name}.self_attn",
+            prefix=f"{prefix}.self_attn",
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
@@ -210,7 +210,7 @@ class LlamaDecoderLayer(nn.Module):
             cache_config=cache_config,
         )
         self.mlp = LlamaMLP(
-            parent_name=f"{parent_name}.mlp",
+            prefix=f"{prefix}.mlp",
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -278,7 +278,7 @@ class LlamaModel(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, lambda layer_idx: LlamaDecoderLayer(
-                parent_name=f"model.layers.{layer_idx}",
+                prefix=f"model.layers.{layer_idx}",
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config))
