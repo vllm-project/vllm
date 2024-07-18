@@ -35,6 +35,8 @@ USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 
 class RayXPUExecutor(DistributedGPUExecutor):
 
+    uses_ray: bool = True
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -337,7 +339,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
                              f"required, but found {current_version}")
 
         from ray.dag import InputNode, MultiOutputNode
-        assert self.parallel_config.distributed_executor_backend == "ray"
+        assert self.parallel_config.use_ray
 
         # Right now, compiled DAG requires at least 1 arg. We send
         # a dummy value for now. It will be fixed soon.

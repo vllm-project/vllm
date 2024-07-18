@@ -25,6 +25,8 @@ logger = init_logger(__name__)
 
 class RayGPUExecutor(DistributedGPUExecutor):
 
+    uses_ray: bool = True
+
     def _init_executor(self) -> None:
         # If the env var is set, it uses the Ray's compiled DAG API
         # which optimizes the control plane overhead.
@@ -46,7 +48,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 "VLLM_USE_RAY_SPMD_WORKER=1 requires "
                 "VLLM_USE_RAY_COMPILED_DAG=1")
 
-        assert self.parallel_config.distributed_executor_backend == "ray"
+        assert self.uses_ray
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
@@ -390,7 +392,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                              f"required, but found {current_version}")
 
         from ray.dag import InputNode, MultiOutputNode
-        assert self.parallel_config.distributed_executor_backend == "ray"
+        assert self.parallel_config.use_ray
 
         # Right now, compiled DAG requires at least 1 arg. We send
         # a dummy value for now. It will be fixed soon.
