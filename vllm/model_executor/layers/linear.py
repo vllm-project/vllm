@@ -289,9 +289,8 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            prefix=prefix,
             weight_loader=self.weight_loader,
-        )
+            prefix=prefix)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -387,8 +386,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             skip_bias_add=skip_bias_add,
             params_dtype=params_dtype,
             quant_config=quant_config,
-            prefix=prefix,
-        )
+            prefix=prefix)
 
     def weight_loader(self,
                       param: Parameter,
@@ -732,8 +730,9 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            prefix=prefix,
-            weight_loader=self.weight_loader)
+            weight_loader=self.weight_loader,
+            prefix=prefix)
+
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")
