@@ -279,6 +279,8 @@ def run_server(args, llm_engine=None):
         served_model_names,
         args.lora_modules,
         args.chat_template,
+        log_requests=log_requests,
+        max_log_len=max_log_len,
     )
     app.root_path = args.root_path
 

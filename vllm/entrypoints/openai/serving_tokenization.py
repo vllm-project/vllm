@@ -28,13 +28,16 @@ class OpenAIServingTokenization(OpenAIServing):
         served_model_names: List[str],
         lora_modules: Optional[List[LoRAModulePath]] = None,
         chat_template: Optional[str] = None,
+        *,
+        log_requests: bool,
+        max_log_len: Optional[int],
     ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
-                         log_requests=False,
-                         max_log_len=None)
+                         log_requests=log_requests,
+                         max_log_len=max_log_len)
 
         # If this is None we use the tokenizer's default chat template
         self.chat_template = load_chat_template(chat_template)
