@@ -364,7 +364,7 @@ class OpenAIServing:
     ) -> None:
         if not self.log_requests:
             return
-        
+
         if isinstance(inputs, str):
             shortened_prompt = inputs
             shortened_token_ids = None

@@ -82,9 +82,8 @@ class OpenAIServingTokenization(OpenAIServing):
                          prompt_adapter_request=prompt_adapter_request)
 
         if prompt_adapter_request is not None:
-            raise NotImplementedError(
-                "Prompt adapter is not supported "
-                "for tokenization")
+            raise NotImplementedError("Prompt adapter is not supported "
+                                      "for tokenization")
 
         prompt_input = self._tokenize_prompt_input(
             request,
@@ -122,9 +121,8 @@ class OpenAIServingTokenization(OpenAIServing):
                          prompt_adapter_request=prompt_adapter_request)
 
         if prompt_adapter_request is not None:
-            raise NotImplementedError(
-                "Prompt adapter is not supported "
-                "for tokenization")
+            raise NotImplementedError("Prompt adapter is not supported "
+                                      "for tokenization")
 
         prompt_input = self._tokenize_prompt_input(
             request,
