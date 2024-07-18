@@ -3,7 +3,7 @@
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
 from argparse import Namespace
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Dict
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 from torch import nn
@@ -579,7 +579,8 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
 
         for combined_name, merged_weight_dict in merged_weights_dict.items():
             param = params_dict[combined_name]
-            combined_weight = torch.cat(list(merged_weight_dict.values()), dim=0)
+            combined_weight = torch.cat(list(merged_weight_dict.values()),
+                                        dim=0)
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, combined_weight)
