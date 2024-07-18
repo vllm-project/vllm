@@ -73,7 +73,8 @@ class HabanaPagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
     ) -> torch.Tensor:
         block_size = value_cache.shape[1]
         return ops.paged_attention_v1(

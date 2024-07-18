@@ -171,7 +171,8 @@ class HabanaAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: HabanaAttentionMetadata,
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -253,7 +254,8 @@ class HabanaAttentionImpl(AttentionImpl):
             output = HabanaPagedAttention.forward_decode(
                 query, key_cache, value_cache, attn_metadata.block_tables,
                 attn_metadata.seq_lens_tensor, self.kv_cache_dtype,
-                self.num_kv_heads, self.scale, self.position_bias, kv_scale)
+                self.num_kv_heads, self.scale, self.position_bias, k_scale,
+                v_scale)
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 
