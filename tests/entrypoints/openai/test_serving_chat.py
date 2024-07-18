@@ -38,5 +38,4 @@ async def _async_serving_chat_init():
 
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
-    assert serving_completion.tokenizer is not None
-    assert serving_completion.tokenizer.chat_template == CHAT_TEMPLATE
+    assert serving_completion.chat_template == CHAT_TEMPLATE
