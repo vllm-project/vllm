@@ -88,7 +88,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 "dimensions is currently not supported")
 
         model_name = request.model
-        request_id = f"embed-{random_uuid()}"
+        request_id = f"embd-{random_uuid()}"
         created_time = int(time.monotonic())
 
         # Schedule the request and get the result generator.

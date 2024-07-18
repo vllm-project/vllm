@@ -47,7 +47,7 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tok-{random_uuid()}"
+        request_id = f"tokn-{random_uuid()}"
 
         (
             lora_request,
@@ -105,7 +105,7 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tok-{random_uuid()}"
+        request_id = f"tokn-{random_uuid()}"
 
         (
             lora_request,
