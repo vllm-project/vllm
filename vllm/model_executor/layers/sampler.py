@@ -775,7 +775,7 @@ def _get_logprobs(
     next_token_ids: List[int] = []
     # The largest requested number of logprobs. We find logprobs as many as the
     # largest num logprobs in this API.
-    largest_num_logprobs = 1
+    largest_num_logprobs = 0
 
     # Select indices to compute logprob from, ranks of token ids, and the top
     # k token ids from logprobs.
@@ -786,7 +786,7 @@ def _get_logprobs(
         # Update indices and tokens for prompt logprobs.
         if (seq_group.is_prompt
                 and sampling_params.prompt_logprobs is not None):
-            largest_num_logprobs = max(largest_num_logprobs,
+            largest_num_logprobs = max(1, largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prompt_logprob_indices)
@@ -805,7 +805,7 @@ def _get_logprobs(
             next_token_ids.extend(token_ids)
 
             if sampling_params.logprobs is not None:
-                largest_num_logprobs = max(largest_num_logprobs,
+                largest_num_logprobs = max(1, largest_num_logprobs,
                                            sampling_params.logprobs)
 
         assert len(next_token_ids) == len(query_indices)
@@ -815,35 +815,38 @@ def _get_logprobs(
         empty_prompt_logprob: Optional[PromptLogprobs] = None
         return [empty_prompt_logprob], [empty_sampled_logprob]
 
-    query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
-    next_token_ids_gpu = torch.tensor(next_token_ids, device=logprobs.device)
-
-    # (num_selected_query_tokens, num_logprobs). Note that query_indices can
-    # contain duplicates if beam search is enabled.
-    selected_logprobs = logprobs[[
-        query_indices_gpu,
-        next_token_ids_gpu,
-    ]]
-    ranks = _get_ranks(
-        logprobs[query_indices_gpu],
-        next_token_ids_gpu,
-    )
-    assert selected_logprobs.shape[0] == ranks.shape[0]
-
-    # Logprobs of topk tokens for a batch of sequence groups.
-    # (num_query_tokens_across_batch).
     if largest_num_logprobs > 0:
+        query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
+        next_token_ids_gpu = torch.tensor(next_token_ids,
+                                          device=logprobs.device)
+
+        # (num_selected_query_tokens, num_logprobs). Note that query_indices can
+        # contain duplicates if beam search is enabled.
+        selected_logprobs = logprobs[[
+            query_indices_gpu,
+            next_token_ids_gpu,
+        ]]
+        ranks = _get_ranks(
+            logprobs[query_indices_gpu],
+            next_token_ids_gpu,
+        )
+        assert selected_logprobs.shape[0] == ranks.shape[0]
+
+        # Logprobs of topk tokens for a batch of sequence groups.
+        # (num_query_tokens_across_batch).
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
                                                  dim=-1)
-    else:
-        top_logprobs, top_token_ids = None, None
 
-    selected_logprobs = selected_logprobs.to('cpu')
-    ranks = ranks.to('cpu')
-    if top_logprobs is not None and top_token_ids is not None:
+        selected_logprobs = selected_logprobs.to('cpu')
+        ranks = ranks.to('cpu')
         top_logprobs = top_logprobs.to('cpu')
         top_token_ids = top_token_ids.to('cpu')
+
+    else:
+        # We do not need these if sampling_params.(prompt_)logprobs is None for all seq_groups
+        selected_logprobs, ranks = None, None
+        top_logprobs, top_token_ids = None, None
 
     # Find prompt/sample logprobs.
     prompt_logprobs_per_seq_group: List[Optional[PromptLogprobs]] = []
@@ -946,21 +949,26 @@ def _get_sampled_logprob_if_needed(
 
     if seq_group.do_sample:
         assert len(next_token_ids) > 0
-        # Pre-select items from tensor. tolist() is faster than repetitive
-        # `.item()` calls.
-        selected_logprob_items = selected_logprobs[
-            selected_logprobs_idx:selected_logprobs_idx +
-            len(next_token_ids)].tolist()
-        rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
-                           len(next_token_ids)].tolist()
-        for idx, (next_token_id,
-                  parent_id) in enumerate(zip(next_token_ids, parent_seq_ids)):
-            # Get the logprob of a sampled token.
-            sampled_logprobs_dict = {
-                next_token_id: (selected_logprob_items[idx], rank_items[idx])
-            }
-            # Get top K logprobs.
-            if num_logprobs > 0:
+        if num_logprobs == 0:
+            for next_token_id in next_token_ids:
+                # Use a dummy logprob
+                sampled_logprobs.append({next_token_id: Logprob(0.0)})
+        else:
+            # Pre-select items from tensor. tolist() is faster than repetitive
+            # `.item()` calls.
+            selected_logprob_items = selected_logprobs[
+                selected_logprobs_idx:selected_logprobs_idx +
+                len(next_token_ids)].tolist()
+            rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
+                               len(next_token_ids)].tolist()
+            for idx, (next_token_id, parent_id) in enumerate(
+                    zip(next_token_ids, parent_seq_ids)):
+                # Get the logprob of a sampled token.
+                sampled_logprobs_dict = {
+                    next_token_id:
+                    (selected_logprob_items[idx], rank_items[idx])
+                }
+                # Get top K logprobs.
                 top_ids = top_token_ids[top_logprob_idx +
                                         parent_id, :num_logprobs].tolist()
                 top_probs = top_logprobs[top_logprob_idx +
@@ -974,11 +982,11 @@ def _get_sampled_logprob_if_needed(
                                                       top_ranks)
                 })
 
-            sampled_logprobs.append({
-                token_id: Logprob(*logprob_and_rank)
-                for token_id, logprob_and_rank in
-                sampled_logprobs_dict.items()
-            })
+                sampled_logprobs.append({
+                    token_id: Logprob(*logprob_and_rank)
+                    for token_id, logprob_and_rank in
+                    sampled_logprobs_dict.items()
+                })
 
         # NOTE: This part of code is not intuitive. `selected_logprobs` include
         # logprobs for the current step, which has len(next_token_ids) tokens
