@@ -267,10 +267,10 @@ class MixtralModel(nn.Module):
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, 
+            config.num_hidden_layers,
             lambda prefix: MixtralDecoderLayer(
-                config, cache_config, 
-                quant_config=quant_config, prefix=prefix),
+                config, cache_config, quant_config=quant_config, prefix=prefix
+            ),
             prefix="model.layers")
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

@@ -147,9 +147,15 @@ class GPT2Block(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPT2Attention(config, cache_config, quant_config, prefix=f"{prefix}.attn")
+        self.attn = GPT2Attention(config,
+                                  cache_config,
+                                  quant_config,
+                                  prefix=f"{prefix}.attn")
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = GPT2MLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
+        self.mlp = GPT2MLP(inner_dim,
+                           config,
+                           quant_config,
+                           prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -193,7 +199,8 @@ class GPT2Model(nn.Module):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: GPT2Block(config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: GPT2Block(
+                config, cache_config, quant_config, prefix=prefix),
             prefix="transformer.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 

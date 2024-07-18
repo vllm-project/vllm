@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Protocol, Tuple
+from typing import Dict, List, Protocol, Tuple
 
 import torch
 from torch.func import functional_call
@@ -46,8 +46,10 @@ def merge_vision_embeddings(input_ids: torch.Tensor,
 
 
 class LayerFn(Protocol):
+
     def __call__(
-        self, prefix="",
+        self,
+        prefix="",
     ) -> torch.nn.Module:
         ...
 
@@ -123,6 +125,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     module.forward = forward
 
     return module
+
 
 def make_layers(
     num_hidden_layers: int,
