@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Protocol, Tuple
 
 import torch
 
@@ -52,9 +52,16 @@ class PPMissingLayer(torch.nn.Identity):
         super().__init__()
 
 
+class LayerFn(Protocol):
+    def __call__(
+        self, prefix="",
+    ) -> torch.nn.Module:
+        ...
+
+
 def make_layers(
     num_hidden_layers: int,
-    layer_fn: Callable[[], torch.nn.Module],
+    layer_fn: LayerFn,
     prefix: str,
 ) -> Tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
