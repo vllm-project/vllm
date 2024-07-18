@@ -813,26 +813,34 @@ def init_distributed_environment(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
-    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-        # Disaggregated prefilling is enabled
-        # There will be 2 copies of vLLM
-        # One for prefilling and one for decoding
-        world_size = world_size * 2
-        logger.debug(
-            "Disaggregated prefill enabled, "
-            "increase world size to %d", world_size)
-    else:
-        disagg_prefill_size = 1
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
             "distributed environment")
         # this backend is used for WORLD
+        if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+            # Disaggregated prefilling is enabled
+            # world_size in vLLM is tp * pp
+            # for prefill, the ranks are [0, world_size)
+            # for decode, the ranks are [world_size, 2 * world_size)
+            maybe_disagg_world_size = world_size * 2
+            logger.debug(
+                "Disaggregated prefill enabled, handle torch-related changes on world size and ranks. This change is only inside `vllm/distributed/parallel_state.py`) and the other files are unchanged.")
+            assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefilling", "decoding"], (
+            "VLLM_DISAGG_PREFILL_ROLE should be either prefilling or decoding")
+            if envs.VLLM_DISAGG_PREFILL_ROLE == "prefilling":
+                maybe_disagg_rank = rank
+            else:
+                # offset global rank by tp * pp (which is world_size)
+                maybe_disagg_rank = rank + world_size
+        else:
+            maybe_disagg_world_size = world_size
+            maybe_disagg_rank = rank
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
-            world_size=world_size,
-            rank=rank)
+            world_size=maybe_disagg_world_size,
+            rank=maybe_disagg_rank)
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
