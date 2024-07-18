@@ -662,10 +662,12 @@ def make_tensor_with_pad(
     """
     np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
     padded_x = make_array_with_pad(x, max_len, pad, np_dtype)
-    return torch.tensor(padded_x,
-                        dtype=dtype,
-                        device=device,
-                        pin_memory=pin_memory)
+
+    tensor = torch.from_numpy(padded_x).to(device)
+    if pin_memory:
+        tensor = tensor.pin_memory()
+
+    return tensor
 
 
 def async_tensor_h2d(
