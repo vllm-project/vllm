@@ -12,6 +12,7 @@ from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.metrics import StatLoggerBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
@@ -389,6 +390,7 @@ class AsyncLLMEngine:
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -451,6 +453,7 @@ class AsyncLLMEngine:
             max_log_len=engine_args.max_log_len,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
         )
         return engine
 
@@ -957,3 +960,19 @@ class AsyncLLMEngine:
             )
         else:
             return self.engine.is_tracing_enabled()
+
+    def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
+        if self.engine_use_ray:
+            ray.get(
+                self.engine.add_logger.remote(  # type: ignore
+                    logger_name=logger_name, logger=logger))
+        else:
+            self.engine.add_logger(logger_name=logger_name, logger=logger)
+
+    def remove_logger(self, logger_name: str) -> None:
+        if self.engine_use_ray:
+            ray.get(
+                self.engine.remove_logger.remote(  # type: ignore
+                    logger_name=logger_name))
+        else:
+            self.engine.remove_logger(logger_name=logger_name)
