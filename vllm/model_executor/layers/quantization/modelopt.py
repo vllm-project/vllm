@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn import Module
@@ -7,11 +7,11 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_fp8_supported, apply_fp8_linear)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    apply_fp8_linear, cutlass_fp8_supported)
+from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
