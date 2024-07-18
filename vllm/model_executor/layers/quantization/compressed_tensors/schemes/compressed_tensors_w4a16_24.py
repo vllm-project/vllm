@@ -29,6 +29,10 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
             raise ValueError(
                 "group_size must be given when using strategy group")
 
+    def get_min_capability(self) -> int:
+        # ampere + up
+        return 80
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 

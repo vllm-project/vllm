@@ -13,6 +13,13 @@ class CompressedTensorsScheme(ABC):
     """
 
     @abstractmethod
+    def get_min_capability(self) -> int:
+        """
+        Get minimum device capability.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def create_weights(self, *args, **kwargs):
         """
         Weight creation for the particular scheme. Inputs to this function 
