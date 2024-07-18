@@ -77,15 +77,6 @@ class Fp8Config(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
-        from vllm.model_executor.layers.quantization.modelopt import (
-            ModelOptFp8LinearMethod)
-
-        quant_source = self.quant_source
-        quant_source_dicts = {
-            "default": [Fp8LinearMethod, Fp8KVCacheMethod],
-            "modelopt": [ModelOptFp8LinearMethod, Fp8KVCacheMethod],
-            "neural_magic": [Fp8LinearMethod, Fp8KVCacheMethod],
-        }
 
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix, self.ignored_layers):
@@ -226,13 +217,6 @@ class Fp8LinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-            return apply_quantize(layer, x, self.cutlass_fp8_supported, bias) 
-
-def apply_quantize(layer: torch.nn.Module,
-              x: torch.Tensor,
-              is_cutlass_fp8_supported: bool,
-              bias: Optional[torch.Tensor] = None,
-              ) -> torch.Tensor:
 
         if self.use_marlin:
             return apply_fp8_marlin_linear(

@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Dict, Any
 
 import torch
 from torch.nn import Module
@@ -6,14 +6,70 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearMethodBase
-from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
-                                                         cutlass_fp8_supported,
-                                                         per_tensor_quantize, 
-                                                         apply_quantize)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported, apply_fp8_linear)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
 
 logger = init_logger(__name__)
+
+ACTIVATION_SCHEMES = ["static"]
+
+
+class ModelOptFp8Config(QuantizationConfig):
+    """Config class for FP8."""
+
+    def __init__(self,
+                 is_checkpoint_fp8_serialized: bool = False,
+                 activation_scheme: str = "static") -> None:
+        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+        if is_checkpoint_fp8_serialized:
+            logger.warning("Detected fp8 checkpoint. Please note that the "
+                           "format is experimental and subject to change.")
+        if activation_scheme not in ACTIVATION_SCHEMES:
+            raise ValueError(
+                f"Unsupported activation scheme {activation_scheme}")
+        self.activation_scheme = activation_scheme
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "modelopt"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 80
+
+    @classmethod
+    def get_config_filenames(cls) -> List[str]:
+        return ["hf_quant_config.json"]
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ModelOptFp8Config":
+        quant_config = cls.get_from_keys(config, ["quantization"])
+        quant_method = quant_config["quant_algo"]
+        is_checkpoint_fp8_serialized = ("FP8" in quant_method)
+        activation_scheme = "static"
+        return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
+                   activation_scheme=activation_scheme)
+
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention  # Avoid circular import
+
+        if isinstance(layer, LinearBase):
+            return ModelOptFp8LinearMethod(self)
+
+        else:
+            raise ValueError("Unsupported quant method for ModelOpt weights")
+
+    def get_scaled_act_names(self) -> List[str]:
+        return []
 
 
 class ModelOptQuantizer(torch.nn.Module):
@@ -49,7 +105,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: Fp8Config):
+    def __init__(self, quant_config: ModelOptFp8Config):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
@@ -71,11 +127,14 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         # Model Opt weights are not converted to FP8 when stored in
         # the checkpoint, so we use the original datatype. May change
         # in the future if the format of Model Opt checkpoint changes.
+        weight_dtype = (torch.int8
+                        if self.quant_config.is_checkpoint_fp8_serialized else
+                        params_dtype)
         weight = Parameter(
             torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                dtype=params_dtype,
+                dtype=weight_dtype,
             ),
             requires_grad=False,
         )
@@ -130,34 +189,14 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             return
 
         else:
-            # WEIGHT_SCALE / WEIGHT
-            # Convert the given weight to fp8 because model opt generates
-            # quantization scales, but doesn't convert then to fp8.
-            layer.weight_scale = layer.weight_quantizer._amax / 448
-            max_w_scale = layer.weight_scale.max()
-
-            weight = torch.empty_like(layer.weight, dtype=torch.float8_e4m3fn)
-            start = 0
-            for idx, logical_width in enumerate(layer.logical_widths):
-                end = start + logical_width
-                weight_dq = layer.weight[start:end, :]
-                weight[start:end, :] = per_tensor_quantize(
-                    weight_dq, layer.weight_scale.max())
-                start = end
-
-            layer.weight.data = weight
-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
-
-            # WEIGHT
-            #   Transpose weight for passing to torch._scaled_mm
-            layer.weight = Parameter(weight.t(), requires_grad=False)
-            
-            if self.quant_config.activation_scheme == "static":
-                layer.input_scale = Parameter(layer.input_quantizer._amax.max(),
-                                              requires_grad=False)
-            else:
-                raise ValueError(
-                    f"Unknown scheme {self.quant_config.activation_scheme}")
+            weight_scale = layer.weight_quantizer._amax / 448
+            layer.weight_scale = Parameter(weight_scale.max(),
+                                           requires_grad=False)
+            restored_fp8_tensor = layer.weight.view(torch.float8_e4m3fn)
+            layer.weight = Parameter(restored_fp8_tensor.t(),
+                                     requires_grad=False)
+            layer.input_scale = Parameter(
+                (layer.input_quantizer._amax.max()) / 448, requires_grad=False)
 
     def apply(
         self,
@@ -165,6 +204,11 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
-      return apply_quantize(layer, x, self.cutlass_fp8_supported, bias) 
-
+        result = apply_fp8_linear(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            input_scale=layer.input_scale,
+            bias=bias,
+            cutlass_fp8_supported=self.cutlass_fp8_supported)
+        return result
