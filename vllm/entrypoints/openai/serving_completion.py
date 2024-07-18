@@ -17,8 +17,10 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               UsageInfo)
+# yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
-                                                    OpenAIServing)
+                                                    OpenAIServing,
+                                                    PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -63,11 +65,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+                 lora_modules: Optional[List[LoRAModulePath]],
+                 prompt_adapters: Optional[List[PromptAdapterPath]]):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         prompt_adapters=prompt_adapters)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -97,7 +101,12 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
-            lora_request = self._maybe_get_lora(request)
+            adapter_type, adapter_request = self._maybe_get_adapter(request)
+            lora_request, prompt_adapter_request = None, None
+            if adapter_type == 'LoRA':
+                lora_request, prompt_adapter_request = adapter_request, None
+            elif adapter_type == 'PromptAdapter':
+                lora_request, prompt_adapter_request = None, adapter_request
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
@@ -143,6 +152,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params,
                     f"{request_id}-{i}",
                     lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
                     trace_headers=trace_headers,
                 )
 
@@ -267,16 +277,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_num_tokens[i] = len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
-                    if output.finish_reason is not None:  # return final usage
-                        prompt_tokens = len(res.prompt_token_ids)
-                        completion_tokens = len(output.token_ids)
-                        final_usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=prompt_tokens + completion_tokens,
-                        )
-                    else:
-                        final_usage = None
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -293,9 +293,21 @@ class OpenAIServingCompletion(OpenAIServing):
                         ])
                     if (request.stream_options
                             and request.stream_options.include_usage):
-                        chunk.usage = None
+                        if (request.stream_options.continuous_usage_stats
+                                or output.finish_reason is not None):
+                            prompt_tokens = len(res.prompt_token_ids)
+                            completion_tokens = len(output.token_ids)
+                            usage = UsageInfo(
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=prompt_tokens + completion_tokens,
+                            )
+                        if request.stream_options.continuous_usage_stats:
+                            chunk.usage = usage
+                        else:
+                            chunk.usage = None
 
-                    response_json = chunk.model_dump_json(exclude_unset=True)
+                    response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
 
             if (request.stream_options
@@ -305,10 +317,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     created=created_time,
                     model=model_name,
                     choices=[],
-                    usage=final_usage,
+                    usage=usage,
                 )
                 final_usage_data = (final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True))
+                    exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
         except ValueError as e:
@@ -341,7 +353,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     out_logprobs = prompt_logprobs
                     output_text = prompt_text
                 elif request.echo and request.max_tokens > 0:
-                    token_ids = prompt_token_ids + output.token_ids
+                    token_ids = prompt_token_ids + list(output.token_ids)
                     out_logprobs = (prompt_logprobs + output.logprobs
                                     if request.logprobs is not None else None)
                     output_text = prompt_text + output.text

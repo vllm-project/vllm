@@ -1,22 +1,108 @@
 """Minimal implementation of CLIPVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPAttention
 
+from vllm.config import ModelConfig
+from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.multimodal.image import (cached_get_tokenizer,
+                                   repeat_and_pad_image_tokens)
+from vllm.sequence import SequenceData
 
 
-def get_clip_num_patches(image_size: int, patch_size: int) -> int:
+def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
     assert image_size % patch_size == 0
-    return (image_size // patch_size)**2
+    return image_size // patch_size
+
+
+def get_clip_num_patches(*, image_size: int, patch_size: int) -> int:
+    grid_length = get_clip_patch_grid_length(image_size=image_size,
+                                             patch_size=patch_size)
+    return grid_length * grid_length
+
+
+def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
+    return get_clip_num_patches(image_size=hf_config.image_size,
+                                patch_size=hf_config.patch_size)
+
+
+def get_max_clip_image_tokens(hf_config: CLIPVisionConfig) -> int:
+    return get_clip_image_feature_size(hf_config)
+
+
+def dummy_seq_data_for_clip(
+    hf_config: CLIPVisionConfig,
+    seq_len: int,
+    *,
+    image_token_id: int,
+    image_feature_size_override: Optional[int] = None,
+):
+    if image_feature_size_override is None:
+        image_feature_size = get_clip_image_feature_size(hf_config)
+    else:
+        image_feature_size = image_feature_size_override
+
+    token_ids = [image_token_id] * image_feature_size
+    token_ids += [0] * (seq_len - image_feature_size)
+    return SequenceData(token_ids)
+
+
+def dummy_image_for_clip(
+    hf_config: CLIPVisionConfig,
+    *,
+    image_width_override: Optional[int] = None,
+    image_height_override: Optional[int] = None,
+):
+    width = height = hf_config.image_size
+    if image_width_override is not None:
+        width = image_width_override
+    if image_height_override is not None:
+        height = image_height_override
+
+    image = Image.new("RGB", (width, height), color=0)
+    return {"image": image}
+
+
+def input_processor_for_clip(
+    model_config: ModelConfig,
+    hf_config: CLIPVisionConfig,
+    llm_inputs: LLMInputs,
+    *,
+    image_token_id: int,
+    image_feature_size_override: Optional[int] = None,
+):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return llm_inputs
+
+    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+
+    if image_feature_size_override is None:
+        image_feature_size = get_clip_image_feature_size(hf_config)
+    else:
+        image_feature_size = image_feature_size_override
+
+    new_prompt, new_token_ids = repeat_and_pad_image_tokens(
+        tokenizer,
+        llm_inputs.get("prompt"),
+        llm_inputs["prompt_token_ids"],
+        image_token_id=image_token_id,
+        repeat_count=image_feature_size,
+    )
+
+    # NOTE: Create a defensive copy of the original inputs
+    return LLMInputs(prompt_token_ids=new_token_ids,
+                     prompt=new_prompt,
+                     multi_modal_data=multi_modal_data)
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
@@ -39,8 +125,8 @@ class CLIPVisionEmbeddings(nn.Module):
             bias=False,
         )
 
-        self.num_patches = get_clip_num_patches(self.image_size,
-                                                self.patch_size)
+        self.num_patches = get_clip_num_patches(image_size=self.image_size,
+                                                patch_size=self.patch_size)
         self.num_positions = self.num_patches + 1
         self.position_embedding = nn.Embedding(self.num_positions,
                                                self.embed_dim)
@@ -101,7 +187,7 @@ class CLIPEncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
         residual = hidden_states
 
@@ -128,22 +214,24 @@ class CLIPEncoder(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
         self.config = config
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
         self.layers = nn.ModuleList([
             CLIPEncoderLayer(config=config, quant_config=quant_config)
-            for _ in range(config.num_hidden_layers)
+            for _ in range(num_hidden_layers)
         ])
 
-    def forward(self,
-                inputs_embeds: torch.Tensor,
-                vision_feature_layer: int = -1):
+    def forward(self, inputs_embeds: torch.Tensor):
 
-        # Encoder forward pass only up to the required layer
-        num_layer = len(self.layers) + vision_feature_layer + 1
         hidden_states = inputs_embeds
-        for encoder_layer in self.layers[:num_layer]:
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
 
         return hidden_states
@@ -153,7 +241,8 @@ class CLIPVisionTransformer(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
@@ -163,18 +252,19 @@ class CLIPVisionTransformer(nn.Module):
         # NOTE: This typo of "layrnorm" is not fixed on purpose to match
         # the original transformers code and name of the model weights.
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.encoder = CLIPEncoder(config=config, quant_config=quant_config)
+        self.encoder = CLIPEncoder(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override)
 
     def forward(
         self,
         pixel_values: torch.Tensor,
-        vision_feature_layer: int = -1,
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
-        hidden_states = self.encoder(inputs_embeds=hidden_states,
-                                     vision_feature_layer=vision_feature_layer)
+        hidden_states = self.encoder(inputs_embeds=hidden_states)
 
         return hidden_states
 
@@ -186,17 +276,17 @@ class CLIPVisionModel(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
-        self.vision_model = CLIPVisionTransformer(config=config,
-                                                  quant_config=quant_config)
+        self.vision_model = CLIPVisionTransformer(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override)
 
-    def forward(self,
-                pixel_values: Optional[torch.Tensor] = None,
-                vision_feature_layer: int = -1):
+    def forward(self, pixel_values: Optional[torch.Tensor] = None):
 
-        return self.vision_model(pixel_values=pixel_values,
-                                 vision_feature_layer=vision_feature_layer)
+        return self.vision_model(pixel_values=pixel_values)
 
     @property
     def device(self):

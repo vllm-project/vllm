@@ -8,38 +8,13 @@ import pytest  # noqa
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.policy import PolicyFactory
-from vllm.core.scheduler import Scheduler, SchedulerOutputs, SchedulingBudget
+from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
-from vllm.sequence import (Logprob, SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+from vllm.sequence import SequenceGroup, SequenceStatus
 
-from .utils import create_dummy_prompt, create_dummy_prompt_encoder_decoder
-
-
-def get_sequence_groups(scheduler_output):
-    return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
-
-
-def append_new_token(out, token_id: int):
-    seq_groups = get_sequence_groups(out)
-    for seq_group in seq_groups:
-        for seq in seq_group.get_seqs():
-            seq.append_token_id(token_id, {token_id: Logprob(token_id)})
-
-
-def schedule_and_update_computed_tokens(scheduler) \
-    -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
-
-    metas, out = scheduler.schedule()
-    for s, meta in zip(out.scheduled_seq_groups, metas):
-        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
-    return metas, out
-
-
-def append_new_token_seq_group(token_chunk_size, seq_group, token_id: int):
-    seq_group.update_num_computed_tokens(token_chunk_size)
-    for seq in seq_group.get_seqs():
-        seq.append_token_id(token_id, {token_id: Logprob(token_id)})
+from .utils import (append_new_token, append_new_token_seq_group,
+                    create_dummy_prompt, get_sequence_groups,
+                    schedule_and_update_computed_tokens)
 
 
 def test_scheduler_add_seq_group():
@@ -56,29 +31,6 @@ def test_scheduler_add_seq_group():
         _, seq_group = create_dummy_prompt(str(i), block_size)
         scheduler.add_seq_group(seq_group)
         assert scheduler.get_num_unfinished_seq_groups() == i + 1
-
-
-# def test_scheduler_add_seq_group_encoder_decoder():
-#     block_size = 4
-#     scheduler_config = SchedulerConfig(100, 64, 1)
-#     cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
-#     cache_config.num_cpu_blocks = 4
-#     cache_config.num_gpu_blocks = 4
-#     scheduler = Scheduler(scheduler_config, cache_config, None)
-
-#     # Add seq group to scheduler.
-#     num_seq_group = 4
-#     for i in range(num_seq_group):
-#         # _, seq_group = create_dummy_prompt(str(i), block_size)
-#         req_id = str(i)
-#         _, _, seq_group = create_dummy_prompt_encoder_decoder(req_id,
-#                                                               block_size,
-#                                                               block_size,
-#                                                               block_size)
-#         scheduler.add_seq_group(seq_group)
-#         assert scheduler.get_num_unfinished_seq_groups() == i + 1
-#         # Verify that cross-attention block-table has been registered
-#         #assert req_id in scheduler.block_manager.cross_block_tables
 
 
 def test_scheduler_abort_seq_group():
@@ -138,64 +90,6 @@ def test_scheduler_schedule_simple():
             and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == num_seq_group
     append_new_token(out, 1)
-
-
-def test_scheduler_schedule_simple_encoder_decoder():
-    block_size = 4
-    num_seq_group = 4
-    max_model_len = 16
-    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len)
-    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 16  # enc and dec prompts per seq_group
-    cache_config.num_gpu_blocks = 16  # enc and dec prompts per seq_group
-    scheduler = Scheduler(scheduler_config, cache_config, None)
-    running: List[SequenceGroup] = []
-
-    # Add seq groups to scheduler.
-    req_id_list = []
-    for i in range(num_seq_group):
-        # _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
-        req_id = str(i)
-        req_id_list.append(req_id)
-        _, _, seq_group = create_dummy_prompt_encoder_decoder(
-            req_id, block_size, block_size, block_size)
-        scheduler.add_seq_group(seq_group)
-        running.append(seq_group)
-
-    # Schedule seq groups prompts.
-    num_tokens = block_size * num_seq_group
-    seq_group_meta_list, out = schedule_and_update_computed_tokens(scheduler)
-    # - Verify that sequence group cross-attention block tables are
-    #   registered with the block manager
-    assert all([(req_id in scheduler.block_manager.cross_block_tables)
-                for req_id in req_id_list])
-    assert set(get_sequence_groups(out)) == set(running)
-    assert out.num_batched_tokens == num_tokens
-    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
-            and not out.blocks_to_swap_out)
-    assert len(seq_group_meta_list) == num_seq_group
-    append_new_token(out, 1)
-
-    # Schedule seq groups generation.
-    seq_group_meta_list, out = schedule_and_update_computed_tokens(scheduler)
-    # - Verify that sequence group metadata includes encoder attention
-    #   and cross-attention metadata
-    assert all([not ((seq_group_meta.encoder_seq_data is None) or \
-                (seq_group_meta.cross_block_table is None)) \
-                    for seq_group_meta in seq_group_meta_list])
-    assert set(get_sequence_groups(out)) == set(running)
-    assert out.num_batched_tokens == num_seq_group
-    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
-            and not out.blocks_to_swap_out)
-    assert len(seq_group_meta_list) == num_seq_group
-    append_new_token(out, 1)
-
-    # Abort sequences
-    for req_id in req_id_list:
-        scheduler.abort_seq_group(req_id)
-        # - Verify that sequence group cross-attention block tables are
-        #   NO LONGER registered with the block manager
-        assert req_id not in scheduler.block_manager.cross_block_tables
 
 
 def test_scheduler_prefill_prioritized():

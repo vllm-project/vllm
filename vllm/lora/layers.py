@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+from vllm.adapter_commons.layers import AdapterMapping
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -134,15 +135,8 @@ def _apply_lora_packed_nslice(
 
 
 @dataclass
-class LoRAMapping:
-    # Per every token in input_ids:
-    index_mapping: Tuple[int, ...]
-    # Per sampled token:
-    prompt_mapping: Tuple[int, ...]
-
-    def __post_init__(self):
-        self.index_mapping = tuple(self.index_mapping)
-        self.prompt_mapping = tuple(self.prompt_mapping)
+class LoRAMapping(AdapterMapping):
+    pass
 
 
 class BaseLayerWithLoRA(nn.Module):
@@ -1070,6 +1064,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return self.base_layer.scale
 
     @property
+    def soft_cap(self):
+        return self.base_layer.soft_cap
+
+    @property
     def org_vocab_size(self):
         return self.base_layer.org_vocab_size
 
@@ -1168,11 +1166,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
-        embedding: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
+        logits = lm_head.linear_method.apply(lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
         logits = tensor_model_parallel_gather(logits)

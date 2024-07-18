@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import openai
 import pytest
-import ray
 import torch
 from tensorizer import EncryptionParams
 
@@ -215,26 +214,26 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
 
     ## Start OpenAI API server
     openai_args = [
-        "--model", model_ref, "--dtype", "float16", "--load-format",
+        "--dtype", "float16", "--load-format",
         "tensorizer", "--model-loader-extra-config",
         json.dumps(model_loader_extra_config),
     ]
 
-    server = RemoteOpenAIServer(openai_args)
-    print("Server ready.")
+    with RemoteOpenAIServer(model_ref, openai_args) as server:
+        print("Server ready.")
 
-    client = server.get_client()
-    completion = client.completions.create(model=model_ref,
-                                           prompt="Hello, my name is",
-                                           max_tokens=5,
-                                           temperature=0.0)
+        client = server.get_client()
+        completion = client.completions.create(model=model_ref,
+                                            prompt="Hello, my name is",
+                                            max_tokens=5,
+                                            temperature=0.0)
 
-    assert completion.id is not None
-    assert len(completion.choices) == 1
-    assert len(completion.choices[0].text) >= 5
-    assert completion.choices[0].finish_reason == "length"
-    assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11)
+        assert completion.id is not None
+        assert len(completion.choices) == 1
+        assert len(completion.choices[0].text) >= 5
+        assert completion.choices[0].finish_reason == "length"
+        assert completion.usage == openai.types.CompletionUsage(
+            completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
 
 def test_raise_value_error_on_invalid_load_format(vllm_runner):
@@ -280,7 +279,6 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     base_model.model.llm_engine.model_executor.shutdown()
     del base_model
     cleanup()
-    ray.shutdown()
 
     # load model with two shards and serialize with encryption
     model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
@@ -303,7 +301,6 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
     assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
     cleanup()
-    ray.shutdown()
 
     loaded_vllm_model = vllm_runner(
         model_ref,

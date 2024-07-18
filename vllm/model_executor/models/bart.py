@@ -25,16 +25,17 @@ from transformers import BartConfig
 from transformers.activations import ACT2FN
 from transformers.utils import logging
 
-from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 logger = logging.get_logger(__name__)
 
@@ -75,18 +76,26 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
 
         if attn_type == AttentionType.ENCODER:
             seq_lens = attn_metadata.encoder_seq_lens
+            past_key_values_lens = [0] * len(seq_lens)
         else:
             # AttentionType.DECODER
             if attn_metadata.num_prefill_tokens > 0:
                 # Prefill
                 seq_lens = attn_metadata.seq_lens
+                past_key_values_lens = [0] * len(seq_lens)
             else:
                 # Decode: infer one (1) new token per sequence
                 seq_lens = [1] * len(attn_metadata.seq_lens)
+                past_key_values_lens = [
+                    seq_len - 1 for seq_len in attn_metadata.seq_lens
+                ]
 
         positions = []
-        for seq_len in seq_lens:
-            positions.extend(list(range(seq_len)))
+        for past_key_values_len, seq_len in zip(past_key_values_lens,
+                                                seq_lens):
+            positions.extend(
+                list(range(past_key_values_len,
+                           past_key_values_len + seq_len)))
 
         positions = torch.tensor(positions,
                                  dtype=torch.long,
@@ -95,18 +104,17 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
         return super().forward(positions + self.offset)
 
 
-class BartScaledWordEmbedding(nn.Embedding):
+class BartScaledWordEmbedding(VocabParallelEmbedding):
     """
-    This module overrides nn.Embeddings' 
+    This module overrides VocabParallelEmbedding's 
     forward by multiplying with embeddings scale.
     """
 
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
-                 padding_idx: int,
                  embed_scale: Optional[float] = 1.0):
-        super().__init__(num_embeddings, embedding_dim, padding_idx)
+        super().__init__(num_embeddings, embedding_dim)
         self.embed_scale = embed_scale
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -310,17 +318,11 @@ class BartEncoderLayer(nn.Module):
         r"""
         Args:
             hidden_states
-
                 torch.Tensor of *encoder* input embeddings.
-
             kv_cache:
-
                 Layer-wise list of KV cache tensors
-
             attn_metadata:
-
                 vLLM Attention metadata structure
-
         Returns:
             Encoder layer output torch.Tensor
         """
@@ -396,21 +398,13 @@ class BartDecoderLayer(nn.Module):
         r"""
         Args:
             decoder_hidden_states
-
                 torch.Tensor of *decoder* input embeddings.
-
             kv_cache:
-
                 KV cache tensor
-
             attn_metadata:
-
                 vLLM Attention metadata structure
-
             encoder_hidden_states
-
                 torch.Tensor of *encoder* input embeddings.
-
         Returns:
             Decoder layer output torch.Tensor
         """
@@ -447,13 +441,13 @@ class BartDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
 
-        if hidden_states.dtype == torch.float16 and (
-                torch.isinf(hidden_states).any()
-                or torch.isnan(hidden_states).any()):
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
+        # if hidden_states.dtype == torch.float16 and (
+        #         torch.isinf(hidden_states).any()
+        #         or torch.isnan(hidden_states).any()):
+        #     clamp_value = torch.finfo(hidden_states.dtype).max - 1000
+        #     hidden_states = torch.clamp(hidden_states,
+        #                                 min=-clamp_value,
+        #                                 max=clamp_value)
 
         return hidden_states
 
@@ -462,7 +456,6 @@ class BartEncoder(nn.Module):
     """
     Transformer encoder consisting of *config.encoder_layers*
     self attention layers. Each layer is a [`BartEncoderLayer`].
-
     Args:
         config: BartConfig
         embed_tokens (nn.Embedding): output embedding
@@ -480,13 +473,11 @@ class BartEncoder(nn.Module):
         self.quant_config = quant_config
         self.lora_config = lora_config
         embed_dim = config.d_model
-        self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_position_embeddings
         embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
         self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
                                                     embed_dim,
-                                                    self.padding_idx,
                                                     embed_scale=embed_scale)
 
         if embed_tokens is not None:
@@ -508,19 +499,13 @@ class BartEncoder(nn.Module):
         Args:
             input_ids
             (`torch.LongTensor` of shape `(total_num_tokens)`):
-
                 Indices of *encoder* input sequence tokens in the vocabulary.
                 Padding will be ignored by default should you
                 provide it.
-
             kv_caches:
-
                 Layer-wise list of KV cache tensors
-
             attn_metadata:
-
                 vLLM Attention metadata structure
-
         Returns:
             Decoder output torch.Tensor
         """
@@ -551,7 +536,6 @@ class BartDecoder(nn.Module):
     """
     Transformer decoder consisting of *config.decoder_layers* layers.
     Each layer is a [`BartDecoderLayer`]
-
     Args:
         config: BartConfig
         embed_tokens (nn.Embedding): output embedding
@@ -569,14 +553,12 @@ class BartDecoder(nn.Module):
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.lora_config = lora_config
-        self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
         self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
                                                     config.d_model,
-                                                    self.padding_idx,
                                                     embed_scale=embed_scale)
 
         if embed_tokens is not None:
@@ -601,23 +583,15 @@ class BartDecoder(nn.Module):
         Args:
             decoder_input_ids
             (`torch.LongTensor` of shape `(total_num_tokens)`):
-
                 Indices of *decoder* input sequence tokens in the vocabulary.
                 Padding will be ignored by default should you
                 provide it.
-
             encoder_hidden_states:
-
                 Tensor of encoder output embeddings
-
             kv_caches:
-
                 Layer-wise list of KV cache tensors
-
             attn_metadata:
-
                 vLLM Attention metadata structure
-
         Returns:
             Decoder output torch.Tensor
         """
@@ -726,42 +700,40 @@ class BartForConditionalGeneration(nn.Module):
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        embed_scale = math.sqrt(
+            config.d_model) if config.scale_embedding else 1.0
+        self.lm_head = BartScaledWordEmbedding(config.vocab_size,
+                                               config.d_model,
+                                               embed_scale=embed_scale)
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        encoder_input_ids: torch.Tensor,
+        encoder_positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> torch.Tensor:
         r"""
         Args:
             input_ids
-
                 torch.Tensor of *decoder* input token ids.
-
             positions
-
                 torch.Tensor of *decoder* position indices.
-
             encoder_input_ids
-
                 torch.Tensor of *encoder* input token ids.
-
             encoder_positions
-
                 torch.Tensor of *encoder* position indices
-
             kv_caches:
-
                 Layer-wise list of KV cache tensors
-
             attn_metadata:
-
                 vLLM Attention metadata structure
-
         Returns:
             Output torch.Tensor
         """
@@ -771,7 +743,7 @@ class BartForConditionalGeneration(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -828,41 +800,24 @@ class BartForConditionalGeneration(nn.Module):
         model_params_dict = dict(self.model.named_parameters())
         top_params_dict = dict(self.named_parameters())
 
-        for name, loaded_weight in weights:
+        weights_tuple_list = list(weights)
+
+        shared_embedding_weight = None
+        shared_embedding_shard_id = None
+
+        for name, loaded_weight in weights_tuple_list:
 
             name = self._rename_key(name)
             name, shard_id = self._rename_stacked_param(name)
 
-            if 'shared.weight' in name:
-                encoder_in_param = model_params_dict[
-                    'encoder.embed_tokens.weight']
-                encoder_in_weight_loader = getattr(encoder_in_param,
-                                                   "weight_loader",
-                                                   default_weight_loader)
-
-                decoder_in_param = model_params_dict[
-                    'decoder.embed_tokens.weight']
-                decoder_in_weight_loader = getattr(decoder_in_param,
-                                                   "weight_loader",
-                                                   default_weight_loader)
-
-                lm_head_in_param = top_params_dict['lm_head.weight']
-                lm_head_in_weight_loader = getattr(lm_head_in_param,
-                                                   "weight_loader",
-                                                   default_weight_loader)
-
-                if shard_id:
-                    encoder_in_weight_loader(encoder_in_param, loaded_weight,
-                                             shard_id)
-                    decoder_in_weight_loader(decoder_in_param, loaded_weight,
-                                             shard_id)
-                    lm_head_in_weight_loader(lm_head_in_param, loaded_weight,
-                                             shard_id)
-                else:
-                    encoder_in_weight_loader(encoder_in_param, loaded_weight)
-                    decoder_in_weight_loader(decoder_in_param, loaded_weight)
-                    lm_head_in_weight_loader(lm_head_in_param, loaded_weight)
-
+            if ('shared.weight' in name
+                    or 'encoder.embed_tokens.weight' in name
+                    or 'decoder.embed_tokens.weight' in name
+                    or 'lm_head.weight' in name):
+                assert shared_embedding_weight is None, (
+                    "Conflicting embedding weights.")
+                shared_embedding_weight = loaded_weight
+                shared_embedding_shard_id = shard_id
             else:
                 # Skip the specific downstream task weight.
                 if name.startswith('cls.'):
@@ -881,3 +836,30 @@ class BartForConditionalGeneration(nn.Module):
                     weight_loader(param, loaded_weight, shard_id)
                 else:
                     weight_loader(param, loaded_weight)
+
+        # Assign shared weight values
+        encoder_in_param = model_params_dict['encoder.embed_tokens.weight']
+        encoder_in_weight_loader = getattr(encoder_in_param, "weight_loader",
+                                           default_weight_loader)
+
+        decoder_in_param = model_params_dict['decoder.embed_tokens.weight']
+        decoder_in_weight_loader = getattr(decoder_in_param, "weight_loader",
+                                           default_weight_loader)
+
+        lm_head_in_param = top_params_dict['lm_head.weight']
+        lm_head_in_weight_loader = getattr(lm_head_in_param, "weight_loader",
+                                           default_weight_loader)
+
+        assert shared_embedding_weight is not None
+
+        if shared_embedding_shard_id:
+            encoder_in_weight_loader(encoder_in_param, shared_embedding_weight,
+                                     shared_embedding_shard_id)
+            decoder_in_weight_loader(decoder_in_param, shared_embedding_weight,
+                                     shared_embedding_shard_id)
+            lm_head_in_weight_loader(lm_head_in_param, shared_embedding_weight,
+                                     shared_embedding_shard_id)
+        else:
+            encoder_in_weight_loader(encoder_in_param, shared_embedding_weight)
+            decoder_in_weight_loader(decoder_in_param, shared_embedding_weight)
+            lm_head_in_weight_loader(lm_head_in_param, shared_embedding_weight)

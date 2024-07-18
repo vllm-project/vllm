@@ -73,5 +73,5 @@ Resources for vLLM contributors
 -------------------------------
 * `A Hacker's Guide to Speculative Decoding in vLLM <https://www.youtube.com/watch?v=9wNAgpX6z_4>`_
 * `What is Lookahead Scheduling in vLLM? <https://docs.google.com/document/d/1Z9TvqzzBPnh5WHcRwjvK2UEeFeq5zMZb5mFE8jR0HCs/edit#heading=h.1fjfb0donq5a>`_
-* `Information on batch expansion. <https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit#heading=h.kk7dq05lc6q8>`_
+* `Information on batch expansion <https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit#heading=h.kk7dq05lc6q8>`_
 * `Dynamic speculative decoding <https://github.com/vllm-project/vllm/issues/4565>`_

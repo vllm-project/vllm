@@ -103,7 +103,8 @@ class ResponseFormat(OpenAIBaseModel):
 
 
 class StreamOptions(OpenAIBaseModel):
-    include_usage: Optional[bool]
+    include_usage: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = True
 
 
 class FunctionDefinition(OpenAIBaseModel):
@@ -190,6 +191,27 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "special tokens so this should be set to False (as is the "
             "default)."),
     )
+    documents: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description=
+        ("A list of dicts representing documents that will be accessible to "
+         "the model if it is performing RAG (retrieval-augmented generation)."
+         " If the template does not support RAG, this argument will have no "
+         "effect. We recommend that each document should be a dict containing "
+         "\"title\" and \"text\" keys."),
+    )
+    chat_template: Optional[str] = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "If this is not passed, the model's default chat template will be "
+            "used instead."),
+    )
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
+    )
     include_stop_str_in_output: Optional[bool] = Field(
         default=False,
         description=(
@@ -234,15 +256,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         logits_processors = None
         if self.logit_bias:
+            logit_bias: Dict[int, float] = {}
+            try:
+                for token_id, bias in self.logit_bias.items():
+                    # Convert token_id to integer before we add to LLMEngine
+                    # Clamp the bias between -100 and 100 per OpenAI API spec
+                    logit_bias[int(token_id)] = min(100, max(-100, bias))
+            except ValueError as exc:
+                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
+                                 f"but token_id must be an integer or string "
+                                 f"representing an integer") from exc
 
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
-                for token_id, bias in self.logit_bias.items():
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    bias = min(100, max(-100, bias))
-                    logits[int(token_id)] += bias
+                for token_id, bias in logit_bias.items():
+                    logits[token_id] += bias
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
@@ -419,15 +448,22 @@ class CompletionRequest(OpenAIBaseModel):
 
         logits_processors = None
         if self.logit_bias:
+            logit_bias: Dict[int, float] = {}
+            try:
+                for token_id, bias in self.logit_bias.items():
+                    # Convert token_id to integer
+                    # Clamp the bias between -100 and 100 per OpenAI API spec
+                    logit_bias[int(token_id)] = min(100, max(-100, bias))
+            except ValueError as exc:
+                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
+                                 f"but token_id must be an integer or string "
+                                 f"representing an integer") from exc
 
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
-                for token_id, bias in self.logit_bias.items():
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    bias = min(100, max(-100, bias))
-                    logits[int(token_id)] += bias
+                for token_id, bias in logit_bias.items():
+                    logits[token_id] += bias
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
@@ -566,7 +602,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
 class EmbeddingResponseData(BaseModel):
     index: int
     object: str = "embedding"
-    embedding: List[float]
+    embedding: Union[List[float], str]
 
 
 class EmbeddingResponse(BaseModel):
@@ -680,7 +716,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Union[ChatCompletionResponse, ]
+    body: Optional[ChatCompletionResponse] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -699,3 +735,26 @@ class BatchRequestOutput(OpenAIBaseModel):
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
     error: Optional[Any]
+
+
+class TokenizeRequest(OpenAIBaseModel):
+    add_generation_prompt: bool = Field(default=True)
+    add_special_tokens: bool = Field(default=False)
+    prompt: Optional[str] = Field(default=None)
+    messages: Optional[List[ChatCompletionMessageParam]] = Field(default=None)
+    model: str
+
+
+class TokenizeResponse(OpenAIBaseModel):
+    count: int
+    max_model_len: int
+    tokens: List[int]
+
+
+class DetokenizeRequest(OpenAIBaseModel):
+    model: str
+    tokens: List[int]
+
+
+class DetokenizeResponse(OpenAIBaseModel):
+    prompt: str

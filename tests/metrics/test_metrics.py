@@ -39,7 +39,7 @@ def test_metric_counter_prompt_tokens(
         vllm_prompt_token_count = sum(prompt_token_counts)
 
         _ = vllm_model.generate_greedy(example_prompts, max_tokens)
-        stat_logger = vllm_model.model.llm_engine.stat_logger
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metric_count = stat_logger.metrics.counter_prompt_tokens.labels(
             **stat_logger.labels)._value.get()
 
@@ -64,7 +64,7 @@ def test_metric_counter_generation_tokens(
                      gpu_memory_utilization=0.4) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         tokenizer = vllm_model.model.get_tokenizer()
-        stat_logger = vllm_model.model.llm_engine.stat_logger
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metric_count = stat_logger.metrics.counter_generation_tokens.labels(
             **stat_logger.labels)._value.get()
         vllm_generation_count = 0
@@ -92,7 +92,7 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
                      disable_log_stats=False,
                      gpu_memory_utilization=0.3,
                      served_model_name=served_model_name) as vllm_model:
-        stat_logger = vllm_model.model.llm_engine.stat_logger
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metrics_tag_content = stat_logger.labels["model_name"]
 
     if served_model_name is None or served_model_name == []:
@@ -168,14 +168,63 @@ def test_engine_log_metrics_regression(
     assert_metrics(engine, disable_log_stats, len(example_prompts))
 
 
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [10])
+def test_metric_spec_decode(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+) -> None:
+    k = 5
+
+    with vllm_runner(model,
+                     dtype=dtype,
+                     disable_log_stats=False,
+                     gpu_memory_utilization=0.4,
+                     speculative_model=model,
+                     num_speculative_tokens=k,
+                     use_v2_block_manager=True) as vllm_model:
+
+        # Force log interval to be 0 to catch all metrics.
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+        stat_logger.local_interval = 0
+
+        # Note that the purpose of this test is to verify spec decode
+        # metrics instead of functional correctness, so the expected values
+        # are intended to be loose.
+        metric_name_to_expected_fn = {
+            "gauge_spec_decode_draft_acceptance_rate": lambda v: 0 <= v <= 1,
+            "gauge_spec_decode_efficiency": lambda v: 0 <= v <= 1,
+            "counter_spec_decode_num_accepted_tokens": lambda v: 0 <= v <= k,
+            "counter_spec_decode_num_draft_tokens": lambda v: v == k,
+            "counter_spec_decode_num_emitted_tokens":
+            lambda v: 0 <= v <= k + 1,
+        }
+
+        # Use one request to better inspect the metrics.
+        prompts = example_prompts[:1]
+
+        _ = vllm_model.generate_greedy(prompts, max_tokens)
+        for metric_name, is_expected in metric_name_to_expected_fn.items():
+            metric_val = getattr(
+                stat_logger.metrics,
+                metric_name).labels(**stat_logger.labels)._value.get()
+            assert is_expected(metric_val), (
+                f"the value of metric {metric_name} ({metric_val}) "
+                "does not meet expectation")
+
+
 def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
                    num_requests: int) -> None:
     if disable_log_stats:
         with pytest.raises(AttributeError):
-            _ = engine.stat_logger
+            _ = engine.stat_loggers
     else:
-        assert (engine.stat_logger
-                is not None), "engine.stat_logger should be set"
+        assert (engine.stat_loggers
+                is not None), "engine.stat_loggers should be set"
         # Ensure the count bucket of request-level histogram metrics matches
         # the number of requests as a simple sanity check to ensure metrics are
         # generated

@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from transformers import BertConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -358,7 +358,12 @@ class BertSelfAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        output = self.attn(q, k, v, kv_cache, attn_metadata)
+        output = self.attn(q,
+                           k,
+                           v,
+                           kv_cache,
+                           attn_metadata,
+                           attn_type=AttentionType)
         return output
 
 

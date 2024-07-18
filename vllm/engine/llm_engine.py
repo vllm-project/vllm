@@ -1,32 +1,37 @@
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Type, TypeVar, Union
+from typing import Set, Tuple, Type, TypeVar, Union
 
-from transformers import GenerationConfig, PreTrainedTokenizer
+import torch
+from transformers import PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         LoRAConfig, ModelConfig, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import StatLogger, Stats
+from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
+                                 StatLoggerBase, Stats)
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, LLMInputsOptions,
-                         PromptInputs)
+from vllm.inputs import (INPUT_REGISTRY, LLMInputs, PromptInputs,
+                         get_prompt_type)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
@@ -34,6 +39,7 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
+from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -47,15 +53,17 @@ logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 
-def _load_generation_config_dict(model_config: ModelConfig):
-    try:
-        return GenerationConfig.from_pretrained(
-            model_config.model,
-            revision=model_config.revision,
-        ).to_diff_dict()
-    except OSError:
-        # Not found.
+def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
+    config = try_get_generation_config(
+        model_config.model,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=model_config.revision,
+    )
+
+    if config is None:
         return {}
+
+    return config.to_diff_dict()
 
 
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
@@ -85,12 +93,14 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        vision_language_config (Optional): The configuration related to vision
-            language models.
+        multimodal_config (Optional): The configuration related to multimodal 
+            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
+        prompt_adapter_config (Optional): The configuration related to serving 
+            prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
     """
@@ -155,13 +165,15 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
+        prompt_adapter_config: Optional[PromptAdapterConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -170,11 +182,13 @@ class LLMEngine:
             "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+            "pipeline_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s)",
+            "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
+            "enable_prefix_caching=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -191,6 +205,7 @@ class LLMEngine:
             load_config.download_dir,
             load_config.load_format,
             parallel_config.tensor_parallel_size,
+            parallel_config.pipeline_parallel_size,
             parallel_config.disable_custom_all_reduce,
             model_config.quantization,
             model_config.enforce_eager,
@@ -201,19 +216,22 @@ class LLMEngine:
             observability_config,
             model_config.seed,
             model_config.served_model_name,
+            scheduler_config.use_v2_block_manager,
+            cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.speculative_config = speculative_config
         self.load_config = load_config
         self.decoding_config = decoding_config or DecodingConfig()
+        self.prompt_adapter_config = prompt_adapter_config
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
@@ -229,6 +247,9 @@ class LLMEngine:
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
+        self.input_processor = INPUT_REGISTRY.create_input_processor(
+            self.model_config)
+
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -236,12 +257,13 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            vision_language_config=vision_language_config,
+            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
+            prompt_adapter_config=prompt_adapter_config,
         )
 
-        if not self._is_embedding_model():
+        if not self.model_config.embedding_mode:
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
@@ -266,11 +288,13 @@ class LLMEngine:
                     "quantization":
                     model_config.quantization,
                     "kv_cache_dtype":
-                    cache_config.cache_dtype,
+                    str(cache_config.cache_dtype),
 
                     # Feature flags
                     "enable_lora":
                     bool(lora_config),
+                    "enable_prompt_adapter":
+                    bool(prompt_adapter_config),
                     "enable_prefix_caching":
                     cache_config.enable_prefix_caching,
                     "enforce_eager":
@@ -287,15 +311,29 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        self.scheduler = [
+            Scheduler(scheduler_config, cache_config, lora_config,
+                      parallel_config.pipeline_parallel_size)
+            for _ in range(parallel_config.pipeline_parallel_size)
+        ]
 
         # Metric Logging.
         if self.log_stats:
-            self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.served_model_name),
-                max_model_len=self.model_config.max_model_len)
-            self.stat_logger.info("cache_config", self.cache_config)
+            if stat_loggers is not None:
+                self.stat_loggers = stat_loggers
+            else:
+                self.stat_loggers = {
+                    "logging":
+                    LoggingStatLogger(
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
+                    "prometheus":
+                    PrometheusStatLogger(
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                        labels=dict(model_name=model_config.served_model_name),
+                        max_model_len=self.model_config.max_model_len),
+                }
+                self.stat_loggers["prometheus"].info("cache_config",
+                                                     self.cache_config)
 
         self.tracer = None
         if self.observability_config.otlp_traces_endpoint:
@@ -317,12 +355,6 @@ class LLMEngine:
                     self.get_tokenizer_for_seq,
                 ),
             ))
-
-    def _is_encoder_decoder_model(self):
-        return is_encoder_decoder_model_config(self.model_config)
-
-    def _is_embedding_model(self):
-        return is_embedding_model_config(self.model_config)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -357,7 +389,6 @@ class LLMEngine:
         engine_config = engine_args.create_engine_config()
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
-
         # Initialize the cluster and specify the executor class.
         if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
@@ -368,6 +399,9 @@ class LLMEngine:
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
+        elif engine_config.device_config.device_type == "openvino":
+            from vllm.executor.openvino_executor import OpenVINOExecutor
+            executor_class = OpenVINOExecutor
         elif engine_config.device_config.device_type == "xpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
@@ -387,7 +421,6 @@ class LLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
-
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),
@@ -448,6 +481,9 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+        if self.prompt_adapter_config:
+            self.prompt_adapter_config.verify_with_model_config(
+                self.model_config)
 
     def _get_eos_token_id(
             self, lora_request: Optional[LoRARequest]) -> Optional[int]:
@@ -458,13 +494,34 @@ class LLMEngine:
 
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
+    def _get_decoder_start_token_id(self, ) -> Optional[int]:
+        '''
+        Obtain the decoder start token id employed by an encoder/decoder
+        model. Returns None for non-encoder/decoder models or if the
+        model config is unavailable.
+        '''
+
+        if not self.is_encoder_decoder_model():
+            logger.warning("Using None for decoder start token id because "
+                           "this is not an encoder/decoder model.")
+            return None
+
+        if (self.model_config is None or self.model_config.hf_config is None):
+            logger.warning("Using None for decoder start token id because "
+                           "model config is not available.")
+            return None
+
+        return getattr(self.model_config.hf_config, 'decoder_start_token_id',
+                       None)
+
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: LLMInputsOptions,
+        processed_inputs: LLMInputs,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Create the sequences.
@@ -472,153 +529,338 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self._get_eos_token_id(lora_request)
 
-        if self._is_encoder_decoder_model():
-            # Add encoder/decoder model request
-            encoder_seq_id = 0  # Encoder sequence id is not used
+        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+                       lora_request, prompt_adapter_request)
 
-            processed_encoder_inputs = {
-                "prompt":
-                processed_inputs.get("encoder_prompt"),
-                "prompt_token_ids":
-                processed_inputs.get("encoder_prompt_token_ids")
-            }
+        encoder_seq = None
+        if 'encoder_prompt_token_ids' in processed_inputs:
+            encoder_seq = Sequence(seq_id,
+                                   processed_inputs,
+                                   block_size,
+                                   eos_token_id,
+                                   lora_request,
+                                   prompt_adapter_request,
+                                   from_decoder_prompt=False)
 
-            encoder_seq = Sequence(encoder_seq_id, processed_encoder_inputs,
-                                   block_size, eos_token_id, lora_request)
-
-            decoder_seq = Sequence(seq_id, processed_inputs, block_size,
-                                   eos_token_id, lora_request)
-
-            # Create a SequenceGroup based on SamplingParams or PoolingParams
-            if isinstance(params, SamplingParams):
-                seq_group = self._create_sequence_group_with_sampling(
-                    request_id,
-                    decoder_seq,
-                    params,
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    encoder_seq=encoder_seq)
-            elif isinstance(params, PoolingParams):
-                seq_group = self._create_sequence_group_with_pooling(
-                    request_id,
-                    decoder_seq,
-                    params,
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                    encoder_seq=encoder_seq)
-            else:
-                raise ValueError(
-                    "Either SamplingParams or PoolingParams must be provided.")
-
-            # Add the sequence group to the scheduler.
-            self.scheduler.add_seq_group(seq_group)
+        # Create a SequenceGroup based on SamplingParams or PoolingParams
+        if isinstance(params, SamplingParams):
+            seq_group = self._create_sequence_group_with_sampling(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
+                encoder_seq=encoder_seq)
+        elif isinstance(params, PoolingParams):
+            seq_group = self._create_sequence_group_with_pooling(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+                encoder_seq=encoder_seq)
         else:
-            # Add decoder-only model request
-            decoder_seq = Sequence(seq_id, processed_inputs, block_size,
-                                   eos_token_id, lora_request)
+            raise ValueError(
+                "Either SamplingParams or PoolingParams must be provided.")
 
-            # Create a SequenceGroup based on SamplingParams or PoolingParams
-            if isinstance(params, SamplingParams):
-                seq_group = self._create_sequence_group_with_sampling(
-                    request_id,
-                    decoder_seq,
-                    params,
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                )
-            elif isinstance(params, PoolingParams):
-                seq_group = self._create_sequence_group_with_pooling(
-                    request_id,
-                    decoder_seq,
-                    params,
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                )
-            else:
-                raise ValueError(
-                    "Either SamplingParams or PoolingParams must be provided.")
+        # Add the sequence group to the scheduler with least unfinished seqs.
+        costs = [
+            scheduler.get_num_unfinished_seq_groups()
+            for scheduler in self.scheduler
+        ]
+        min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+        min_cost_scheduler.add_seq_group(seq_group)
 
-            # Add the sequence group to the scheduler.
-            self.scheduler.add_seq_group(seq_group)
+    def stop_remote_worker_execution_loop(self) -> None:
+        self.model_executor.stop_remote_worker_execution_loop()
+
+    _LLMInputComponentsType = Tuple[str, List[int], ]
+
+    def _prepare_decoder_input_ids_for_generation(
+        self,
+        decoder_input_ids: Optional[Union[List[int], torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """
+        Prepares `decoder_input_ids` for generation with encoder-decoder models.
+
+        Based on
+
+        https://github.com/huggingface/transformers/blob/
+        4037a2b5b1278736e566aec12e169100275545ea/
+        src/transformers/generation/utils.py
+
+        specifically GenerationMixin._prepare_decoder_input_ids_for_generation()
+        """
+
+        decoder_start_token_id: Optional[
+            Union[int, List[int],
+                  torch.Tensor]] = (self._get_decoder_start_token_id())
+
+        # Cast decoder_start_token_id to torch.Tensor, if not already
+        if isinstance(decoder_start_token_id, int):
+            decoder_start_token_id = torch.tensor([decoder_start_token_id],
+                                                  dtype=torch.int)
+        elif isinstance(decoder_start_token_id, list):
+            assert len(decoder_start_token_id) > 0
+            assert isinstance(decoder_start_token_id[0], int)
+            decoder_start_token_id = torch.tensor(decoder_start_token_id,
+                                                  dtype=torch.int)
+        else:
+            assert isinstance(decoder_start_token_id, torch.Tensor)
+
+        decoder_start_token_id = decoder_start_token_id.view(-1, 1)
+
+        # Cast decoder_input_ids to torch.Tensor, if not already
+        originally_list = False
+        if isinstance(decoder_input_ids, list):
+            assert (len(decoder_input_ids) == 0
+                    or isinstance(decoder_input_ids[0], int))
+            decoder_input_ids = torch.tensor(decoder_input_ids,
+                                             dtype=torch.int)
+            originally_list = True
+
+        if decoder_input_ids is not None:
+            assert isinstance(decoder_input_ids, torch.Tensor)
+            # Reshape: (batch_size=1,num_tokens)
+            decoder_input_ids = decoder_input_ids.view(1, -1)
+
+        if decoder_input_ids is None:
+            # no user input -> use decoder_start_token_id as decoder_input_ids
+            decoder_input_ids = decoder_start_token_id
+        elif (decoder_input_ids[:, 0] !=
+              decoder_start_token_id[:, 0]).all().item():
+            # Encoder-decoder models expect the `decoder_input_ids` to start
+            # with a special token. Let's ensure that.
+            decoder_input_ids = (torch.cat(
+                [decoder_start_token_id, decoder_input_ids],
+                dim=-1,
+            ))
+
+        assert isinstance(decoder_input_ids, torch.Tensor)
+        decoder_input_ids = decoder_input_ids.view(-1)
+
+        if originally_list:
+            return decoder_input_ids.tolist()
+        else:
+            return decoder_input_ids
+
+    def _tokenize_prompt(
+        self,
+        request_id,
+        prompt,
+        lora_request,
+        is_enc_dec_decoder=False,
+    ) -> List[int]:
+        tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                             "skip_tokenizer_init is True")
+
+        if is_enc_dec_decoder and prompt == "":
+            # Scenario: enc/dec model, decoder input prompt is ""
+            # => Treat it as None (no decoder input prompt provided)
+            # & obtain default decoder input prompt
+            return self._prepare_decoder_input_ids_for_generation()
+
+        # Scenario:
+        # * Any decoder-only input prompt
+        # * Enc/dec model, non-empty-str decoder input prompt
+        # => Tokenize prompt
+        prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                            prompt=prompt,
+                                            lora_request=lora_request)
+
+        if is_enc_dec_decoder:
+            # Scenario: enc/dec model, non-empty-str decoder input prompt
+            # which was just tokenized
+            # => perform decoder-specific preprocessing
+            return self._prepare_decoder_input_ids_for_generation(
+                prompt_token_ids, )
+
+        # Decoder-only tokenized prompt
+        return prompt_token_ids
+
+    def _extract_single_prompt(
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        lora_request: Optional[LoRARequest],
+        is_encoder_prompt: bool = False,
+        is_enc_dec_model: bool = False,
+    ) -> Tuple[str, List[int], Optional["MultiModalDataDict"]]:
+        '''
+        Extract prompt & prompt_token_ids from any single
+        encoder or decoder input prompt. For encoder input prompts
+        in particular, also extract multi-modal data.
+
+        Arguments:
+
+        * request_id
+        * inputs: single encoder or decoder input prompt
+        * lora_request
+        * is_encoder_prompt: True if encoder input prompt
+
+        Returns:
+        * prompt
+        * prompt_token_ids
+        * multi_modal_data (None if is_encoder_prompt)
+        '''
+
+        is_enc_dec_decoder = ((not is_encoder_prompt) and is_enc_dec_model)
+
+        if isinstance(inputs, str):
+            # prompt = inputs
+            # prompt_token_ids = tokenize(inputs)
+            # no multi-modal data
+            return (inputs,
+                    self._tokenize_prompt(
+                        request_id,
+                        inputs,
+                        lora_request,
+                        is_enc_dec_decoder=is_enc_dec_decoder,
+                    ), None)
+
+        # Tokenize
+        prompt_token_ids = (inputs["prompt_token_ids"]
+                            if inputs["prompt_token_ids"] else
+                            self._tokenize_prompt(
+                                request_id,
+                                inputs,
+                                lora_request,
+                                is_enc_dec_decoder=is_enc_dec_decoder,
+                            ))
+
+        if is_encoder_prompt:
+            # Only care about multi-modal data associated
+            # with the encoder prompt
+            return (inputs.get('prompt'), prompt_token_ids,
+                    inputs.get("multi_modal_data"))
+        else:
+            # Assume there is no decoder multi-modal data
+            return (inputs.get('prompt'), prompt_token_ids, None)
+
+    def _get_default_decoder_prompt(
+        self,
+        request_id: str,
+        lora_request: Optional[LoRARequest],
+    ) -> Tuple[str, List[int]]:
+        prompt = ""
+        prompt_token_ids = (self._tokenize_prompt(
+            request_id,
+            prompt,
+            lora_request,
+        ))
+        return prompt, prompt_token_ids
+
+    def _process_encoder_decoder_prompt(self, request_id: str,
+                                        inputs: PromptInputs,
+                                        lora_request: Optional[LoRARequest]):
+        ptype = get_prompt_type(inputs)
+
+        # Obtain encoder prompt
+        (
+            encoder_prompt,
+            encoder_prompt_token_ids,
+            multi_modal_data,
+        ) = self._extract_single_prompt(
+            request_id,
+            (inputs.get('encoder_prompt') if get_prompt_type(inputs)
+             == "ExplicitEncoderDecoder" else inputs),
+            lora_request,
+            is_encoder_prompt=True,
+            is_enc_dec_model=True,
+        )
+
+        # Obtain decoder prompt
+        if ptype == "ExplicitEncoderDecoder":
+            # User supplied a dict with explicit
+            # encoder and decoder prompts; extract
+            # decoder prompt
+            (
+                decoder_prompt,
+                decoder_prompt_token_ids,
+                _,
+            ) = self._extract_single_prompt(
+                request_id,
+                inputs.get('decoder_prompt'),
+                lora_request,
+                is_encoder_prompt=False,
+                is_enc_dec_model=True,
+            )
+        else:
+            # User supplied a single prompt (implicitly
+            # the encoder prompt) so default decoder
+            # prompt must be inferred
+            (
+                decoder_prompt,
+                decoder_prompt_token_ids,
+            ) = self._get_default_decoder_prompt(request_id, lora_request)
+
+        return LLMInputs(
+            prompt_token_ids=decoder_prompt_token_ids,
+            prompt=decoder_prompt,
+            encoder_prompt_token_ids=encoder_prompt_token_ids,
+            encoder_prompt=encoder_prompt,
+            multi_modal_data=multi_modal_data,
+        )
+
+    def _process_decoder_only_prompt(
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> LLMInputs:
+        if isinstance(inputs, str):
+            inputs = {"prompt": inputs}
+        prompt = inputs.get("prompt")
+
+        if "prompt_token_ids" not in inputs:
+            prompt_token_ids = self._tokenize_prompt(
+                request_id,
+                prompt,
+                lora_request,
+            )
+        else:
+            prompt_token_ids = inputs["prompt_token_ids"]
+
+        if prompt_adapter_request:
+            prompt_token_ids = (
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
+                + prompt_token_ids)
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=prompt,
+                         multi_modal_data=inputs.get("multi_modal_data"))
 
     def process_model_inputs(
         self,
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
-    ) -> LLMInputsOptions:
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> LLMInputs:
 
-        if self._is_encoder_decoder_model():
-            # Encoder/decoder model input
-
-            if isinstance(inputs, str):
-                # Interpret a single input prompt as a single encoder input
-                # (leave decoder input to default)
-                inputs = {"encoder_prompt": inputs}
-
-            if isinstance(inputs, tuple) and len(inputs) == 2:
-                # Detect input which is EncoderDecoderStringPrompts
-                # (i.e. Tuple[str,str])
-                # Interpret a tuple of input string prompts as a single
-                # encoder input and a single decoder input, respectively
-                inputs = {
-                    "encoder_prompt": inputs[0],
-                    "decoder_prompt": inputs[1]
-                }
-
-            input_has_decoder_token_ids = "decoder_prompt_token_ids" in inputs
-            input_has_encoder_token_ids = "encoder_prompt_token_ids" in inputs
-
-            if not (input_has_decoder_token_ids and \
-                    input_has_encoder_token_ids):
-                tokenizer = self.get_tokenizer_group(
-                    "prompts must be None if "
-                    "skip_tokenizer_init is True")
-
-                if not input_has_decoder_token_ids:
-                    decoder_prompt_token_ids = tokenizer.encode(
-                        request_id=request_id,
-                        prompt=inputs["decoder_prompt"],
-                        lora_request=lora_request)
-
-                    encoder_prompt_token_ids = tokenizer.encode(
-                        request_id=request_id,
-                        prompt=inputs["encoder_prompt"],
-                        lora_request=lora_request)
-
-            else:
-                decoder_prompt_token_ids = inputs["decoder_prompt_token_ids"]
-                encoder_prompt_token_ids = inputs["encoder_prompt_token_ids"]
-
-            return EncoderDecoderLLMInputs(
-                decoder_prompt_token_ids=decoder_prompt_token_ids,
-                decoder_prompt=inputs.get("decoder_prompt"),
-                encoder_prompt_token_ids=encoder_prompt_token_ids,
-                encoder_prompt=inputs.get("encoder_prompt"),
-                multi_modal_data=inputs.get("multi_modal_data"))
+        if self.is_encoder_decoder_model():
+            # Encoder-decoder model requires special mapping of
+            # input prompts to encoder & decoder
+            return self.input_processor(
+                self._process_encoder_decoder_prompt(
+                    request_id,
+                    inputs,
+                    lora_request,
+                ))
 
         else:
-            # Decoder-only model input
-
-            if isinstance(inputs, str):
-                inputs = {"prompt": inputs}
-
-            if "prompt_token_ids" not in inputs:
-                tokenizer = self.get_tokenizer_group(
-                    "prompts must be None if "
-                    "skip_tokenizer_init is True")
-
-                prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                                    prompt=inputs["prompt"],
-                                                    lora_request=lora_request)
-            else:
-                prompt_token_ids = inputs["prompt_token_ids"]
-
-            return LLMInputs(prompt_token_ids=prompt_token_ids,
-                             prompt=inputs.get("prompt"),
-                             multi_modal_data=inputs.get("multi_modal_data"))
+            # Decoder-only operation
+            return self.input_processor(
+                self._process_decoder_only_prompt(
+                    request_id,
+                    inputs,
+                    lora_request,
+                    prompt_adapter_request,
+                ))
 
     def add_request(
         self,
@@ -628,6 +870,7 @@ class LLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -677,9 +920,11 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        processed_inputs = self.process_model_inputs(request_id=request_id,
-                                                     inputs=inputs,
-                                                     lora_request=lora_request)
+        processed_inputs = self.process_model_inputs(
+            request_id=request_id,
+            inputs=inputs,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request)
 
         self._add_processed_request(
             request_id=request_id,
@@ -687,18 +932,21 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
         )
 
     def _create_sequence_group_with_sampling(
-            self,
-            request_id: str,
-            seq: Sequence,
-            sampling_params: SamplingParams,
-            arrival_time: float,
-            lora_request: Optional[LoRARequest],
-            trace_headers: Optional[Dict[str, str]] = None,
-            encoder_seq: Optional[Sequence] = None) -> SequenceGroup:
+        self,
+        request_id: str,
+        seq: Sequence,
+        sampling_params: SamplingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+        trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        encoder_seq: Optional[Sequence] = None,
+    ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
         if (sampling_params.logprobs
@@ -711,42 +959,45 @@ class LLMEngine:
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
-        # Add the eos token id into the sampling_params to support min_tokens
-        # processing
-        if seq.eos_token_id is not None:
-            sampling_params.all_stop_token_ids.add(seq.eos_token_id)
+
         sampling_params.update_from_generation_config(
-            self.generation_config_fields)
+            self.generation_config_fields, seq.eos_token_id)
 
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  sampling_params=sampling_params,
-                                  lora_request=lora_request,
-                                  trace_headers=trace_headers,
-                                  encoder_seq=encoder_seq)
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq)
 
         return seq_group
 
     def _create_sequence_group_with_pooling(
-            self,
-            request_id: str,
-            seq: Sequence,
-            pooling_params: PoolingParams,
-            arrival_time: float,
-            lora_request: Optional[LoRARequest],
-            encoder_seq: Optional[Sequence] = None) -> SequenceGroup:
+        self,
+        request_id: str,
+        seq: Sequence,
+        pooling_params: PoolingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
+        encoder_seq: Optional[Sequence] = None,
+    ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
         pooling_params = pooling_params.clone()
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  lora_request=lora_request,
-                                  pooling_params=pooling_params,
-                                  encoder_seq=encoder_seq)
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -766,7 +1017,8 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
-        self.scheduler.abort_seq_group(request_id)
+        for scheduler in self.scheduler:
+            scheduler.abort_seq_group(request_id)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -778,11 +1030,20 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
-        return self.scheduler.get_num_unfinished_seq_groups()
+        return sum(scheduler.get_num_unfinished_seq_groups()
+                   for scheduler in self.scheduler)
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        return self.scheduler.has_unfinished_seqs()
+        return any(scheduler.has_unfinished_seqs()
+                   for scheduler in self.scheduler)
+
+    def has_unfinished_requests_for_virtual_engine(
+            self, virtual_engine: int) -> bool:
+        """
+        Returns True if there are unfinished requests for the virtual engine.
+        """
+        return self.scheduler[virtual_engine].has_unfinished_seqs()
 
     def _process_sequence_group_outputs(
         self,
@@ -822,7 +1083,7 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            if self._is_embedding_model():
+            if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue
 
@@ -831,7 +1092,8 @@ class LLMEngine:
                 self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
-        self.scheduler.free_finished_seq_groups()
+        for scheduler in self.scheduler:
+            scheduler.free_finished_seq_groups()
 
         # Create the outputs.
         request_outputs: List[Union[RequestOutput,
@@ -897,9 +1159,16 @@ class LLMEngine:
             >>>     if not (engine.has_unfinished_requests() or example_inputs):
             >>>         break
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise NotImplementedError(
+                "Pipeline parallelism is only supported through AsyncLLMEngine "
+                "as performance will be severely degraded otherwise.")
+        seq_group_metadata_list, scheduler_outputs = self.scheduler[
+            0].schedule()
 
         if not scheduler_outputs.is_empty():
+            finished_requests_ids = self.scheduler[
+                0].get_and_reset_finished_requests_ids()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -907,7 +1176,7 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-            )
+                finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:
@@ -923,7 +1192,7 @@ class LLMEngine:
         # Tracing
         self.do_tracing(scheduler_outputs)
 
-        if not request_outputs:
+        if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
             # torch.distributed ops which may otherwise timeout, and unblocks
@@ -933,14 +1202,24 @@ class LLMEngine:
 
         return request_outputs
 
+    def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
+        if logger_name in self.stat_loggers:
+            raise KeyError(f"Logger with name {logger_name} already exists.")
+        self.stat_loggers[logger_name] = logger
+
+    def remove_logger(self, logger_name: str) -> None:
+        if logger_name not in self.stat_loggers:
+            raise KeyError(f"Logger with name {logger_name} does not exist.")
+        del self.stat_loggers[logger_name]
+
     def do_log_stats(
             self,
             scheduler_outputs: Optional[SchedulerOutputs] = None,
             model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            self.stat_logger.log(
-                self._get_stats(scheduler_outputs, model_output))
+            for logger in self.stat_loggers.values():
+                logger.log(self._get_stats(scheduler_outputs, model_output))
 
     def _get_stats(
             self,
@@ -958,23 +1237,28 @@ class LLMEngine:
 
         # System State
         #   Scheduler State
-        num_running_sys = len(self.scheduler.running)
-        num_swapped_sys = len(self.scheduler.swapped)
-        num_waiting_sys = len(self.scheduler.waiting)
+        num_running_sys = sum(
+            len(scheduler.running) for scheduler in self.scheduler)
+        num_swapped_sys = sum(
+            len(scheduler.swapped) for scheduler in self.scheduler)
+        num_waiting_sys = sum(
+            len(scheduler.waiting) for scheduler in self.scheduler)
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
         gpu_cache_usage_sys = 0.
         if num_total_gpu is not None:
-            num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks(
-            )
+            num_free_gpu = sum(
+                scheduler.block_manager.get_num_free_gpu_blocks()
+                for scheduler in self.scheduler)
             gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage_sys = 0.
         if num_total_cpu is not None and num_total_cpu > 0:
-            num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
-            )
+            num_free_cpu = sum(
+                scheduler.block_manager.get_num_free_cpu_blocks()
+                for scheduler in self.scheduler)
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Iteration stats
@@ -1117,6 +1401,16 @@ class LLMEngine:
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
 
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        return self.model_executor.add_prompt_adapter(prompt_adapter_request)
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_executor.remove_prompt_adapter(prompt_adapter_id)
+
+    def list_prompt_adapters(self) -> List[int]:
+        return self.model_executor.list_prompt_adapters()
+
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
@@ -1180,3 +1474,9 @@ class LLMEngine:
             seq_span.set_attribute(
                 SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
+
+    def is_encoder_decoder_model(self):
+        return is_encoder_decoder_model_config(self.model_config)
+
+    def is_embedding_model(self):
+        return is_embedding_model_config(self.model_config)

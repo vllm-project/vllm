@@ -8,6 +8,11 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
+import vllm.envs as envs
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -184,6 +189,18 @@ class SamplingParams:
 
         self._verify_args()
         if self.use_beam_search:
+            # Lazy import to avoid circular imports.
+            from vllm.usage.usage_lib import set_runtime_usage_data
+            set_runtime_usage_data("use_beam_search", True)
+
+            if not envs.VLLM_NO_DEPRECATION_WARNING:
+                logger.warning(
+                    "[IMPORTANT] We plan to discontinue the support for beam "
+                    "search in the next major release. Please refer to "
+                    "https://github.com/vllm-project/vllm/issues/6226 for "
+                    "more information. Set VLLM_NO_DEPRECATION_WARNING=1 to "
+                    "suppress this warning.")
+
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
@@ -280,17 +297,30 @@ class SamplingParams:
                              f"Got {self.best_of}.")
 
     def update_from_generation_config(
-            self, generation_config: Dict[str, Any]) -> None:
+            self,
+            generation_config: Dict[str, Any],
+            model_eos_token_id: Optional[int] = None) -> None:
         """Update if there are non-default values from generation_config"""
+
+        if model_eos_token_id is not None:
+            # Add the eos token id into the sampling_params to support
+            # min_tokens processing.
+            self.all_stop_token_ids.add(model_eos_token_id)
+
         # Update eos_token_id for generation
-        if (not self.ignore_eos) and (eos_ids :=
-                                      generation_config.get("eos_token_id")):
+        if (eos_ids := generation_config.get("eos_token_id")) is not None:
             # it can be either int or list of int
-            if isinstance(eos_ids, int):
-                eos_ids = [eos_ids]
-            original_stop_token_ids = set(self.stop_token_ids)
-            original_stop_token_ids.update(eos_ids)
-            self.stop_token_ids = list(original_stop_token_ids)
+            eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
+            if model_eos_token_id is not None:
+                # We don't need to include the primary eos_token_id in
+                # stop_token_ids since it's handled separately for stopping
+                # purposes.
+                eos_ids.discard(model_eos_token_id)
+            if eos_ids:
+                self.all_stop_token_ids.update(eos_ids)
+                if not self.ignore_eos:
+                    eos_ids.update(self.stop_token_ids)
+                    self.stop_token_ids = list(eos_ids)
 
     @cached_property
     def sampling_type(self) -> SamplingType:

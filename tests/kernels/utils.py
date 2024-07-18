@@ -8,8 +8,7 @@ from typing import Any, List, NamedTuple, Optional, Tuple, Union
 import pytest
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata, AttentionType)
+from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
                         make_tensor_with_pad)
@@ -125,9 +124,11 @@ class PhaseTestParameters(NamedTuple):
     packed_qkvo: PackedQKVO
     kv_mmap: Optional[KVMemoryMap]
 
-def maybe_make_int_tensor(_list: Optional[List[int]],
-                              device: Union[torch.device, str]) \
-  -> torch.Tensor:
+
+def maybe_make_int_tensor(
+    _list: Optional[List[int]],
+    device: Union[torch.device, str],
+) -> torch.Tensor:
     '''
     Convert Python int list to a 1D int torch.Tensor on `device`
 
@@ -139,9 +140,11 @@ def maybe_make_int_tensor(_list: Optional[List[int]],
     return None if _list is None else torch.tensor(
         _list, dtype=torch.int, device=device)
 
-def maybe_make_long_tensor(_list: Optional[List[int]],
-                               device: Union[torch.device, str]) \
-  -> torch.Tensor:
+
+def maybe_make_long_tensor(
+    _list: Optional[List[int]],
+    device: Union[torch.device, str],
+) -> torch.Tensor:
     '''
     Convert Python int list to a 1D long torch.Tensor on `device`
 
@@ -163,8 +166,11 @@ def maybe_max(_list: Optional[List]) -> Optional[Number]:
     '''
     return None if _list is None else max(_list)
 
-def make_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
-                                                -> torch.Tensor:
+
+def make_causal_mask(
+    q_max_seq_len: int,
+    kv_max_seq_len: int,
+) -> torch.Tensor:
     '''
     Create a q_max_seq_len x kv_max_seq_len causal mask
 
@@ -381,22 +387,25 @@ def make_qkv(
     decode_q_seq_lens = [1 for _ in q_seq_lens]
     decode_kv_seq_lens = [1 for _ in kv_seq_lens]
 
-    return QKVInputs(query, # Overall QKV inputs
-                     key,
-                     value,
-                     q_seq_lens,
-                     kv_seq_lens), \
-           QKVInputs(prefill_query, # Prefill subset of QKV sequences
-                     prefill_key,
-                     prefill_value,
-                     prefill_q_seq_lens,
-                     prefill_kv_seq_lens), \
-           QKVInputs(
-                     decode_query, # Decode subset of KV sequences
-                     decode_key,
-                     decode_value,
-                     decode_q_seq_lens,
-                     decode_kv_seq_lens)
+    return (
+        QKVInputs(
+            query,  # Overall QKV inputs
+            key,
+            value,
+            q_seq_lens,
+            kv_seq_lens),
+        QKVInputs(
+            prefill_query,  # Prefill subset of QKV sequences
+            prefill_key,
+            prefill_value,
+            prefill_q_seq_lens,
+            prefill_kv_seq_lens),
+        QKVInputs(
+            decode_query,  # Decode subset of KV sequences
+            decode_key,
+            decode_value,
+            decode_q_seq_lens,
+            decode_kv_seq_lens))
 
 
 def pack_tensor(
@@ -468,14 +477,11 @@ def pack_qkv(qkv: QKVInputs, device: Union[torch.device,
                                                 qkv.kv_seq_lens,
                                                 device=device)
     packed_value, _ = pack_tensor(qkv.value, qkv.kv_seq_lens, device=device)
-    return PackedQKVInputs(packed_query, \
-                           packed_key, \
-                           packed_value, \
-                           q_start_loc_list, \
-                           kv_start_loc_list, \
-                           None if q_start_loc_list is None else \
-                            qkv.q_seq_lens, \
-                           qkv.kv_seq_lens)
+    return PackedQKVInputs(
+        packed_query, packed_key, packed_value, q_start_loc_list,
+        kv_start_loc_list,
+        (None if q_start_loc_list is None else qkv.q_seq_lens),
+        qkv.kv_seq_lens)
 
 
 def make_backend(backend_name: str) -> AttentionBackend:
@@ -534,18 +540,13 @@ def _make_metadata_tensors(
     max_seq_len = maybe_max(seq_lens)
 
     encoder_seq_lens_tensor = maybe_make_int_tensor(encoder_seq_lens, device)
-    max_encoder_seq_len = None if encoder_seq_lens is None else \
-                            max(encoder_seq_lens)
+    max_encoder_seq_len = (None if encoder_seq_lens is None else
+                           max(encoder_seq_lens))
 
     seq_start_loc = None
 
-    return seq_lens_tensor, \
-           context_lens_tensor, \
-           max_context_len, \
-           max_seq_len, \
-           seq_start_loc, \
-           encoder_seq_lens_tensor, \
-           max_encoder_seq_len
+    return (seq_lens_tensor, context_lens_tensor, max_context_len, max_seq_len,
+            seq_start_loc, encoder_seq_lens_tensor, max_encoder_seq_len)
 
 
 def make_kv_cache(num_blocks: int,
@@ -646,8 +647,8 @@ def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: List[int],
         decode_slot_mapping.append(slot_mapping_list[base_idx + seq_len - 1])
         base_idx += seq_len
 
-    return maybe_make_long_tensor(prefill_slot_mapping, device), \
-           maybe_make_long_tensor(decode_slot_mapping, device)
+    return (maybe_make_long_tensor(prefill_slot_mapping, device),
+            maybe_make_long_tensor(decode_slot_mapping, device))
 
 
 def make_block_tables_slot_mapping(
@@ -728,9 +729,7 @@ def make_block_tables_slot_mapping(
         device=device,
     )
 
-    return block_tables_tensor, \
-           slot_mapping_list, \
-           max_block_idx
+    return (block_tables_tensor, slot_mapping_list, max_block_idx)
 
 
 def make_test_metadata(
@@ -784,8 +783,8 @@ def make_test_metadata(
     # Decoder self-attention memory mapping
     # decoder_test_params is None signals encoder-only
     # scenario, so kv_mmap is None
-    kv_mmap = None if decoder_test_params is None else \
-                decoder_test_params.kv_mmap
+    kv_mmap = (None
+               if decoder_test_params is None else decoder_test_params.kv_mmap)
 
     # This function constructs metadata assuming no chunked prefill,
     # i.e. 100% prefill tokens or 100% decode tokens
@@ -798,11 +797,10 @@ def make_test_metadata(
     # seq_lens is None signals encoder-only
     # scenario, in which case num_prefills_or_decodes and
     # num_prefill_or_decode_tokens are unused
-    num_prefills_or_decodes = None if seq_lens is None else \
-                                len(seq_lens)
+    num_prefills_or_decodes = (None if seq_lens is None else len(seq_lens))
 
-    num_prefill_or_decode_tokens = None if seq_lens is None else \
-        (sum(seq_lens) if is_prompt else len(seq_lens))
+    num_prefill_or_decode_tokens = (None if seq_lens is None else (
+        sum(seq_lens) if is_prompt else len(seq_lens)))
 
     # Seems for non-prefix-caching scenarios context_lens
     # is never needed
@@ -816,8 +814,8 @@ def make_test_metadata(
         # * Extract encoder input sequence lengths
         assert encoder_test_params.packed_qkvo.packed_qkv is not None
         encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
-        num_encoder_tokens = None if encoder_seq_lens is None else \
-            (sum(encoder_seq_lens))
+        num_encoder_tokens = (None if encoder_seq_lens is None else
+                              (sum(encoder_seq_lens)))
 
     if cross_test_params is None:
         cross_kv_mmap = None
@@ -834,21 +832,22 @@ def make_test_metadata(
         num_prefill_tokens = num_prefill_or_decode_tokens
         num_decode_tokens = 0
 
-        seq_lens_tensor, \
-        context_lens_tensor, \
-        _, \
-        _, \
-        _, \
-        encoder_seq_lens_tensor, \
-        max_encoder_seq_len = _make_metadata_tensors(seq_lens,
-                              context_lens,
-                              encoder_seq_lens,
-                              device=device)
+        (
+            seq_lens_tensor,
+            context_lens_tensor,
+            _,
+            _,
+            _,
+            encoder_seq_lens_tensor,
+            max_encoder_seq_len,
+        ) = _make_metadata_tensors(seq_lens,
+                                   context_lens,
+                                   encoder_seq_lens,
+                                   device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=None if kv_mmap is None else \
-                            kv_mmap.slot_mapping,
+            slot_mapping=(None if kv_mmap is None else kv_mmap.slot_mapping),
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -856,17 +855,16 @@ def make_test_metadata(
             max_prefill_seq_len=None if seq_lens is None else max(seq_lens),
             max_decode_seq_len=0,
             context_lens_tensor=context_lens_tensor,
-            block_tables=None if kv_mmap is None else \
-                            kv_mmap.block_tables,
+            block_tables=(None if kv_mmap is None else kv_mmap.block_tables),
             use_cuda_graph=False,
             num_encoder_tokens=num_encoder_tokens,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
-            cross_slot_mapping=None if cross_kv_mmap is None else \
-                                cross_kv_mmap.slot_mapping,
-            cross_block_tables=None if cross_kv_mmap is None else \
-                                cross_kv_mmap.block_tables)
+            cross_slot_mapping=(None if cross_kv_mmap is None else
+                                cross_kv_mmap.slot_mapping),
+            cross_block_tables=(None if cross_kv_mmap is None else
+                                cross_kv_mmap.block_tables))
 
     else:  # not is_prompt
         # Decode-phase scenario
@@ -879,16 +877,18 @@ def make_test_metadata(
         num_prefill_tokens = 0
         num_decode_tokens = num_prefill_or_decode_tokens
 
-        seq_lens_tensor, \
-        context_lens_tensor, \
-        _, \
-        _, \
-        _, \
-        encoder_seq_lens_tensor, \
-        max_encoder_seq_len = _make_metadata_tensors(seq_lens,
-                                  context_lens,
-                                  encoder_seq_lens,
-                                  device=device)
+        (
+            seq_lens_tensor,
+            context_lens_tensor,
+            _,
+            _,
+            _,
+            encoder_seq_lens_tensor,
+            max_encoder_seq_len,
+        ) = _make_metadata_tensors(seq_lens,
+                                   context_lens,
+                                   encoder_seq_lens,
+                                   device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
@@ -906,10 +906,10 @@ def make_test_metadata(
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
-            cross_slot_mapping=None if cross_kv_mmap is None else \
-                                cross_kv_mmap.slot_mapping,
-            cross_block_tables=None if cross_kv_mmap is None else \
-                                cross_kv_mmap.block_tables)
+            cross_slot_mapping=(None if cross_kv_mmap is None else
+                                cross_kv_mmap.slot_mapping),
+            cross_block_tables=(None if cross_kv_mmap is None else
+                                cross_kv_mmap.block_tables))
 
 
 def assert_actual_matches_ideal(test_params: PhaseTestParameters,

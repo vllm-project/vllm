@@ -11,6 +11,7 @@ from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import Policy, PolicyFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
 
@@ -139,6 +140,8 @@ class SchedulerOutputs:
         if self.num_loras > 0:
             self._sort_by_lora_ids()
 
+        self.num_prompt_adapters: int = len(self.prompt_adapter_requests)
+
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
@@ -155,6 +158,14 @@ class SchedulerOutputs:
             g.seq_group.lora_request
             for g in self.scheduled_seq_groups
             if g.seq_group.lora_request is not None
+        }
+
+    @property
+    def prompt_adapter_requests(self) -> Set[PromptAdapterRequest]:
+        return {
+            g.seq_group.prompt_adapter_request
+            for g in self.scheduled_seq_groups
+            if g.seq_group.prompt_adapter_request is not None
         }
 
 
@@ -256,6 +267,7 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        pipeline_parallel_size: int = 1,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -273,11 +285,19 @@ class Scheduler:
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        if num_gpu_blocks:
+            num_gpu_blocks //= pipeline_parallel_size
+
+        num_cpu_blocks = cache_config.num_cpu_blocks
+        if num_cpu_blocks:
+            num_cpu_blocks //= pipeline_parallel_size
+
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
-            num_gpu_blocks=self.cache_config.num_gpu_blocks,
-            num_cpu_blocks=self.cache_config.num_cpu_blocks,
+            num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
@@ -290,7 +310,10 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
-
+        # Sequence groups finished requests ids since last step iteration.
+        # It lets the model know that any state associated with these requests
+        # can and must be released after the current step.
+        self._finished_requests_ids: List[str] = list()
         # Time at previous scheduling step
         self.prev_time = 0.0
         # Did we schedule a prompt at previous step?
@@ -351,12 +374,25 @@ class Scheduler:
             for aborted_group in aborted_groups:
                 # Remove the sequence group from the state queue.
                 state_queue.remove(aborted_group)
+                self._finished_requests_ids.append(aborted_group.request_id)
                 for seq in aborted_group.get_seqs():
                     if seq.is_finished():
                         continue
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
-                self.free_seq_group(aborted_group)
+
+                self._free_seq_group(aborted_group)
+
+    def _free_seq_group(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        """
+        Free a sequence group from a cross-attention block table.
+        Has no effect on decoder-only models.
+        """
+        if seq_group.is_encoder_decoder():
+            self.block_manager.free_cross(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
@@ -364,6 +400,12 @@ class Scheduler:
 
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
+
+    def get_and_reset_finished_requests_ids(self) -> List[str]:
+        """Flushes the list of request ids of previously finished seq_groups."""
+        finished_requests_ids = self._finished_requests_ids
+        self._finished_requests_ids = list()
+        return finished_requests_ids
 
     def _schedule_running(
         self,
@@ -961,6 +1003,7 @@ class Scheduler:
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+
             # Encoder associated with SequenceGroup
             encoder_seq_data: SequenceData = \
                 seq_group.get_encoder_seq().data \
@@ -1020,6 +1063,7 @@ class Scheduler:
                 # `multi_modal_data` will be None.
                 multi_modal_data=seq_group.multi_modal_data
                 if scheduler_outputs.num_prefill_groups > 0 else None,
+                prompt_adapter_request=seq_group.prompt_adapter_request,
             )
             seq_group_metadata_list.append(seq_group_metadata)
 
@@ -1040,27 +1084,17 @@ class Scheduler:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
-    def free_seq_group(self, seq_group: SequenceGroup) \
-        -> None:
-        """
-        Free a sequence group from a cross-attention block table.
-        Has no effect on decoder-only models.
-        """
-        self.block_manager.free_cross(seq_group)
-
     def free_finished_seq_groups(self) -> None:
-        new_running: deque = deque()
-        for seq_group in self.running:
-            if seq_group.is_finished():
-                # For encoder/decoder models, free cross-
-                # attention block table associated with finished
-                # seq_group
-                self.free_seq_group(seq_group)
-            else:
-                # Maintain `running` deque without finished
-                # sequence groups
-                new_running.append(seq_group)
-        self.running = new_running
+        for queue in [self.running, self.swapped, self.waiting]:
+            new_finished_requests_ids = []
+            for seq_group in queue:
+                if seq_group.is_finished():
+                    new_finished_requests_ids += seq_group.request_id
+                    # Free cross-attention block table, if it exists
+                    self._free_seq_group(seq_group)
+            self._finished_requests_ids += new_finished_requests_ids
+        self.running = deque(seq_group for seq_group in self.running
+                             if not seq_group.is_finished())
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)

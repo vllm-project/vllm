@@ -31,8 +31,8 @@ class TorchSDPABackend(AttentionBackend):
         return TorchSDPABackendImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "TorchSDPAMetadata":
-        return TorchSDPAMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return TorchSDPAMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -138,14 +138,16 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 "Please use xFormers backend instead.")
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            kv_cache: Optional[torch.Tensor],
-            attn_metadata: TorchSDPAMetadata,  # type: ignore
-            kv_scale: float = 1.0,
-            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: TorchSDPAMetadata,  # type: ignore
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
         Args:
@@ -157,11 +159,11 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert kv_scale == 1.0
+        assert k_scale == 1.0 and v_scale == 1.0
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and " + \
-                                      "encoder/decoder cross-attention " + \
-                                      "are not implemented for " + \
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
                                       "TorchSDPABackendImpl")
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -175,7 +177,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
-                                                self.kv_cache_dtype, kv_scale)
+                                                self.kv_cache_dtype, k_scale,
+                                                v_scale)
 
         if attn_metadata.is_prompt:
             assert attn_metadata.seq_lens is not None
@@ -238,7 +241,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         # Reshape the output tensor.
