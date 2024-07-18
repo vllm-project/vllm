@@ -191,7 +191,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                                                   device=target_probs.device,
                                                   generator=generators[idx])
 
-            if non_seed_indices is not None and len(non_seed_indices) > 0:
+            if non_seed_indices:
                 uniform_rand[non_seed_indices, :] = torch.rand(
                     len(non_seed_indices),
                     k,
@@ -272,8 +272,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
     # partition batch into indices for which a generator is provided
     # and indicies for which no generator is provided
+    @staticmethod
     def _split_batch_by_seeded(
-        self,
         generators: List[Optional[torch.Generator]],
         k: int = 1,
     ) -> Tuple[List[int], Optional[List[int]]]:
@@ -304,7 +304,7 @@ def _multinomial(
     k: int,
     generators: List[Optional[torch.Generator]],
     seed_indices: List[int],
-    non_seed_indices: List[int],
+    non_seed_indices: Optional[List[int]],
 ) -> torch.Tensor:
 
     if num_samples > 1:
