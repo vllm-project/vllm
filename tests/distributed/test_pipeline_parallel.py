@@ -8,6 +8,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import os
 
 import pytest
+from transformers import AutoTokenizer
 
 from vllm.logger import init_logger
 
