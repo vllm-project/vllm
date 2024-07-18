@@ -115,7 +115,7 @@ def apply_fp8_linear(
     if cutlass_fp8_supported:
         qinput, x_scale = ops.scaled_fp8_quant(input,
                                                input_scale,
-                                               per_token=True)
+                                               use_per_token_if_dynamic=True)
 
         # Fused GEMM_DQ
         output = ops.cutlass_scaled_mm(qinput,
