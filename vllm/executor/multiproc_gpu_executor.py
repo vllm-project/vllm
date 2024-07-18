@@ -28,6 +28,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
     def _init_executor(self) -> None:
         # Create the parallel GPU workers.
         world_size = self.parallel_config.world_size
+        tensor_parallel_size = self.parallel_config.tensor_parallel_size
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -50,8 +51,15 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         if world_size > 1:
             maybe_set_triton_cache_manager()
 
-        assert world_size <= cuda_device_count_stateless(), (
-            "please set tensor_parallel_size to less than max local gpu count")
+        cuda_device_count = cuda_device_count_stateless()
+        # Use confusing message for more common TP-only case.
+        assert tensor_parallel_size <= cuda_device_count, (
+            f"please set tensor_parallel_size ({tensor_parallel_size}) "
+            f"to less than max local gpu count ({cuda_device_count})")
+
+        assert world_size <= cuda_device_count, (
+            f"please ensure that world_size ({world_size}) "
+            f"is less than than max local gpu count ({cuda_device_count}")
 
         error_on_invalid_device_count_status()
 
@@ -86,7 +94,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                             distributed_init_method=distributed_init_method,
                         )))
                 self.workers.append(worker)
-                if rank % self.parallel_config.tensor_parallel_size == 0:
+                if rank % tensor_parallel_size == 0:
                     self.tp_driver_workers.append(worker)
                 else:
                     self.non_driver_workers.append(worker)
