@@ -223,7 +223,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # Decode
         start = time.time()
         seq_len = 1
-        batch_size = 1
+        batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
             self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=False)
             xm.wait_device_ops()
@@ -285,20 +285,20 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                             max_prompt_len,
                                             pad=0,
                                             dtype=torch.int32,
-                                            device=self.device)
+                                            device="cpu")
         input_positions = make_tensor_with_pad(input_positions,
                                                max_prompt_len,
                                                pad=0,
                                                dtype=torch.int32,
-                                               device=self.device)
+                                               device="cpu")
         slot_mapping = make_tensor_with_pad(slot_mapping,
                                             max_prompt_len,
                                             pad=_PAD_SLOT_ID,
                                             dtype=torch.int64,
-                                            device=self.device)
+                                            device="cpu")
         prompt_lens = torch.tensor(prompt_lens,
                                    dtype=torch.int32,
-                                   device=self.device)
+                                   device="cpu")
         attn_metadata = self.attn_backend.make_metadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,  # NOTE: This is not used.
@@ -352,22 +352,22 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.int32,
-                                    device=self.device)
+                                    device="cpu")
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.int32,
-                                       device=self.device)
+                                       device="cpu")
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.int64,
-                                    device=self.device)
+                                    device="cpu")
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int32,
-                                    device=self.device)
+                                    device="cpu")
         block_tables = torch.tensor(self.block_tables[:batch_size],
                                     dtype=torch.int32,
-                                    device=self.device)
+                                    device="cpu")
         input_lens = torch.tensor([1] * batch_size,
                                   dtype=torch.int32,
-                                  device=self.device)
+                                  device="cpu")
         attn_metadata = self.attn_backend.make_metadata(
             num_prefills=0,
             num_prefill_tokens=0,
@@ -428,8 +428,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         t += [1.0] * num_paddings
         p += [1.0] * num_paddings
 
-        t = torch.tensor(t, dtype=torch.float32, device=self.device)
-        p = torch.tensor(p, dtype=torch.float32, device=self.device)
+        t = torch.tensor(t, dtype=torch.float32, device="cpu")
+        p = torch.tensor(p, dtype=torch.float32, device="cpu")
         return t, p, best_of
 
     def prepare_model_input(
@@ -480,6 +480,21 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             raise ValueError(
                 "TPUModelRunner does not support multi-step execution.")
 
+        def _execute_model(*args) -> torch.Tensor:
+            """Move input args to device and execute the model."""
+            new_args = []
+            for arg in args:
+                if isinstance(arg, torch.Tensor):
+                    arg = arg.to(self.device)
+                elif isinstance(arg, AttentionMetadata):
+                    arg.slot_mapping = arg.slot_mapping.to(self.device)
+                    if getattr(arg, "block_tables", None) is not None:
+                        arg.block_tables = arg.block_tables.to(self.device)
+                    if getattr(arg, "context_lens", None) is not None:
+                        arg.context_lens = arg.context_lens.to(self.device)
+                new_args.append(arg)
+            return self.model(*new_args)
+
         is_prompt = model_input.token_ids.shape[1] > 1
         if is_prompt:
             # NOTE(woosuk): To reduce the compilation time, we only compile the
@@ -496,7 +511,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 # Execute the model.
                 model_input.attn_metadata.slot_mapping = orig_slot_mapping[
                     i:i + 1]
-                output_token_ids = self.model(
+                output_token_ids = _execute_model(
                     model_input.token_ids[i:i + 1],
                     model_input.position_ids[i:i + 1],
                     model_input.attn_metadata, model_input.input_lens[i:i + 1],
@@ -506,12 +521,11 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 next_token_ids += output_token_ids.cpu().tolist()
         else:
             # Execute the model.
-            output_token_ids = self.model(model_input.token_ids,
-                                          model_input.position_ids,
-                                          model_input.attn_metadata,
-                                          model_input.input_lens,
-                                          model_input.t, model_input.p,
-                                          model_input.num_samples, kv_caches)
+            output_token_ids = _execute_model(
+                model_input.token_ids, model_input.position_ids,
+                model_input.attn_metadata, model_input.input_lens,
+                model_input.t, model_input.p, model_input.num_samples,
+                kv_caches)
             # Retrieve the outputs to CPU.
             next_token_ids = output_token_ids.cpu().tolist()
 
