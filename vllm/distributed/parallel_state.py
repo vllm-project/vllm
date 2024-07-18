@@ -887,9 +887,9 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(world_size))
         # offset the distributed group
-        if all(
-            [envs.VLLM_DISAGG_PREFILL_ROLE is not None],
-            [envs.VLLM_DISAGG_PREFILL_ROLE == "decode"]):
+        if all([
+            envs.VLLM_DISAGG_PREFILL_ROLE is not None,
+            envs.VLLM_DISAGG_PREFILL_ROLE == "decode"]):
             ranks = offset_distributed_groups(ranks, world_size)
         _WORLD = init_world_group(ranks, local_rank, backend)
     else:
