@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonMetadataBuilder
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -27,6 +28,10 @@ class ROCmFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return ROCmFlashAttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["ROCmFlashAttentionMetadataBuilder"]:
+        return ROCmFlashAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -166,6 +171,12 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self._cached_decode_metadata
 
 
+class ROCmFlashAttentionMetadataBuilder(
+        CommonMetadataBuilder[ROCmFlashAttentionMetadata]):
+
+    _metadata_cls = ROCmFlashAttentionMetadata
+
+
 def _make_alibi_bias(alibi_slopes: torch.Tensor,
                      dtype: torch.dtype,
                      seq_lens: Optional[List[int]],
@@ -296,7 +307,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -336,7 +348,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -456,7 +469,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         # Reshape the output tensor.

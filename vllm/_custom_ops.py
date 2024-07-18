@@ -84,7 +84,8 @@ def paged_attention_v1(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    kv_scale: float,
+    k_scale: float,
+    v_scale: float,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -94,8 +95,9 @@ def paged_attention_v1(
     torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
-        kv_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step)
+        k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+        blocksparse_vert_stride, blocksparse_block_size,
+        blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -114,7 +116,8 @@ def paged_attention_v2(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    kv_scale: float,
+    k_scale: float,
+    v_scale: float,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -124,7 +127,7 @@ def paged_attention_v2(
     torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
-        alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
+        alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
 
@@ -161,6 +164,18 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def advance_step(num_seqs: int, num_queries: int, block_size: int,
+                 input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
+                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
+                 slot_mapping: torch.Tensor,
+                 block_tables: torch.Tensor) -> None:
+    """Advance a step on GPU for existing inputs for a multi-step runner"""
+    return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
+                                     input_tokens, sampled_token_ids,
+                                     input_positions, seq_lens, slot_mapping,
+                                     block_tables)
 
 
 # quantization ops
@@ -320,6 +335,17 @@ def scaled_fp8_quant(
     return output, scale
 
 
+def dynamic_per_token_scaled_fp8_quant(
+        input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    scales = torch.empty((input.numel() // input.shape[-1], 1),
+                         device=input.device,
+                         dtype=torch.float32)
+    torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scales)
+    return output, scales
+
+
 # int8
 def scaled_int8_quant(
         input: torch.Tensor,
@@ -374,11 +400,12 @@ def reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
-    kv_scale: float,
+    k_scale: float,
+    v_scale: float,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
                                              value_cache, slot_mapping,
-                                             kv_cache_dtype, kv_scale)
+                                             kv_cache_dtype, k_scale, v_scale)
 
 
 def reshape_and_cache_flash(

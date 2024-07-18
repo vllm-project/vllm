@@ -45,7 +45,8 @@ class PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
         *args,
     ) -> None:
         ipex_modules.PagedAttention.reshape_and_cache(
@@ -64,7 +65,8 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
         *args,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
