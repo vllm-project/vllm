@@ -688,7 +688,7 @@ class ExtractedToolCallInformation(BaseModel):
 
     # content - per OpenAI spec, content AND tool calls can be returned ALTHOUGH THIS IS VERY RARE
     # But some models will do this intentionally
-    content: Union[str, None]
+    content: Optional[str | None]
 
 
 class ChatMessage(OpenAIBaseModel):
