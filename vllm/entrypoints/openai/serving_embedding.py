@@ -95,8 +95,13 @@ class OpenAIServingEmbedding(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: List[AsyncIterator[EmbeddingRequestOutput]] = []
         try:
+            (
+                lora_request,
+                prompt_adapter_request,
+            ) = self._maybe_get_adapters(request)
+            tokenizer = await self.engine.get_tokenizer(lora_request)
+
             pooling_params = request.to_pooling_params()
-            tokenizer = await self.engine.get_tokenizer()
 
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
@@ -111,12 +116,20 @@ class OpenAIServingEmbedding(OpenAIServing):
                 self._log_inputs(request_id_item,
                                  prompt_inputs,
                                  pooling_params,
-                                 lora_request=None)
+                                 lora_request=lora_request,
+                                 prompt_adapter_request=prompt_adapter_request)
+
+                if prompt_adapter_request is not None:
+                    raise NotImplementedError(
+                        "Prompt adapter is not supported "
+                        "for embedding models")
 
                 generator = self.engine.encode(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     pooling_params,
                     request_id_item,
+                    lora_request=lora_request,
+                    # prompt_adapter_request=prompt_adapter_request,
                 )
 
                 generators.append(generator)
