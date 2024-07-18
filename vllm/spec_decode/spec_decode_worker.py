@@ -201,7 +201,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker = scorer_worker
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
         self.spec_decode_sampler = spec_decode_sampler
-        self.allow_no_draft_tokens = allow_zero_draft_token_step
+        self._allow_zero_draft_token_step = allow_zero_draft_token_step
         self._metrics = AsyncMetricsCollector(
             self.spec_decode_sampler
         ) if metrics_collector is None else metrics_collector
@@ -471,8 +471,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposals = self.proposer_worker.get_spec_proposals(
             execute_model_req, self._seq_with_bonus_token_in_last_step)
 
-        if not self.allow_no_draft_tokens and sum(
-                proposals.proposal_lens) == 0:
+        if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
