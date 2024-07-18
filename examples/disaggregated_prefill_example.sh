@@ -1,4 +1,5 @@
 
+export VLLM_LOGGING_LEVEL=DEBUG
 
 # prefilling instance
 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
@@ -10,7 +11,7 @@ VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
     --disable-log-requests \
     --enable-chunked-prefill &
 
-sleep 2
+sleep 10
 
 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     -m vllm.entrypoints.openai.api_server \

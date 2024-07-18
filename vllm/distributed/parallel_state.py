@@ -808,6 +808,16 @@ def init_distributed_environment(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
+    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+        # Disaggregated prefilling is enabled
+        # There will be 2 copies of vLLM
+        # One for prefilling and one for decoding
+        world_size = world_size * 2
+        logger.debug(
+            "Disaggregated prefill enabled, "
+            "increase world size to %d", world_size)
+    else:
+        disagg_prefill_size = 1
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -929,7 +939,7 @@ def initialize_model_parallel(
                                     get_world_group().local_rank, backend)
 
     # Build the pipeline model-parallel groups.
-    num_pipeline_model_parallel_groups: int = (world_size //
+    num_pipeline_model_parallel_groups: int = (world_size // disagg_prefill_size //
                                                pipeline_model_parallel_size)
     global _PP
     assert _PP is None, (

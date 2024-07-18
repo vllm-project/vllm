@@ -662,15 +662,7 @@ class ParallelConfig:
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
 
-        if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-            # Disaggregated prefilling is enabled
-            # There will be 2 copies of vLLM
-            # One for prefilling and one for decoding
-            self.disagg_prefill_size = 2
-        else:
-            self.disagg_prefill_size = 1
-
-        self.world_size = pipeline_parallel_size * tensor_parallel_size * self.disagg_prefill_size
+        self.world_size = pipeline_parallel_size * tensor_parallel_size
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
