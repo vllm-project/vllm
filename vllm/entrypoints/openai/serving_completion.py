@@ -91,6 +91,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 lora_request,
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
+
             tokenizer = await self.engine.get_tokenizer(lora_request)
 
             sampling_params = request.to_sampling_params()
@@ -121,7 +122,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 self._log_inputs(request_id_item,
                                  prompt_inputs,
-                                 sampling_params,
+                                 params=sampling_params,
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 

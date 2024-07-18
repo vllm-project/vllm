@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
+from vllm.utils import random_uuid
 
 
 class OpenAIServingTokenization(OpenAIServing):
@@ -46,7 +47,13 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        lora_request, _ = self._maybe_get_adapters(request)
+        request_id = f"tok-{random_uuid()}"
+
+        (
+            lora_request,
+            prompt_adapter_request,
+        ) = self._maybe_get_adapters(request)
+
         tokenizer = await self.engine.get_tokenizer(lora_request)
 
         if isinstance(request, TokenizeChatRequest):
@@ -64,8 +71,20 @@ class OpenAIServingTokenization(OpenAIServing):
                 conversation=conversation,
                 tokenize=False,
                 chat_template=self.chat_template)
+            assert isinstance(prompt, str)
         else:
             prompt = request.prompt
+
+        self._log_inputs(request_id,
+                         prompt,
+                         params=None,
+                         lora_request=lora_request,
+                         prompt_adapter_request=prompt_adapter_request)
+
+        if prompt_adapter_request is not None:
+            raise NotImplementedError(
+                "Prompt adapter is not supported "
+                "for tokenization")
 
         prompt_input = self._tokenize_prompt_input(
             request,
@@ -87,8 +106,25 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        lora_request, _ = self._maybe_get_adapters(request)
+        request_id = f"tok-{random_uuid()}"
+
+        (
+            lora_request,
+            prompt_adapter_request,
+        ) = self._maybe_get_adapters(request)
+
         tokenizer = await self.engine.get_tokenizer(lora_request)
+
+        self._log_inputs(request_id,
+                         request.tokens,
+                         params=None,
+                         lora_request=lora_request,
+                         prompt_adapter_request=prompt_adapter_request)
+
+        if prompt_adapter_request is not None:
+            raise NotImplementedError(
+                "Prompt adapter is not supported "
+                "for tokenization")
 
         prompt_input = self._tokenize_prompt_input(
             request,

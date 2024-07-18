@@ -128,7 +128,7 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))
 
-        request_id = f"cmpl-{random_uuid()}"
+        request_id = f"chat-{random_uuid()}"
         try:
             sampling_params = request.to_sampling_params()
             decoding_config = await self.engine.get_decoding_config()
@@ -154,7 +154,7 @@ class OpenAIServingChat(OpenAIServing):
 
             self._log_inputs(request_id,
                              prompt_inputs,
-                             sampling_params,
+                             params=sampling_params,
                              lora_request=lora_request,
                              prompt_adapter_request=prompt_adapter_request)
 

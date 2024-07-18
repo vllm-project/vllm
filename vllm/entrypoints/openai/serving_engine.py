@@ -357,21 +357,28 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: TextTokensPrompt,
-        params: Union[SamplingParams, PoolingParams],
+        inputs: Union[str, List[int], TextTokensPrompt],
+        params: Optional[Union[SamplingParams, PoolingParams]],
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
         if not self.log_requests:
             return
+        
+        if isinstance(inputs, str):
+            shortened_prompt = inputs
+            shortened_token_ids = None
+        elif isinstance(inputs, list):
+            shortened_prompt = None
+            shortened_token_ids = inputs
+        else:
+            shortened_prompt = inputs["prompt"]
+            shortened_token_ids = inputs["prompt_token_ids"]
 
-        shortened_prompt = inputs["prompt"]
-        shortened_token_ids = inputs["prompt_token_ids"]
-
-        max_log_len = self.max_log_len
-        if max_log_len is not None:
-            shortened_prompt = shortened_prompt[:max_log_len]
-            shortened_token_ids = shortened_token_ids[:max_log_len]
+            max_log_len = self.max_log_len
+            if max_log_len is not None:
+                shortened_prompt = shortened_prompt[:max_log_len]
+                shortened_token_ids = shortened_token_ids[:max_log_len]
 
         logger.info(
             "Received request %s: prompt: %r, "

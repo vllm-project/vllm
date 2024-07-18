@@ -88,7 +88,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 "dimensions is currently not supported")
 
         model_name = request.model
-        request_id = f"cmpl-{random_uuid()}"
+        request_id = f"embed-{random_uuid()}"
         created_time = int(time.monotonic())
 
         # Schedule the request and get the result generator.
@@ -98,6 +98,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 lora_request,
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
+
             tokenizer = await self.engine.get_tokenizer(lora_request)
 
             pooling_params = request.to_pooling_params()
@@ -114,7 +115,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 self._log_inputs(request_id_item,
                                  prompt_inputs,
-                                 pooling_params,
+                                 params=pooling_params,
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
