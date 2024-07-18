@@ -110,7 +110,7 @@ def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist():
     configuration occurs."""
     with pytest.raises(RuntimeError) as ex_info:
         _configure_vllm_root_logger()
-    assert ex_info.type == RuntimeError
+    assert ex_info.type is RuntimeError
     assert "File does not exist" in str(ex_info)
 
 
@@ -151,7 +151,7 @@ def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
                    logging_config_file.name):
             with pytest.raises(ValueError) as ex_info:
                 _configure_vllm_root_logger()
-            assert ex_info.type == ValueError
+            assert ex_info.type is ValueError
             assert "Invalid logging config. Expected Dict, got" in str(ex_info)
 
 

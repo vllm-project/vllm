@@ -165,7 +165,7 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
     test_name = request.node.name
 
     model = kwargs["model"]
-    draft_model = kwargs.get("speculative_model", None)
+    draft_model = kwargs.get("speculative_model")
     same_draft_target_model = (draft_model is not None
                                and draft_model == model)
 

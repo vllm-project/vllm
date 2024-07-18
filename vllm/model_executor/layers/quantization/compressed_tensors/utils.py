@@ -80,7 +80,7 @@ class QuantizationArgs(BaseModel):
     )
 
 
-def is_activation_quantization_format(format: str) -> bool:
+def is_activation_quantization_format(format: Optional[str]) -> bool:
     _ACTIVATION_QUANTIZATION_FORMATS = [
         CompressionFormat.naive_quantized.value,
         CompressionFormat.int_quantized.value,
