@@ -480,11 +480,16 @@ class AsyncLLMEngine:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
-    async def get_tokenizer(self) -> "PreTrainedTokenizer":
+    async def get_tokenizer(
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> "PreTrainedTokenizer":
         if self.engine_use_ray:
-            return await self.engine.get_tokenizer.remote()  # type: ignore
-        else:
-            return self.engine.get_tokenizer()
+            return await self.engine.get_tokenizer.remote(  # type: ignore
+                lora_request)
+
+        return await (self.engine.get_tokenizer_group().
+                      get_lora_tokenizer_async(lora_request))
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
