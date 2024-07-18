@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
-from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
+from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
@@ -281,6 +281,33 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         # list to conform to interface.
         return output
 
+    def _execute_model_spmd(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
+        """
+        Execute model in Single Program Multiple Data (SPMD) fashion.
+        All workers take the same request, prepare the input and
+        execute the model.
+        """
+        assert execute_model_req is not None, (
+            "_execute_model_spmd() requires each worker to take in an "
+            "ExecuteModelRequest")
+        worker_input: WorkerInput = self.prepare_worker_input(
+            execute_model_req=execute_model_req)
+        model_input: ModelRunnerInputBase = (
+            self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list))
+
+        self.execute_worker(worker_input)
+
+        # If there is no input, we don't need to execute the model.
+        if worker_input.num_seq_groups == 0:
+            return []
+
+        return self.model_runner.execute_model(
+            model_input, self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None)
+
 
 class WorkerWrapperBase:
     """
@@ -296,7 +323,7 @@ class WorkerWrapperBase:
                  trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
-        self.worker = None
+        self.worker: Optional[WorkerBase] = None
         if trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -309,14 +336,6 @@ class WorkerWrapperBase:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`
             del os.environ[key]
-            if is_hip():
-                hip_env_var = "HIP_VISIBLE_DEVICES"
-                if hip_env_var in os.environ:
-                    logger.warning(
-                        "Ignoring pre-set environment variable `%s=%s` as "
-                        "%s has also been set, which takes precedence.",
-                        hip_env_var, os.environ[hip_env_var], key)
-                os.environ.pop(hip_env_var, None)
         update_environment_variables(envs)
 
     def init_worker(self, *args, **kwargs):
@@ -331,7 +350,9 @@ class WorkerWrapperBase:
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
+
         self.worker = worker_class(*args, **kwargs)
+        assert self.worker is not None
 
     def execute_method(self, method, *args, **kwargs):
         try:

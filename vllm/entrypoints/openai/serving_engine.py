@@ -1,7 +1,8 @@
 import json
+import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Iterable, Iterator, List, Optional, TypedDict, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
 
 from pydantic import Field
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -20,8 +21,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
 
@@ -29,6 +30,12 @@ logger = init_logger(__name__)
 class TextTokensPrompt(TypedDict):
     prompt: str
     prompt_token_ids: List[int]
+
+
+@dataclass
+class PromptAdapterPath:
+    name: str
+    local_path: str
 
 
 @dataclass
@@ -45,27 +52,21 @@ class OpenAIServing:
         model_config: ModelConfig,
         served_model_names: List[str],
         lora_modules: Optional[List[LoRAModulePath]],
+        prompt_adapters: Optional[List[PromptAdapterPath]] = None,
         *,
         log_requests: bool,
         max_log_len: Optional[int],
     ):
+        super().__init__()
+
         self.engine = engine
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
-        # A separate tokenizer to map token IDs to strings.
-        self.tokenizer = get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            tokenizer_revision=model_config.tokenizer_revision,
-            trust_remote_code=model_config.trust_remote_code,
-            truncation_side="left")
-
         self.served_model_names = served_model_names
 
-        if lora_modules is None:
-            self.lora_requests = []
-        else:
+        self.lora_requests = []
+        if lora_modules is not None:
             self.lora_requests = [
                 LoRARequest(
                     lora_name=lora.name,
@@ -73,6 +74,20 @@ class OpenAIServing:
                     lora_local_path=lora.local_path,
                 ) for i, lora in enumerate(lora_modules, start=1)
             ]
+
+        self.prompt_adapter_requests = []
+        if prompt_adapters is not None:
+            for i, prompt_adapter in enumerate(prompt_adapters, start=1):
+                with pathlib.Path(prompt_adapter.local_path,
+                                  "adapter_config.json").open() as f:
+                    adapter_config = json.load(f)
+                    num_virtual_tokens = adapter_config["num_virtual_tokens"]
+                self.prompt_adapter_requests.append(
+                    PromptAdapterRequest(
+                        prompt_adapter_name=prompt_adapter.name,
+                        prompt_adapter_id=i,
+                        prompt_adapter_local_path=prompt_adapter.local_path,
+                        prompt_adapter_num_virtual_tokens=num_virtual_tokens))
 
         self.log_requests = log_requests
         self.max_log_len = max_log_len
@@ -92,7 +107,14 @@ class OpenAIServing:
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
+        prompt_adapter_cards = [
+            ModelCard(id=prompt_adapter.prompt_adapter_name,
+                      root=self.served_model_names[0],
+                      permission=[ModelPermission()])
+            for prompt_adapter in self.prompt_adapter_requests
+        ]
         model_cards.extend(lora_cards)
+        model_cards.extend(prompt_adapter_cards)
         return ModelList(data=model_cards)
 
     def create_error_response(
@@ -126,21 +148,30 @@ class OpenAIServing:
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return None
+        if request.model in [
+                prompt_adapter.prompt_adapter_name
+                for prompt_adapter in self.prompt_adapter_requests
+        ]:
+            return None
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_lora(
+    def _maybe_get_adapter(
         self, request: Union[CompletionRequest, ChatCompletionRequest,
-                             DetokenizeRequest, EmbeddingRequest,
-                             TokenizeRequest]
-    ) -> Optional[LoRARequest]:
+                             EmbeddingRequest, TokenizeRequest,
+                             DetokenizeRequest]
+    ) -> Tuple[Optional[str], Optional[Union[LoRARequest,
+                                             PromptAdapterRequest]]]:
         if request.model in self.served_model_names:
-            return None
+            return None, None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
-                return lora
+                return 'LoRA', lora
+        for prompt_adapter in self.prompt_adapter_requests:
+            if request.model == prompt_adapter.prompt_adapter_name:
+                return 'PromptAdapter', prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
@@ -148,8 +179,8 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest,
                        DetokenizeRequest, EmbeddingRequest, TokenizeRequest],
-        prompt: str,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        prompt: str,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
@@ -171,8 +202,8 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest,
                        DetokenizeRequest, EmbeddingRequest, TokenizeRequest],
-        prompt_ids: List[int],
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        prompt_ids: List[int],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> TextTokensPrompt:
         if truncate_prompt_tokens is None:
@@ -180,7 +211,7 @@ class OpenAIServing:
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
-        input_text = tokenizer.decode(prompt_ids)
+        input_text = tokenizer.decode(input_ids)
 
         return self._validate_input(request, input_ids, input_text)
 
@@ -234,6 +265,7 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest,
                        DetokenizeRequest, EmbeddingRequest, TokenizeRequest],
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         prompt_input: Union[str, List[int]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
@@ -245,6 +277,7 @@ class OpenAIServing:
         return next(
             self._tokenize_prompt_inputs(
                 request,
+                tokenizer,
                 [prompt_input],
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
@@ -254,6 +287,7 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest,
                        DetokenizeRequest, EmbeddingRequest, TokenizeRequest],
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         prompt_inputs: Iterable[Union[str, List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
@@ -262,22 +296,20 @@ class OpenAIServing:
         A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
         that assumes multiple inputs.
         """
-        tokenizer = self.tokenizer
-
         for text in prompt_inputs:
             if isinstance(text, str):
                 yield self._normalize_prompt_text_to_input(
                     request,
+                    tokenizer,
                     prompt=text,
-                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=add_special_tokens,
                 )
             else:
                 yield self._normalize_prompt_tokens_to_input(
                     request,
+                    tokenizer,
                     prompt_ids=text,
-                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
@@ -285,6 +317,7 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest,
                        DetokenizeRequest, EmbeddingRequest, TokenizeRequest],
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
@@ -296,8 +329,6 @@ class OpenAIServing:
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
         """
-        tokenizer = self.tokenizer
-
         for prompt_input in parse_and_batch_prompt(input_or_inputs):
             # Although our type checking is based on mypy,
             # VSCode Pyright extension should still work properly
@@ -306,16 +337,16 @@ class OpenAIServing:
             if prompt_input["is_tokens"] is False:
                 yield self._normalize_prompt_text_to_input(
                     request,
+                    tokenizer,
                     prompt=prompt_input["content"],
-                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=add_special_tokens,
                 )
             else:
                 yield self._normalize_prompt_tokens_to_input(
                     request,
+                    tokenizer,
                     prompt_ids=prompt_input["content"],
-                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
@@ -343,7 +374,12 @@ class OpenAIServing:
             "lora_request: %s.", request_id, shortened_prompt, params,
             shortened_token_ids, lora_request)
 
-    def _get_decoded_token(self, logprob: Logprob, token_id: int) -> str:
+    @staticmethod
+    def _get_decoded_token(
+        logprob: Logprob,
+        token_id: int,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    ) -> str:
         if logprob.decoded_token is not None:
             return logprob.decoded_token
-        return self.tokenizer.decode(token_id)
+        return tokenizer.decode(token_id)

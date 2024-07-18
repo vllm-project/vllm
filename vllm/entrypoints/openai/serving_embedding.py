@@ -95,10 +95,12 @@ class OpenAIServingEmbedding(OpenAIServing):
         generators: List[AsyncIterator[EmbeddingRequestOutput]] = []
         try:
             pooling_params = request.to_pooling_params()
+            tokenizer = await self.engine.get_tokenizer()
 
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
                     request,
+                    tokenizer,
                     request.input,
                 ))
 

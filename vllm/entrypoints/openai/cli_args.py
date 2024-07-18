@@ -9,7 +9,8 @@ import json
 import ssl
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
-from vllm.entrypoints.openai.serving_engine import LoRAModulePath
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    PromptAdapterPath)
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -23,9 +24,17 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
-def make_arg_parser():
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server.")
+class PromptAdapterParserAction(argparse.Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        adapter_list = []
+        for item in values:
+            name, path = item.split('=')
+            adapter_list.append(PromptAdapterPath(name, path))
+        setattr(namespace, self.dest, adapter_list)
+
+
+def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--host",
                         type=nullable_str,
                         default=None,
@@ -65,6 +74,14 @@ def make_arg_parser():
         action=LoRAParserAction,
         help="LoRA module configurations in the format name=path. "
         "Multiple modules can be specified.")
+    parser.add_argument(
+        "--prompt-adapters",
+        type=nullable_str,
+        default=None,
+        nargs='+',
+        action=PromptAdapterParserAction,
+        help="Prompt adapter configurations in the format name=path. "
+        "Multiple adapters can be specified.")
     parser.add_argument("--chat-template",
                         type=nullable_str,
                         default=None,
@@ -122,3 +139,9 @@ def make_arg_parser():
                         '\n\nDefault: Unlimited')
 
     return parser
+
+
+def create_parser_for_docs() -> FlexibleArgumentParser:
+    parser_for_docs = FlexibleArgumentParser(
+        prog="-m vllm.entrypoints.openai.api_server")
+    return make_arg_parser(parser_for_docs)

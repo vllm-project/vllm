@@ -1,26 +1,21 @@
-.. _adding_a_new_multimodal_model:
+.. _enabling_multimodal_inputs:
 
-Adding a New Multimodal Model
-=============================
+Enabling Multimodal Inputs
+==========================
 
-This document provides a high-level guide on integrating a :ref:`multi-modal model <multi_modality>` into vLLM.
+This document walks you through the steps to extend a vLLM model so that it accepts :ref:`multi-modal <multi_modality>` inputs.
 
-.. note::
-    The complexity of adding a new model depends heavily on the model's architecture.
-    The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
-    However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
-
-.. tip::
-    If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.
-    We will be happy to help you out!
+.. seealso::
+    :ref:`adding_a_new_model`
 
 
-1. Set up the base vLLM model
+1. Update the base vLLM model
 -----------------------------
 
-As usual, follow :ref:`these steps <adding_a_new_model>` to implement the model in vLLM, but note the following:
+It is assumed that you have already implemented the model in vLLM according to :ref:`these steps <adding_a_new_model>`.
+Further update the model as follows:
 
-- You should additionally implement the :class:`~vllm.model_executor.models.interfaces.SupportsVision` interface.
+- Implement the :class:`~vllm.model_executor.models.interfaces.SupportsVision` interface.
 
   .. code-block:: diff
 
@@ -33,19 +28,19 @@ As usual, follow :ref:`these steps <adding_a_new_model>` to implement the model 
       The model class does not have to be named :code:`*ForCausalLM`.
       Check out `the HuggingFace Transformers documentation <https://huggingface.co/docs/transformers/model_doc/auto#multimodal>`__ for some examples.
 
-- While implementing the :meth:`~torch.nn.Module.forward` method, reserve a keyword parameter
+- If you haven't already done so, reserve a keyword parameter in :meth:`~torch.nn.Module.forward`
   for each input tensor that corresponds to a multi-modal input, as shown in the following example:
 
   .. code-block:: diff
 
-      def forward(
-          self,
-          input_ids: torch.Tensor,
-          positions: torch.Tensor,
-          kv_caches: List[torch.Tensor],
-          attn_metadata: AttentionMetadata,
-      +   pixel_values: torch.Tensor,
-      ) -> SamplerOutput:
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
+      +     pixel_values: torch.Tensor,
+        ) -> SamplerOutput:
 
 
 2. Register input mappers
@@ -68,8 +63,8 @@ A default mapper is available for each modality in the core vLLM library. This i
     :ref:`input_processing_pipeline`
 
 
-3. Register maximum number of multimodal tokens
-----------------------------------------------------------
+3. Register maximum number of multi-modal tokens
+------------------------------------------------
 
 For each modality type that the model accepts as input, calculate the maximum possible number of tokens
 and register it via :meth:`INPUT_REGISTRY.register_dummy_data <vllm.inputs.registry.InputRegistry.register_max_multimodal_tokens>`.
