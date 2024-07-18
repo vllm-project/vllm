@@ -249,18 +249,16 @@ class ColumnParallelLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj) 
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        bias: bool = True,
-        gather_output: bool = False,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        output_sizes: Optional[List[int]] = None,
-        prefix: Optional[str] = None,
-    ):
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 bias: bool = True,
+                 gather_output: bool = False,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 output_sizes: Optional[List[int]] = None,
+                 prefix: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
@@ -729,7 +727,6 @@ class RowParallelLinear(LinearBase):
             params_dtype=self.params_dtype,
             weight_loader=self.weight_loader,
             prefix=prefix)
-
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")
