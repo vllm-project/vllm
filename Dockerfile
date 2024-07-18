@@ -21,15 +21,15 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
     && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
-    && python3 --version \
-    && python3 -m pip --version
+    && python3 --version
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip git curl sudo
 
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+RUN python3 -m pip --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -144,7 +144,7 @@ WORKDIR /usr/src/mamba
 COPY requirements-mamba.txt requirements-mamba.txt
 
 # Download the wheel or build it if a pre-compiled release doesn't exist
-RUN python3 -m pip --verbose wheel -r requirements-mamba.txt \
+RUN pip --verbose wheel -r requirements-mamba.txt \
     --no-build-isolation --no-deps --no-cache-dir
 
 #################### MAMBA Build IMAGE ####################
@@ -204,7 +204,7 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install accelerate hf_transfer 'modelscope!=1.15.0'
+    pip install accelerate hf_transfer 'modelscope!=1.15.0'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
