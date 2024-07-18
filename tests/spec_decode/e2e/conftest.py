@@ -129,7 +129,7 @@ class AsyncLLM:
             for i in range(num_requests):
                 prompt = prompts[i] if prompts is not None else None
                 params = sampling_params[i] if isinstance(
-                    sampling_params, Sequence) else sampling_params,
+                    sampling_params, Sequence) else sampling_params
                 res = asyncio.run(get_output(prompt, params))
                 outputs.append(res)
         finally:
