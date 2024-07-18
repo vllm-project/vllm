@@ -80,6 +80,9 @@ void CacheAllocator::setPageSize(int64_t num) { pageSize = num * granurality; }
 
 // reserve function, reserve virtual address space
 int64_t CacheAllocator::reserveCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr, int64_t pageNum) {
+  if (pageNum == 0) {
+    return CUDA_SUCCESS;
+  }
   size_t size = pageNum * pageSize;
   auto status = cuMemAddressReserve(&(ptr->dptr), size, 0, 0, 0);
 
@@ -96,6 +99,9 @@ int64_t CacheAllocator::reserveCachePtr(const c10::intrusive_ptr<CacheDevicePtr>
 // space of dptr, and set access permission
 int64_t CacheAllocator::allocCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr,
                                       int64_t pageNum, int64_t offset) {
+  if (pageNum == 0) {
+    return CUDA_SUCCESS;
+  }
   // size = ((size - 1) / pageSize + 1) * pageSize;
   size_t size = pageNum * pageSize;
   auto start_dptr = ptr->dptr + offset;
@@ -159,10 +165,15 @@ int64_t CacheAllocator::freeCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& p
 
 // releaseCachePtrPages function, unmap the virtual address space，release
 // physical memory handles but not free virtual address space
-int64_t CacheAllocator::releaseCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr) {
+int64_t CacheAllocator::releaseCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr,
+                                        int64_t pageNum, int64_t offset) {
+  if (pageNum == 0) {
+    return CUDA_SUCCESS;
+  }
+  auto start_dptr = ptr->dptr + offset;
   CUresult status = CUDA_SUCCESS;
   if (ptr->dptr != 0) {
-    status = cuMemUnmap(ptr->dptr, ptr->reservedPageNum * pageSize);
+    status = cuMemUnmap(start_dptr, pageNum * pageSize);
     // status = cuMemUnmap(ptr.dptr, ptr.allocatedPageNum * pageSize);
     if (status != CUDA_SUCCESS) {
       printf("cuMemUnmap failed! error-code: %d\n", status);

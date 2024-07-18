@@ -869,7 +869,10 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids)
 
             if self.use_vmm:
-                execute_model_req.allocated_block_counts = scheduler_outputs.allocated_block_counts
+                execute_model_req.allocated_block_counts = \
+                    scheduler_outputs.allocated_block_counts
+                execute_model_req.free_buffer_ids = \
+                    scheduler_outputs.free_buffer_ids
 
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)

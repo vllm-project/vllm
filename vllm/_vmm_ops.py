@@ -54,8 +54,11 @@ class CacheAllocator:
     def free_cache_ptr(self, ptr: CacheDevicePtr):
         return self._allocator.freeCachePtr(ptr._ptr)
 
-    def release_cache_ptr(self, ptr: CacheDevicePtr):
-        return self._allocator.releaseCachePtr(ptr._ptr)
+    def release_cache_ptr(self,
+                          ptr: CacheDevicePtr,
+                          page_num: int = 0,
+                          offset: int = 0):
+        return self._allocator.releaseCachePtr(ptr._ptr, page_num, offset)
 
 
 # other utils

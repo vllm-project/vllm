@@ -957,9 +957,9 @@ class ExecuteModelRequest:
     num_steps: int = 1
     # Finished request ids since last step.
     finished_requests_ids: List[str] = field(default_factory=list)
-    
     # new add for vmm
-    allocated_block_counts: Dict[int, int]= field(default_factory=dict),
+    allocated_block_counts: Dict[int, int]= field(default_factory=dict)
+    free_buffer_ids: List[int] = field(default_factory=list)
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]

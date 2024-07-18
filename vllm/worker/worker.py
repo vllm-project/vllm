@@ -278,8 +278,10 @@ class Worker(LocalOrDistributedWorkerBase):
 
         if not self.use_vmm:
             allocated_block_counts = None
+            free_buffer_ids = None
         else:
             allocated_block_counts = execute_model_req.allocated_block_counts
+            free_buffer_ids = execute_model_req.free_buffer_ids
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
@@ -288,6 +290,7 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             allocated_block_counts=allocated_block_counts,
+            free_buffer_ids=free_buffer_ids,
         )
 
     @torch.inference_mode()
@@ -305,9 +308,12 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
-
+        # new add for vmm
+        if self.use_vmm and worker_input.free_buffer_ids is not None:
+            self.cache_engine[virtual_engine].free_seqs(
+                worker_input.free_buffer_ids)
         if self.use_vmm and worker_input.allocated_block_counts is not None:
-            self.cache_engine[virtual_engine].alloc_all_seqs(
+            self.cache_engine[virtual_engine].alloc_seqs(
                 worker_input.allocated_block_counts)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

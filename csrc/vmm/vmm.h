@@ -83,7 +83,7 @@ public:
 
   // releaseCachePtrPages function, unmap the virtual address space，release physical memory handles but not free virtual address space
   // int releaseCachePtr(CacheDevicePtr& ptr);
-  int64_t releaseCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr);
+  int64_t releaseCachePtr(const c10::intrusive_ptr<CacheDevicePtr>& ptr, int64_t pageNum=0, int64_t offset=0);
 
 };
 

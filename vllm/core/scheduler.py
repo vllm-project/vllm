@@ -130,9 +130,9 @@ class SchedulerOutputs:
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
-
     # new add for vmm
     allocated_block_counts: Dict[int, int] = field(default_factory=dict)
+    free_buffer_ids: List[int] = field(default_factory=list)
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -858,8 +858,7 @@ class Scheduler:
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=preempted,
-            # new add for vmm, update in schedule func
-            allocated_block_counts={})
+        )
 
     def _schedule_chunked_prefill(self):
         """Schedule queued requests.
@@ -949,8 +948,7 @@ class Scheduler:
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
-            # new add for vmm, update in schedule func
-            allocated_block_counts={})
+        )
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
@@ -989,6 +987,10 @@ class Scheduler:
         scheduler_outputs = self._schedule()
         now = time.time()
 
+        if self.use_vmm:
+            scheduler_outputs.allocated_block_counts, \
+                scheduler_outputs.free_buffer_ids = self.block_manager.step()
+
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for i, scheduled_seq_group in enumerate(
@@ -1011,11 +1013,11 @@ class Scheduler:
                         seq)
                     self.block_manager.access_all_blocks_in_seq(seq, now)
 
-                else:
-                    cache_buffer_id = seq.cache_buffer_id
-                    assert cache_buffer_id >= 0  # allocated seq.cache_buffer_id should be >= 0
-                    scheduler_outputs.allocated_block_counts[cache_buffer_id] = \
-                        self.block_manager.get_allocated_block_count(seq.seq_id)
+                # else:
+                #     cache_buffer_id = seq.cache_buffer_id
+                #     assert cache_buffer_id >= 0
+                #     scheduler_outputs.allocated_block_counts[cache_buffer_id] = \
+                #         self.block_manager.get_allocated_block_count(seq.seq_id)
 
             common_computed_block_nums = (
                 self.block_manager.get_common_computed_block_ids(

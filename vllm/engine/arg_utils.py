@@ -686,12 +686,14 @@ class EngineArgs:
 
             if self.block_bytes_size % single_token_bytes_size != 0:
                 raise ValueError(
-                    f"Block size in bytes ({self.block_bytes_size}) must be a "
-                    f"multiple of the size of the cache single_token_bytes_size ({single_token_bytes_size} byte)."
+                    f"block_bytes_size ({self.block_bytes_size}) % "
+                    f"single_token_bytes_size ({single_token_bytes_size}) != 0"
                 )
-
             self.block_size = self.block_bytes_size // single_token_bytes_size
             logger.info(f"use vmm 2MB block size: {self.block_size}")
+            # TODO: support swap preemption mode for vmm
+            self.preemption_mode = "recompute"
+            logger.warning("Preemption only support recompute for vmm now.")
         else:
             logger.info(f"use normal block size: {self.block_size}")
 

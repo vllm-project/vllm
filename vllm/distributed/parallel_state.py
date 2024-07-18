@@ -72,8 +72,7 @@ def _split_tensor_dict(
                                               value.size())))
             tensor_list.append(value)
         elif isinstance(value, dict):
-            if key == "allocated_block_counts":
-                # if allocated_block_counts, no need to split_tensor_dict its values
+            if key == "allocated_block_counts" or key == "free_buffer_ids":
                 metadata_list.append((prefix + key, value))
             else:
                 if len(value) == 0:
