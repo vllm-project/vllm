@@ -861,10 +861,15 @@ def extend_distributed_group_with_offset(
                 Typically world_size // 2
     """
     
+    logger.debug("Extend the distributed groups with offset %d", offset)
+    logger.debug("Before extension:\n%s", str(groups))
+    
     new_groups = []
     for group in groups:
         new_groups.append([rank for rank in group])
         new_groups.append([rank + offset for rank in group])
+
+    logger.debug("After extension:\n%s", str(new_groups))
         
     return new_groups
 
