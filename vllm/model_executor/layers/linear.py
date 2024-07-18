@@ -171,6 +171,8 @@ class ReplicatedLinear(LinearBase):
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
     """
 
     def __init__(
@@ -181,7 +183,7 @@ class ReplicatedLinear(LinearBase):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        layer_name: Optional[str] = None,
+        prefix: Optional[str] = None,
     ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
@@ -193,7 +195,7 @@ class ReplicatedLinear(LinearBase):
                                          self.input_size,
                                          self.output_size,
                                          self.params_dtype,
-                                         layer_name=layer_name)
+                                         layer_name=prefix)
 
         if bias:
             self.bias = Parameter(
@@ -245,6 +247,8 @@ class ColumnParallelLinear(LinearBase):
         quant_config: Quantization configure.
         output_sizes: list of output sizes packed into one output, like for QKV
                        the list would be size 3.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj) 
     """
 
     def __init__(
@@ -257,7 +261,7 @@ class ColumnParallelLinear(LinearBase):
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
         output_sizes: Optional[List[int]] = None,
-        layer_name: Optional[str] = None,
+        prefix: Optional[str] = None,
     ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
@@ -285,7 +289,7 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            layer_name=layer_name,
+            layer_name=prefix,
             weight_loader=self.weight_loader,
         )
         if bias:
@@ -359,6 +363,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                        skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
     """
 
     def __init__(self,
@@ -369,7 +375,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 layer_name: Optional[str] = None):
+                 prefix: Optional[str] = None):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
@@ -381,7 +387,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             skip_bias_add=skip_bias_add,
             params_dtype=params_dtype,
             quant_config=quant_config,
-            layer_name=layer_name,
+            prefix=prefix,
         )
 
     def weight_loader(self,
@@ -502,6 +508,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                        skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
     """
 
     def __init__(self,
@@ -513,7 +521,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 layer_name: Optional[str] = None):
+                 prefix: Optional[str] = None):
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -546,7 +554,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
                          quant_config=quant_config,
-                         layer_name=layer_name)
+                         prefix=prefix)
 
     def weight_loader(self,
                       param: Parameter,

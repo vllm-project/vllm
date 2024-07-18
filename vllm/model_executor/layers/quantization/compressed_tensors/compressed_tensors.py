@@ -257,25 +257,20 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.scheme.process_weights_after_loading(layer)
 
-    def create_weights(self,
-                       layer: torch.nn.Module,
+    def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int],
-                       input_size: int,
-                       output_size: int,
-                       params_dtype: torch.dtype,
-                       layer_name: Optional[str] = None,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         """
         Use the CompressedTensorsScheme associated with each layer to create 
         the necessary parameters for the layer. See LinearMethodBase for param
         details
-
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
+        layer_name = extra_weight_attrs.get("prefix")
 
-        scheme = self.quantization_config.get_scheme(layer=layer,
-                                                     layer_name=layer_name)
+        scheme = self.quantization_config.get_scheme(layer, layer_name)
         scheme.create_weights(
             layer=layer,
             input_size=input_size,

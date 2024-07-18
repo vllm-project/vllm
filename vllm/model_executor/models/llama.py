@@ -57,12 +57,12 @@ class LlamaMLP(nn.Module):
 
     def __init__(
         self,
-        prefix: str,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -176,10 +176,10 @@ class LlamaDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        prefix: str,
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -196,7 +196,6 @@ class LlamaDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
         self.self_attn = LlamaAttention(
-            prefix=f"{prefix}.self_attn",
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
@@ -207,14 +206,15 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=attention_bias,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = LlamaMLP(
-            prefix=f"{prefix}.mlp",
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -276,11 +276,12 @@ class LlamaModel(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, lambda layer_idx: LlamaDecoderLayer(
-                prefix=f"model.layers.{layer_idx}",
-                config=config,
-                cache_config=cache_config,
-                quant_config=quant_config))
+            config.num_hidden_layers,
+            lambda prefix: LlamaDecoderLayer(config=config,
+                                             cache_config=cache_config,
+                                             quant_config=quant_config,
+                                             prefix=prefix),
+            prefix="model.layers")
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:

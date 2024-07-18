@@ -53,7 +53,9 @@ class PPMissingLayer(torch.nn.Identity):
 
 
 def make_layers(
-    num_hidden_layers: int, layer_fn: Callable[[], torch.nn.Module]
+    num_hidden_layers: int,
+    layer_fn: Callable[[], torch.nn.Module],
+    prefix: str,
 ) -> Tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
@@ -64,9 +66,10 @@ def make_layers(
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
     modules = torch.nn.ModuleList(
-        [PPMissingLayer() for _ in range(start_layer)] +
-        [layer_fn(idx) for idx in range(start_layer, end_layer)] +
-        [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
+        [PPMissingLayer() for _ in range(start_layer)] + [
+            layer_fn(prefix=f"{prefix}.{idx}")
+            for idx in range(start_layer, end_layer)
+        ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
 
 
