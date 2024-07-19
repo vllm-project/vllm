@@ -19,7 +19,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.envs import VLLM_USE_MODELSCOPE
-from vllm.logger import init_logger
+from vllm.logger import init_logger, tqdm
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -239,6 +239,7 @@ class DefaultModelLoader(BaseModelLoader):
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             model_name_or_path, revision, fall_back_to_pt)
+        hf_weights_files = tqdm(hf_weights_files,desc="Loading checkpoint shards")
         if self.load_config.load_format == LoadFormat.NPCACHE:
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
