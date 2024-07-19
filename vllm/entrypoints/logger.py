@@ -30,7 +30,6 @@ class RequestLogger:
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
-
         max_log_len = self.max_log_len
         if max_log_len is not None:
             if prompt is not None:
