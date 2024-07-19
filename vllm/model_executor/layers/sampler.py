@@ -127,7 +127,6 @@ class Sampler(nn.Module):
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities.
-        #logprobs = None
         #if not sampling_metadata.skip_logprobs_computation: 
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
@@ -517,10 +516,10 @@ def _sample_with_torch(
 
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
-        sampled_token_ids_tensor = torch.empty(probs.shape[0],
+        sampled_token_ids_tensor = torch.empty(logprobs.shape[0],
                                                1,
                                                dtype=torch.long,
-                                               device=probs.device)
+                                               device=logprobs.device)
     else:
         sampled_token_ids_tensor = None
 
@@ -537,7 +536,7 @@ def _sample_with_torch(
         sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(probs[long_sample_indices],
+            greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
 
             if sampled_token_ids_tensor is not None:
@@ -743,7 +742,6 @@ def _get_logprobs(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     sample_results: SampleResultType,
-    skip_logprobs_computation: bool = False,
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
     """Return sample lobprobs and prompt logprobs.
 
@@ -771,14 +769,6 @@ def _get_logprobs(
     Returns:
         A tuple of prompt and sample logprobs per sequence group in a batch.
     """
-    if skip_logprobs_computation:
-        # We are skipping the logprobs computation. However create dummy logprobs for
-        # prompt and sample tokens with null values to return to the caller.
-        token_ids, parent_seq_ids = sample_result
-        dummy_sampled_logprob: List[SampleLogprobs] = [
-            [None] * len(token_id) for token_id in token_ids]
-        dummy_prompt_logprob: List[Optional[PromptLogprobs]] = [None] * len(sampling_metadata.seq_groups)
-        return dummy_prompt_logprob, dummy_sampled_logprob
     # The index of query token to calculate logprobs. It includes both
     # prompt and sample logprob indices.
     query_indices: List[int] = []
