@@ -112,12 +112,14 @@ def apply_fp8_linear(
     # ops.scaled_fp8_quant supports both dynamic and static quant.
     #   If dynamic, layer.input_scale is None and x_scale computed from x.
     #   If static, layer.input_scale is scalar and x_scale is input_scale.
-    
+
     cutlass_fp8_supported = False
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
-        qinput, x_scale = ops.scaled_fp8_quant(input, input_scale, 
-                                               use_per_token_if_dynamic=use_per_token_if_dynamic)
+        qinput, x_scale = ops.scaled_fp8_quant(
+            input,
+            input_scale,
+            use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         # Fused GEMM_DQ
         return ops.cutlass_scaled_mm(qinput,
@@ -133,8 +135,11 @@ def apply_fp8_linear(
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
-        qinput, x_scale = ops.scaled_fp8_quant(input, input_scale, batch_dim_padding=17, 
-                                               use_per_token_if_dynamic=use_per_token_if_dynamic)
+        qinput, x_scale = ops.scaled_fp8_quant(
+            input,
+            input_scale,
+            batch_dim_padding=17,
+            use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
@@ -148,7 +153,7 @@ def apply_fp8_linear(
                                          scale_b=weight_scale,
                                          bias=bias)
             return torch.narrow(output, 0, 0, input.shape[0])
-        
+
         else:
             # Fallback for channelwise case, where we use unfused DQ
             # due to limitations with scaled_mm
