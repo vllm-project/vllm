@@ -1,4 +1,4 @@
-from typing import List, Optional, TypedDict, Union
+from typing import List, Optional, Union
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -7,11 +7,6 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
-
-
-class TextTokensPrompt(TypedDict):
-    prompt: str
-    prompt_token_ids: List[int]
 
 
 class RequestLogger:

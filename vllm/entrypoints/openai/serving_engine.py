@@ -2,7 +2,7 @@ import json
 import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
 
 from pydantic import Field
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -10,7 +10,7 @@ from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger, TextTokensPrompt
+from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -50,6 +50,11 @@ AnyRequest = Union[ChatCompletionRequest, CompletionRequest, DetokenizeRequest,
                    EmbeddingRequest, TokenizeRequest]
 
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+
+
+class TextTokensPrompt(TypedDict):
+    prompt: str
+    prompt_token_ids: List[int]
 
 
 class OpenAIServing:
