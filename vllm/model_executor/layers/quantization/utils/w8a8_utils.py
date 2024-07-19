@@ -113,7 +113,6 @@ def apply_fp8_linear(
     #   If dynamic, layer.input_scale is None and x_scale computed from x.
     #   If static, layer.input_scale is scalar and x_scale is input_scale.
 
-    cutlass_fp8_supported = False
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
         qinput, x_scale = ops.scaled_fp8_quant(
@@ -170,6 +169,7 @@ def apply_fp8_linear(
             # For the scaled_mm fallback case, we break this down, since it
             # does not support s_w being a vector.
 
+            # GEMM
             # This computes C = (X * W).
             # Output in fp32 to allow subsequent ops to happen in-place
             output, _ = torch._scaled_mm(qinput,
@@ -178,6 +178,7 @@ def apply_fp8_linear(
             # Unpad (undo batch_dim_padding)
             output = torch.narrow(output, 0, 0, input.shape[0])
 
+            # DQ
             # C = sw * sx * (X * W) + bias
             output = output * x_scale * weight_scale.t()
             if bias is not None:
