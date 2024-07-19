@@ -9,11 +9,11 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    create_per_channel_scale_param, apply_fp8_linear)
+    apply_fp8_linear, create_per_channel_scale_param)
 from vllm.model_executor.utils import set_weight_attrs
 
-
 logger = init_logger(__name__)
+
 
 class FBGEMMFp8Config(QuantizationConfig):
     """Config class for FBGEMM Fp8."""
@@ -79,7 +79,8 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                            requires_grad=False)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {
-            "input_dim": 1, "output_dim": 0,
+            "input_dim": 1,
+            "output_dim": 0,
             **extra_weight_attrs,
         })
 
@@ -89,9 +90,13 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
         # NOT USED FOR INFERNECE
-        input_scale_ub = torch.nn.Parameter(torch.zeros((1), dtype=torch.float8_e4m3fn))
+        input_scale_ub = torch.nn.Parameter(
+            torch.zeros((1), dtype=torch.float8_e4m3fn))
         layer.register_parameter("input_scale_ub", input_scale_ub)
-        set_weight_attrs(input_scale_ub, extra_weight_attrs)
+        set_weight_attrs(input_scale_ub, {
+            "ignore_warning": True,
+            **extra_weight_attrs
+        })
 
     def process_weights_after_loading(self, layer: Module) -> None:
         weight = layer.weight
@@ -102,11 +107,9 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            bias=bias,
-            cutlass_fp8_supported=True)
-
+        return apply_fp8_linear(input=x,
+                                weight=layer.weight,
+                                weight_scale=layer.weight_scale,
+                                input_scale=None,
+                                bias=bias,
+                                cutlass_fp8_supported=True)
