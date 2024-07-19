@@ -90,7 +90,8 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE UPPER BOUND
-        input_scale_ub = torch.nn.Parameter(torch.zeros((1), dtype=torch.float32),
+        input_scale_ub = torch.nn.Parameter(torch.zeros((1),
+                                                        dtype=torch.float32),
                                             requires_grad=False)
         layer.register_parameter("input_scale_ub", input_scale_ub)
         set_weight_attrs(input_scale_ub, {
