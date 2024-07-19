@@ -6,6 +6,7 @@ from typing import Set, Type, TypeVar, Union
 
 from transformers import PreTrainedTokenizer
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig,
@@ -284,7 +285,7 @@ class LLMEngine:
                     "quantization":
                     model_config.quantization,
                     "kv_cache_dtype":
-                    cache_config.cache_dtype,
+                    str(cache_config.cache_dtype),
 
                     # Feature flags
                     "enable_lora":
@@ -379,6 +380,7 @@ class LLMEngine:
         cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -413,6 +415,9 @@ class LLMEngine:
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
                 MultiprocessingGPUExecutor)
+            assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
+                "multiprocessing distributed executor backend does not "
+                "support VLLM_USE_RAY_SPMD_WORKER=1")
             executor_class = MultiprocessingGPUExecutor
         else:
             from vllm.executor.gpu_executor import GPUExecutor
@@ -423,7 +428,9 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
         )
+
         return engine
 
     def __reduce__(self):
@@ -448,8 +455,11 @@ class LLMEngine:
 
         return self.tokenizer
 
-    def get_tokenizer(self) -> "PreTrainedTokenizer":
-        return self.get_tokenizer_group().get_lora_tokenizer(None)
+    def get_tokenizer(
+            self,
+            lora_request: Optional[LoRARequest] = None
+    ) -> "PreTrainedTokenizer":
+        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
     def get_tokenizer_for_seq(self,
                               sequence: Sequence) -> "PreTrainedTokenizer":
@@ -871,10 +881,10 @@ class LLMEngine:
                 "as performance will be severely degraded otherwise.")
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
-        finished_requests_ids = self.scheduler[
-            0].get_and_reset_finished_requests_ids()
 
         if not scheduler_outputs.is_empty():
+            finished_requests_ids = self.scheduler[
+                0].get_and_reset_finished_requests_ids()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,

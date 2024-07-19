@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 import torch
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
@@ -14,7 +13,7 @@ from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
-                        print_warning_once, update_environment_variables)
+                        print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -35,6 +34,7 @@ _PP_SUPPORTED_MODELS = [
     "MistralForCausalLM",
     "Phi3ForCausalLM",
     "GPT2LMHeadModel",
+    "MixtralForCausalLM",
 ]
 
 
@@ -138,12 +138,10 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
-        self.max_context_len_to_capture = max_context_len_to_capture
-        if self.max_context_len_to_capture is not None:
+        if max_context_len_to_capture is not None:
             raise ValueError("`max_context_len_to_capture` is deprecated. "
                              "Use `max_seq_len_to_capture` instead.")
-        self.max_seq_len_to_capture = (max_seq_len_to_capture
-                                       or max_context_len_to_capture)
+        self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
@@ -152,6 +150,15 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+
+        if (getattr(self.hf_config, "max_position_embeddings", 0) == 131072
+                and getattr(self.hf_config, "rope_scaling", None) is None):
+            # Note(simon): this is a special case for a model that doesn't
+            # supply rope_scaling. We should remove this once the model is
+            # updated.
+            self.hf_config.update({"rope_scaling": {
+                "type": "extended",
+            }})
 
         if (not self.disable_sliding_window
                 and self.hf_text_config.model_type == "gemma2"
@@ -240,7 +247,8 @@ class ModelConfig:
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
             if (self.quantization
-                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin")):
+                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin",
+                            "compressed_tensors")):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -434,6 +442,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        cpu_offload_gb: float = 0,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -442,6 +451,7 @@ class CacheConfig:
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.cpu_offload_gb = cpu_offload_gb
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -697,21 +707,11 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
-        # If CUDA_VISIBLE_DEVICES is set on ROCm prior to vLLM init,
-        # propagate changes to HIP_VISIBLE_DEVICES (conversion handled by
-        # the update_environment_variables function)
-        if is_hip() and envs.CUDA_VISIBLE_DEVICES:
-            update_environment_variables(
-                {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
         self.rank = 0
 
     def _verify_args(self) -> None:
-        if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend == "mp"):
-            raise NotImplementedError("Pipeline parallelism is not supported "
-                                      "yet with multiprocessing.")
         if self.distributed_executor_backend not in ("ray", "mp", None):
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
@@ -1447,8 +1447,9 @@ def _get_and_verify_max_len(
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     # The correct one should be "longrope", kept "su" here
     # to be backward compatible
-    if rope_scaling is not None and rope_scaling["type"] != "su" \
-        and rope_scaling["type"] != "longrope":
+    if rope_scaling is not None and rope_scaling["type"] not in {
+            "su", "longrope", "extended"
+    }:
         if disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.

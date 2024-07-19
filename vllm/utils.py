@@ -386,10 +386,6 @@ def get_open_port() -> int:
 
 
 def update_environment_variables(envs: Dict[str, str]):
-    if is_hip() and "CUDA_VISIBLE_DEVICES" in envs:
-        # Propagate changes to CUDA_VISIBLE_DEVICES to
-        # ROCm's HIP_VISIBLE_DEVICES as well
-        envs["HIP_VISIBLE_DEVICES"] = envs["CUDA_VISIBLE_DEVICES"]
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -943,3 +939,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
+
+
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
+                              **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)
