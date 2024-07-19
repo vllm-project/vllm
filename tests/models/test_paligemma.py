@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Tuple, Type
 
 import pytest
@@ -5,6 +6,7 @@ from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
+from vllm.utils import is_hip
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
@@ -21,6 +23,12 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 IMAGE_TOKEN_ID = 257152
 
 models = ["google/paligemma-3b-mix-224"]
+
+# ROCm Triton FA can run into shared memory issues with these models,
+# use other backends in the meantime
+# FIXME (mattwong, gshtrasb, hongxiayan)
+if is_hip():
+    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
