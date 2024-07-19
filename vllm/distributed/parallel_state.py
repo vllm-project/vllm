@@ -902,7 +902,7 @@ def init_distributed_environment(
 
     cpu_group = torch.distributed.new_group(list(range(8)), backend="gloo")
     
-    logger.debug("CPU group initialized")
+    logger.debug("CPU group initialized, rank %d", torch.distributed.get_rank())
     time.sleep(1000)
 
         
