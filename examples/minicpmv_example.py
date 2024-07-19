@@ -1,15 +1,14 @@
 from PIL import Image
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
 
-IMAGES = [
-    "./examples/images/375.jpg",
-]
+
 
 # MODEL_NAME = "HwwwH/MiniCPM-V-2"
 MODEL_NAME = "HwwwH/MiniCPM-Llama3-V-2_5"
 
-image = Image.open(IMAGES[0]).convert("RGB")
+image = ImageAsset("stop_sign").pil_image.convert("RGB")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 llm = LLM(model=MODEL_NAME,
@@ -17,7 +16,7 @@ llm = LLM(model=MODEL_NAME,
           trust_remote_code=True,
           max_model_len=4096)
 
-messages = [{'role': 'user', 'content': '(<image>./</image>)\n' + 'what kind of wine is this?'}]
+messages = [{'role': 'user', 'content': '(<image>./</image>)\n' + "What's the content of the image?"}]
 prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 # 2.0
 # stop_token_ids = [tokenizer.eos_id]
