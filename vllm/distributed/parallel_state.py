@@ -996,7 +996,7 @@ def initialize_model_parallel(
             backend,
             use_custom_allreduce=False)
         
-    logger.debug("Success")
+    logger.debug("Success, rank %d", torch.distributed.get_rank())
     time.sleep(1000)
     
     
