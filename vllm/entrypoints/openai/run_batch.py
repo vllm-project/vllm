@@ -44,7 +44,7 @@ def parse_args():
                         type=nullable_str,
                         default="assistant",
                         help="The role name to return if "
-                        "`request.add_generation_prompt=true`.")
+                        "`request.add_generation_prompt=True`.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

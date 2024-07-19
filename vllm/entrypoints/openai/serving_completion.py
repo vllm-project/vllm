@@ -115,6 +115,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     request.prompt,
                     truncate_prompt_tokens=sampling_params.
                     truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
                 ))
 
             for i, prompt_inputs in enumerate(prompts):

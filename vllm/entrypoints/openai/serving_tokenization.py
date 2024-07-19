@@ -75,11 +75,8 @@ class OpenAIServingTokenization(OpenAIServing):
                 tokenize=False,
                 chat_template=self.chat_template)
             assert isinstance(prompt, str)
-
-            add_special_tokens = request.add_special_tokens
         else:
             prompt = request.prompt
-            add_special_tokens = False
 
         self._log_inputs(request_id,
                          prompt,
@@ -95,7 +92,7 @@ class OpenAIServingTokenization(OpenAIServing):
             request,
             tokenizer,
             prompt,
-            add_special_tokens=add_special_tokens,
+            add_special_tokens=request.add_special_tokens,
         )
         input_ids = prompt_input["prompt_token_ids"]
 

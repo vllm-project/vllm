@@ -149,7 +149,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 prompt,
                 truncate_prompt_tokens=sampling_params.truncate_prompt_tokens,
-                add_special_tokens=False,
+                add_special_tokens=request.add_special_tokens,
             )
 
             self._log_inputs(request_id,

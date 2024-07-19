@@ -172,20 +172,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
     echo: Optional[bool] = Field(
         default=False,
         description=(
-            "If true, the new message will be prepended with the last message "
+            "If True, the new message will be prepended with the last message "
             "if they belong to the same role."),
     )
-    add_generation_prompt: Optional[bool] = Field(
+    add_generation_prompt: bool = Field(
         default=True,
         description=
-        ("If true, the generation prompt will be added to the chat template. "
+        ("If True, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
     )
-    add_special_tokens: Optional[bool] = Field(
+    add_special_tokens: bool = Field(
         default=False,
         description=(
-            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "If True, special tokens (e.g. BOS) will be added to the prompt "
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
             "special tokens so this should be set to False (as is the "
@@ -397,6 +397,12 @@ class CompletionRequest(OpenAIBaseModel):
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If True (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."),
+    )
     include_stop_str_in_output: Optional[bool] = Field(
         default=False,
         description=(
@@ -740,6 +746,8 @@ class BatchRequestOutput(OpenAIBaseModel):
 class TokenizeCompletionRequest(OpenAIBaseModel):
     model: str
     prompt: str
+
+    add_special_tokens: bool = Field(default=True)
 
 
 class TokenizeChatRequest(OpenAIBaseModel):
