@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 
 import torch
 
@@ -7,13 +7,19 @@ def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
     return torch.as_tensor(x, dtype=torch.float32, device='cuda')
 
 def ref_dynamic_per_token_quant(x: torch.tensor,
+                                scale_ub: Optional[float],
                                 quant_dtype: torch.dtype) \
         -> Tuple[torch.tensor, torch.tensor]:
 
     assert quant_dtype in [torch.int8, torch.float8_e4m3fn]
+    if scale_ub is not None:
+        assert quant_dtype == torch.float8_e4m3fn
+
     qtype_traits = torch.iinfo(quant_dtype) if quant_dtype == torch.int8 \
             else torch.finfo(quant_dtype)
     qtype_max = as_float32_tensor(qtype_traits.max)
+    s_1 = as_float32_tensor(1.0)
+    s_512 = as_float32_tensor(512.0)
 
     # For fp8, in order to match the cuda kernel output, we have to do exactly
     # the same operations as in the corresponding fp8 kernel to prevent
@@ -22,17 +28,22 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
     # Compute scales
     x_token_max, _ = x.abs().max(dim=-1)
     x_token_max = as_float32_tensor(x_token_max)
+    if scale_ub is not None: 
+        x_token_max = x_token_max.clamp(max=scale_ub)
+
     scales = (x_token_max / qtype_max)[:, None]
+    if quant_dtype == torch.float8_e4m3fn:
+        min_scaling_factor = s_1 / (qtype_max * s_512)
+        scales = scales.clamp(min=min_scaling_factor)
 
     # Quant
-    iscales = (qtype_max / x_token_max)[:, None]
+    iscales = as_float32_tensor(s_1 / scales)
     torch_out = as_float32_tensor(x) * iscales
     torch_out = torch_out.round() if quant_dtype == torch.int8 else torch_out
     torch_out = torch_out.clamp(qtype_traits.min,
                                 qtype_traits.max).to(quant_dtype)
 
     return torch_out, scales
-
 
 # The int8 version is very similar. Incorporate the int8 version, like in
 # ref_dynamic_per_token_quant, when we have a dynamic_per_tensor int8 quant

@@ -26,13 +26,14 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
     x = torch.rand(num_tokens, hidden_size, dtype=dtype,
                    device="cuda") + 1e-6  # avoid nans
 
-    ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.float8_e4m3fn)
-    ops_out, ops_scales = ops.dynamic_per_token_scaled_fp8_quant(x)
+    scale_ub = None
+
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, scale_ub, torch.float8_e4m3fn)
+    ops_out, ops_scales = ops.dynamic_per_token_scaled_fp8_quant(x, scale_ub)
 
     assert torch.allclose(ref_scales, ops_scales)
     assert torch.allclose(ref_out.to(dtype=torch.float32),
                           ops_out.to(dtype=torch.float32))
-
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)

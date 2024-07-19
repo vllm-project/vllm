@@ -336,13 +336,13 @@ def scaled_fp8_quant(
 
 
 def dynamic_per_token_scaled_fp8_quant(
-        input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        input: torch.Tensor, scale_ub: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
 
     output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     scales = torch.empty((input.numel() // input.shape[-1], 1),
                          device=input.device,
                          dtype=torch.float32)
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scales)
+    torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scales, scale_ub)
     return output, scales
 
 
