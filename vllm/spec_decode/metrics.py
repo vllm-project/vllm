@@ -145,6 +145,10 @@ class AsyncMetricsCollector:
         """
 
         ready_event.synchronize()
+
+        # update time of last collection
+        self._last_metrics_collect_time = self._timer()
+
         accepted_tokens = self._aggregate_num_accepted_tokens.item()
         emitted_tokens = self._aggregate_num_emitted_tokens.item()
         draft_tokens = self._aggregate_num_draft_tokens
