@@ -42,7 +42,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
-logger = init_logger(__name__)
 engine: AsyncLLMEngine
 engine_args: AsyncEngineArgs
 openai_serving_chat: OpenAIServingChat
@@ -73,11 +72,13 @@ async def lifespan(app: fastapi.FastAPI):
 
 router = APIRouter()
 
-# Add prometheus asgi middleware to route /metrics requests
-route = Mount("/metrics", make_asgi_app())
-# Workaround for 307 Redirect for /metrics
-route.path_regex = re.compile('^/metrics(?P<path>.*)$')
-router.routes.append(route)
+
+def mount_metrics(app: fastapi.FastAPI):
+    # Add prometheus asgi middleware to route /metrics requests
+    metrics_route = Mount("/metrics", make_asgi_app())
+    # Workaround for 307 Redirect for /metrics
+    metrics_route.path_regex = re.compile('^/metrics(?P<path>.*)$')
+    app.routes.append(metrics_route)
 
 
 @router.get("/health")
@@ -166,6 +167,8 @@ def build_app(args):
     app = fastapi.FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
+
+    mount_metrics(app)
 
     app.add_middleware(
         CORSMiddleware,
@@ -257,7 +260,8 @@ def run_server(args, llm_engine=None):
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     openai_serving_tokenization = OpenAIServingTokenization(
-        engine, model_config, served_model_names, args.chat_template)
+        engine, model_config, served_model_names, args.lora_modules,
+        args.chat_template)
     app.root_path = args.root_path
 
     logger.info("Available routes are:")
