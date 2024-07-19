@@ -89,9 +89,9 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                                                       **extra_weight_attrs)
         layer.register_parameter("weight_scale", weight_scale)
 
-        # NOT USED FOR INFERNECE
-        input_scale_ub = torch.nn.Parameter(
-            torch.zeros((1), dtype=torch.float8_e4m3fn))
+        # INPUT SCALE UPPER BOUND
+        input_scale_ub = torch.nn.Parameter(torch.zeros((1), dtype=torch.float32),
+                                            requires_grad=False)
         layer.register_parameter("input_scale_ub", input_scale_ub)
         set_weight_attrs(input_scale_ub, {
             "ignore_warning": True,
@@ -111,6 +111,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                                 weight=layer.weight,
                                 weight_scale=layer.weight_scale,
                                 input_scale=None,
+                                input_scale_ub=layer.input_scale_ub,
                                 bias=bias,
                                 cutlass_fp8_supported=True,
                                 use_per_token_if_dynamic=True)

@@ -299,7 +299,7 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
-    scale_ub: Optional[float] = None,
+    scale_ub: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
     use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
