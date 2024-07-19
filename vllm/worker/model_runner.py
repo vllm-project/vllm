@@ -342,6 +342,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             raise RuntimeError(
                 "chunked prefill cannot be used with prefix caching now.")
 
+        # If prefix cache is hit, advance context length to bypass
+        # hit blocks. Accordingly, input tokens, position and query length
+        # have to be updated.
         if prefix_cache_hit:
             assert computed_block_nums is not None
             context_len = len(computed_block_nums) * self.block_size
@@ -350,6 +353,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][context_len:]
             inter_data.context_lens[seq_idx] = context_len
+            inter_data.query_lens[
+                seq_idx] = inter_data.seq_lens[seq_idx] - context_len
 
     def _compute_for_sliding_window(self, inter_data: InterDataForSeqGroup,
                                     seq_idx: int,
