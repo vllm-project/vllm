@@ -274,11 +274,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             num_steps)
 
         if not get_pp_group().is_last_rank:
+            # output is IntermediateTensors
             get_pp_group().send_tensor_dict(output.tensors)
             return [None]
 
-        # Worker only supports single-step execution. Wrap the output in a
-        # list to conform to interface.
+        # output is List[SamplerOutput]
         return output
 
     def _execute_model_spmd(
