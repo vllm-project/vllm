@@ -898,10 +898,6 @@ def init_distributed_environment(
         else:
             local_rank = rank
             
-    if all([
-        envs.VLLM_DISAGG_PREFILL_ROLE is not None,
-        envs.VLLM_DISAGG_PREFILL_ROLE == "prefill"]):
-        time.sleep(1000)
     global _WORLD
     if _WORLD is None:
         ranks = list(range(world_size))
@@ -909,7 +905,6 @@ def init_distributed_environment(
         if all([
             envs.VLLM_DISAGG_PREFILL_ROLE is not None,
             envs.VLLM_DISAGG_PREFILL_ROLE == "decode"]):
-                # sleep 10 seconds to avoid potential collisions
                 # when initializing distributed environment
                 ranks = list(range(world_size, 2 * world_size))
             
