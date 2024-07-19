@@ -6,6 +6,7 @@ silu_mul_quant_name = "torch_P_empty_T_int_3_int_1K_device_D_cuda_0_K_dtype_floa
 
 register_silu_mul_quant = False
 
+
 def silu_mul_quant(output: torch.Tensor, input: torch.Tensor,
                    weight: torch.Tensor, input_scale: torch.Tensor,
                    weight_scale: torch.Tensor):

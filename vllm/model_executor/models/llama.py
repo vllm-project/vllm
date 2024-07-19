@@ -47,7 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.model_optimizer.model_optimizer import optimizer
+#from vllm.model_executor.model_optimizer.model_optimizer import optimizer
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_hip
@@ -305,7 +305,7 @@ class LlamaModel(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    #@optimizer
+    #@optimizer(fullgraph=True)
     def forward(
         self,
         input_ids: Optional[torch.Tensor],

@@ -1854,3 +1854,16 @@ void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
           : (int*)q_perm.data_ptr(),
       q_weight.size(0) * 32 / bit, q_weight.size(1), bit);
 }
+
+torch::Tensor gptq_gemm_meta(torch::Tensor a, torch::Tensor b_q_weight,
+                             torch::Tensor b_gptq_qzeros,
+                             torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
+                             bool use_exllama, int64_t bit) {
+  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+  // TODO: this might not be quite right, add check for symbolic dims and only
+  // use when needed?
+  auto const m = a.sym_size(0);
+  auto const n = b_q_weight.sym_size(1);
+  auto res = torch::empty_symint({m, n}, options);
+  return res;
+}

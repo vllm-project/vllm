@@ -126,11 +126,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
 
   // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
-  ops.def("marlin_gemm", &marlin_gemm);
+  ops.def(
+      "marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
+      "Tensor! workspace, int size_m, int size_n, int size_k) -> Tensor");
   ops.impl("marlin_gemm", torch::kCUDA, &marlin_gemm);
 
   // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
-  ops.def("gptq_marlin_24_gemm", &gptq_marlin_24_gemm);
+  ops.def(
+      "gptq_marlin_24_gemm(Tensor a, Tensor b_q_weight, Tensor b_meta, "
+      "Tensor b_scales, Tensor! workspace, int num_bits, int size_m, "
+      "int size_n, int size_k) -> Tensor");
   ops.impl("gptq_marlin_24_gemm", torch::kCUDA, &gptq_marlin_24_gemm);
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
@@ -149,8 +154,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("machete_prepack_B", torch::kCUDA, &machete::prepack_B);
 
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
-  ops.def("gptq_marlin_gemm", &gptq_marlin_gemm);
+  ops.def(
+      "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
+      "Tensor g_idx, Tensor perm, Tensor! workspace, int num_bits, int size_m, "
+      "int size_n, int size_k, bool is_k_full) -> Tensor");
   ops.impl("gptq_marlin_gemm", torch::kCUDA, &gptq_marlin_gemm);
+  ops.impl("gptq_marlin_gemm", torch::kMeta, &gptq_marlin_gemm_meta);
 
   // gptq_marlin repack from GPTQ.
   ops.def("gptq_marlin_repack", &gptq_marlin_repack);
@@ -205,8 +214,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // Quantized GEMM for GPTQ.
-  ops.def("gptq_gemm", &gptq_gemm);
+  // Note: even though the C++ inferred schema is correct for this op, it seems
+  // to prevent the meta function registry.
+  ops.def(
+      "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
+      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, int bit) "
+      "-> Tensor");
   ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
+  ops.impl("gptq_gemm", torch::kMeta, &gptq_gemm_meta);
 
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");

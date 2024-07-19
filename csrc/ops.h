@@ -119,6 +119,13 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                bool is_k_full, bool has_zp,
                                bool use_fp32_reduce);
 
+torch::Tensor gptq_marlin_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
+                                    torch::Tensor& b_scales,
+                                    torch::Tensor& g_idx, torch::Tensor& perm,
+                                    torch::Tensor& workspace, int64_t num_bits,
+                                    int64_t size_m, int64_t size_n,
+                                    int64_t size_k, bool is_k_full);
+
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
@@ -206,6 +213,11 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
                         bool use_exllama, int64_t bit);
+
+torch::Tensor gptq_gemm_meta(torch::Tensor a, torch::Tensor b_q_weight,
+                             torch::Tensor b_gptq_qzeros,
+                             torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
+                             bool use_exllama, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 

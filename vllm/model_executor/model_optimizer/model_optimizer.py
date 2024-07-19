@@ -3,7 +3,6 @@ from typing import Callable, List, Optional
 
 import torch
 from torch._dynamo import lookup_backend
-from torch.fx.passes.shape_prop import ShapeProp
 
 from vllm.logger import init_logger
 
@@ -90,14 +89,11 @@ class backend_class:
                  example_inputs: List[torch.Tensor]) -> Callable:
         logger.info("Graph optimizer start")
 
-        logger.debug("Original module:")
+        logger.debug("Original module:\n%s", gm)
         logger.debug(
             lazy_graph_print_tabular(gm.graph, 'users',
                                      lambda n: list(n.users.keys())))
         logger.debug("input_types: %s", [type(inp) for inp in example_inputs])
-
-        # Annotate all nodes with types and shapes.
-        ShapeProp(gm).propagate(*example_inputs)
 
         gm = optimize(backend_class.cc, gm, example_inputs)
 

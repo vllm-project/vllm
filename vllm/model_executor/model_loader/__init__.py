@@ -10,6 +10,7 @@ from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name, get_model_architecture)
 from vllm.model_executor.model_optimizer.model_optimizer import optimizer
 
+
 def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               device_config: DeviceConfig, parallel_config: ParallelConfig,
               scheduler_config: SchedulerConfig,

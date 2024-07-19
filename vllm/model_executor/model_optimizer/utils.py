@@ -4,8 +4,6 @@
 #
 ###############################################################################
 
-import copy
-
 import torch
 
 try:
@@ -117,6 +115,13 @@ def is_call(node: torch.fx.Node) -> bool:
     """
     return (node.op == 'call_function' or node.op == 'call_method'
             or node.op == 'call_module')
+
+
+def is_simple_call(node: torch.fx.Node) -> bool:
+    """
+    Is the given node a call of some kind?
+    """
+    return (node.op == 'call_function' or node.op == 'call_method')
 
 
 def node_function_target(node: torch.fx.Node) -> str:
@@ -318,8 +323,9 @@ def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
 
 def dump_inputs_users(
     nodes: List[torch.fx.Node],
-    all_input_nodes: Dict[torch.fx.Node, List[torch.fx.Node]],
-    all_node_users: Dict[torch.fx.Node, Dict[torch.fx.Node, None]]
+    all_input_nodes: OrderedDict[torch.fx.Node, List[torch.fx.Node]],
+    all_node_users: OrderedDict[torch.fx.Node, OrderedDict[torch.fx.Node,
+                                                           None]]
 ) -> str:
     """
     Pretty print inputs/users info for a set of nodes and tag where
@@ -344,8 +350,8 @@ def dump_inputs_users(
 def gather_all_input_nodes(
     nodes: List[torch.fx.Node],
     do_renames: bool = True
-) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]],
-           OrderedDict[torch.fx.Node, OrderedDict[torch.fx.Node, None]]]:
+) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]], OrderedDict[
+        torch.fx.Node, OrderedDict[torch.fx.Node, None]]]:
     """
     Collect all def/use information for each node in 'nodes'.  This is different
     than node.all_input_nodes and node.users since it handles in-place
@@ -366,8 +372,11 @@ def gather_all_input_nodes(
 
     Note: this will include Node kwargs
     """
-    all_input_nodes: OrderedDict[torch.fx.Node, List[torch.fx.Node]] = OrderedDict()
-    all_node_users: OrderedDict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = OrderedDict()
+    all_input_nodes: OrderedDict[torch.fx.Node,
+                                 List[torch.fx.Node]] = OrderedDict()
+    all_node_users: OrderedDict[torch.fx.Node,
+                                OrderedDict[torch.fx.Node,
+                                            None]] = OrderedDict()
     renames: Dict[torch.fx.Node, torch.fx.Node] = dict()
 
     def process_arg(n: torch.fx.Node, arg: torch.fx.node.Argument):
@@ -396,7 +405,8 @@ def gather_all_input_nodes(
     #
     for n in nodes:
         all_input_nodes[n] = n.all_input_nodes
-        all_node_users[n] = OrderedDict(sorted(n.users.items(), key=lambda kv: kv[0].name))
+        all_node_users[n] = OrderedDict(
+            sorted(n.users.items(), key=lambda kv: kv[0].name))
 
     #
     # process each node

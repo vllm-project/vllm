@@ -16,8 +16,8 @@ from .code_cache import CodeCache
 from .fused_op_generator import FusionFail
 from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
-from .utils import (FlowGraph, SubGraph, is_call, lazy_graph_print_tabular,
-                    mangle_name, node_function_target)
+from .utils import (FlowGraph, SubGraph, lazy_graph_print_tabular,
+                    mangle_name, node_function_target, is_simple_call)
 
 logger = init_logger(__name__)
 
@@ -36,7 +36,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     kwargs: Dict[torch.fx.Node, Dict[str, torch.fx.Argument]] = dict()
 
     for n in sub.nodes:
-        if not is_call(n):
+        if not is_simple_call(n):
             continue
 
         nodes_to_fuse.append(n)
@@ -104,7 +104,7 @@ def is_fusable(node: torch.fx.Node) -> bool:
     Determine whether or not node is a fusable operations.
     TODO: Smarter filter for 'getitem'.
     """
-    if not is_call(node):
+    if not is_simple_call(node):
         return False
 
     op_name = node_function_target(node)
@@ -120,7 +120,7 @@ def is_compute(node: torch.fx.Node) -> bool:
     """
     Determine whether or not node is a fusable compute operation, e.g. gemm.
     """
-    if not is_call(node):
+    if not is_simple_call(node):
         return False
 
     op_name = node_function_target(node)
@@ -178,7 +178,7 @@ def dump_partitions(node_map: Dict[torch.fx.Node, int]) -> str:
 
 
 def non_trivial_op(n: torch.fx.Node) -> bool:
-    if not is_call(n):
+    if not is_simple_call(n):
         return False
     trg = node_function_target(n)
     return not FUSABLE[trg].is_trivial if trg in FUSABLE else False
@@ -211,13 +211,36 @@ def pointwise_fusion(cc: CodeCache,
 
     logger.debug("Start fusion")
 
+    num_compute: Dict[int, int] = dict()
+    num_compute[0] = 0
+
+    num_inputs: Dict[int, int] = dict()
+
+    def set_partition(n: torch.fx.Node, part_id: int):
+        node_map[n] = part_id
+
+        if part_id not in num_compute:
+            num_compute[part_id] = 0
+
+        if part_id not in num_inputs:
+            num_inputs[part_id] = 0
+
+        if is_compute(n):
+            num_compute[part_id] = num_compute[part_id] + 1
+
+        # conservative count of fused op input arguments.
+        num_inputs[part_id] = num_inputs[part_id] + len(n.args)
+
+        logger.debug("SET_PARTITION[%s] = %d (%s), %d", n, part_id,
+                     is_compute(n), num_inputs[part_id])
+
     # create partition groups
     # run in reverse order so predecessors of non-unary ops will appear
     # in the same partition.
     for n in reversed(mod.graph.nodes):
         logger.debug("CONSIDER %s", n)
 
-        if not is_call(n):
+        if not is_simple_call(n):
             logger.debug("  REJECT %s: not call", n)
             node_map[n] = 0
             continue
@@ -230,8 +253,9 @@ def pointwise_fusion(cc: CodeCache,
             if s.op != 'placeholder' and not is_get_attr(s)
         ]
         if not all(fusable):
-            logger.debug("  REJECT %s: not all preds fusable: %s, %s", n,
-                         fusable, fg.predecessors(n))
+            logger.debug("  REJECT %s[%d]: not all preds fusable: %s, %s", n,
+                         node_map[n] if n in node_map else 0, fusable,
+                         fg.predecessors(n))
 
             if n not in node_map:
                 node_map[n] = 0
@@ -245,13 +269,22 @@ def pointwise_fusion(cc: CodeCache,
 
         if n not in node_map:
             partition = partition + 1
-            node_map[n] = partition
+            set_partition(n, partition)
+
+        fuse_part_id = node_map[n]
+
+        # Pytorch only supports functions with up to 64 inputs.
+        if fuse_part_id in num_inputs and num_inputs[fuse_part_id] >= 63:
+            logger.debug("  REJECT %s: too many inputs in partition %d", n,
+                         fuse_part_id)
+            continue
 
         for s in fg.predecessors(n):
-            if s.op != 'placeholder':
-                node_map[s] = node_map[n]
+            if s.op != 'placeholder' and (not is_compute(s)
+                                          or num_compute[fuse_part_id] == 0):
+                set_partition(s, fuse_part_id)
 
-        logger.debug("ACCEPT %s: partition %s", n, node_map[n])
+        logger.debug("ACCEPT %s: partition %s", n, fuse_part_id)
 
     logger.debug("partitions = %s", dump_partitions(node_map))
 
@@ -270,21 +303,11 @@ def pointwise_fusion(cc: CodeCache,
     # prologue or epilogue fusion.
     #
     if fuse_with_compute:
-        num_compute: Dict[int, int] = dict()  # use set
-
-        for i in range(len(node_map)):
-            num_compute[i] = 0
+        assert all([(num <= 1 or part == 0)
+                    for part, num in num_compute.items()])
 
         for n in mod.graph.nodes:
-            part = node_map[n]
-            if is_compute(n):
-                assert part == 0 or num_compute[part] == 0, (
-                    f"part = {part}:"
-                    f"{[n for n, p in node_map.items() if p == part]}")
-                num_compute[part] = num_compute[part] + 1
-
-        for n in mod.graph.nodes:
-            if not is_call(n):
+            if not is_simple_call(n):
                 continue
 
             logger.debug("COMPUTE CONSIDER %s", n)
@@ -320,8 +343,7 @@ def pointwise_fusion(cc: CodeCache,
             logger.debug("COMPUTE ACCEPT %s: partition %s, nodes=%s", n,
                          fuse_part_id, str(nodes))
 
-            num_compute[fuse_part_id] = num_compute[fuse_part_id] + 1
-            node_map[n] = fuse_part_id
+            set_partition(n, fuse_part_id)
 
     logger.debug("final partitions = %s", dump_partitions(node_map))
 
