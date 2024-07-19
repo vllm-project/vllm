@@ -900,6 +900,8 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
+
+        
             
     global _WORLD
     if _WORLD is None:
@@ -915,6 +917,11 @@ def init_distributed_environment(
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
+
+            
+    time.sleep(torch.distributed.get_rank())
+    logger.debug("Success initialized _WORLD for rank %d", torch.distributed.get_rank())
+    time.sleep(100)
         
 
 
