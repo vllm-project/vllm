@@ -182,7 +182,6 @@ def apply_fp8_linear(
             # C = sw * sx * (X * W) + bias
             output = output * x_scale * weight_scale.t()
             if bias is not None:
-                # C = sw * sx * (X * W) + bias
                 output = output + bias
             return output.to(dtype=input.dtype)
 
