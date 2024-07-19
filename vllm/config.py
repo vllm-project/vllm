@@ -712,10 +712,6 @@ class ParallelConfig:
         self.rank = 0
 
     def _verify_args(self) -> None:
-        if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend == "mp"):
-            raise NotImplementedError("Pipeline parallelism is not supported "
-                                      "yet with multiprocessing.")
         if self.distributed_executor_backend not in ("ray", "mp", None):
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
