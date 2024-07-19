@@ -1,6 +1,7 @@
 
 export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_PORT=12345
+export VLLM_TRACE_FUNCTION=1
 
 # prefilling instance
 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
