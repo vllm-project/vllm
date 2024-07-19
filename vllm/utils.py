@@ -415,9 +415,10 @@ def init_kmp_env():
     os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
 
 
-def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
+def chunk_list(lst: List[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
-    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
 
 
 def cdiv(a: int, b: int) -> int:

@@ -1,3 +1,4 @@
+import math
 from typing import List, Optional
 
 from vllm.core.block.common import BlockList
@@ -337,10 +338,17 @@ class BlockTable:
         This is required for the scheduler to determine whether a sequence can
         continue generation, or if it must be preempted.
         """
+        # Math below is equivalent to:
+        # all_token_ids = token_ids + [-1] * num_lookahead_slots
+        # token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
+        # return len(token_blocks)
 
-        all_token_ids = token_ids + [-1] * num_lookahead_slots
-        token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
-        return len(token_blocks)
+        num_token_ids = len(token_ids) + num_lookahead_slots
+        first_chunk_size = self._block_size - (self._num_full_slots %
+                                               self._block_size)
+        num_token_blocks = (1 + math.ceil(
+            (num_token_ids - first_chunk_size) / self._block_size))
+        return num_token_blocks
 
     def _chunk_token_blocks_for_append(
             self, token_ids: List[int]) -> List[List[int]]:
@@ -351,6 +359,7 @@ class BlockTable:
         """
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
-        token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
-            token_ids[first_chunk_size:], self._block_size)
+        token_blocks = [token_ids[:first_chunk_size]]
+        token_blocks.extend(
+            chunk_list(token_ids[first_chunk_size:], self._block_size))
         return token_blocks
