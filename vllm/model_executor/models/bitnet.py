@@ -36,7 +36,9 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -255,8 +257,8 @@ class BitnetMLP(nn.Module):
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
-        self.ffn_layernorm = BitnetRMSNorm(intermediate_size,
-                                           eps=config.rms_norm_eps)
+        self.ffn_layernorm = RMSNorm(intermediate_size,
+                                     eps=config.rms_norm_eps)
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -264,76 +266,6 @@ class BitnetMLP(nn.Module):
         x = self.ffn_layernorm(x)
         x, _ = self.down_proj(x)
         return x
-
-
-class BitnetRotaryEmbedding(nn.Module):
-
-    def __init__(
-        self,
-        dim,
-        max_position_embeddings=2048,
-        base=10000,
-        device=None,
-        scaling_factor=1.0,
-    ):
-        super().__init__()
-        self.scaling_factor = scaling_factor
-        self.dim = dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        inv_freq = 1.0 / (self.base**(torch.arange(
-            0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
-        self.register_buffer("inv_freq", inv_freq)
-        # For BC we register cos and sin cached
-        self.max_seq_len_cached = max_position_embeddings
-        t = torch.arange(self.max_seq_len_cached,
-                         device=device,
-                         dtype=torch.int64).type_as(self.inv_freq)
-        t = t / self.scaling_factor
-        freqs = torch.outer(t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("_cos_cached",
-                             emb.cos().to(torch.get_default_dtype()),
-                             persistent=False)
-        self.register_buffer("_sin_cached",
-                             emb.sin().to(torch.get_default_dtype()),
-                             persistent=False)
-
-    @property
-    def sin_cached(self):
-        logger.warning_once(
-            "The sin_cached attribute will be removed in 4.39. Bear in mind that its contents changed in v4.38. Use "
-            "the forward method of RoPE from now on instead. It is not used in the `BitnetAttention` class"
-        )
-        return self._sin_cached
-
-    @property
-    def cos_cached(self):
-        logger.warning_once(
-            "The cos_cached attribute will be removed in 4.39. Bear in mind that its contents changed in v4.38. Use "
-            "the forward method of RoPE from now on instead. It is not used in the `BitnetAttention` class"
-        )
-        return self._cos_cached
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        inv_freq_expanded = (self.inv_freq[None, :, None].float().expand(
-            position_ids.shape[0], -1, 1))
-        position_ids_expanded = position_ids[:, None, :].float()
-        # Force float32 since bfloat16 loses precision on long contexts
-        # See https://github.com/huggingface/transformers/pull/29285
-        device_type = x.device.type
-        device_type = (device_type if isinstance(device_type, str)
-                       and device_type != "mps" else "cpu")
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float()
-                     @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class BitnetAttention(nn.Module):
@@ -378,23 +310,11 @@ class BitnetAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.attention_dropout = config.attention_dropout
 
-        self.q_proj = RowParallelLinear(
-            input_size=hidden_size,
-            output_size=self.head_dim * self.num_heads,
-            bias=bias,
-            quant_config=quant_config,
-        )
-
-        self.k_proj = RowParallelLinear(
-            input_size=hidden_size,
-            output_size=self.head_dim * self.num_heads,
-            bias=bias,
-            quant_config=quant_config,
-        )
-
-        self.v_proj = RowParallelLinear(
-            input_size=hidden_size,
-            output_size=self.head_dim * self.num_heads,
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
         )
@@ -423,8 +343,8 @@ class BitnetAttention(nn.Module):
             rope_scaling=rope_scaling,
         )
 
-        self.inner_attn_ln = BitnetRMSNorm(config.hidden_size,
-                                           eps=config.rms_norm_eps)
+        self.inner_attn_ln = RMSNorm(config.hidden_size,
+                                     eps=config.rms_norm_eps)
 
     def find_flash_attn_supported_head_dims(self, head_dim: int) -> int:
         """
@@ -450,9 +370,8 @@ class BitnetAttention(nn.Module):
     ) -> torch.Tensor:
         # QKV projection cannot be grouped as the they
         # do not share the same scaling factor
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         # Padding as paged attention doesn't support head_dim == 100
         q = torch.nn.functional.pad(
@@ -475,25 +394,6 @@ class BitnetAttention(nn.Module):
         attn_output = self.inner_attn_ln(attn_output)
         output, _ = self.o_proj(attn_output)
         return output
-
-
-class BitnetRMSNorm(nn.Module):
-
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        BitnetRMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance +
-                                                    self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
 
 
 class BitnetDecoderLayer(nn.Module):
@@ -538,10 +438,10 @@ class BitnetDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             config=config,
         )
-        self.input_layernorm = BitnetRMSNorm(config.hidden_size,
-                                             eps=config.rms_norm_eps)
-        self.post_attention_layernorm = BitnetRMSNorm(config.hidden_size,
-                                                      eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -549,23 +449,29 @@ class BitnetDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        hidden_states = residual + hidden_states
+
         # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
+
+        return hidden_states, residual
 
 
 class BitnetModel(nn.Module):
@@ -592,7 +498,7 @@ class BitnetModel(nn.Module):
                                quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = BitnetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -609,15 +515,17 @@ class BitnetModel(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids)
+        residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            hidden_states = layer(
+            hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 attn_metadata,
+                residual,
             )
-        hidden_states = self.norm(hidden_states)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -695,6 +603,9 @@ class BitnetForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]

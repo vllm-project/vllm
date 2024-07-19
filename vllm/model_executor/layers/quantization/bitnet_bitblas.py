@@ -8,6 +8,8 @@ from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
@@ -327,7 +329,8 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
 
     def repack_bitblas_from_bitnet(self,
                                    b_q_weight: torch.Tensor,
-                                   is_qkv_packed: bool = False):
+                                   is_qkv_packed: bool = False,
+                                   is_gateup_packed: bool = False):
         if is_qkv_packed:
             hidden_size = b_q_weight.size(0)
             sw_q = 1 / b_q_weight[:hidden_size //
@@ -336,9 +339,11 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
                                   3].abs().mean().clamp(min=1e-5)
             sw_v = 1 / b_q_weight[2 * hidden_size //
                                   3:].abs().mean().clamp(min=1e-5)
-            self.sw_q = sw_q
-            self.sw_k = sw_k
-            self.sw_v = sw_v
+            self.sw = torch.cat(
+                (sw_q.repeat(hidden_size // 3), sw_k.repeat(
+                    hidden_size // 3), sw_v.repeat(hidden_size // 3)),
+                dim=0)
+
             qweight_q = self.weight_quant(b_q_weight[:hidden_size //
                                                      3]).detach()
             qweight_k = self.weight_quant(
@@ -346,6 +351,20 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
             qweight_v = self.weight_quant(b_q_weight[2 * hidden_size //
                                                      3:]).detach()
             qweight = torch.cat([qweight_q, qweight_k, qweight_v], dim=0)
+        elif is_gateup_packed:
+            hidden_size = b_q_weight.size(0)
+            sw_gate = 1 / b_q_weight[:hidden_size //
+                                     2].abs().mean().clamp(min=1e-5)
+            sw_up = 1 / b_q_weight[hidden_size //
+                                   2:].abs().mean().clamp(min=1e-5)
+            self.sw = torch.cat((sw_gate.repeat(
+                hidden_size // 2), sw_up.repeat(hidden_size // 2)),
+                                dim=0)
+            qweight_gate = self.weight_quant(b_q_weight[:hidden_size //
+                                                        2]).detach()
+            qweight_up = self.weight_quant(b_q_weight[hidden_size //
+                                                      2:]).detach()
+            qweight = torch.cat([qweight_gate, qweight_up], dim=0)
         else:
             sw = 1 / b_q_weight.abs().mean().clamp(min=1e-5)
             self.sw = sw
@@ -381,7 +400,13 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
                 setattr(layer, name, new_t)
 
             # Repack weights
-            bitblas_qweight = self.repack_bitblas_from_bitnet(layer.weight)
+            # QKVParallelLinear is a special case where the weight is packed
+            # For bitnet as different weights matrix shouldn't share the same
+            # scale, we need to unpack and repack the weight matrix
+            is_qkv_packed = isinstance(layer, QKVParallelLinear)
+            is_gateup_packed = isinstance(layer, MergedColumnParallelLinear)
+            bitblas_qweight = self.repack_bitblas_from_bitnet(
+                layer.weight, is_qkv_packed, is_gateup_packed)
             # free the original weight tensor
             free_tensor("weight")
             replace_tensor("qweight", bitblas_qweight)

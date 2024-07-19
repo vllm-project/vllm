@@ -533,13 +533,21 @@ class BitBLASLinearMethod(LinearMethodBase):
             logger.info(_message)
         return bitblas_matmul
 
-    def activation_quant(self, x, num_bits=8):
+    @torch.compile
+    def activation_quant(self, x):
         x = x.float()
         Qn = self.Qn
         Qp = self.Qp
         s = Qp / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
-        result = (x * s).round().clamp(Qn, Qp)
-        return result.type(torch.int8)
+        result = (x * s).round().clamp(Qn, Qp).type(torch.int8)
+        return result, s
+
+    @torch.compile
+    def post_quant_process(self, input, si, sw):
+        out = input / si
+        out = out / sw
+        out = out.half()
+        return out
 
     def apply_gptq(
         self,
@@ -569,18 +577,14 @@ class BitBLASLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        quant_input = self.activation_quant(
-            x, self.quant_config.input_bits).detach()
+        quant_input, si = self.activation_quant(x)
 
-        fp32_out = self.bitblas_matmul(quant_input, layer.qweight)
+        output = self.bitblas_matmul(quant_input, layer.qweight)
+
         sw = layer.sw
-        Qp = self.Qp
-        si = Qp / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
+
         # if / (si * sw) will cause inf in some cases
-        output = fp32_out / si
-        output = output / sw
-        output = output.half()
-        output = output.type(x.dtype)
+        output = self.post_quant_process(output, si, sw)
 
         output = output.view(x.shape[:-1] + (output.shape[1], ))
 
