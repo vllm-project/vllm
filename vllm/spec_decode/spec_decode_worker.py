@@ -9,7 +9,7 @@ from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.spec_decode_base_sampler import (
-    SpecDecodeBaseSampler)
+    SpecDecodeBaseSampler, SpecDecodeStochasticBaseSampler)
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
@@ -521,11 +521,28 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
+        # Sampler arguments
+        sampler_extra_kwargs = {}
+        if isinstance(self.spec_decode_sampler,
+                      SpecDecodeStochasticBaseSampler):
+
+            # Get sequence group state
+            generators = []
+            for seq_group_metadata in seq_group_metadata_list:
+                if (seq_group_metadata.state is not None
+                        and seq_group_metadata.state.generator is not None):
+                    generators.append(seq_group_metadata.state.generator)
+                else:
+                    generators.append(None)
+
+            sampler_extra_kwargs["generators"] = generators
+
         accepted_token_ids = self.spec_decode_sampler(
             target_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
+            **sampler_extra_kwargs,
         )
 
         # Append output tokens from non-speculative sequences to
