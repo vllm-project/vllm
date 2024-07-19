@@ -45,6 +45,7 @@ class OpenAIServingChat(OpenAIServing):
         model_config: ModelConfig,
         served_model_names: List[str],
         response_role: str,
+        *,
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],

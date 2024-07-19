@@ -59,6 +59,7 @@ class OpenAIServing:
         engine: AsyncLLMEngine,
         model_config: ModelConfig,
         served_model_names: List[str],
+        *,
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],

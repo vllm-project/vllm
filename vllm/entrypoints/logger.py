@@ -2,8 +2,8 @@ from typing import List, Optional, TypedDict, Union
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
@@ -20,7 +20,7 @@ class RequestLogger:
         super().__init__()
 
         self.max_log_len = max_log_len
-    
+
     def log_inputs(
         self,
         request_id: str,
@@ -35,7 +35,7 @@ class RequestLogger:
         if max_log_len is not None:
             if prompt is not None:
                 prompt = prompt[:max_log_len]
-            
+
             if prompt_token_ids is not None:
                 prompt_token_ids = prompt_token_ids[:max_log_len]
 

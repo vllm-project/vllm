@@ -27,6 +27,7 @@ class OpenAIServingTokenization(OpenAIServing):
         engine: AsyncLLMEngine,
         model_config: ModelConfig,
         served_model_names: List[str],
+        *,
         lora_modules: Optional[List[LoRAModulePath]],
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],

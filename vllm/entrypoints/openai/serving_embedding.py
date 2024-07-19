@@ -59,6 +59,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         engine: AsyncLLMEngine,
         model_config: ModelConfig,
         served_model_names: List[str],
+        *,
         request_logger: Optional[RequestLogger],
     ):
         super().__init__(engine=engine,
