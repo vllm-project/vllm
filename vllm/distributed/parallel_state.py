@@ -962,6 +962,25 @@ def initialize_model_parallel(
              local rank. This guarantees the communications inside the
              prefill instance and decode instance are unchanged.
     """
+    
+    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+        assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"], (
+            "VLLM_DISAGG_PREFILL_ROLE should be either prefill or decode")
+        logger.debug("Disaggregated prefill enabled, create _DISAGG group")
+        group_ranks = []
+        for i in range(world_size):
+            # prefill local rank: i
+            # decode global rank: i + world_size
+            group_ranks.append([i, i + world_size])
+        logger.debug("Distributed group is %s", str(group_ranks))
+        _DISAGG = init_model_parallel_group(
+            group_ranks,
+            int(envs.VLLM_DISAGG_PREFILL_ROLE == "decode"),
+            backend,
+            use_custom_allreduce=False)
+        
+    time.sleep(1000)
+    
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
@@ -997,23 +1016,6 @@ def initialize_model_parallel(
             world_size
         )
         
-    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-        assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"], (
-            "VLLM_DISAGG_PREFILL_ROLE should be either prefill or decode")
-        logger.debug("Disaggregated prefill enabled, create _DISAGG group")
-        group_ranks = []
-        for i in range(world_size):
-            # prefill local rank: i
-            # decode global rank: i + world_size
-            group_ranks.append([i, i + world_size])
-        logger.debug("Distributed group is %s", str(group_ranks))
-        _DISAGG = init_model_parallel_group(
-            group_ranks,
-            int(envs.VLLM_DISAGG_PREFILL_ROLE == "decode"),
-            backend,
-            use_custom_allreduce=False)
-        
-    time.sleep(1000)
 
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
