@@ -798,16 +798,16 @@ def graph_capture():
 
 
 logger = init_logger(__name__)
-
-original_logger = logger
-def logger(*args, **kwargs):
-    # disaggregated prefill enabled
-    # indicating if the current instance is prefill or decode
-    if torch.distributed.is_initialized():
-        if torch.distributed.get_rank() % 4 == 0:
-            original_logger(*args, **kwargs)
-    else:
-        original_logger(*args, **kwargs)
+class ConditionalLoggingHandler(logging.Handler):
+    def emit(self, record):
+        dist = torch.distributed
+        try:
+            if not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() % 4 == 0):
+                msg = self.format(record)
+                print(msg)  # You can replace this with any other logging mechanism you prefer
+        except Exception:
+            pass
+logger.addHandler(handler)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
