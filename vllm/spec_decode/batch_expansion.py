@@ -59,6 +59,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             SpeculativeScores: The scores of each speculative token, along with
                 which sequences were ignored during scoring.
         """
+    
         # TODO(cade) perform this on GPU to remove blocking call.
         proposal_lens_list = proposals.proposal_lens.tolist()
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
@@ -168,7 +169,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_token_ids = target_token_ids.reshape(spec_expanded_bs, k + 1)
         target_probs = target_probs.reshape(*target_token_ids.shape,
                                             self._vocab_size)
-
         target_logprobs = target_logprobs.reshape(target_probs.shape)
 
         all_tokens = target_token_ids.new_full(size=(contracted_bs, k + 1),
