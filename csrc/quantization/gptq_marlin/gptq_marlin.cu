@@ -379,6 +379,31 @@ __device__ inline typename ScalarType<half>::FragB dequant_4bit_zp<half>(
   return frag_b;
 }
 
+template <typename scalar_t>
+__device__ inline typename ScalarType<scalar_t>::FragB dequant_8bit_zp(int q) {
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+}
+
+template <>
+__device__ inline typename ScalarType<half>::FragB dequant_8bit_zp<half>(
+    int q) {
+  static constexpr uint32_t mask_for_elt_01 = 0x5250;
+  static constexpr uint32_t mask_for_elt_23 = 0x5351;
+  static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
+
+  uint32_t lo = prmt<start_byte_for_fp16, mask_for_elt_01>(q);
+  uint32_t hi = prmt<start_byte_for_fp16, mask_for_elt_23>(q);
+
+  static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64006400;
+
+  typename ScalarType<half>::FragB frag_b;
+  frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
+                      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
+  frag_b[1] = __hsub2(*reinterpret_cast<half2*>(&hi),
+                      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
+  return frag_b;
+}
+
 // Multiply dequantized values by the corresponding quantization scale; used
 // only for grouped quantization.
 template <typename scalar_t>
@@ -831,8 +856,8 @@ __global__ void Marlin(
   FragC frag_c[thread_m_blocks][4][2];
   FragS frag_s[2][4];         // No act-order
   FragS act_frag_s[2][4][4];  // For act-order
-  int frag_zp[2];             // Zero-points
-  FragZP frag_zp_fp16;        // Zero-points in fp16
+  int frag_qzp[2];            // Zero-points
+  FragZP frag_zp;             // Zero-points in fp16
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -1131,13 +1156,13 @@ __global__ void Marlin(
     static_assert(!has_act_order);
 
     if constexpr (group_blocks == -1) {
-      frag_zp[k % 2] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd];
+      frag_qzp[k % 2] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd];
 
     } else if constexpr (group_blocks >= thread_k_blocks) {
       int4* sh_zp_stage =
           sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
                                  (pipe / (group_blocks / thread_k_blocks)));
-      frag_zp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
+      frag_qzp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
     } else {
       int warp_id = threadIdx.x / 32;
       int n_warps = thread_n_blocks / 4;
@@ -1153,14 +1178,22 @@ __global__ void Marlin(
       int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
       sh_zp_stage += cur_group_id * zp_sh_stride;
-      frag_zp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
+      frag_qzp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
     }
   };
 
   // Execute the actual tensor core matmul of a sub-tile.
   auto matmul = [&](int k) {
     if constexpr (has_zp) {
-      frag_zp_fp16 = dequantize_s4_to_fp16x2<scalar_t>(frag_zp[k % 2]);
+      int zp_quant = frag_qzp[k % 2];
+      int zp_quant_shift = zp_quant >> 8;
+      FragB frag_zp_0 = dequant_4bit_zp<scalar_t>(zp_quant);
+      FragB frag_zp_1 = dequant_4bit_zp<scalar_t>(zp_quant_shift);
+      frag_zp[0] = frag_zp_0[0];
+      frag_zp[1] = frag_zp_0[1];
+      frag_zp[2] = frag_zp_1[0];
+      frag_zp[3] = frag_zp_1[1];
+      // frag_zp_fp16 = dequantize_s4_to_fp16x2<scalar_t>(frag_zp[k % 2]);
     }
 
   // We have the m dimension as the inner loop in order to encourage overlapping
@@ -1187,13 +1220,18 @@ __global__ void Marlin(
         int b_quant_0 = frag_b_quant_ptr[j * 2 + 0];
         int b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
 
-        frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
-        frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
+        if constexpr (has_zp) {
+          frag_b0 = dequant_8bit_zp<scalar_t>(b_quant_0);
+          frag_b1 = dequant_8bit_zp<scalar_t>(b_quant_1);
+        } else {
+          frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
+          frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
+        }
       }
 
       // Apply zero-point to frag_b0
       if constexpr (has_zp) {
-        sub_zp<scalar_t>(frag_b0, frag_zp_fp16[j], 0);
+        sub_zp<scalar_t>(frag_b0, frag_zp[j], 0);
       }
 
       // Apply scale to frag_b0
@@ -1209,7 +1247,7 @@ __global__ void Marlin(
 
       // Apply zero-point to frag_b1
       if constexpr (has_zp) {
-        sub_zp<scalar_t>(frag_b1, frag_zp_fp16[j], 1);
+        sub_zp<scalar_t>(frag_b1, frag_zp[j], 1);
       }
 
       // Apply scale to frag_b1
