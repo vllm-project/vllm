@@ -327,16 +327,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
          ) = sampler_output.sampled_token_probs.split(split_sizes)
         (spec_sampled_tokens, non_spec_sampled_tokens
          ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
-        if (sampler_output.logprobs is not None):
-            (
-                spec_logprobs,
-                non_spec_logprobs,
-            ) = sampler_output.logprobs.split(split_sizes)
-        else:
-            (
-                spec_logprobs,
-                non_spec_logprobs,
-            ) = (None, None)
+        (
+            spec_logprobs,
+            non_spec_logprobs,
+        ) = sampler_output.logprobs.split(split_sizes)
 
         # Convert scores to tensors.
         sampler_output.sampled_token_probs = spec_probs

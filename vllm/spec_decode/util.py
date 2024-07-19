@@ -149,18 +149,12 @@ def sampler_output_to_torch(
         sampled_token_probs = sampled_token_probs.transpose(0, 1)
 
     # shape: [batch_size, num_sampler_output, vocab_size]
-    if sampler_output_list[0].logprobs is not None:
-        sampled_token_logprobs = torch.stack(
-            [
-                sampler_output.logprobs
-                for sampler_output in sampler_output_list
-            ],
-            dim=0,
-        )
-    else:
-        sampled_token_logprobs = None
+    sampled_token_logprobs = torch.stack(
+        [sampler_output.logprobs for sampler_output in sampler_output_list],
+        dim=0,
+    )
 
-    if sampler_transposed and sampled_token_logprobs is not None:
+    if sampler_transposed:
         sampled_token_logprobs = sampled_token_logprobs.transpose(0, 1)
 
     # shape: [batch_size, num_sampler_output]
