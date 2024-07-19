@@ -18,8 +18,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<用户>(<image>./</image>)What's the content of the image?<AI>",  # noqa: E501
     "cherry_blossom":
     "<用户>(<image>./</image>)What is the season?<AI>",
-    "boardwalk":
-    "<用户>(<image>./</image>)What's in this image?<AI>"
 })
 
 models = ["openbmb/MiniCPM-V-2"]
