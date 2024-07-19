@@ -963,6 +963,18 @@ def initialize_model_parallel(
              prefill instance and decode instance are unchanged.
     """
     
+    # Get world size and rank. Ensure some consistencies.
+    assert torch.distributed.is_initialized()
+    world_size: int = torch.distributed.get_world_size()
+    backend = backend or torch.distributed.get_backend(
+        get_world_group().device_group)        
+    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+        logger.debug("Disaggregated prefill enabled, the world size obtained from torch.distributed (2 * tp * pp) should be decreased to align with vLLM world size (tp * pp)")
+        world_size = world_size // 2
+        
+        
+        
+    
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
         assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"], (
             "VLLM_DISAGG_PREFILL_ROLE should be either prefill or decode")
@@ -981,14 +993,9 @@ def initialize_model_parallel(
         
     time.sleep(1000)
     
-    # Get world size and rank. Ensure some consistencies.
-    assert torch.distributed.is_initialized()
-    world_size: int = torch.distributed.get_world_size()
-    backend = backend or torch.distributed.get_backend(
-        get_world_group().device_group)        
-    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-        logger.debug("Disaggregated prefill enabled, the world size obtained from torch.distributed (2 * tp * pp) should be decreased to align with vLLM world size (tp * pp)")
-        world_size = world_size // 2
+    
+        
+    
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
