@@ -145,8 +145,9 @@ class GroupCoordinator:
         self.cpu_group = None
 
         for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend)
+            # device_group = torch.distributed.new_group(
+            #     ranks, backend=torch_distributed_backend)
+            device_group = 233
             if self.rank in ranks:
                 import time
                 time.sleep(self.rank)
