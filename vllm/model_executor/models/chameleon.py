@@ -2,6 +2,7 @@ from functools import cached_property
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
@@ -24,6 +25,22 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import ChameleonConfig
 from vllm.utils import print_warning_once
+
+
+class ChameleonLayerNorm(nn.LayerNorm):
+
+    def __init__(self, hidden_size, *args, **kwargs):
+        super().__init__(hidden_size, *args, **kwargs)
+        self.normalized_shape = (hidden_size[-1], )
+
+    def forward(self, hidden_states):
+        hidden_states = F.layer_norm(hidden_states,
+                                     self.normalized_shape,
+                                     None,
+                                     None,
+                                     eps=1e-5)
+        hidden_states = hidden_states * self.weight + self.bias
+        return hidden_states
 
 
 # Copied from vllm.model_executor.models.llama.LlamaMLP -> ChameleonMLP
@@ -111,9 +128,8 @@ class ChameleonAttention(nn.Module):
             bias=bias,
             quant_config=quant_config,
         )
-        self.q_norm = nn.LayerNorm(param_shape=(self.num_heads, self.head_dim))
-        self.k_norm = nn.LayerNorm(param_shape=(self.num_kv_heads,
-                                                self.head_dim))
+        self.q_norm = ChameleonLayerNorm((self.num_heads, self.head_dim))
+        self.k_norm = ChameleonLayerNorm((self.num_kv_heads, self.head_dim))
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -132,8 +148,8 @@ class ChameleonAttention(nn.Module):
     def _apply_qk_norm(self, q: torch.Tensor,
                        k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # reshape for layernorm
-        q = q.view(*q.shape[:-1], -1, self.head_dim)
-        k = k.view(*k.shape[:-1], -1, self.head_dim)
+        q = q.reshape(-1, self.num_heads, self.head_dim)
+        k = k.reshape(-1, self.num_kv_heads, self.head_dim)
         q = self.q_norm(q)
         k = self.k_norm(k)
         q = q.view(*q.shape[:-2], -1)
@@ -365,7 +381,7 @@ class ChameleonModel(nn.Module):
         return hidden_states
 
 
-class ChameleonForCausalLM(nn.Module):
+class ChameleonForConditionalGeneration(nn.Module):
 
     def __init__(
         self,
