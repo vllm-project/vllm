@@ -147,16 +147,16 @@ class GroupCoordinator:
         for ranks in group_ranks:
             # device_group = torch.distributed.new_group(
             #     ranks, backend=torch_distributed_backend)
-            device_group = 233
             if self.rank in ranks:
                 import time
                 time.sleep(self.rank)
-                logger.debug("initializing cpu group, rank %d", self.rank)
+                logger.debug("initializing cpu group, rank %d, group %s", self.rank, ranks)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
             if self.rank in ranks:
-                logger.debug("cpu group initialized, rank %d", self.rank)
+                logger.debug("cpu group initialized, rank %d, group %s", self.rank, ranks)
+                time.sleep(1000)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -898,12 +898,6 @@ def init_distributed_environment(
             local_rank = rank
 
             
-    logger.debug("My rank is %d", torch.distributed.get_rank())
-
-    cpu_group = torch.distributed.new_group(list(range(8)), backend="gloo")
-    
-    logger.debug("CPU group initialized, rank %d", torch.distributed.get_rank())
-    time.sleep(1000)
 
         
             
