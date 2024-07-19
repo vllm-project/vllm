@@ -11,7 +11,7 @@ ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
 # Triton FA is used by default on ROCm now so this is unnecessary.
 ARG BUILD_FA="1"
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
-ARG FA_BRANCH="ae7928c"
+ARG FA_BRANCH="23a2b1c2"
 
 # Whether to build triton on rocm
 ARG BUILD_TRITON="1"
