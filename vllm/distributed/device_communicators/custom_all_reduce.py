@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from typing import Any, List, Optional, Union
+import logging
 
 import torch
 import torch.distributed as dist
@@ -21,6 +22,17 @@ except Exception:
     custom_ar = False
 
 logger = init_logger(__name__)
+
+class ConditionalLoggingHandler(logging.Handler):
+    def emit(self, record):
+        dist = torch.distributed
+        try:
+            if not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() % 4 == 0):
+                msg = self.format(record)
+                print(msg)  # You can replace this with any other logging mechanism you prefer
+        except Exception:
+            pass
+logger.addHandler(ConditionalLoggingHandler())
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
