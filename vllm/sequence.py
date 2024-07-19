@@ -354,7 +354,7 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
-    def get_averaged_logprob(self) -> float:
+    def get_average_logprob(self) -> float:
         return self.data.cumulative_logprob / self.get_len()
 
     def get_beam_search_score(self,
