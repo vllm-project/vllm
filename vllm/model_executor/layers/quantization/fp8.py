@@ -67,7 +67,8 @@ class Fp8Config(QuantizationConfig):
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys(config, ["ignored_layers"])
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-                   activation_scheme=activation_scheme, ignored_layers=ignored_layers)
+                   activation_scheme=activation_scheme,
+                   ignored_layers=ignored_layers)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
