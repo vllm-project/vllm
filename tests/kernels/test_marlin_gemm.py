@@ -28,19 +28,18 @@ ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
 MARLIN_K_CHUNKS = [128]
-# MARLIN_N_CHUNKS = [64, 128, 256]
-MARLIN_N_CHUNKS = [128]
+MARLIN_N_CHUNKS = [64, 128, 256]
 
 MARLIN_24_K_CHUNKS = [128]
 MARLIN_24_N_CHUNKS = [512]
 
 MNK_FACTORS = [
     (1, 1, 1),
-    # (1, 4, 8),
-    # (1, 7, 5),
-    # (13, 17, 67),
-    # (26, 37, 13),
-    # (67, 13, 11),
+    (1, 4, 8),
+    (1, 7, 5),
+    (13, 17, 67),
+    (26, 37, 13),
+    (67, 13, 11),
 ]
 
 DTYPES = [torch.float16, torch.bfloat16]
@@ -311,8 +310,7 @@ def test_fp8_marlin_gemm(
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("num_bits", [4])  #GPTQ_MARLIN_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size",
-                         [128])  #GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 def test_awq_marlin_gemm(
     k_chunk,
