@@ -807,7 +807,7 @@ class ConditionalLoggingHandler(logging.Handler):
                 print(msg)  # You can replace this with any other logging mechanism you prefer
         except Exception:
             pass
-logger.addHandler(handler)
+logger.addHandler(ConditionalLoggingHandler())
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
