@@ -24,8 +24,8 @@ IMAGE_TOKEN_ID = 257152
 
 models = ["google/paligemma-3b-mix-224"]
 
-# ROCm Triton FA can run into shared memory issues with these models,
-# use other backends in the meantime
+# ROCm Triton FA can run into compilation issues with these models due to,
+# excessive use of shared memory. Use other backends in the meantime.
 # FIXME (mattwong, gshtrasb, hongxiayan)
 if is_hip():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
@@ -138,7 +138,15 @@ def run_test(
         [0.25, 0.5, 1.0],
     ],
 )
-@pytest.mark.parametrize("dtype", ["float", "half"])
+@pytest.mark.parametrize("dtype", [
+    pytest.param(
+        "float",
+        marks=pytest.mark.skipif(
+            is_hip(),
+            reason=
+            "ROCm FA does not yet fully support 32-bit precision on PaliGemma")
+    ), "half"
+])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,

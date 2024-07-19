@@ -92,9 +92,15 @@ _ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
                     "please use CK flash attention by setting "
                     "`VLLM_USE_TRITON_FLASH_ATTN=0`")
 _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
-    "Qwen2ForCausalLM": _ROCM_SWA_REASON,
-    "MistralForCausalLM": _ROCM_SWA_REASON,
-    "MixtralForCausalLM": _ROCM_SWA_REASON,
+    "Qwen2ForCausalLM":
+    _ROCM_SWA_REASON,
+    "MistralForCausalLM":
+    _ROCM_SWA_REASON,
+    "MixtralForCausalLM":
+    _ROCM_SWA_REASON,
+    "PaliGemmaForConditionalGeneration":
+    ("ROCm flash attention does not yet "
+     "fully support 32-bit precision on PaliGemma")
 }
 
 
