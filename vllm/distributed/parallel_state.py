@@ -897,6 +897,10 @@ def init_distributed_environment(
         else:
             local_rank = rank
 
+            
+    logger.debug("My rank is %d", torch.distributed.get_rank())
+    time.sleep(20)
+
         
             
     global _WORLD
