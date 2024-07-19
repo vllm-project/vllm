@@ -11,7 +11,7 @@ VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
     -tp 4 \
     --disable-log-stats \
     --disable-log-requests \
-    --enable-chunked-prefill > >(tee -a prefill.txt) 2> >(tee -a prefill.txt >&2) &
+    --enable-chunked-prefill &
 
 # decoding instance
 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
@@ -21,6 +21,6 @@ VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     -tp 4 \
     --disable-log-stats \
     --disable-log-requests \
-    --enable-chunked-prefill > >(tee -a decode.txt) 2> >(tee -a decode.txt >&2) &
+    --enable-chunked-prefill &
 
 
