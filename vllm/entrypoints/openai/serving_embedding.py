@@ -129,7 +129,6 @@ class OpenAIServingEmbedding(OpenAIServing):
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
-                    # prompt_adapter_request=prompt_adapter_request,
                 )
 
                 generators.append(generator)
