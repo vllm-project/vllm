@@ -141,6 +141,7 @@ class LinearBase(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -155,7 +156,7 @@ class LinearBase(torch.nn.Module):
             self.quant_method: Optional[
                 QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
-            self.quant_method = quant_config.get_quant_method(self)
+            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -184,7 +185,7 @@ class ReplicatedLinear(LinearBase):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, prefix=prefix)
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
@@ -260,7 +261,7 @@ class ColumnParallelLinear(LinearBase):
                  output_sizes: Optional[List[int]] = None,
                  prefix: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, prefix)
 
         self.gather_output = gather_output
 
@@ -709,7 +710,7 @@ class RowParallelLinear(LinearBase):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, prefix)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results

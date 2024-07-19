@@ -5,7 +5,7 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -15,8 +15,20 @@ from vllm.model_executor.utils import set_weight_attrs
 logger = init_logger(__name__)
 
 
+# Note: this is a hack. We should update each model to register the 
+# stacked params and get it from there instead in a future PR.
+# fused_name: List[shard_name]
+_FUSED_LAYER_NAME_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"]
+}
+
+
 class FBGEMMFp8Config(QuantizationConfig):
     """Config class for FBGEMM Fp8."""
+
+    def __init__(self, ignore_list: List[str]):
+        self.ignore_list = ignore_list
 
     @classmethod
     def get_name(cls) -> str:
@@ -24,7 +36,7 @@ class FBGEMMFp8Config(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.bfloat16]
+        return [torch.bfloat16, torch.float16]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -36,11 +48,42 @@ class FBGEMMFp8Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FBGEMMFp8Config":
-        return cls()
+        ignore_list = cls.get_from_keys(config, ["modules_to_not_convert"])
+        return cls(ignore_list=ignore_list)
 
+    def _is_layer_skipped(self, prefix: str) -> bool:
+        # prefix: model.layers.0.self_attn.q_proj
+        # proj_name: q_proj
+        proj_name = prefix.split(".")[-1]
+        if proj_name in _FUSED_LAYER_NAME_MAPPING:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard_proj_name) for
+                shard_proj_name in _FUSED_LAYER_NAME_MAPPING[proj_name]
+            ]
+
+            is_skipped = None
+            for shard_prefix in shard_prefixes:
+                is_shard_skipped = shard_prefix in self.ignore_list
+                
+                if is_skipped is None:
+                    is_skipped = is_shard_skipped
+                elif is_shard_skipped != is_skipped:
+                    raise ValueError(
+                        f"Detected some but not all shards of {prefix} "
+                        "are quantized. All shards of fused layers "
+                        "to have the same precision."
+                    )
+        else:
+            is_skipped = prefix in self.ignore_list
+
+        assert is_skipped is not None
+        return is_skipped
+        
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+            self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
+            if self._is_layer_skipped(prefix):
+                return UnquantizedLinearMethod()
             return FBGEMMFp8LinearMethod(self)
         return None
 
