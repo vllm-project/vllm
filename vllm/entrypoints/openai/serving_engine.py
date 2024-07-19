@@ -1,9 +1,11 @@
 import json
+import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import Field
+from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
@@ -16,10 +18,16 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ModelPermission, TokenizeRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class PromptAdapterPath:
+    name: str
+    local_path: str
 
 
 @dataclass
@@ -30,27 +38,24 @@ class LoRAModulePath:
 
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
-                 served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        lora_modules: Optional[List[LoRAModulePath]],
+        prompt_adapters: Optional[List[PromptAdapterPath]] = None,
+    ):
         super().__init__()
 
         self.engine = engine
+        self.model_config = model_config
         self.max_model_len = model_config.max_model_len
-
-        # A separate tokenizer to map token IDs to strings.
-        self.tokenizer = get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            tokenizer_revision=model_config.tokenizer_revision,
-            trust_remote_code=model_config.trust_remote_code,
-            truncation_side="left")
 
         self.served_model_names = served_model_names
 
-        if lora_modules is None:
-            self.lora_requests = []
-        else:
+        self.lora_requests = []
+        if lora_modules is not None:
             self.lora_requests = [
                 LoRARequest(
                     lora_name=lora.name,
@@ -58,6 +63,20 @@ class OpenAIServing:
                     lora_local_path=lora.local_path,
                 ) for i, lora in enumerate(lora_modules, start=1)
             ]
+
+        self.prompt_adapter_requests = []
+        if prompt_adapters is not None:
+            for i, prompt_adapter in enumerate(prompt_adapters, start=1):
+                with pathlib.Path(prompt_adapter.local_path,
+                                  "adapter_config.json").open() as f:
+                    adapter_config = json.load(f)
+                    num_virtual_tokens = adapter_config["num_virtual_tokens"]
+                self.prompt_adapter_requests.append(
+                    PromptAdapterRequest(
+                        prompt_adapter_name=prompt_adapter.name,
+                        prompt_adapter_id=i,
+                        prompt_adapter_local_path=prompt_adapter.local_path,
+                        prompt_adapter_num_virtual_tokens=num_virtual_tokens))
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -74,7 +93,14 @@ class OpenAIServing:
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
+        prompt_adapter_cards = [
+            ModelCard(id=prompt_adapter.prompt_adapter_name,
+                      root=self.served_model_names[0],
+                      permission=[ModelPermission()])
+            for prompt_adapter in self.prompt_adapter_requests
+        ]
         model_cards.extend(lora_cards)
+        model_cards.extend(prompt_adapter_cards)
         return ModelList(data=model_cards)
 
     def create_error_response(
@@ -108,28 +134,39 @@ class OpenAIServing:
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return None
+        if request.model in [
+                prompt_adapter.prompt_adapter_name
+                for prompt_adapter in self.prompt_adapter_requests
+        ]:
+            return None
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_lora(
+    def _maybe_get_adapter(
         self, request: Union[CompletionRequest, ChatCompletionRequest,
-                             EmbeddingRequest]
-    ) -> Optional[LoRARequest]:
+                             EmbeddingRequest, TokenizeRequest,
+                             DetokenizeRequest]
+    ) -> Tuple[Optional[str], Optional[Union[LoRARequest,
+                                             PromptAdapterRequest]]]:
         if request.model in self.served_model_names:
-            return None
+            return None, None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
-                return lora
+                return 'LoRA', lora
+        for prompt_adapter in self.prompt_adapter_requests:
+            if request.model == prompt_adapter.prompt_adapter_name:
+                return 'PromptAdapter', prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
-    def _validate_prompt_and_tokenize(
+    async def _validate_prompt_and_tokenize(
             self,
             request: Union[ChatCompletionRequest, CompletionRequest,
                            DetokenizeRequest, EmbeddingRequest,
                            TokenizeRequest],
+            tokenizer: "PreTrainedTokenizer",
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[Annotated[int,
@@ -138,7 +175,7 @@ class OpenAIServing:
     ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
-        if (prompt and prompt_ids):
+        if prompt and prompt_ids:
             raise ValueError(
                 "Only one of prompt or prompt_ids should be provided.")
 
@@ -157,14 +194,14 @@ class OpenAIServing:
                     "truncation": True,
                     "max_length": truncate_prompt_tokens,
                 })
-            input_ids = self.tokenizer(prompt, **tokenizer_kwargs).input_ids
+            input_ids = tokenizer(prompt, **tokenizer_kwargs).input_ids
         elif truncate_prompt_tokens is not None:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
         else:
             input_ids = prompt_ids
 
-        input_text = prompt if prompt is not None else self.tokenizer.decode(
-            prompt_ids)
+        input_text = prompt if prompt is not None else tokenizer.decode(
+            input_ids)
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest doesn't have max_tokens
@@ -202,7 +239,9 @@ class OpenAIServing:
         else:
             return input_ids, input_text
 
-    def _get_decoded_token(self, logprob: Logprob, token_id: int) -> str:
+    @staticmethod
+    def _get_decoded_token(logprob: Logprob, token_id: int,
+                           tokenizer: PreTrainedTokenizer) -> str:
         if logprob.decoded_token is not None:
             return logprob.decoded_token
-        return self.tokenizer.decode(token_id)
+        return tokenizer.decode(token_id)

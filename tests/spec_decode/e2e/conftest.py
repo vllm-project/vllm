@@ -1,6 +1,6 @@
 import asyncio
 from itertools import cycle
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import pytest
 import ray
@@ -11,8 +11,9 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.utils import set_random_seed
-from vllm.multimodal import MultiModalData
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import RequestOutput
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob
 from vllm.usage.usage_lib import UsageContext
@@ -91,7 +92,8 @@ class AsyncLLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
+        multi_modal_data: Optional[MultiModalDataDict] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> List[RequestOutput]:
 
         if prompts is None:
@@ -126,7 +128,9 @@ class AsyncLLM:
         try:
             for i in range(num_requests):
                 prompt = prompts[i] if prompts is not None else None
-                res = asyncio.run(get_output(prompt, sampling_params))
+                params = sampling_params[i] if isinstance(
+                    sampling_params, Sequence) else sampling_params
+                res = asyncio.run(get_output(prompt, params))
                 outputs.append(res)
         finally:
             ray.shutdown()
@@ -160,6 +164,11 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
     }
     test_name = request.node.name
 
+    model = kwargs["model"]
+    draft_model = kwargs.get("speculative_model", None)
+    same_draft_target_model = (draft_model is not None
+                               and draft_model == model)
+
     def generator_inner():
 
         wait_for_gpu_memory_to_clear(
@@ -175,6 +184,13 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
 
         print(f'Creating {baseline_or_test=} LLM for {test_name=}. {kwargs=}')
         llm = AsyncLLM(**kwargs) if use_async else LLM(**kwargs)
+
+        # Override logging interval to 0 for spec decode test run to
+        # log all metrics in time.
+        if (baseline_or_test == "test" and not use_async
+                and llm.llm_engine.log_stats):
+            for sate_logger in llm.llm_engine.stat_loggers.values():
+                sate_logger.local_interval = 0
         set_random_seed(seed)
 
         yield llm
@@ -186,6 +202,9 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
             yield llm
             del llm
 
+    # Set an attribute to the generator_outer function to allow us to
+    # determine whether to further check the acceptance rate in tests.
+    generator_outer.same_draft_target_model = same_draft_target_model  # type: ignore
     return generator_outer
 
 
@@ -202,18 +221,27 @@ def maybe_assert_ngram_worker(llm):
 
 def get_output_from_llm_generator(
         llm_generator, prompts,
-        sampling_params) -> Tuple[List[str], List[List[int]]]:
+        sampling_params) -> Tuple[List[str], List[List[int]], float]:
     tokens: List[str] = []
     token_ids: List[List[int]] = []
+    acceptance_rate: float = -1.0
     for llm in llm_generator():
         maybe_assert_ngram_worker(llm)
 
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
+
+        # Fetch acceptance rate if logging is enabled.
+        if stat_loggers := getattr(llm.llm_engine, "stat_loggers", None):
+            stat_logger = stat_loggers["prometheus"]
+            acceptance_rate = (stat_logger.metrics.
+                               gauge_spec_decode_draft_acceptance_rate.labels(
+                                   **stat_logger.labels)._value.get())
         del llm
 
-    return tokens, token_ids
+    return tokens, token_ids, acceptance_rate
 
 
 def get_logprobs_from_llm_generator(
@@ -235,12 +263,37 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
                                          batch_size,
                                          max_output_len,
                                          force_output_len: bool,
-                                         print_tokens: bool = False):
+                                         print_tokens: bool = False,
+                                         ensure_all_accepted: bool = False):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
     """
-    temperature = 0.0
+
+    run_equality_correctness_test(baseline_llm_generator,
+                                  test_llm_generator,
+                                  batch_size,
+                                  max_output_len,
+                                  force_output_len,
+                                  temperature=0.0,
+                                  seeded=False,
+                                  print_tokens=print_tokens,
+                                  ensure_all_accepted=ensure_all_accepted)
+
+
+def run_equality_correctness_test(baseline_llm_generator,
+                                  test_llm_generator,
+                                  batch_size,
+                                  max_output_len,
+                                  force_output_len: bool,
+                                  temperature: float,
+                                  seeded: bool,
+                                  print_tokens: bool = False,
+                                  ensure_all_accepted: bool = False):
+    """Helper method that compares the outputs of both the baseline LLM and
+    the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
+    the same when temperature is zero (or when temperature is > 0 and seeded).
+    """
 
     prompts = [
         "Hello, my name is",
@@ -259,18 +312,29 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
     # sampling params to ignore eos token.
     ignore_eos = force_output_len
 
-    sampling_params = SamplingParams(
-        max_tokens=max_output_len,
-        ignore_eos=ignore_eos,
-        temperature=temperature,
-    )
+    if seeded:
+        sampling_params = [
+            SamplingParams(
+                max_tokens=max_output_len,
+                ignore_eos=ignore_eos,
+                temperature=temperature,
+                seed=i,
+            ) for i in range(len(prompts))
+        ]
+    else:
+        sampling_params = SamplingParams(
+            max_tokens=max_output_len,
+            ignore_eos=ignore_eos,
+            temperature=temperature,
+        )
 
-    spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
-        test_llm_generator, prompts, sampling_params)
+    (spec_batch_tokens, spec_batch_token_ids,
+     acceptance_rate) = get_output_from_llm_generator(test_llm_generator,
+                                                      prompts, sampling_params)
 
-    (baseline_batch_tokens,
-     baseline_batch_token_ids) = get_output_from_llm_generator(
-         baseline_llm_generator, prompts, sampling_params)
+    (baseline_batch_tokens, baseline_batch_token_ids,
+     _) = get_output_from_llm_generator(baseline_llm_generator, prompts,
+                                        sampling_params)
 
     assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
@@ -285,3 +349,6 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         print(f'{i=} {baseline_token_ids=}')
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
+
+    if ensure_all_accepted:
+        assert acceptance_rate == 1.0

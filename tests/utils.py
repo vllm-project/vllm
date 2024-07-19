@@ -10,11 +10,12 @@ from typing import Any, Dict, List
 import openai
 import ray
 import requests
+from transformers import AutoTokenizer
 
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.utils import get_open_port, is_hip
+from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
 if is_hip():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -49,50 +50,13 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    @ray.remote(num_gpus=1)
-    class _RemoteRunner:
-
-        def __init__(self, cli_args: List[str], *, wait_url: str,
-                     wait_timeout: float) -> None:
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
-            self.proc = subprocess.Popen(
-                [
-                    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-                    *cli_args
-                ],
-                env=env,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-            )
-
-            self._wait_for_server(url=wait_url, timeout=wait_timeout)
-
-        def ready(self):
-            return True
-
-        def _wait_for_server(self, *, url: str, timeout: float):
-            # run health check
-            start = time.time()
-            while True:
-                try:
-                    if requests.get(url).status_code == 200:
-                        break
-                except Exception as err:
-                    if self.proc.poll() is not None:
-                        raise RuntimeError(
-                            "Server exited unexpectedly.") from err
-
-                    time.sleep(0.5)
-                    if time.time() - start > timeout:
-                        raise RuntimeError(
-                            "Server failed to start in time.") from err
-
-        def __del__(self):
-            if hasattr(self, "proc"):
-                self.proc.terminate()
-
-    def __init__(self, cli_args: List[str], *, auto_port: bool = True) -> None:
+    def __init__(
+        self,
+        model: str,
+        cli_args: List[str],
+        *,
+        auto_port: bool = True,
+    ) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -100,17 +64,46 @@ class RemoteOpenAIServer:
 
             cli_args = cli_args + ["--port", str(get_open_port())]
 
-        parser = make_arg_parser()
+        parser = FlexibleArgumentParser(
+            description="vLLM's remote OpenAI server.")
+        parser = make_arg_parser(parser)
         args = parser.parse_args(cli_args)
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        self._runner = self._RemoteRunner.remote(  # type: ignore
-            cli_args,
-            wait_url=self.url_for("health"),
-            wait_timeout=self.MAX_SERVER_START_WAIT_S)
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        self.proc = subprocess.Popen(["vllm", "serve"] + [model] + cli_args,
+                                     env=env,
+                                     stdout=sys.stdout,
+                                     stderr=sys.stderr)
+        self._wait_for_server(url=self.url_for("health"),
+                              timeout=self.MAX_SERVER_START_WAIT_S)
 
-        self._wait_until_ready()
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+
+    def _wait_for_server(self, *, url: str, timeout: float):
+        # run health check
+        start = time.time()
+        while True:
+            try:
+                if requests.get(url).status_code == 200:
+                    break
+            except Exception as err:
+                result = self.proc.poll()
+                if result is not None and result != 0:
+                    raise RuntimeError("Server exited unexpectedly.") from err
+
+                time.sleep(0.5)
+                if time.time() - start > timeout:
+                    raise RuntimeError(
+                        "Server failed to start in time.") from err
 
     @property
     def url_root(self) -> str:
@@ -118,9 +111,6 @@ class RemoteOpenAIServer:
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
-
-    def _wait_until_ready(self) -> None:
-        ray.get(self._runner.ready.remote())
 
     def get_client(self):
         return openai.OpenAI(
@@ -133,6 +123,99 @@ class RemoteOpenAIServer:
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
         )
+
+
+def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
+    """
+    Launch API server with two different sets of arguments and compare the
+    results of the API calls. The arguments are after the model name.
+    """
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
+    prompt = "Hello, my name is"
+    token_ids = tokenizer(prompt)["input_ids"]
+    results = []
+    for args in (arg1, arg2):
+        with RemoteOpenAIServer(model, args) as server:
+            client = server.get_client()
+
+            # test models list
+            models = client.models.list()
+            models = models.data
+            served_model = models[0]
+            results.append({
+                "test": "models_list",
+                "id": served_model.id,
+                "root": served_model.root,
+            })
+
+            # test with text prompt
+            completion = client.completions.create(model=model,
+                                                   prompt=prompt,
+                                                   max_tokens=5,
+                                                   temperature=0.0)
+
+            results.append({
+                "test": "single_completion",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
+
+            # test using token IDs
+            completion = client.completions.create(
+                model=model,
+                prompt=token_ids,
+                max_tokens=5,
+                temperature=0.0,
+            )
+
+            results.append({
+                "test": "token_ids",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
+
+            # test simple list
+            batch = client.completions.create(
+                model=model,
+                prompt=[prompt, prompt],
+                max_tokens=5,
+                temperature=0.0,
+            )
+
+            results.append({
+                "test": "simple_list",
+                "text0": batch.choices[0].text,
+                "text1": batch.choices[1].text,
+            })
+
+            # test streaming
+            batch = client.completions.create(
+                model=model,
+                prompt=[prompt, prompt],
+                max_tokens=5,
+                temperature=0.0,
+                stream=True,
+            )
+            texts = [""] * 2
+            for chunk in batch:
+                assert len(chunk.choices) == 1
+                choice = chunk.choices[0]
+                texts[choice.index] += choice.text
+            results.append({
+                "test": "streaming",
+                "texts": texts,
+            })
+
+    n = len(results) // 2
+    arg1_results = results[:n]
+    arg2_results = results[n:]
+    for arg1_result, arg2_result in zip(arg1_results, arg2_results):
+        assert arg1_result == arg2_result, \
+            f"Results for {model=} are not the same with {arg1=} and {arg2=}"
 
 
 def init_test_distributed_environment(

@@ -6,15 +6,12 @@ from typing import List
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import ray
 import torch
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 from openai import BadRequestError
 
 from ...utils import RemoteOpenAIServer
+from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
+from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -22,71 +19,10 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
-TEST_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string"
-        },
-        "age": {
-            "type": "integer"
-        },
-        "skills": {
-            "type": "array",
-            "items": {
-                "type": "string",
-                "maxLength": 10
-            },
-            "minItems": 3
-        },
-        "work history": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "company": {
-                        "type": "string"
-                    },
-                    "duration": {
-                        "type": "string"
-                    },
-                    "position": {
-                        "type": "string"
-                    }
-                },
-                "required": ["company", "position"]
-            }
-        }
-    },
-    "required": ["name", "age", "skills", "work history"]
-}
-
-TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-              r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
-
-TEST_CHOICE = [
-    "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
-    "Swift", "Kotlin"
-]
-
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
-
-
-@pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init()
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(zephyr_lora_files, ray_ctx):
-    return RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
+def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
+    args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -97,14 +33,17 @@ def server(zephyr_lora_files, ray_ctx):
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_files}",
+        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
         "2",
         "--max-num-seqs",
         "128",
-    ])
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")
@@ -408,7 +347,8 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_chat(client: openai.AsyncOpenAI,
-                                  guided_decoding_backend: str):
+                                  guided_decoding_backend: str,
+                                  sample_guided_choice):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -422,10 +362,10 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_tokens=10,
-        extra_body=dict(guided_choice=TEST_CHOICE,
+        extra_body=dict(guided_choice=sample_guided_choice,
                         guided_decoding_backend=guided_decoding_backend))
     choice1 = chat_completion.choices[0].message.content
-    assert choice1 in TEST_CHOICE
+    assert choice1 in sample_guided_choice
 
     messages.append({"role": "assistant", "content": choice1})
     messages.append({
@@ -436,10 +376,10 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_tokens=10,
-        extra_body=dict(guided_choice=TEST_CHOICE,
+        extra_body=dict(guided_choice=sample_guided_choice,
                         guided_decoding_backend=guided_decoding_backend))
     choice2 = chat_completion.choices[0].message.content
-    assert choice2 in TEST_CHOICE
+    assert choice2 in sample_guided_choice
     assert choice1 != choice2
 
 
@@ -447,7 +387,8 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_json_chat(client: openai.AsyncOpenAI,
-                                guided_decoding_backend: str):
+                                guided_decoding_backend: str,
+                                sample_json_schema):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -456,18 +397,18 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI,
         "user",
         "content":
         f"Give an example JSON for an employee profile that "
-        f"fits this schema: {TEST_SCHEMA}"
+        f"fits this schema: {sample_json_schema}"
     }]
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         max_tokens=1000,
-        extra_body=dict(guided_json=TEST_SCHEMA,
+        extra_body=dict(guided_json=sample_json_schema,
                         guided_decoding_backend=guided_decoding_backend))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json1 = json.loads(message.content)
-    jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
+    jsonschema.validate(instance=json1, schema=sample_json_schema)
 
     messages.append({"role": "assistant", "content": message.content})
     messages.append({
@@ -480,12 +421,12 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_tokens=1000,
-        extra_body=dict(guided_json=TEST_SCHEMA,
+        extra_body=dict(guided_json=sample_json_schema,
                         guided_decoding_backend=guided_decoding_backend))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json2 = json.loads(message.content)
-    jsonschema.validate(instance=json2, schema=TEST_SCHEMA)
+    jsonschema.validate(instance=json2, schema=sample_json_schema)
     assert json1["name"] != json2["name"]
     assert json1["age"] != json2["age"]
 
@@ -494,7 +435,7 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_regex_chat(client: openai.AsyncOpenAI,
-                                 guided_decoding_backend: str):
+                                 guided_decoding_backend: str, sample_regex):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -502,17 +443,17 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI,
         "role":
         "user",
         "content":
-        f"Give an example IP address with this regex: {TEST_REGEX}"
+        f"Give an example IP address with this regex: {sample_regex}"
     }]
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         max_tokens=20,
-        extra_body=dict(guided_regex=TEST_REGEX,
+        extra_body=dict(guided_regex=sample_regex,
                         guided_decoding_backend=guided_decoding_backend))
     ip1 = chat_completion.choices[0].message.content
     assert ip1 is not None
-    assert re.fullmatch(TEST_REGEX, ip1) is not None
+    assert re.fullmatch(sample_regex, ip1) is not None
 
     messages.append({"role": "assistant", "content": ip1})
     messages.append({"role": "user", "content": "Give me a different one"})
@@ -520,11 +461,11 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_tokens=20,
-        extra_body=dict(guided_regex=TEST_REGEX,
+        extra_body=dict(guided_regex=sample_regex,
                         guided_decoding_backend=guided_decoding_backend))
     ip2 = chat_completion.choices[0].message.content
     assert ip2 is not None
-    assert re.fullmatch(TEST_REGEX, ip2) is not None
+    assert re.fullmatch(sample_regex, ip2) is not None
     assert ip1 != ip2
 
 
@@ -553,7 +494,8 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
-                                           guided_decoding_backend: str):
+                                           guided_decoding_backend: str,
+                                           sample_guided_choice):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -569,7 +511,7 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
         max_tokens=10,
         logprobs=True,
         top_logprobs=5,
-        extra_body=dict(guided_choice=TEST_CHOICE,
+        extra_body=dict(guided_choice=sample_guided_choice,
                         guided_decoding_backend=guided_decoding_backend))
 
     assert chat_completion.choices[0].logprobs is not None
@@ -585,7 +527,8 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_named_tool_use(client: openai.AsyncOpenAI,
-                              guided_decoding_backend: str):
+                              guided_decoding_backend: str,
+                              sample_json_schema):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -594,7 +537,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
         "user",
         "content":
         f"Give an example JSON for an employee profile that "
-        f"fits this schema: {TEST_SCHEMA}"
+        f"fits this schema: {sample_json_schema}"
     }]
 
     # non-streaming
@@ -608,7 +551,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
             "function": {
                 "name": "dummy_function_name",
                 "description": "This is a dummy function",
-                "parameters": TEST_SCHEMA
+                "parameters": sample_json_schema
             }
         }],
         tool_choice={
@@ -621,7 +564,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
     assert len(message.content) == 0
     json_string = message.tool_calls[0].function.arguments
     json1 = json.loads(json_string)
-    jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
+    jsonschema.validate(instance=json1, schema=sample_json_schema)
 
     messages.append({"role": "assistant", "content": json_string})
     messages.append({
@@ -642,7 +585,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
             "function": {
                 "name": "dummy_function_name",
                 "description": "This is a dummy function",
-                "parameters": TEST_SCHEMA
+                "parameters": sample_json_schema
             }
         }],
         tool_choice={
@@ -667,7 +610,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
     # finish reason should only return in last block
     assert finish_reason_count == 1
     json2 = json.loads("".join(output))
-    jsonschema.validate(instance=json2, schema=TEST_SCHEMA)
+    jsonschema.validate(instance=json2, schema=sample_json_schema)
     assert json1["name"] != json2["name"]
     assert json1["age"] != json2["age"]
 
@@ -675,7 +618,8 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
 async def test_required_tool_use_not_yet_supported(
-        client: openai.AsyncOpenAI, guided_decoding_backend: str):
+        client: openai.AsyncOpenAI, guided_decoding_backend: str,
+        sample_json_schema):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -684,7 +628,7 @@ async def test_required_tool_use_not_yet_supported(
         "user",
         "content":
         f"Give an example JSON for an employee profile that "
-        f"fits this schema: {TEST_SCHEMA}"
+        f"fits this schema: {sample_json_schema}"
     }]
 
     with pytest.raises(openai.BadRequestError):
@@ -697,7 +641,7 @@ async def test_required_tool_use_not_yet_supported(
                 "function": {
                     "name": "dummy_function_name",
                     "description": "This is a dummy function",
-                    "parameters": TEST_SCHEMA
+                    "parameters": sample_json_schema
                 }
             }],
             tool_choice="required")
@@ -712,7 +656,7 @@ async def test_required_tool_use_not_yet_supported(
                 "function": {
                     "name": "dummy_function_name",
                     "description": "This is a dummy function",
-                    "parameters": TEST_SCHEMA
+                    "parameters": sample_json_schema
                 }
             }],
             tool_choice="auto")
@@ -720,8 +664,9 @@ async def test_required_tool_use_not_yet_supported(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
-async def test_inconsistent_tool_choice_and_tools(
-        client: openai.AsyncOpenAI, guided_decoding_backend: str):
+async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
+                                                  guided_decoding_backend: str,
+                                                  sample_json_schema):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -730,7 +675,7 @@ async def test_inconsistent_tool_choice_and_tools(
         "user",
         "content":
         f"Give an example JSON for an employee profile that "
-        f"fits this schema: {TEST_SCHEMA}"
+        f"fits this schema: {sample_json_schema}"
     }]
 
     with pytest.raises(openai.BadRequestError):
@@ -755,7 +700,7 @@ async def test_inconsistent_tool_choice_and_tools(
                 "function": {
                     "name": "dummy_function_name",
                     "description": "This is a dummy function",
-                    "parameters": TEST_SCHEMA
+                    "parameters": sample_json_schema
                 }
             }],
             tool_choice={

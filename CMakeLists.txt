@@ -32,7 +32,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.3.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.3.1")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.4.0")
 
 #
@@ -151,6 +151,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
+  "csrc/prepare_inputs/advance_step.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -171,6 +172,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
+    "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"

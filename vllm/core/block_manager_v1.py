@@ -471,6 +471,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
         # Thus, it is always safe from OOM.
+        if parent_seq.seq_id not in self.block_tables:
+            # Parent sequence has either been freed or never existed.
+            return
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
         # When using a sliding window, blocks will be eventually reused.

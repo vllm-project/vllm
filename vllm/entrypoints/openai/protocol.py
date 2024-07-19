@@ -103,7 +103,8 @@ class ResponseFormat(OpenAIBaseModel):
 
 
 class StreamOptions(OpenAIBaseModel):
-    include_usage: Optional[bool]
+    include_usage: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = True
 
 
 class FunctionDefinition(OpenAIBaseModel):
@@ -189,6 +190,27 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "For most models, the chat template takes care of adding the "
             "special tokens so this should be set to False (as is the "
             "default)."),
+    )
+    documents: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description=
+        ("A list of dicts representing documents that will be accessible to "
+         "the model if it is performing RAG (retrieval-augmented generation)."
+         " If the template does not support RAG, this argument will have no "
+         "effect. We recommend that each document should be a dict containing "
+         "\"title\" and \"text\" keys."),
+    )
+    chat_template: Optional[str] = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "If this is not passed, the model's default chat template will be "
+            "used instead."),
+    )
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
     )
     include_stop_str_in_output: Optional[bool] = Field(
         default=False,
@@ -694,7 +716,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Union[ChatCompletionResponse, ]
+    body: Optional[ChatCompletionResponse] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -716,15 +738,17 @@ class BatchRequestOutput(OpenAIBaseModel):
 
 
 class TokenizeRequest(OpenAIBaseModel):
+    add_generation_prompt: bool = Field(default=True)
+    add_special_tokens: bool = Field(default=False)
+    prompt: Optional[str] = Field(default=None)
+    messages: Optional[List[ChatCompletionMessageParam]] = Field(default=None)
     model: str
-    prompt: str
-    add_special_tokens: bool = Field(default=True)
 
 
 class TokenizeResponse(OpenAIBaseModel):
-    tokens: List[int]
     count: int
     max_model_len: int
+    tokens: List[int]
 
 
 class DetokenizeRequest(OpenAIBaseModel):

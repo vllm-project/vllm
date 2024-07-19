@@ -1,8 +1,8 @@
-import pickle
 from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import get_ip, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -31,23 +31,37 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def execute_model_compiled_dag_remote(self, ignored):
-            """Used only when compiled DAG is enabled."""
+        def execute_model_spmd(self, execute_model_req: ExecuteModelRequest):
+            """Used only when SPMD worker and compiled DAG are both
+            enabled."""
+            # TODO(swang): This is needed right now because Ray aDAG executes
+            # on a background thread, so we need to reset torch's current
+            # device.
             import torch
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            output = self.worker.execute_model()
-            output = pickle.dumps(output)
-            return output
+            return self.worker._execute_model_spmd(execute_model_req)
+
+    ray_import_err = None
 
 except ImportError as e:
-    logger.warning(
-        "Failed to import Ray with %r. For multi-node inference, "
-        "please install Ray with `pip install ray`.", e)
     ray = None  # type: ignore
+    ray_import_err = e
     RayWorkerWrapper = None  # type: ignore
+
+
+def ray_is_available() -> bool:
+    """Returns True if Ray is available."""
+    return ray is not None
+
+
+def assert_ray_available():
+    """Raise an exception if Ray is not available."""
+    if ray is None:
+        raise ValueError("Failed to import Ray, please install Ray with "
+                         "`pip install ray`.") from ray_import_err
 
 
 def initialize_ray_cluster(
@@ -65,10 +79,7 @@ def initialize_ray_cluster(
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
     """
-    if ray is None:
-        raise ImportError(
-            "Ray is not installed. Please install Ray to use multi-node "
-            "serving.")
+    assert_ray_available()
 
     # Connect to a ray cluster.
     if is_hip() or is_xpu():
