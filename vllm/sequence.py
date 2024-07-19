@@ -712,6 +712,13 @@ class SequenceOutput:
         self.fast_forward_tokens: Optional[List[int]] = None
 
     def append_to(self, seq: Sequence) -> None:
+        """
+        Append the sampling output to the sequence.
+
+        If fast forward tokens is set, this appends them, generating appropriate
+        Logprobs, and switching the sequence to PREFILL if needed.
+        Otherwise, just the output token is appended.
+        """
         if self.fast_forward_tokens is not None:
             logprobs = self.logprobs
             for token in self.fast_forward_tokens:
@@ -942,6 +949,33 @@ class HiddenStates:
 
 
 class SamplingController:
+    """
+    This is used to modify sampling process for a given LLMEngine.
+    There is only one instance of this class per LLMEngine.
+
+    In each generation step, one of the following things can happen:
+    
+    There are no sequences to run, and empty_step() is called;
+    this can be used to run actions that normally run in sync with step,
+    when there are no sequences to run
+    
+    Otherwise (normal case), the following methods are run in this exact order:
+    - prepare() causes the sampling controller to start logit bias prepreation
+      for the sequences that will be run; typically the logit indices from
+      sampling_metadata will have to be stored in the sampling controller
+    - forward pass is started
+    - transform_logits() is called after the forward pass has finished, to
+      modify the logits
+    - sampling happens on biased logits
+    - transform_sampler_output() is called to modify the sampler output
+
+    This class does nothing for each of these steps. Subclasses can override
+    any and each of these methods to modify the sampling process; they will
+    be stateful.
+
+    Currently, you just have to assign an instance of your subclass to
+    engine.sampling_controller to use it.
+    """
 
     def prepare(self, sampling_metadata: "SamplingMetadata"):
         """Prepare the sampling controller for the next step."""
