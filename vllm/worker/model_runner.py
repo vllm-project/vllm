@@ -538,7 +538,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             lora_index_mapping.extend([0] * cuda_graph_pad_size)
             lora_prompt_mapping = [
                 m for data in self.inter_data_list
-                for m in data.lora_prompt_mapping
+                for ms in data.lora_prompt_mapping for m in ms
             ]
             lora_mapping = LoRAMapping(
                 lora_index_mapping,
