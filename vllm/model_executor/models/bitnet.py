@@ -52,6 +52,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_hip, print_warning_once
+
 from .utils import PPMissingLayer
 
 logger = init_logger(__name__)
@@ -582,7 +583,8 @@ class BitnetForCausalLM(nn.Module):
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size, logit_scale)
+                                                    config.vocab_size,
+                                                    logit_scale)
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
@@ -595,9 +597,8 @@ class BitnetForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids, positions, kv_caches, attn_metadata, intermediate_tensors
-        )
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -667,22 +668,19 @@ class BitnetForCausalLM(nn.Module):
                 # Remapping the name of FP8 kv-scale.
                 if name.endswith("kv_scale"):
                     remapped_kv_scale_name = name.replace(
-                        ".kv_scale", ".attn.kv_scale"
-                    )
+                        ".kv_scale", ".attn.kv_scale")
                     if remapped_kv_scale_name not in params_dict:
                         print_warning_once(
                             f"Found kv scale in the checkpoint (e.g. {name}), "
                             "but not found the expected name in the model "
                             f"(e.g. {remapped_kv_scale_name}). kv-scale is "
-                            "not loaded."
-                        )
+                            "not loaded.")
                         continue
                     else:
                         name = remapped_kv_scale_name
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 # align scaling attr with param
                 if sum(param.data.shape) == 0 or sum(loaded_weight.shape) == 0:
                     loaded_weight = loaded_weight.view(param.data.shape)
