@@ -34,6 +34,10 @@ def get_physical_device_capability(device_id: int = 0) -> Tuple[int, int]:
 def device_id_to_physical_device_id(device_id: int) -> int:
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
+        if (device_ids[0].startswith("MIG-")
+                or device_ids[0].startswith("GPU-")):
+            return 0
+
         physical_device_id = device_ids[device_id]
         return int(physical_device_id)
     else:
