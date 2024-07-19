@@ -6,8 +6,8 @@ IMAGES = [
     "./examples/images/375.jpg",
 ]
 
-MODEL_NAME = "/data1/hezhihui/openbmb/MiniCPM-V-2"
-# MODEL_NAME = "/data1/hezhihui/projects/MiniCPM-Llama3-V-2_5_eval"
+# MODEL_NAME = "HwwwH/MiniCPM-V-2"
+MODEL_NAME = "HwwwH/MiniCPM-Llama3-V-2_5_eval"
 
 image = Image.open(IMAGES[0]).convert("RGB")
 
@@ -16,15 +16,14 @@ llm = LLM(model=MODEL_NAME,
           gpu_memory_utilization=1,
           trust_remote_code=True,
           max_model_len=4096)
+
+messages = [{'role': 'user', 'content': '(<image>./</image>)\n' + 'what kind of wine is this?'}]
+prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 # 2.0
-prompt = "<用户>(<image>./</image>)what kind of wine is this?<AI>"
-stop_token_ids = [tokenizer.eos_id]
+# stop_token_ids = [tokenizer.eos_id]
 # 2.5
-# stop_token_ids = [tokenizer.eos_id, tokenizer.eot_id]
-# prompt = "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + \
-#         "(<image>./</image>)\nwhat kind of wine is this?" + \
-#         "<|eot_id|>" + \
-#         "<|start_header_id|>assistant<|end_header_id|>\n\n"
+stop_token_ids = [tokenizer.eos_id, tokenizer.eot_id]
+
 
 sampling_params = SamplingParams(
     stop_token_ids=stop_token_ids,
