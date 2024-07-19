@@ -1,4 +1,5 @@
 import random
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ from vllm.lora.ops.bgmv_shrink import bgmv_shrink
 from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+from vllm.triton_utils.libentry import LibEntry
 
 HIDDEN_SIZES = [
     128,
@@ -323,6 +325,8 @@ def test_punica_bgmv(
     seed: int,
     device: str,
 ):
+    from vllm.lora.ops.bgmv_expand import _bgmv_expand_kernel
+    from vllm.lora.ops.bgmv_shrink import _bgmv_shrink_kernel
     random.seed(seed)
     torch.set_default_device(device)
     torch.random.manual_seed(seed)
@@ -346,21 +350,29 @@ def test_punica_bgmv(
     ) = _generate_data(batches, hidden_size, num_loras, rank, seq_length,
                        dtype, op_type, device)
     if op_type == "shrink":
-        bgmv_shrink(
-            inputs_tensor,
-            lora_weights,
-            our_out_tensor,
-            indices,
-            scaling,
-        )
+        #The current _bgmv_shrink_kernel does not require the libentry
+        # decoration. The purpose of adding this patch is to test the
+        # correctness of libentry.
+        with patch("vllm.lora.ops.bgmv_shrink._bgmv_shrink_kernel",
+                   LibEntry(_bgmv_shrink_kernel)):
+            bgmv_shrink(
+                inputs_tensor,
+                lora_weights,
+                our_out_tensor,
+                indices,
+                scaling,
+            )
     else:
-        bgmv_expand(
-            inputs_tensor,
-            lora_weights,
-            our_out_tensor,
-            indices,
-            add_inputs=True,
-        )
+        #ditto
+        with patch("vllm.lora.ops.bgmv_expand._bgmv_expand_kernel",
+                   LibEntry(_bgmv_expand_kernel)):
+            bgmv_expand(
+                inputs_tensor,
+                lora_weights,
+                our_out_tensor,
+                indices,
+                add_inputs=True,
+            )
     _torch_groupgemm(
         ref_out_tensor,
         inputs_tensor,
@@ -394,6 +406,7 @@ def test_punica_expand_nslices(
     seed: int,
     device: str,
 ):
+    from vllm.lora.ops.bgmv_expand_slice import _bgmv_expand_slice_kernel
     random.seed(seed)
     torch.set_default_device(device)
     torch.random.manual_seed(seed)
@@ -446,15 +459,21 @@ def test_punica_expand_nslices(
                 add_inputs=True,
             )
         else:
-            bgmv_expand_slice(
-                inputs_tensor,
-                lora_weights,
-                our_outputs,
-                indices,
-                slice_offset,
-                slice_size=hidden_size,
-                add_inputs=True,
-            )
+            #The current _bgmv_expand_slice_kernel does not require the
+            # libentry decoration. The purpose of adding this patch is to test
+            # the correctness of libentry.
+            with patch(
+                    "vllm.lora.ops.bgmv_expand_slice._bgmv_expand_slice_kernel",
+                    LibEntry(_bgmv_expand_slice_kernel)):
+                bgmv_expand_slice(
+                    inputs_tensor,
+                    lora_weights,
+                    our_outputs,
+                    indices,
+                    slice_offset,
+                    slice_size=hidden_size,
+                    add_inputs=True,
+                )
         _torch_groupgemm(
             ref_outputs[:, slice_offset:slice_offset + hidden_size],
             inputs_tensor,
@@ -468,3 +487,21 @@ def test_punica_expand_nslices(
 
         slice_offset += hidden_size
     assert_close(our_outputs, ref_outputs)
+
+
+if __name__ == "__main__":
+    from itertools import product
+    lst = list(
+        product(
+            BATCHES,
+            NUM_LORA,
+            MAX_RANKS,
+            [1.0],
+            [torch.float16],
+            ["shrink"],
+            SEED,
+            CUDA_DEVICES,
+        ))
+    for ele in lst:
+        test_punica_bgmv(*ele)
+        print(f"{ele},pass")
