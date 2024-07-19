@@ -927,10 +927,11 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
                 TypicalAcceptanceSampler.
-            disable_logprobs (Optional[bool]): If set to True, no logprobs are
-                returned during speculative decoding. If set to False, logprobs
-                are returned according to the settings in SamplingParams. If
-                not specified, it defaults to True.
+            disable_logprobs (Optional[bool]): If set to True, token log
+                probabilities are not returned during speculative decoding.
+                If set to False, token log probabilities are returned
+                according to the log probability settings in SamplingParams.
+                If not specified, it defaults to True.
     
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
