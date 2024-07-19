@@ -130,10 +130,10 @@ class RequestTracker:
         """Process a request output from the engine."""
         request_id = request_output.request_id
 
-        # Avoid a KeyError which can occur if the request was aborted while the
-        # outputs were generated
-        if request_id in self._request_streams:
-            self._request_streams[request_id].put(request_output)
+        # Guard against a KeyError which can occur if the request was aborted
+        # while the output was generated
+        if stream := self._request_streams.get(request_id):
+            stream.put(request_output)
         if request_output.finished:
             if verbose:
                 logger.info("Finished request %s.", request_id)
