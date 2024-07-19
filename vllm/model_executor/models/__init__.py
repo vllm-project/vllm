@@ -100,7 +100,11 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
     _ROCM_SWA_REASON,
     "PaliGemmaForConditionalGeneration":
     ("ROCm flash attention does not yet "
-     "fully support 32-bit precision on PaliGemma")
+     "fully support 32-bit precision on PaliGemma"),
+    "Phi3VForCausalLM":
+    ("ROCm Triton flash attention may run into compilation errors due to "
+     "excessive use of shared memory. If this happens, disable Triton FA "
+     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
 }
 
 
