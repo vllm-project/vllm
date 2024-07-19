@@ -92,10 +92,13 @@ class OpenAIServingCompletion(OpenAIServing):
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
-            guided_decode_logit_processor = (
-                await get_guided_decoding_logits_processor(
-                    guided_decoding_backend, request, await
-                    self.engine.get_tokenizer()))
+            guided_decode_logit_processor = None
+            model_config = await self.engine.get_model_config()
+            if not model_config.skip_tokenizer_init:
+                guided_decode_logit_processor = (
+                    await get_guided_decoding_logits_processor(
+                        guided_decoding_backend, request, await
+                        self.engine.get_tokenizer()))
             if guided_decode_logit_processor is not None:
                 if sampling_params.logits_processors is None:
                     sampling_params.logits_processors = []
@@ -260,6 +263,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             CompletionResponseStreamChoice(
                                 index=i,
                                 text=delta_text,
+                                token_ids=delta_token_ids,
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
@@ -325,6 +329,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     logprobs=logprobs,
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
+                    token_ids=output.token_ids,
                 )
                 choices.append(choice_data)
 
