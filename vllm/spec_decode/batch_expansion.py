@@ -59,7 +59,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             SpeculativeScores: The scores of each speculative token, along with
                 which sequences were ignored during scoring.
         """
-    
+
         # TODO(cade) perform this on GPU to remove blocking call.
         proposal_lens_list = proposals.proposal_lens.tolist()
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()

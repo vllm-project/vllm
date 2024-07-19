@@ -226,6 +226,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
                 token_id = seq_output.output_token
                 token_logprob = seq_output.logprobs[token_id]
+
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)
 
