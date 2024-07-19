@@ -976,6 +976,8 @@ def initialize_model_parallel(
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
         logger.debug("Disaggregated prefill enabled, the world size obtained from torch.distributed (2 * tp * pp) should be decreased to align with vLLM world size (tp * pp)")
         world_size = world_size // 2
+
+    time.sleep(torch.distributed.get_rank())
         
         
         
