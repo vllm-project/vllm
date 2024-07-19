@@ -899,7 +899,11 @@ def init_distributed_environment(
 
             
     logger.debug("My rank is %d", torch.distributed.get_rank())
-    time.sleep(20)
+
+    cpu_group = torch.distributed.new_group(list(range(8)), backend="gloo")
+    
+    logger.debug("CPU group initialized")
+    time.sleep(1000)
 
         
             
@@ -919,8 +923,6 @@ def init_distributed_environment(
             "world group already initialized with a different world size")
 
             
-    logger.debug("Success initialized _WORLD for rank %d", torch.distributed.get_rank())
-    time.sleep(100)
         
 
 
