@@ -140,7 +140,6 @@ class GroupCoordinator:
     ):
 
         self.rank = torch.distributed.get_rank()
-        logger.debug("My rank is %d", self.rank)
         self.local_rank = local_rank
         self.device_group = None
         self.cpu_group = None
@@ -799,13 +798,16 @@ def graph_capture():
 
 
 logger = init_logger(__name__)
-if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+
+original_logger = logger
+def logger(*args, **kwargs):
     # disaggregated prefill enabled
     # indicating if the current instance is prefill or decode
-    class CustomAdapter(logging.LoggerAdapter):
-        def process(self, msg, kwargs):
-            return f"[{envs.VLLM_DISAGG_PREFILL_ROLE}] {msg}", kwargs
-    logger = CustomAdapter(logger, extra=None)
+    if torch.distributed.is_initialized():
+        if torch.distributed.get_rank() % 4 == 0:
+            original_logger(*args, **kwargs)
+    else:
+        original_logger(*args, **kwargs)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
