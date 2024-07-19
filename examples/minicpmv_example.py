@@ -7,7 +7,7 @@ IMAGES = [
 ]
 
 # MODEL_NAME = "HwwwH/MiniCPM-V-2"
-MODEL_NAME = "HwwwH/MiniCPM-Llama3-V-2_5_eval"
+MODEL_NAME = "HwwwH/MiniCPM-Llama3-V-2_5"
 
 image = Image.open(IMAGES[0]).convert("RGB")
 
