@@ -15,7 +15,7 @@ ARG FA_BRANCH="ae7928c"
 
 # Whether to build triton on rocm
 ARG BUILD_TRITON="1"
-ARG TRITON_BRANCH="0ef1848"
+ARG TRITON_BRANCH="e0fc12c"
 
 ### Base image build stage
 FROM $BASE_IMAGE AS base
