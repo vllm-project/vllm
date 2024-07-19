@@ -84,9 +84,7 @@ class OpenAIServingTokenization(OpenAIServing):
                          lora_request=lora_request,
                          prompt_adapter_request=prompt_adapter_request)
 
-        if prompt_adapter_request is not None:
-            raise NotImplementedError("Prompt adapter is not supported "
-                                      "for tokenization")
+        # Silently ignore prompt adapter since it does not affect tokenization
 
         prompt_input = self._tokenize_prompt_input(
             request,
