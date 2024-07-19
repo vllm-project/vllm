@@ -993,6 +993,7 @@ def initialize_model_parallel(
             backend,
             use_custom_allreduce=False)
         
+    logger.debug("Success")
     time.sleep(1000)
     
     
