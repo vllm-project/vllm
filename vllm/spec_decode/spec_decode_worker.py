@@ -49,6 +49,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
     kwargs["model_runner_cls"] = TargetModelRunner
     target_worker = Worker(*args, **kwargs)
+    target_worker.model_runner.disable_logprobs =\
+         speculative_config.disable_logprobs    
 
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
@@ -59,7 +61,6 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         # TODO allow draft-model specific load config.
         #load_config=load_config,
     )
-    skip_logprobs = True
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
@@ -72,7 +73,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
         typical_acceptance_sampler_posterior_alpha,
-        skip_logprobs=skip_logprobs)
+        disable_logprobs=speculative_config.disable_logprobs)
 
     return spec_decode_worker
 
@@ -112,7 +113,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
-        skip_logprobs: bool,
+        disable_logprobs: bool,
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -163,7 +164,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         return SpecDecodeWorker(proposer_worker,
                                 scorer_worker,
-                                skip_logprobs=skip_logprobs,
+                                disable_logprobs=disable_logprobs,
                                 disable_by_batch_size=disable_by_batch_size,
                                 spec_decode_sampler=spec_decode_sampler)
 
@@ -172,7 +173,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
         spec_decode_sampler: SpecDecodeBaseSampler,
-        skip_logprobs: bool,
+        disable_logprobs: bool,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
     ):
@@ -220,7 +221,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
-        self.skip_logprobs = skip_logprobs
+        self.disable_logprobs = disable_logprobs
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -415,7 +416,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 self.previous_hidden_states.update(
                     execute_model_req.seq_group_metadata_list, hidden_states)
 
-        if self.skip_logprobs:
+        if self.disable_logprobs:
             # We are skipping adding logprobs to the result. Since we are
             # skipping the logprobs the sampler has not serialized any tensors
             # like sampled_token_ids to the cpu. We create the
@@ -604,7 +605,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         batch_size, num_steps = accepted_token_ids.shape
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
-        if self.skip_logprobs:
+        if self.disable_logprobs:
             # We are skipping the logprobs. Hence don't synchronize the
             # logprobs related tensors from the GPU and create empty/dummy
             # lists instead.

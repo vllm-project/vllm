@@ -29,9 +29,8 @@ class TargetModelRunner(ModelRunner):
                  is_driver_worker: bool = False,
                  prompt_adapter_config: Optional[PromptAdapterConfig] = None,
                  multimodal_config: Optional[MultiModalConfig] = None,
-                 return_hidden_states: bool = False,
-                 skip_logprobs: bool = True):
-        self.skip_logprobs = skip_logprobs
+                 return_hidden_states: bool = False):
+        self.disable_logprobs = True
         super().__init__(
             model_config=model_config,
             parallel_config=parallel_config,
@@ -56,6 +55,10 @@ class TargetModelRunner(ModelRunner):
         model_input: ModelInputForGPUWithSamplingMetadata = super(
         ).prepare_model_input(seq_group_metadata_list, virtual_engine,
                               finished_requests_ids)
+        # If logprob is disabled then skip sampler CPU output. We directly
+        # synchronize the GPU sampled_token_id tensors as needed. If logprobs
+        # is enabled then synchronize all the sampling related tensors which
+        # includes the logprobs tensors.
         model_input.sampling_metadata.skip_sampler_cpu_output = (
-            self.skip_logprobs)
+            self.disable_logprobs)
         return model_input

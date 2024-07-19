@@ -868,6 +868,7 @@ class SpeculativeConfig:
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: Optional[float],
         typical_acceptance_sampler_posterior_alpha: Optional[float],
+        disable_logprobs: Optional[bool],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -917,6 +918,10 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
                 TypicalAcceptanceSampler.
+            disable_logprobs (Optional[bool]): If set to True, no logprobs are
+                returned during speculative decoding. If set to False, logprobs
+                are returned according to the settings in SamplingParams. If
+                not specified, it defaults to True.
     
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -1029,6 +1034,8 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_threshold = 0.09
         if typical_acceptance_sampler_posterior_alpha is None:
             typical_acceptance_sampler_posterior_alpha = 0.3
+        if disable_logprobs is None:
+            disable_logprobs = True
 
         return SpeculativeConfig(
             draft_model_config,
@@ -1042,6 +1049,7 @@ class SpeculativeConfig:
                 typical_acceptance_sampler_posterior_threshold,
             typical_acceptance_sampler_posterior_alpha=\
                 typical_acceptance_sampler_posterior_alpha,
+            disable_logprobs=disable_logprobs
         )
 
     @staticmethod
@@ -1126,6 +1134,7 @@ class SpeculativeConfig:
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
+        disable_logprobs: bool,
     ):
         """Create a SpeculativeConfig object.
 
@@ -1152,6 +1161,7 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
                 TypicalAcceptanceSampler.
+            disable_logprobs:
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
@@ -1165,6 +1175,7 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_threshold
         self.typical_acceptance_sampler_posterior_alpha = \
             typical_acceptance_sampler_posterior_alpha
+        self.disable_logprobs = disable_logprobs
 
         self._verify_args()
 
