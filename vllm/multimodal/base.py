@@ -48,8 +48,11 @@ class MultiModalInputs(_MultiModalInputsBase):
 
         # may be list rather than tensors
         if not isinstance(tensors[0], torch.Tensor):
-            return [[t.to(device=device) for t in tensor[0]]
-                    for tensor in tensors]
+            new_tensors = []
+            for new_tensor in tensors:
+                for new_t in new_tensor:
+                    new_tensors.append(new_t.to(device))
+            return new_tensors
         unbatched_shape = tensors[0].shape[1:]
 
         for tensor in tensors:
