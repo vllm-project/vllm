@@ -476,17 +476,18 @@ if _no_device():
     ext_modules = []
 
 setup(
-    name="vllm-odh",
+    name="vllm",
     version=get_vllm_version(),
-    author="Open Data Hub Community",
+    author="vLLM Team",
     license="Apache 2.0",
     description=("A high-throughput and memory-efficient inference and "
                  "serving engine for LLMs"),
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    url="https://github.com/opendatahub-io/vllm",
+    url="https://github.com/vllm-project/vllm",
     project_urls={
-        "Homepage": "https://github.com/opendatahub-io/vllm",
+        "Homepage": "https://github.com/vllm-project/vllm",
+        "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
         "Programming Language :: Python :: 3.8",
