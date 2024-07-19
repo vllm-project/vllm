@@ -49,11 +49,10 @@ You can install vLLM using pip:
     .. code-block:: console
 
         $ export VLLM_VERSION=0.5.2 # vLLM's main branch version is currently set to latest released tag
-        $ export PYTHON_VERSION=310
-        $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl
+        $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
         $ # You can also access a specific commit
         $ # export VLLM_COMMIT=...
-        $ # pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-${VLLM_VERSION}-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl
+        $ # pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
 
 
 .. _build_from_source:
