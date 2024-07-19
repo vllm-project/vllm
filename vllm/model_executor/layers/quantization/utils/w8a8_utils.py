@@ -124,20 +124,50 @@ def apply_fp8_linear(
                                        bias=bias)
 
     else:
+        # Note: we pad the input because torch._scaled_mm is more performant
+        # for matrices with batch dimension > 16.
+        # This could change in the future.
         qinput, x_scale = ops.scaled_fp8_quant(input,
                                                input_scale,
                                                batch_dim_padding=17)
 
-        # Fused GEMM_DQ -- note we padded the input above because
-        # torch._scaled_mm is more performant for matrices with
-        # batch dimension > 16. Note that this could change
-        # in the future.
-        output, _ = torch._scaled_mm(qinput,
-                                     weight,
-                                     out_dtype=input.dtype,
-                                     scale_a=x_scale,
-                                     scale_b=weight_scale,
-                                     bias=bias)
+        if weight_scale.numel() == 1:
+            # Fused GEMM_DQ
+            output, _ = torch._scaled_mm(qinput,
+                                         weight,
+                                         out_dtype=input.dtype,
+                                         scale_a=x_scale,
+                                         scale_b=weight_scale,
+                                         bias=bias)
+        else:
+            # Fallback for channelwise case, where the weight scales are
+            # applied separately.
+
+            # Symmetric quantized GEMM by definition computes the following:
+            #   C = (s_x * X) (s_w * W) + bias
+            # This is equivalent to dequantizing the weights and activations
+            # before applying a GEMM.
+            #
+            # In order to compute quantized operands, a quantized kernel
+            # will rewrite the above like so:
+            #   C = s_w * s_x * (X * W) + bias
+            #
+            # For the scaled_mm fallback case, we break this down, since it
+            # does not support s_w being a vector.
+
+            # This computes C = sx * (X * W).
+            # Output in fp32 to allow subsequent ops to happen in-place
+            output, _ = torch._scaled_mm(qinput,
+                                         weight,
+                                         out_dtype=torch.float32,
+                                         scale_a=x_scale)
+
+            # C = sw * sx * (X * W)
+            output = output * weight_scale.t()
+            if bias is not None:
+                # C = sw * sx * (X * W) + bias
+                output = output + bias
+            output = output.to(dtype=input.dtype)
 
     return torch.narrow(output, 0, 0, input.shape[0])
 

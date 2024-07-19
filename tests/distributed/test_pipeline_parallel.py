@@ -1,7 +1,6 @@
 import pytest
-from transformers import AutoTokenizer
 
-from ..utils import RemoteOpenAIServer
+from ..utils import compare_two_settings
 
 
 @pytest.mark.parametrize(
@@ -13,7 +12,6 @@ from ..utils import RemoteOpenAIServer
         (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B"),
     ])
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     pp_args = [
         # use half precision for speed and memory savings in CI environment
@@ -48,85 +46,4 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME):
         pp_args.append("--enforce-eager")
         tp_args.append("--enforce-eager")
 
-    prompt = "Hello, my name is"
-    token_ids = tokenizer(prompt)["input_ids"]
-    results = []
-    for args in (pp_args, tp_args):
-        with RemoteOpenAIServer(MODEL_NAME, args) as server:
-            client = server.get_client()
-
-            # test models list
-            models = client.models.list()
-            models = models.data
-            served_model = models[0]
-            results.append({
-                "test": "models_list",
-                "id": served_model.id,
-                "root": served_model.root,
-            })
-
-            # test with text prompt
-            completion = client.completions.create(model=MODEL_NAME,
-                                                   prompt=prompt,
-                                                   max_tokens=5,
-                                                   temperature=0.0)
-
-            results.append({
-                "test": "single_completion",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
-            })
-
-            # test using token IDs
-            completion = client.completions.create(
-                model=MODEL_NAME,
-                prompt=token_ids,
-                max_tokens=5,
-                temperature=0.0,
-            )
-
-            results.append({
-                "test": "token_ids",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
-            })
-
-            # test simple list
-            batch = client.completions.create(
-                model=MODEL_NAME,
-                prompt=[prompt, prompt],
-                max_tokens=5,
-                temperature=0.0,
-            )
-
-            results.append({
-                "test": "simple_list",
-                "text0": batch.choices[0].text,
-                "text1": batch.choices[1].text,
-            })
-
-            # test streaming
-            batch = client.completions.create(
-                model=MODEL_NAME,
-                prompt=[prompt, prompt],
-                max_tokens=5,
-                temperature=0.0,
-                stream=True,
-            )
-            texts = [""] * 2
-            for chunk in batch:
-                assert len(chunk.choices) == 1
-                choice = chunk.choices[0]
-                texts[choice.index] += choice.text
-            results.append({
-                "test": "streaming",
-                "texts": texts,
-            })
-
-    n = len(results) // 2
-    pp_results = results[:n]
-    tp_results = results[n:]
-    for pp, tp in zip(pp_results, tp_results):
-        assert pp == tp
+    compare_two_settings(MODEL_NAME, pp_args, tp_args)
