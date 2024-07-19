@@ -41,6 +41,7 @@ class PyNcclCommunicator:
         self.rank = dist.get_rank(group)
         self.world_size = dist.get_world_size(group)
 
+
         # if world_size == 1, no need to create communicator
         if self.world_size == 1:
             self.available = False
@@ -70,8 +71,11 @@ class PyNcclCommunicator:
             self.unique_id = ncclUniqueId()
         tensor = torch.ByteTensor(list(self.unique_id.internal))
         ranks = dist.get_process_group_ranks(group)
+        logger.debug("Group: %s, group rank: %s, world size: %s, src: %s", str(group), str(self.rank), str(self.world_size), ranks[0])
+        
         # arg `src` in `broadcast` is the global rank
         dist.broadcast(tensor, src=ranks[0], group=group)
+        logger.debug("dist broadcast succeeded")
         byte_list = tensor.tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
