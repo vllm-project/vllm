@@ -166,8 +166,7 @@ __global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
 template <typename scalar_t>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
     c10::Float8_e4m3fn* __restrict__ out, float* __restrict__ scale,
-    scalar_t const* __restrict__ input,
-    float const* __restrict__ scale_ub,
+    scalar_t const* __restrict__ input, float const* __restrict__ scale_ub,
     const int hidden_size) {
   float const min_scaling_factor = 1.0f / (FP8_E4M3_MAX * 512.f);
 
@@ -200,7 +199,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
       token_scale = block_absmax_val_maybe;
     }
     // token scale computation
-    token_scale = max(token_scale / FP8_E4M3_MAX, min_scaling_factor); 
+    token_scale = max(token_scale / FP8_E4M3_MAX, min_scaling_factor);
     scale[token_idx] = token_scale;
   }
   __syncthreads();
@@ -256,10 +255,10 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
       });
 }
 
-void dynamic_per_token_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
-                                        torch::Tensor const& input,  // [..., d]
-                                        torch::Tensor& scales,
-                                        std::optional<at::Tensor> const& scale_ub) {
+void dynamic_per_token_scaled_fp8_quant(
+    torch::Tensor& out,          // [..., d]
+    torch::Tensor const& input,  // [..., d]
+    torch::Tensor& scales, std::optional<at::Tensor> const& scale_ub) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
 

@@ -1,4 +1,4 @@
-from typing import Tuple, Union, Optional
+from typing import Optional, Tuple, Union
 
 import torch
 
@@ -28,7 +28,7 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
     # Compute scales
     x_token_max, _ = x.abs().max(dim=-1)
     x_token_max = as_float32_tensor(x_token_max)
-    if scale_ub is not None: 
+    if scale_ub is not None:
         x_token_max = x_token_max.clamp(max=scale_ub)
 
     scales = (x_token_max / qtype_max)[:, None]
@@ -44,6 +44,7 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
                                 qtype_traits.max).to(quant_dtype)
 
     return torch_out, scales
+
 
 # The int8 version is very similar. Incorporate the int8 version, like in
 # ref_dynamic_per_token_quant, when we have a dynamic_per_tensor int8 quant
