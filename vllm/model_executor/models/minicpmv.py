@@ -55,7 +55,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
-from vllm.sequence import SamplerOutput, SequenceData, IntermediateTensors
+from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",

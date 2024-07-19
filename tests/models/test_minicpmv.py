@@ -22,7 +22,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
         "<|start_header_id|>assistant<|end_header_id|>\n\n"
 })
 
-models = ["HwwwH/MiniCPM-Llama3-V-2_5"]
+models = ["/data1/hezhihui/release/MiniCPM-Llama3-V-2_5"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -111,8 +111,6 @@ def run_test(
         )
 
 
-# Since we use _attn_implementation="eager" for hf_runner, there is more
-# significant numerical difference. The basic `logprobs=5` fails to pass.
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -129,7 +127,7 @@ def run_test(
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
                 dtype: str, max_tokens: int, num_logprobs: int) -> None:
     run_test(
