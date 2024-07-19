@@ -33,7 +33,6 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
-                                       device="cuda",
                                        dtype=params_dtype),
                            requires_grad=False)
 
