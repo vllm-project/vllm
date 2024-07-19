@@ -381,7 +381,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool,
     worker = SpecDecodeWorker(draft_worker,
                               target_worker,
                               spec_decode_sampler,
-                              skip_logprobs=False,
+                              disable_logprobs=False,
                               metrics_collector=metrics_collector)
     worker.init_device()
 
@@ -712,7 +712,7 @@ def test_populate_seq_ids_with_bonus_tokens():
     worker = SpecDecodeWorker(draft_worker,
                               target_worker,
                               mock_spec_decode_sampler("rejection_sampler"),
-                              skip_logprobs=False,
+                              disable_logprobs=False,
                               metrics_collector=metrics_collector)
     # Initialize _seq_with_bonus_token_in_last_step with a set of sequence IDs.
     # This set includes all sequence IDs in the batch as well as an additional
