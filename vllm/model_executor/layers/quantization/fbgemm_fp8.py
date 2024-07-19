@@ -112,4 +112,5 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                                 weight_scale=layer.weight_scale,
                                 input_scale=None,
                                 bias=bias,
-                                cutlass_fp8_supported=True)
+                                cutlass_fp8_supported=True,
+                                use_per_token_if_dynamic=True)
