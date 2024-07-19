@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import inspect
+import os
 import re
 import signal
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from starlette.routing import Mount
 
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.async_llm_engine import AsyncEngineDeadError, AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 # yapf conflicts with isort for this block
@@ -185,6 +186,28 @@ def build_app(args):
         err = openai_serving_chat.create_error_response(message=str(exc))
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
+
+    @app.exception_handler(RuntimeError)
+    async def runtime_error_handler(_, __):
+        """On generic runtime error, check to see if the engine has died.
+        It probably has, in which case the server will no longer be able to
+        handle requests. Trigger a graceful shutdown with a SIGTERM."""
+        if engine.errored and not engine.is_running:
+            logger.fatal("AsyncLLMEngine has failed, terminating server "
+                         "process")
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    @app.exception_handler(AsyncEngineDeadError)
+    async def engine_dead_handler(_, __):
+        """Kill the server if the async engine is already dead. It will
+        not handle any further requests."""
+        logger.fatal("AsyncLLMEngine is already dead, terminating server "
+                     "process")
+        os.kill(os.getpid(), signal.SIGTERM)
+
+        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     if token := envs.VLLM_API_KEY or args.api_key:
 
