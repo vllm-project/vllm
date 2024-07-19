@@ -34,8 +34,8 @@ async def _async_serving_chat_init():
                                            response_role="assistant",
                                            chat_template=CHAT_TEMPLATE,
                                            lora_modules=None,
-                                           log_requests=False,
-                                           max_log_len=None)
+                                           prompt_adapters=None,
+                                           request_logger=None)
     return serving_completion
 
 
