@@ -7,8 +7,8 @@ def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
     return torch.as_tensor(x, dtype=torch.float32, device='cuda')
 
 def ref_dynamic_per_token_quant(x: torch.tensor,
-                                scale_ub: Optional[float],
-                                quant_dtype: torch.dtype) \
+                                quant_dtype: torch.dtype,
+                                scale_ub: Optional[torch.tensor] = None) \
         -> Tuple[torch.tensor, torch.tensor]:
 
     assert quant_dtype in [torch.int8, torch.float8_e4m3fn]
