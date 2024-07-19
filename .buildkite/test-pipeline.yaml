@@ -21,7 +21,7 @@ steps:
   fast_check: true
   fast_check_only: true
   commands:
-  - apt-get install curl libsodium23 && pytest -v -s tensorizer_loader # Tensorizer
+  - apt-get install -y curl libsodium23 && pytest -v -s tensorizer_loader # Tensorizer
   - pytest -v -s metrics # Metrics
   - "pip install \
       opentelemetry-sdk \
@@ -221,7 +221,7 @@ steps:
 - label: Tensorizer Test
   #mirror_hardwares: [amd]
   commands:
-    - apt-get install curl libsodium23
+    - apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
 
