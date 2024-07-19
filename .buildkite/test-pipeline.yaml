@@ -54,7 +54,7 @@ steps:
 - label: Core Test
   mirror_hardwares: [amd]
   fast_check: true
-  commands: 
+  commands:
   - pytest -v -s core
   - pytest -v -s distributed/test_parallel_state.py
 
@@ -73,7 +73,7 @@ steps:
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
-    - pytest -v -s distributed/test_pipeline_parallel.py
+    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
 
@@ -123,7 +123,7 @@ steps:
 
 - label: Engine Test
   mirror_hardwares: [amd]
-  commands: 
+  commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization

@@ -939,3 +939,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
+
+
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
+                              **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)

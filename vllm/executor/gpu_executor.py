@@ -12,6 +12,15 @@ from vllm.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
+def create_worker(worker_module_name, worker_class_name, **kwargs):
+    wrapper = WorkerWrapperBase(
+        worker_module_name=worker_module_name,
+        worker_class_name=worker_class_name,
+    )
+    wrapper.init_worker(**kwargs)
+    return wrapper.worker
+
+
 class GPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
@@ -51,25 +60,30 @@ class GPUExecutor(ExecutorBase):
             or (rank % self.parallel_config.tensor_parallel_size == 0),
         )
 
+    def _get_create_worker_kwargs(
+            self,
+            local_rank: int = 0,
+            rank: int = 0,
+            distributed_init_method: Optional[str] = None) -> Dict:
+        worker_kwargs = self._get_worker_kwargs(local_rank, rank,
+                                                distributed_init_method)
+        if self.speculative_config is None:
+            worker_kwargs.update(worker_module_name="vllm.worker.worker",
+                                 worker_class_name="Worker")
+        else:
+            worker_kwargs.update(
+                worker_module_name="vllm.spec_decode.spec_decode_worker",
+                worker_class_name="create_spec_worker")
+        return worker_kwargs
+
     def _create_worker(self,
                        local_rank: int = 0,
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
-
-        if self.speculative_config is None:
-            worker_module_name = "vllm.worker.worker"
-            worker_class_name = "Worker"
-        else:
-            worker_module_name = "vllm.spec_decode.spec_decode_worker"
-            worker_class_name = "create_spec_worker"
-
-        wrapper = WorkerWrapperBase(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-        )
-        wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
-                                                      distributed_init_method))
-        return wrapper.worker
+        return create_worker(**self._get_create_worker_kwargs(
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method))
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
