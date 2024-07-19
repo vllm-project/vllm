@@ -175,10 +175,11 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
-            PyNcclCommunicator)
+            PyNcclCommunicator))
 
         self.pynccl_comm: Optional[PyNcclCommunicator]
         if use_pynccl and self.world_size > 1:
+            logger.debug("Before pynccl")
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
