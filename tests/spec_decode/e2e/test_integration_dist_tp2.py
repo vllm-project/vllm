@@ -83,6 +83,9 @@ def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
         # cleaned up properly, and its server host thread leaks, causing the
         # second run of the test to fail with internal NCCL error.
         "use_async": True,
+
+        # precision
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize(
