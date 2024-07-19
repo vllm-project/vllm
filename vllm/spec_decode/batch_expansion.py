@@ -59,7 +59,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             SpeculativeScores: The scores of each speculative token, along with
                 which sequences were ignored during scoring.
         """
-        print('Hello123')
         # TODO(cade) perform this on GPU to remove blocking call.
         proposal_lens_list = proposals.proposal_lens.tolist()
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
@@ -82,7 +81,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 seq_group_metadata_list=target_seq_group_metadata_list))
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
-        print('target_sampler_output ' + str(target_sampler_output))
 
         all_tokens, all_probs, spec_logprobs = self._contract_batch(
             contracted_bs=len(execute_model_req.seq_group_metadata_list),
@@ -170,29 +168,24 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_token_ids = target_token_ids.reshape(spec_expanded_bs, k + 1)
         target_probs = target_probs.reshape(*target_token_ids.shape,
                                             self._vocab_size)
-        
-        if target_logprobs is not None:
-            target_logprobs = target_logprobs.reshape(target_probs.shape)
+
+        target_logprobs = target_logprobs.reshape(target_probs.shape)
 
         all_tokens = target_token_ids.new_full(size=(contracted_bs, k + 1),
                                                fill_value=-1)
         all_probs = target_probs.new_zeros(*all_tokens.shape, self._vocab_size)
-        all_logprobs = None
-        if target_logprobs is not None:
-            all_logprobs = target_logprobs.new_full(
-                size=all_probs.shape, fill_value=-float("inf"))
+        all_logprobs = target_logprobs.new_full(size=all_probs.shape,
+                                                fill_value=-float("inf"))
 
         if non_spec_indices:
             all_tokens[non_spec_indices, :1] = non_spec_target_token_ids
             all_probs[non_spec_indices, :1, :] = non_spec_target_probs
-            if all_logprobs is not None:
-                all_logprobs[non_spec_indices, :1, :] = non_spec_target_logprobs
+            all_logprobs[non_spec_indices, :1, :] = non_spec_target_logprobs
 
         if spec_indices:
             all_tokens[spec_indices] = target_token_ids
             all_probs[spec_indices] = target_probs
-            if all_logprobs is not None:
-                all_logprobs[spec_indices] = target_logprobs
+            all_logprobs[spec_indices] = target_logprobs
 
         return all_tokens, all_probs, all_logprobs
 

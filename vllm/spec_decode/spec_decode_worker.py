@@ -7,7 +7,6 @@ import torch
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
-from vllm.spec_decode.target_model_runner import TargetModelRunner
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
@@ -15,7 +14,7 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SamplerOutput, SequenceGroupMetadata,
-                           get_all_seq_ids_and_request_ids, get_all_seq_ids)
+                           get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -27,6 +26,7 @@ from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
+from vllm.spec_decode.target_model_runner import TargetModelRunner
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
@@ -44,12 +44,12 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     assert "speculative_config" in kwargs
     speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
     assert speculative_config is not None
-    
+
     draft_worker_kwargs = kwargs.copy()
 
     kwargs["model_runner_cls"] = TargetModelRunner
     target_worker = Worker(*args, **kwargs)
-    
+
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
         model_config=speculative_config.draft_model_config,
@@ -172,7 +172,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
         spec_decode_sampler: SpecDecodeBaseSampler,
-        skip_logprobs:bool,
+        skip_logprobs: bool,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
     ):
@@ -418,16 +418,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         if self.skip_logprobs:
             # We are skipping adding logprobs to the result. Since we are
             # skipping the logprobs the sampler has not serialized any tensors
-            # like sampled_token_ids to the cpu. We create the 
+            # like sampled_token_ids to the cpu. We create the
             # CompletionSequenceGroupOutput from the GPU tensors.
-            seq_ids = get_all_seq_ids(execute_model_req.seq_group_metadata_list)
+            seq_ids = get_all_seq_ids(
+                execute_model_req.seq_group_metadata_list)
             sampled_token_ids_list = sampler_output.sampled_token_ids.tolist()
-            completion_seq_group_output_list: List[CompletionSequenceGroupOutput] = []
+            completion_seq_group_output_list: List[
+                CompletionSequenceGroupOutput] = []
             for index, seq_id in enumerate(seq_ids):
                 completion_seq_group_output_list.append(
                     create_sequence_group_output(
                         token_id=sampled_token_ids_list[index][0],
-                        token_id_logprob_rank=-1 ,
+                        token_id_logprob_rank=-1,
                         token_id_logprob=0.0,
                         seq_id=seq_id,
                         topk_token_ids=[],
@@ -604,37 +606,42 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
         if self.skip_logprobs:
             # We are skipping the logprobs. Hence don't synchronize the
-            # logprobs related tensors from the GPU and create empty lists
-            # instead.
-            accepted_token_id_ranks_by_step = [[-1] * batch_size for _ in range(num_steps)]
-            accepted_token_id_logprobs_by_step = [[0.0] * batch_size for _ in range(num_steps)]
-            topk_logprobs_by_step = [[[] * k for _ in range(batch_size)] for _ in range(num_steps)]
-            topk_indices_by_step = [[[] * k for _ in range(batch_size)] for _ in range(num_steps)]
+            # logprobs related tensors from the GPU and create empty/dummy
+            # lists instead.
+            accepted_token_id_ranks_by_step = [[-1] * batch_size
+                                               for _ in range(num_steps)]
+            accepted_token_id_logprobs_by_step = [[0.0] * batch_size
+                                                  for _ in range(num_steps)]
+            topk_logprobs_by_step: List[List[List[float]]] = [[
+                [0.0] * k for _ in range(batch_size)
+            ] for _ in range(num_steps)]
+            topk_indices_by_step: List[List[List[int]]] = [
+                [[-1] * k for _ in range(batch_size)] for _ in range(num_steps)
+            ]
         else:
             # Organize input tensors by step instead of by sequence.
             target_logprobs_by_step = target_logprobs.transpose(0, 1)
 
             # Get the logprobs/rank of the accepted tokens.
-            (accepted_token_id_ranks_by_step,
-            accepted_token_id_logprobs_by_step) = get_sampled_token_logprobs(
-                logprob_tensor=target_logprobs_by_step,
-                sampled_token_ids=accepted_token_ids_by_step,
-            )
-
-            # Get the top-k logprobs (which may or may not include the logprob of
-            # the accepted token).
-            (topk_logprobs_by_step,
-            topk_indices_by_step) = target_logprobs_by_step.topk(
-                k=self.scorer_worker.model_config.max_logprobs,
-                dim=-1,
-            )
+            (accepted_token_id_ranks_by_step_tensor,
+             accepted_token_id_logprobs_by_step_tensor
+             ) = get_sampled_token_logprobs(
+                 logprob_tensor=target_logprobs_by_step,
+                 sampled_token_ids=accepted_token_ids_by_step,
+             )
+            # Get the top-k logprobs (which may or may not include the
+            # logprob of the accepted token).
+            (topk_logprobs_by_step_tensor,
+             topk_indices_by_step_tensor) = target_logprobs_by_step.topk(
+                 k=self.scorer_worker.model_config.max_logprobs,
+                 dim=-1,
+             )
             accepted_token_id_ranks_by_step = (
-                accepted_token_id_ranks_by_step.tolist())
+                accepted_token_id_ranks_by_step_tensor.tolist())
             accepted_token_id_logprobs_by_step = (
-                accepted_token_id_logprobs_by_step.tolist())
-            topk_logprobs_by_step = topk_logprobs_by_step.tolist()
-            topk_indices_by_step = topk_indices_by_step.tolist()
-
+                accepted_token_id_logprobs_by_step_tensor.tolist())
+            topk_logprobs_by_step = topk_logprobs_by_step_tensor.tolist()
+            topk_indices_by_step = topk_indices_by_step_tensor.tolist()
 
         # Get the sequence ids and num_logprobs (sampling parameter) in the
         # batch.
@@ -662,7 +669,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         token_id=accepted_token_ids_by_step[step_index]
                         [sequence_index],
                         token_id_logprob_rank=accepted_token_id_ranks_by_step[
-                            step_index][sequence_index] ,
+                            step_index][sequence_index],
                         token_id_logprob=accepted_token_id_logprobs_by_step[
                             step_index][sequence_index],
                         seq_id=seq_ids[sequence_index],

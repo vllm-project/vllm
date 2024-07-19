@@ -480,8 +480,7 @@ def test_k_equals_zero(k: int, batch_size: int,
 
     worker = SpecDecodeWorker(
         draft_worker, target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method),
-        False,
+        mock_spec_decode_sampler(acceptance_sampler_method), False,
         metrics_collector)
 
     seq_group_metadata_list, _, _ = create_batch(batch_size,
@@ -493,7 +492,8 @@ def test_k_equals_zero(k: int, batch_size: int,
     out = worker.execute_model(execute_model_req=execute_model_req)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
-    assert out[0].sampled_token_probs is None, "expect gpu tensor references to be None"
+    assert out[0].sampled_token_probs is None, (
+        "expect gpu tensor references to be None")
     assert out[
         0].sampled_token_ids is None, "expect gpu tensor references to be None"
 
@@ -527,8 +527,8 @@ def test_empty_input_batch(k: int, batch_size: int,
 
     worker = SpecDecodeWorker(
         draft_worker, target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method),
-        False, metrics_collector)
+        mock_spec_decode_sampler(acceptance_sampler_method), False,
+        metrics_collector)
 
     seq_group_metadata_list, _, _ = create_batch(batch_size,
                                                  k,
@@ -539,7 +539,8 @@ def test_empty_input_batch(k: int, batch_size: int,
     out = worker.execute_model(execute_model_req=execute_model_req)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
-    assert out[0].sampled_token_probs is None, "expect gpu tensor references to be None"
+    assert out[0].sampled_token_probs is None, (
+        "expect gpu tensor references to be None")
     assert out[
         0].sampled_token_ids is None, "expect gpu tensor references to be None"
 
