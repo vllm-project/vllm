@@ -177,6 +177,8 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
 
+        logger.debug("Oh plz")
+
         self.pynccl_comm: Optional[PyNcclCommunicator]
         if use_pynccl and self.world_size > 1:
             logger.debug("Before pynccl")
