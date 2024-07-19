@@ -44,11 +44,10 @@ You can also additionally specify :code:`--pipeline-parallel-size` to enable pip
 
     $ vllm serve gpt2 \
     $     --tensor-parallel-size 4 \
-    $     --pipeline-parallel-size 2 \
-    $     --distributed-executor-backend ray
+    $     --pipeline-parallel-size 2
 
 .. note::
-    Pipeline parallel is a beta feature. It is only supported for online serving and the ray backend for now, as well as LLaMa and GPT2 style models.
+    Pipeline parallel is a beta feature. It is only supported for online serving as well as LLaMa, GPT2, and Mixtral style models.
 
 To scale vLLM beyond a single machine, install and start a `Ray runtime <https://docs.ray.io/en/latest/ray-core/starting-ray.html>`_ via CLI before running vLLM:
 
