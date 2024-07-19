@@ -185,18 +185,24 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     )
 
     @dataclasses.dataclass
-    class IntermediateDataForSequenceGroup:
+    class InterDataForSeqGroup:
         """Intermediate data for the current sequence group."""
+        # From sequence group metadata.
         request_id: str
         seq_ids: List[int]
         n_seqs: int
         is_prompt: bool
+        block_tables: Optional[Dict[int, List[int]]]
+        computed_block_nums: List[int]
+
+        # Input tokens and positions.
         input_tokens: List[List[int]]
         input_positions: List[List[int]]
 
         # The sequence length (may be capped to the sliding window).
         seq_lens: List[int]
         # The original sequence length (before applying sliding window).
+        # This is used to compute slot mapping.
         orig_seq_lens: List[int]
         # The query length.
         query_lens: List[int]
@@ -222,11 +228,16 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         prefix_cache_hit: bool = False
 
         def __init__(self, request_id: str, seq_ids: List[int],
-                     is_prompt: bool):
+                     is_prompt: bool, block_tables: Optional[Dict[int,
+                                                                  List[int]]],
+                     computed_block_nums: List[int]):
             self.request_id = request_id
             self.seq_ids = seq_ids
             self.is_prompt = is_prompt
+            self.block_tables = block_tables
+            self.computed_block_nums = computed_block_nums
             self.n_seqs = len(seq_ids)
+
             self.input_tokens = [[] for _ in range(self.n_seqs)]
             self.input_positions = [[] for _ in range(self.n_seqs)]
             self.seq_lens = [0] * self.n_seqs
@@ -260,11 +271,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.decode_only = True
 
         self.inter_data_list: List[
-            ModelInputForGPUBuilder.IntermediateDataForSequenceGroup] = []
+            ModelInputForGPUBuilder.InterDataForSeqGroup] = []
 
         # Attention metadata inputs.
         self.attn_metadata_builder = self.attn_backend.make_metadata_builder(
-            self)
+            weakref.proxy(self))
 
         # Engine/Model configurations.
         self.chunked_prefill_enabled = (
@@ -276,8 +287,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
 
-    def _compute_lens(self, inter_data: IntermediateDataForSequenceGroup,
-                      seq_idx: int, seq_group_metadata: SequenceGroupMetadata):
+    def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
+                      seq_group_metadata: SequenceGroupMetadata):
         """Compute context length, sequence length and tokens
         for the given sequence data.
         """
@@ -313,11 +324,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_idx] = seq_len - context_len if inter_data.is_prompt else 1
 
     def _compute_for_prefix_cache_hit(
-            self, inter_data: IntermediateDataForSequenceGroup, seq_idx: int,
+            self, inter_data: InterDataForSeqGroup, seq_idx: int,
             seq_group_metadata: SequenceGroupMetadata):
-        computed_block_nums = seq_group_metadata.computed_block_nums
+        """Check if hit prefix cache (i.e., some blocks are already computed).
+        If hit, update input tokens and positions to only compute the
+        remaining blocks.
+        """
+        computed_block_nums = inter_data.computed_block_nums
 
-        # Check if hit prefix cache (i.e., some blocks are already computed)
         # Note that prefix caching does not support sliding window.
         prefix_cache_hit = (computed_block_nums is not None
                             and len(computed_block_nums) > 0
@@ -337,13 +351,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_idx][context_len:]
             inter_data.context_lens[seq_idx] = context_len
 
-    def _compute_for_sliding_window(
-            self, inter_data: IntermediateDataForSequenceGroup, seq_idx: int,
-            seq_group_metadata: SequenceGroupMetadata):
+    def _compute_for_sliding_window(self, inter_data: InterDataForSeqGroup,
+                                    seq_idx: int,
+                                    seq_group_metadata: SequenceGroupMetadata):
         """Update seq_len and curr_sliding_window_block for the given
-        sequence data.  If sliding window is enabled. They are passed to
-        decode kernel. We still keep the original seq_len to compute
-        slot mapping.
+        sequence data (only required by decoding) if sliding window is enabled.
         """
         curr_sliding_window_block = 0
         sliding_seq_len = inter_data.seq_lens[seq_idx]
@@ -368,9 +380,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_idx] = curr_sliding_window_block
         inter_data.seq_lens[seq_idx] = sliding_seq_len
 
-    def _compute_lora_input(self, inter_data: IntermediateDataForSequenceGroup,
+    def _compute_lora_input(self, inter_data: InterDataForSeqGroup,
                             seq_idx: int,
                             seq_group_metadata: SequenceGroupMetadata):
+        """If LoRA is enabled, compute LoRA index and prompt mapping."""
         if not self.enable_lora:
             return
 
@@ -386,10 +399,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
              else 1))
 
     def _compute_prompt_adapter_input(
-            self, inter_data: IntermediateDataForSequenceGroup,
+            self, inter_data: InterDataForSeqGroup,
             seq_group_metadata: SequenceGroupMetadata):
-        # Prompt adapter data. Note that when is_prompt=True,
-        # we expect only one sequence in the group.
+        """If prompt adapter is enabled, compute index and prompt mapping.
+        """
+        # Note that when is_prompt=True, we expect only one sequence
+        # in the group.
         if not self.enable_prompt_adapter:
             return
 
@@ -411,9 +426,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             query_len if seq_group_metadata.sampling_params
             and seq_group_metadata.sampling_params.prompt_logprobs else 1)
 
-    def _compute_multi_modal_input(
-            self, inter_data: IntermediateDataForSequenceGroup,
-            seq_group_metadata: SequenceGroupMetadata):
+    def _compute_multi_modal_input(self, inter_data: InterDataForSeqGroup,
+                                   seq_group_metadata: SequenceGroupMetadata):
+        """If multi-modal data is given, add it to the input."""
         mm_data = seq_group_metadata.multi_modal_data
         if not mm_data:
             return
@@ -422,6 +437,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.multi_modal_inputs_list = mm_kwargs
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
+        """Add a sequence group to the builder."""
         seq_ids = list(seq_group_metadata.seq_data.keys())
         n_seqs = len(seq_ids)
         is_prompt = seq_group_metadata.is_prompt
@@ -430,10 +446,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             assert n_seqs == 1
             self.decode_only = False
 
-        inter_data = self.IntermediateDataForSequenceGroup(
+        inter_data = self.InterDataForSeqGroup(
             request_id=seq_group_metadata.request_id,
             seq_ids=seq_ids,
-            is_prompt=is_prompt)
+            is_prompt=is_prompt,
+            block_tables=seq_group_metadata.block_tables,
+            computed_block_nums=seq_group_metadata.computed_block_nums)
         self.inter_data_list.append(inter_data)
 
         for seq_idx in range(n_seqs):
@@ -442,17 +460,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         for fn_name in self.PER_SEQ_GROUP_COMPUTE_FN_NAMES:
             getattr(self, fn_name)(inter_data, seq_group_metadata)
 
-        # Update attention metadata. Note that input builder attributes
-        # (self.xxx) include all added sequences, so we need to slice
-        # the last n_seqs sequences.
-        self.attn_metadata_builder.add_seq_group(
-            seq_group_metadata, [len(t) for t in inter_data.input_tokens],
-            inter_data.orig_seq_lens, inter_data.seq_lens,
-            inter_data.query_lens, inter_data.context_lens,
-            inter_data.curr_sliding_window_blocks, inter_data.prefix_cache_hit,
-            self.chunked_prefill_enabled)
-
     def build(self) -> ModelInputForGPU:
+        """Finalize the builder intermediate data and
+        create on-device tensors.
+        """
         # Combine intermediate data.
         input_tokens = [
             t for data in self.inter_data_list for ts in data.input_tokens
@@ -512,7 +523,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
-            self.runner, seq_lens, query_lens, cuda_graph_pad_size, batch_size)
+            seq_lens, query_lens, cuda_graph_pad_size, batch_size)
 
         # LoRA data.
         lora_requests = set()
