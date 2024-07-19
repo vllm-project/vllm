@@ -50,7 +50,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     kwargs["model_runner_cls"] = TargetModelRunner
     target_worker = Worker(*args, **kwargs)
     target_worker.model_runner.disable_logprobs =\
-         speculative_config.disable_logprobs    
+         speculative_config.disable_logprobs
 
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
