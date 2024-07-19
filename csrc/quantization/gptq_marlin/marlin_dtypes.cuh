@@ -1,11 +1,11 @@
 
 #ifndef _data_types_cuh
 #define _data_types_cuh
-#include "gptq_marlin.cuh"
+#include "marlin.cuh"
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-namespace gptq_marlin {
+namespace marlin {
 
 template <typename scalar_t>
 class ScalarType {};
@@ -74,6 +74,6 @@ class ScalarType<nv_bfloat16> {
 #endif
 };
 
-}  // namespace gptq_marlin
+}  // namespace marlin
 
 #endif
