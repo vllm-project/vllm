@@ -111,6 +111,8 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
     # Expect detokenized string to match.
     tok = AutoTokenizer.from_pretrained("JackFram/llama-68m")
     for actual_tokens, actual_token_ids in zip(batch_tokens, batch_token_ids):
+        print('actual_tokens ' + str(actual_tokens))
+        print('actual_token_ids ' + str(actual_token_ids))
         expected_tokens = tok.decode(actual_token_ids)
         print(f"{actual_token_ids=}")
         assert actual_tokens.strip() == expected_tokens.strip()

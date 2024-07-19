@@ -207,15 +207,6 @@ class TP1DraftModelRunner(ModelRunner):
         # TODO: Add support for other attn backends
         if self.attn_backend.get_name() != "flash-attn":
             return False
-
-        token_id = seq_output.output_token
-        if seq_output.logprobs is not None:
-            token_logprob = seq_output.logprobs[token_id]
-            seq.append_token_id(token_id, token_logprob.logprob)
-        else:
-            seq.append_token_id(token_id, 0.0)
-        seq.update_num_computed_tokens(1)
-
         # TODO: Add support for LORA
         if self.lora_config:
             return False

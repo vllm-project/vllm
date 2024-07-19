@@ -68,21 +68,19 @@ def create_sequence_group_output(
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
-    logprobs = None
-    if token_id_logprob >= 0.0:
-        logprobs: Dict[int, Logprob] = {
-            token_id: Logprob(
-                logprob=token_id_logprob,
-                rank=token_id_logprob_rank,
-            ),
-        }
-        logprobs.update({
-            topk_token_ids[topk_logprob_index]: Logprob(
-                logprob=topk_logprobs[topk_logprob_index],
-                rank=topk_logprob_index + 1,
-            )
-            for topk_logprob_index, _ in enumerate(topk_token_ids)
-        })
+    logprobs: Dict[int, Logprob] = {
+        token_id: Logprob(
+            logprob=token_id_logprob,
+            rank=token_id_logprob_rank,
+        ),
+    }
+    logprobs.update({
+        topk_token_ids[topk_logprob_index]: Logprob(
+            logprob=topk_logprobs[topk_logprob_index],
+            rank=topk_logprob_index + 1,
+        )
+        for topk_logprob_index, _ in enumerate(topk_token_ids)
+    })
 
     return CompletionSequenceGroupOutput(
         samples=[

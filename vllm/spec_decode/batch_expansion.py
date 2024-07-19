@@ -59,7 +59,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             SpeculativeScores: The scores of each speculative token, along with
                 which sequences were ignored during scoring.
         """
-
+        print('Hello123')
         # TODO(cade) perform this on GPU to remove blocking call.
         proposal_lens_list = proposals.proposal_lens.tolist()
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
@@ -82,6 +82,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 seq_group_metadata_list=target_seq_group_metadata_list))
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
+        print('target_sampler_output ' + str(target_sampler_output))
 
         all_tokens, all_probs, spec_logprobs = self._contract_batch(
             contracted_bs=len(execute_model_req.seq_group_metadata_list),

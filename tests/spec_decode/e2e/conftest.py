@@ -251,6 +251,7 @@ def get_logprobs_from_llm_generator(
     for llm in llm_generator():
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         logprobs = [output.outputs[0].logprobs[:] for output in outputs]
+        print('logprobs ' + str(logprobs))
         del llm
 
     return logprobs
