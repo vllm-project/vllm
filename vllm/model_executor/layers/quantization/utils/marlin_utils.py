@@ -6,6 +6,8 @@ import numpy
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
+from .quant_utils import pack_cols
+
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
@@ -139,11 +141,14 @@ def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
     return s
 
 
-def marlin_permute_zp(zp: torch.Tensor, size_k: int, size_n: int,
-                      group_size: int, num_bits: int) -> torch.Tensor:
-    zp = marlin_permute_scales(zp, size_k, size_n, group_size)
+def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
+                       num_bits: int) -> torch.Tensor:
+    # Permute zero-points in a similar way to scales, but do not use the
+    # "single" permutation, since zero-points are applied on every MMA
+    scale_perm, _ = get_scale_perms()
+    zp = zp.reshape((-1, len(scale_perm)))[:, scale_perm]
 
-    # Zero-points are packed on column dim
+    # Interleave column dim (for the dequantize code) and pack it to int32
     if num_bits == 4:
         interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
     elif num_bits == 8:
@@ -152,8 +157,8 @@ def marlin_permute_zp(zp: torch.Tensor, size_k: int, size_n: int,
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
 
     zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
-
     zp = zp.reshape((-1, size_n)).contiguous()
+    zp = pack_cols(zp, num_bits, size_k, size_n)
 
     return zp
 

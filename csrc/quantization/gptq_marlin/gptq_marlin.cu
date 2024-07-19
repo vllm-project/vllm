@@ -745,9 +745,12 @@ __global__ void Marlin(
   // Zero-points
   int zp_gl_rd;
   if constexpr (has_zp) {
-    static_assert(group_blocks != -1);
-    zp_gl_rd = zp_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
-               zp_sh_stride * slice_col + threadIdx.x;
+    if constexpr (group_blocks == -1) {
+      zp_gl_rd = zp_sh_stride * slice_col + threadIdx.x;
+    } else {
+      zp_gl_rd = zp_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
+                 zp_sh_stride * slice_col + threadIdx.x;
+    }
   }
   int zp_sh_wr = threadIdx.x;
   bool zp_sh_wr_pred = threadIdx.x < zp_sh_stride;
@@ -763,15 +766,12 @@ __global__ void Marlin(
     s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
               (threadIdx.x % 32) % 4;
 
-  // Zero-points have the same layout as scales (Look above)
+  // Zero-points have the same read layout as the scales 
+  // (without column-wise case)
   int zp_sh_rd;
   if constexpr (has_zp) {
-    if constexpr (group_blocks != -1)
-      zp_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
-                 (threadIdx.x % 32) / 4;
-    else
-      zp_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
-                 (threadIdx.x % 32) % 4;
+    zp_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+               (threadIdx.x % 32) / 4;
   }
 
   // Precompute which thread should not read memory in which iterations; this is
@@ -939,9 +939,7 @@ __global__ void Marlin(
           }
         }
 
-        if constexpr (has_zp) {
-          static_assert(group_blocks != -1);
-
+        if constexpr (has_zp && group_blocks != -1) {
           int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
           if constexpr (group_blocks >= thread_k_blocks) {
@@ -967,6 +965,12 @@ __global__ void Marlin(
     // Insert a fence even when we are winding down the pipeline to ensure that
     // waiting is also correct at this point.
     cp_async_fence();
+  };
+
+  auto fetch_zp_to_shared = [&]() {
+    if (zp_sh_wr_pred) {
+      cp_async4(&sh_zp[zp_sh_wr], &zp_ptr[zp_gl_rd]);
+    }
   };
 
   // Wait until the next thread tile has been loaded to shared memory.
@@ -1125,9 +1129,11 @@ __global__ void Marlin(
     int pipe = full_pipe % stages;
 
     static_assert(!has_act_order);
-    static_assert(group_blocks != -1);
 
-    if constexpr (group_blocks >= thread_k_blocks) {
+    if constexpr (group_blocks == -1) {
+      frag_zp[k % 2] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd];
+
+    } else if constexpr (group_blocks >= thread_k_blocks) {
       int4* sh_zp_stage =
           sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
                                  (pipe / (group_blocks / thread_k_blocks)));
@@ -1427,6 +1433,12 @@ __global__ void Marlin(
           last_g_idx = prob_k - 1;
         }
         fetch_scales_to_shared(true, g_idx[slice_k_start], g_idx[last_g_idx]);
+      }
+
+      if constexpr (has_zp && group_blocks == -1) {
+        if (i == 0) {
+          fetch_zp_to_shared();
+        }
       }
       fetch_to_shared(i, i, i < slice_iters);
     }
@@ -1818,13 +1830,17 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
 
-  #define AWQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)            \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS) \
-                                                                            \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS) \
-                                                                            \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS) \
-                                                                            \
+  #define AWQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
+                                                                             \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
+                                                                             \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
+                                                                             \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)
 
 template <typename scalar_t>
