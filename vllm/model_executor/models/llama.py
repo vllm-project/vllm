@@ -65,16 +65,18 @@ class LlamaMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        ignored_gate_up_proj = all(p in quant_config.ignored_layers for p in [f"{prefix}.gate_proj", f"{prefix}.up_proj"])
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
             bias=bias,
-            quant_config=quant_config,
+            quant_config=quant_config if not ignored_gate_up_proj else None,
             prefix=f"{prefix}.gate_up_proj")
+        ignore_down_proj = f"{prefix}.down_proj" in quant_config.ignored_layers
         self.down_proj = RowParallelLinear(input_size=intermediate_size,
                                            output_size=hidden_size,
                                            bias=bias,
-                                           quant_config=quant_config,
+                                           quant_config=quant_config if not ignore_down_proj else None,
                                            prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -128,6 +130,7 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+        ignore_qkv_proj = all(p in quant_config.ignored_layers for p in [f"{prefix}.q_proj",  f"{prefix}.k_proj", f"{prefix}.v_proj"]) 
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
@@ -135,17 +138,18 @@ class LlamaAttention(nn.Module):
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
-            quant_config=quant_config,
+            quant_config=quant_config if not ignore_qkv_proj else None,
             prefix=f"{prefix}.qkv_proj",
         )
+        ignore_o_proj = f"{prefix}.o_proj" in quant_config.ignored_layers 
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias,
-            quant_config=quant_config,
+            quant_config=quant_config if not ignore_o_proj else None,
             prefix=f"{prefix}.o_proj",
         )
-
+        
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
