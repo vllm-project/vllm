@@ -77,6 +77,20 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         return ray_remote_kwargs
 
+    def _get_worker_wrapper_args(self) -> Dict[str, Any]:
+        if self.speculative_config is not None:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+        else:
+            worker_module_name = "vllm.worker.worker"
+            worker_class_name = "Worker"
+
+        return dict(
+            worker_module_name=worker_module_name,
+            worker_class_name=worker_class_name,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         if (self.parallel_config.tensor_parallel_size == 1
@@ -99,6 +113,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Create the workers.
         driver_ip = get_ip()
+        worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -108,23 +123,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 placement_group_bundle_index=bundle_id,
             )
 
-            if self.speculative_config is not None:
-                worker_module_name = "vllm.spec_decode.spec_decode_worker"
-                worker_class_name = "create_spec_worker"
-            else:
-                worker_module_name = "vllm.worker.worker"
-                worker_class_name = "Worker"
-
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(
-                worker_module_name=worker_module_name,
-                worker_class_name=worker_class_name,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
 
             if self.use_ray_spmd_worker:
                 self.workers.append(worker)
@@ -135,10 +139,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        worker_module_name=worker_module_name,
-                        worker_class_name=worker_class_name,
-                        trust_remote_code=self.model_config.trust_remote_code,
-                    )
+                        **worker_wrapper_kwargs)
                 else:
                     # Else, added to the list of workers.
                     self.workers.append(worker)
