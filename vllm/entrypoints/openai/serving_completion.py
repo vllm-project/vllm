@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
@@ -48,17 +49,14 @@ class OpenAIServingCompletion(OpenAIServing):
         served_model_names: List[str],
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
-        *,
-        log_requests: bool,
-        max_log_len: Optional[int],
+        request_logger: Optional[RequestLogger],
     ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
                          prompt_adapters=prompt_adapters,
-                         log_requests=log_requests,
-                         max_log_len=max_log_len)
+                         request_logger=request_logger)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):

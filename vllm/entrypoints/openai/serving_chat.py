@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_utils import (ConversationMessage,
                                                 load_chat_template,
                                                 parse_chat_message_content)
@@ -20,7 +21,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
-                                                    OpenAIServing)
+                                                    OpenAIServing,
+                                                    PromptAdapterPath)
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
@@ -44,17 +46,16 @@ class OpenAIServingChat(OpenAIServing):
         served_model_names: List[str],
         response_role: str,
         lora_modules: Optional[List[LoRAModulePath]],
+        prompt_adapters: Optional[List[PromptAdapterPath]],
+        request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
-        *,
-        log_requests: bool,
-        max_log_len: Optional[int],
     ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
-                         log_requests=log_requests,
-                         max_log_len=max_log_len)
+                         prompt_adapters=prompt_adapters,
+                         request_logger=request_logger)
 
         self.response_role = response_role
 

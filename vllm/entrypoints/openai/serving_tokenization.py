@@ -2,6 +2,7 @@ from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_utils import (ConversationMessage,
                                                 load_chat_template,
                                                 parse_chat_message_content)
@@ -26,18 +27,16 @@ class OpenAIServingTokenization(OpenAIServing):
         engine: AsyncLLMEngine,
         model_config: ModelConfig,
         served_model_names: List[str],
-        lora_modules: Optional[List[LoRAModulePath]] = None,
-        chat_template: Optional[str] = None,
-        *,
-        log_requests: bool,
-        max_log_len: Optional[int],
+        lora_modules: Optional[List[LoRAModulePath]],
+        request_logger: Optional[RequestLogger],
+        chat_template: Optional[str],
     ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
-                         log_requests=log_requests,
-                         max_log_len=max_log_len)
+                         prompt_adapters=None,
+                         request_logger=request_logger)
 
         # If this is None we use the tokenizer's default chat template
         self.chat_template = load_chat_template(chat_template)

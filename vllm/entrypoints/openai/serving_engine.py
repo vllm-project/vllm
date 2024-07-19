@@ -2,7 +2,7 @@ import json
 import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
 
 from pydantic import Field
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -10,6 +10,7 @@ from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger, TextTokensPrompt
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -51,11 +52,6 @@ AnyRequest = Union[ChatCompletionRequest, CompletionRequest, DetokenizeRequest,
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 
-class TextTokensPrompt(TypedDict):
-    prompt: str
-    prompt_token_ids: List[int]
-
-
 class OpenAIServing:
 
     def __init__(
@@ -64,10 +60,8 @@ class OpenAIServing:
         model_config: ModelConfig,
         served_model_names: List[str],
         lora_modules: Optional[List[LoRAModulePath]],
-        prompt_adapters: Optional[List[PromptAdapterPath]] = None,
-        *,
-        log_requests: bool,
-        max_log_len: Optional[int],
+        prompt_adapters: Optional[List[PromptAdapterPath]],
+        request_logger: Optional[RequestLogger],
     ):
         super().__init__()
 
@@ -101,8 +95,7 @@ class OpenAIServing:
                         prompt_adapter_local_path=prompt_adapter.local_path,
                         prompt_adapter_num_virtual_tokens=num_virtual_tokens))
 
-        self.log_requests = log_requests
-        self.max_log_len = max_log_len
+        self.request_logger = request_logger
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -362,30 +355,27 @@ class OpenAIServing:
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
-        if not self.log_requests:
+        if self.request_logger is None:
             return
 
         if isinstance(inputs, str):
-            shortened_prompt = inputs
-            shortened_token_ids = None
+            prompt = inputs
+            prompt_token_ids = None
         elif isinstance(inputs, list):
-            shortened_prompt = None
-            shortened_token_ids = inputs
+            prompt = None
+            prompt_token_ids = inputs
         else:
-            shortened_prompt = inputs["prompt"]
-            shortened_token_ids = inputs["prompt_token_ids"]
+            prompt = inputs["prompt"]
+            prompt_token_ids = inputs["prompt_token_ids"]
 
-            max_log_len = self.max_log_len
-            if max_log_len is not None:
-                shortened_prompt = shortened_prompt[:max_log_len]
-                shortened_token_ids = shortened_token_ids[:max_log_len]
-
-        logger.info(
-            "Received request %s: prompt: %r, "
-            "params: %s, prompt_token_ids: %s, "
-            "lora_request: %s, prompt_adapter_request: %s.", request_id,
-            shortened_prompt, params, shortened_token_ids, lora_request,
-            prompt_adapter_request)
+        self.request_logger.log_inputs(
+            request_id,
+            prompt,
+            prompt_token_ids,
+            params=params,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
     @staticmethod
     def _get_decoded_token(

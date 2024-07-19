@@ -7,6 +7,7 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData, UsageInfo)
@@ -58,16 +59,14 @@ class OpenAIServingEmbedding(OpenAIServing):
         engine: AsyncLLMEngine,
         model_config: ModelConfig,
         served_model_names: List[str],
-        *,
-        log_requests: bool,
-        max_log_len: Optional[int],
+        request_logger: Optional[RequestLogger],
     ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=None,
-                         log_requests=log_requests,
-                         max_log_len=max_log_len)
+                         prompt_adapters=None,
+                         request_logger=request_logger)
         self._check_embedding_mode(model_config.embedding_mode)
 
     async def create_embedding(self, request: EmbeddingRequest,
