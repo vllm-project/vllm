@@ -801,7 +801,7 @@ if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
     class CustomAdapter(logging.LoggerAdapter):
         def process(self, msg, kwargs):
             return f"[{envs.VLLM_DISAGG_PREFILL_ROLE}] {msg}", kwargs
-    logger = CustomAdapter(logger)
+    logger = CustomAdapter(logger, extra=None)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
