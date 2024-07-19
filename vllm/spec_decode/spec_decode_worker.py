@@ -49,6 +49,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
     kwargs["model_runner_cls"] = TargetModelRunner
     target_worker = Worker(*args, **kwargs)
+    # Set the disable_logprobs variable in the TargetModelRunner instance
+    # as per its value specified in the SpeculativeConfig.
     target_worker.model_runner.disable_logprobs =\
          speculative_config.disable_logprobs
 
@@ -192,6 +194,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 types of sampler namely RejectionSampler and
                 TypicalAcceptanceSampler. 'spec_decode_sampler' is either an
                 instance of RejectionSampler or TypicalAcceptanceSampler.
+            disable_logprobs: If set to True, token log probabilities will
+                not be output in both the draft worker and the target worker.
+                If set to False, log probabilities will be output by both.
             disable_by_batch_size: If the batch size is larger than this,
                 disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
@@ -613,12 +618,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                for _ in range(num_steps)]
             accepted_token_id_logprobs_by_step = [[0.0] * batch_size
                                                   for _ in range(num_steps)]
-            topk_logprobs_by_step: List[List[List[float]]] = [[
-                [0.0] * k for _ in range(batch_size)
+            topk_logprobs_by_step: List[List[List[Optional[float]]]] = [[
+                [None] * k for _ in range(batch_size)
             ] for _ in range(num_steps)]
-            topk_indices_by_step: List[List[List[int]]] = [
-                [[-1] * k for _ in range(batch_size)] for _ in range(num_steps)
-            ]
+            topk_indices_by_step: List[List[List[Optional[int]]]] = [[
+                [None] * k for _ in range(batch_size)
+            ] for _ in range(num_steps)]
         else:
             # Organize input tensors by step instead of by sequence.
             target_logprobs_by_step = target_logprobs.transpose(0, 1)

@@ -570,10 +570,10 @@ class EngineArgs:
             '--disable-logprobs-during-spec-decoding',
             type=bool,
             default=EngineArgs.disable_logprobs_during_spec_decoding,
-            help='If set to True, no logprobs are returned during speculative '
-            'decoding. If set to False, logprobs are returned according to '
-            'the settings in SamplingParams. If not specified, it defaults '
-            'to True.')
+            help='If set to True, token log probabilities are not returned '
+            'during speculative decoding. If set to False, log probabilities '
+            'are returned according to the settings in SamplingParams. If '
+            'not specified, it defaults to True.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,

@@ -30,6 +30,8 @@ class TargetModelRunner(ModelRunner):
                  prompt_adapter_config: Optional[PromptAdapterConfig] = None,
                  multimodal_config: Optional[MultiModalConfig] = None,
                  return_hidden_states: bool = False):
+        # An internal boolean member variable to indicate if token log
+        # probabilities are needed or not.
         self.disable_logprobs = True
         super().__init__(
             model_config=model_config,
@@ -55,10 +57,10 @@ class TargetModelRunner(ModelRunner):
         model_input: ModelInputForGPUWithSamplingMetadata = super(
         ).prepare_model_input(seq_group_metadata_list, virtual_engine,
                               finished_requests_ids)
-        # If logprob is disabled then skip sampler CPU output. We directly
-        # synchronize the GPU sampled_token_id tensors as needed. If logprobs
-        # is enabled then synchronize all the sampling related tensors which
-        # includes the logprobs tensors.
+        # If log probabilities is disabled then skip sampler CPU output. We
+        # directly synchronize the GPU sampled_token_id tensors as needed.
+        # If log probabilities is enabled then synchronize all the sampling
+        # related tensors which includes the logprobs tensors.
         model_input.sampling_metadata.skip_sampler_cpu_output = (
             self.disable_logprobs)
         return model_input
