@@ -265,92 +265,7 @@ dequant_8bit<nv_bfloat16>(int q) {
   return frag_b;
 }
 
-template <typename scalar_t>
-__device__ inline typename ScalarType<scalar_t>::FragZP dequantize_s4_to_fp16x2(
-    uint32_t const& source) {
-  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
-}
-
-template <>
-__device__ inline typename ScalarType<half>::FragZP
-dequantize_s4_to_fp16x2<half>(uint32_t const& source) {
-  typename ScalarType<half>::FragZP result;
-
-  uint32_t* h = reinterpret_cast<uint32_t*>(&result);
-  uint32_t const i4s = reinterpret_cast<uint32_t const&>(source);
-
-  // First, we extract the i4s and construct an intermediate fp16 number.
-  static constexpr uint32_t immLut = (0xf0 & 0xcc) | 0xaa;
-  static constexpr uint32_t BOTTOM_MASK = 0x000f000f;
-  static constexpr uint32_t TOP_MASK = 0x00f000f0;
-  static constexpr uint32_t I4s_TO_F16s_MAGIC_NUM = 0x64006400;
-
-  // Note that the entire sequence only requires 1 shift instruction. This is
-  // thanks to the register packing format and the fact that we force our
-  // integers to be unsigned, and account for this in the fp16 subtractions. In
-  // addition, I exploit the fact that sub and fma have the same throughput in
-  // order to convert elt_23 and elt_67 to fp16 without having to shift them to
-  // the bottom bits before hand.
-
-  // Shift right by 8 to now consider elt_45 and elt_67. Issue first to hide RAW
-  // dependency if we issue immediately before required.
-  const uint32_t top_i4s = i4s >> 8;
-  // Extract elt_01 - (i4s & 0x000f000f) | 0x64006400
-  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
-               : "=r"(h[0])
-               : "r"(i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
-                 "n"(immLut));
-  // Extract elt_23 (i4s & 0x00f000f0) | 0x64006400
-  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
-               : "=r"(h[1])
-               : "r"(i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
-                 "n"(immLut));
-  // Extract elt_45 (top_i4s & 0x000f000f) | 0x64006400
-  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
-               : "=r"(h[2])
-               : "r"(top_i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
-                 "n"(immLut));
-  // Extract elt_67 (top_i4s & 0x00f000f0) | 0x64006400
-  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
-               : "=r"(h[3])
-               : "r"(top_i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
-                 "n"(immLut));
-
-  // I use inline PTX below because I am not sure if the compiler will emit
-  // float2half instructions if I use the half2 ctor. In this case, I chose
-  // performance reliability over code readability.
-
-  // This is the half2 {1032, 1032} represented as an integer.
-  // static constexpr uint32_t FP16_TOP_MAGIC_NUM = 0x64086408;
-  // Haotian: subtract {1024, 1024} instead, we do not need to map to [-8, 7]
-  static constexpr uint32_t FP16_TOP_MAGIC_NUM = 0x64006400;
-  // This is the half2 {1 / 16, 1 / 16} represented as an integer.
-  static constexpr uint32_t ONE_SIXTEENTH = 0x2c002c00;
-  // This is the half2 {-72, -72} represented as an integer.
-  // static constexpr uint32_t NEG_72 = 0xd480d480;
-  // Haotian: Let's use {-64, -64}.
-  static constexpr uint32_t NEG_64 = 0xd400d400;
-
-  // Finally, we construct the output numbers.
-  // Convert elt_01
-  asm volatile("sub.f16x2 %0, %1, %2;\n"
-               : "=r"(h[0])
-               : "r"(h[0]), "r"(FP16_TOP_MAGIC_NUM));
-  // Convert elt_23
-  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
-               : "=r"(h[1])
-               : "r"(h[1]), "r"(ONE_SIXTEENTH), "r"(NEG_64));
-  // Convert elt_45
-  asm volatile("sub.f16x2 %0, %1, %2;\n"
-               : "=r"(h[2])
-               : "r"(h[2]), "r"(FP16_TOP_MAGIC_NUM));
-  // Convert elt_67
-  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
-               : "=r"(h[3])
-               : "r"(h[3]), "r"(ONE_SIXTEENTH), "r"(NEG_64));
-
-  return result;
-}
+// Zero-point dequantizers
 
 template <typename scalar_t>
 __device__ inline typename ScalarType<scalar_t>::FragB dequant_4bit_zp(int q) {
@@ -793,10 +708,14 @@ __global__ void Marlin(
 
   // Zero-points have the same read layout as the scales
   // (without column-wise case)
+  constexpr int num_col_threads = 8;
+  constexpr int num_row_threads = 4;
+  constexpr int num_ints_per_thread = 8 / pack_factor;
   int zp_sh_rd;
   if constexpr (has_zp) {
-    zp_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
-               (threadIdx.x % 32) / 4;
+    zp_sh_rd = num_ints_per_thread * num_col_threads *
+                   ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+               num_ints_per_thread * ((threadIdx.x % 32) / num_row_threads);
   }
 
   // Precompute which thread should not read memory in which iterations; this is
@@ -854,10 +773,10 @@ __global__ void Marlin(
   FragA frag_a[2][thread_m_blocks];
   I4 frag_b_quant[2][b_thread_vecs];
   FragC frag_c[thread_m_blocks][4][2];
-  FragS frag_s[2][4];         // No act-order
-  FragS act_frag_s[2][4][4];  // For act-order
-  int frag_qzp[2];            // Zero-points
-  FragZP frag_zp;             // Zero-points in fp16
+  FragS frag_s[2][4];                    // No act-order
+  FragS act_frag_s[2][4][4];             // For act-order
+  int frag_qzp[2][num_ints_per_thread];  // Zero-points
+  FragZP frag_zp;                        // Zero-points in fp16
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -1156,13 +1075,18 @@ __global__ void Marlin(
     static_assert(!has_act_order);
 
     if constexpr (group_blocks == -1) {
-      frag_qzp[k % 2] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd];
+      for (int i = 0; i < num_ints_per_thread; i++) {
+        frag_qzp[k % 2][i] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd + i];
+      }
 
     } else if constexpr (group_blocks >= thread_k_blocks) {
       int4* sh_zp_stage =
           sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
                                  (pipe / (group_blocks / thread_k_blocks)));
-      frag_qzp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
+      for (int i = 0; i < num_ints_per_thread; i++) {
+        frag_qzp[k % 2][i] =
+            (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
+      }
     } else {
       int warp_id = threadIdx.x / 32;
       int n_warps = thread_n_blocks / 4;
@@ -1178,22 +1102,36 @@ __global__ void Marlin(
       int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
       sh_zp_stage += cur_group_id * zp_sh_stride;
-      frag_qzp[k % 2] = (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd];
+
+      for (int i = 0; i < num_ints_per_thread; i++) {
+        frag_qzp[k % 2][i] =
+            (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
+      }
     }
   };
 
   // Execute the actual tensor core matmul of a sub-tile.
   auto matmul = [&](int k) {
     if constexpr (has_zp) {
-      int zp_quant = frag_qzp[k % 2];
-      int zp_quant_shift = zp_quant >> 8;
-      FragB frag_zp_0 = dequant_4bit_zp<scalar_t>(zp_quant);
-      FragB frag_zp_1 = dequant_4bit_zp<scalar_t>(zp_quant_shift);
+      FragB frag_zp_0;
+      FragB frag_zp_1;
+      if constexpr (num_bits == 4) {
+        int zp_quant = frag_qzp[k % 2][0];
+        int zp_quant_shift = zp_quant >> 8;
+        frag_zp_0 = dequant_4bit_zp<scalar_t>(zp_quant);
+        frag_zp_1 = dequant_4bit_zp<scalar_t>(zp_quant_shift);
+
+      } else {
+        int zp_quant_0 = frag_qzp[k % 2][0];
+        int zp_quant_1 = frag_qzp[k % 2][1];
+        frag_zp_0 = dequant_8bit_zp<scalar_t>(zp_quant_0);
+        frag_zp_1 = dequant_8bit_zp<scalar_t>(zp_quant_1);
+      }
+
       frag_zp[0] = frag_zp_0[0];
       frag_zp[1] = frag_zp_0[1];
       frag_zp[2] = frag_zp_1[0];
       frag_zp[3] = frag_zp_1[1];
-      // frag_zp_fp16 = dequantize_s4_to_fp16x2<scalar_t>(frag_zp[k % 2]);
     }
 
   // We have the m dimension as the inner loop in order to encourage overlapping
@@ -2032,25 +1970,24 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, void* zp,
     // GPTQ_CALL_IF(8, 8, 4, 128)
     // GPTQ_CALL_IF(8, 4, 8, 128)
 
-    AWQ_CALL_IF(4, 32, 2, 256)
-    AWQ_CALL_IF(4, 16, 4, 256)
-    AWQ_CALL_IF(4, 8, 8, 256)
-    AWQ_CALL_IF(4, 8, 4, 128)
-    AWQ_CALL_IF(4, 4, 8, 128)
-    // AWQ_CALL_IF(8, 32, 2, 256)
-    // AWQ_CALL_IF(8, 16, 4, 256)
-    // AWQ_CALL_IF(8, 8, 8, 256)
-    // AWQ_CALL_IF(8, 8, 4, 128)
-    // AWQ_CALL_IF(8, 4, 8, 128)
+    // AWQ_CALL_IF(4, 32, 2, 256)
+    // AWQ_CALL_IF(4, 16, 4, 256)
+    // AWQ_CALL_IF(4, 8, 8, 256)
+    // AWQ_CALL_IF(4, 8, 4, 128)
+    // AWQ_CALL_IF(4, 4, 8, 128)
+    AWQ_CALL_IF(8, 32, 2, 256)
+    AWQ_CALL_IF(8, 16, 4, 256)
+    AWQ_CALL_IF(8, 8, 8, 256)
+    AWQ_CALL_IF(8, 8, 4, 128)
+    AWQ_CALL_IF(8, 4, 8, 128)
     else {
-      TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
-                             str(prob_n) + ", " + str(prob_k) + "]" +
-                             ", has_act_order = " + str(has_act_order) +
-                             ", num_groups = " + str(num_groups) +
-                             ", group_size = " + str(group_size) +
-                             ", thread_m_blocks = " + str(thread_m_blocks) +
-                             ", thread_n_blocks = " + str(thread_n_blocks) +
-                             ", thread_k_blocks = " + str(thread_k_blocks));
+      TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
+                  ", ", prob_k, "]", ", has_act_order = ", has_act_order,
+                  ", num_groups = ", num_groups, ", group_size = ", group_size,
+                  ", thread_m_blocks = ", thread_m_blocks,
+                  ", thread_n_blocks = ", thread_n_blocks,
+                  ", thread_k_blocks = ", thread_k_blocks,
+                  ", num_bits = ", num_bits);
     }
 
     A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
