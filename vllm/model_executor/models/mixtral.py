@@ -67,7 +67,8 @@ class MixtralMoE(nn.Module):
                  intermediate_size: int,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 tp_size: Optional[int] = None):
+                 tp_size: Optional[int] = None,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = hidden_size
 
@@ -76,7 +77,8 @@ class MixtralMoE(nn.Module):
                                      num_experts,
                                      bias=False,
                                      params_dtype=params_dtype,
-                                     quant_config=None)
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
 
         self.experts = FusedMoE(num_experts=num_experts,
                                 top_k=top_k,
@@ -86,7 +88,8 @@ class MixtralMoE(nn.Module):
                                 reduce_results=True,
                                 renormalize=True,
                                 quant_config=quant_config,
-                                tp_size=tp_size)
+                                tp_size=tp_size,
+                                prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -109,6 +112,7 @@ class MixtralAttention(nn.Module):
         rope_theta: float = 10000,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -139,12 +143,14 @@ class MixtralAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -182,6 +188,7 @@ class MixtralDecoderLayer(nn.Module):
         config: MixtralConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -194,13 +201,15 @@ class MixtralDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             cache_config=cache_config,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn")
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.block_sparse_moe")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -243,6 +252,7 @@ class MixtralModel(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.padding_idx = config.pad_token_id
@@ -258,8 +268,11 @@ class MixtralModel(nn.Module):
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, lambda: MixtralDecoderLayer(
-                config, cache_config, quant_config=quant_config))
+            config.num_hidden_layers,
+            lambda prefix: MixtralDecoderLayer(
+                config, cache_config, quant_config=quant_config, prefix=prefix
+            ),
+            prefix=f"{prefix}.layers")
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -331,7 +344,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
-                                  lora_config=lora_config)
+                                  lora_config=lora_config,
+                                  prefix="model")
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

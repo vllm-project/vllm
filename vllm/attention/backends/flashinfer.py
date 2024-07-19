@@ -20,6 +20,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
+from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import get_kv_cache_torch_dtype, make_tensor_with_pad
 
@@ -61,14 +62,14 @@ class FlashInferBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        raise NotImplementedError
+        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        raise NotImplementedError
+        PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
