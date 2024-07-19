@@ -108,7 +108,7 @@ class Top1Proposer(SpeculativeProposer):
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,
             proposal_lens=proposal_lens,
-        )
+            no_proposals=maybe_sampler_output is None)
 
         return proposals
 
