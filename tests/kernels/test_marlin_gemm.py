@@ -309,7 +309,7 @@ def test_fp8_marlin_gemm(
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", [8])  #GPTQ_MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 @pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 def test_awq_marlin_gemm(
