@@ -57,10 +57,10 @@ class TargetModelRunner(ModelRunner):
         model_input: ModelInputForGPUWithSamplingMetadata = super(
         ).prepare_model_input(seq_group_metadata_list, virtual_engine,
                               finished_requests_ids)
-        # If log probabilities is disabled then skip sampler CPU output. We
-        # directly synchronize the GPU sampled_token_id tensors as needed.
-        # If log probabilities is enabled then synchronize all the sampling
-        # related tensors which includes the logprobs tensors.
+        # If token log probabilities is disabled then skip generating sampler
+        # CPU output. We directly serialize the GPU sampled_token_id tensors
+        # as needed. If log probabilities is enabled then synchronize all the
+        # sampling related tensors which includes the logprobs tensors.
         model_input.sampling_metadata.skip_sampler_cpu_output = (
             self.disable_logprobs)
         return model_input

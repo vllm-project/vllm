@@ -433,8 +433,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         if self.disable_logprobs:
             # We are skipping adding logprobs to the result. Since we are
-            # skipping the logprobs the sampler has not serialized any tensors
-            # like sampled_token_ids to the cpu. We create the
+            # skipping the logprobs, the sampler has not serialized any
+            # tensors like sampled_token_ids to the cpu. We create the
             # CompletionSequenceGroupOutput from the GPU tensors.
             seq_ids = get_all_seq_ids(
                 execute_model_req.seq_group_metadata_list)
@@ -644,7 +644,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         batch_size, num_steps = accepted_token_ids.shape
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
         if self.disable_logprobs:
-            # We are skipping the logprobs. Hence don't synchronize the
+            # We are skipping the logprobs. Hence don't serialize the
             # logprobs related tensors from the GPU and create empty/dummy
             # lists instead.
             accepted_token_id_ranks_by_step = [[-1] * batch_size
@@ -658,6 +658,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 [None] * k for _ in range(batch_size)
             ] for _ in range(num_steps)]
         else:
+            # Serialize all tensors to CPU Python lists.
             # Organize input tensors by step instead of by sequence.
             target_logprobs_by_step = target_logprobs.transpose(0, 1)
 
@@ -689,7 +690,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
 
-        # Serialize all tensors to CPU Python lists.
+        # Serialize tensor to CPU Python list.
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         # Construct the output on a per-step, per-sequence basis.
