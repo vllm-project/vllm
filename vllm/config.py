@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
 import torch
 from transformers import PretrainedConfig
 
-from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
@@ -19,6 +18,7 @@ from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
@@ -657,7 +657,7 @@ class ParallelConfig:
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
         distributed_executor_backend: Optional[Union[
-            str, Type[ExecutorBase]]] = None,
+            str, Type["ExecutorBase"]]] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
@@ -714,6 +714,9 @@ class ParallelConfig:
             and self.distributed_executor_backend.uses_ray)
 
     def _verify_args(self) -> None:
+        # Lazy import to avoid circular import
+        from vllm.executor.executor_base import ExecutorBase
+
         if (self.pipeline_parallel_size > 1
                 and self.distributed_executor_backend == "mp"):
             raise NotImplementedError("Pipeline parallelism is not supported "
@@ -723,8 +726,9 @@ class ParallelConfig:
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
-                "Unrecognized distributed executor backend. Supported values "
-                "are 'ray' or 'mp'.")
+                "Unrecognized distributed executor backend "
+                f"{self.distributed_executor_backend}. Supported "
+                "values are 'ray', 'mp' or custom ExecutorBase subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
