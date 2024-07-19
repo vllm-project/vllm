@@ -5,7 +5,8 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -14,8 +15,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
-
-# Note: this is a hack. We should update each model to register the 
+# Note: this is a hack. We should update each model to register the
 # stacked params and get it from there instead in a future PR.
 # fused_name: List[shard_name]
 _FUSED_LAYER_NAME_MAPPING = {
@@ -57,30 +57,29 @@ class FBGEMMFp8Config(QuantizationConfig):
         proj_name = prefix.split(".")[-1]
         if proj_name in _FUSED_LAYER_NAME_MAPPING:
             shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name) for
-                shard_proj_name in _FUSED_LAYER_NAME_MAPPING[proj_name]
+                prefix.replace(proj_name, shard_proj_name)
+                for shard_proj_name in _FUSED_LAYER_NAME_MAPPING[proj_name]
             ]
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
                 is_shard_skipped = shard_prefix in self.ignore_list
-                
+
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
                 elif is_shard_skipped != is_skipped:
                     raise ValueError(
                         f"Detected some but not all shards of {prefix} "
                         "are quantized. All shards of fused layers "
-                        "to have the same precision."
-                    )
+                        "to have the same precision.")
         else:
             is_skipped = prefix in self.ignore_list
 
         assert is_skipped is not None
         return is_skipped
-        
-    def get_quant_method(
-            self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
+
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
             if self._is_layer_skipped(prefix):
                 return UnquantizedLinearMethod()

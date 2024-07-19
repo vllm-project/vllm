@@ -387,7 +387,8 @@ class ParallelLMHead(VocabParallelEmbedding):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
-                         org_num_embeddings, padding_size, quant_config, prefix)
+                         org_num_embeddings, padding_size, quant_config,
+                         prefix)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,

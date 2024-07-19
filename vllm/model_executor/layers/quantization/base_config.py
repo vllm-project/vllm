@@ -97,8 +97,8 @@ class QuantizationConfig(ABC):
             return default
 
     @abstractmethod
-    def get_quant_method(
-            self, layer: torch.nn.Module, prefix: str) -> Optional[QuantizeMethodBase]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional[QuantizeMethodBase]:
         """Get the quantize method to use for the quantized layer.
         
         Args:
