@@ -337,23 +337,34 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            # input_ids = inputs.input_ids
-            output = self.model.generate(
-                **self.wrap_device(inputs),
-                use_cache=True,
-                do_sample=False,
-                max_new_tokens=max_tokens,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
-                **kwargs,
-            )
-
+            if "MiniCPM-Llama3-V-2_5" in self.model_name:
+                kwargs.pop("eos_token_id", None)
+                output = self.model.generate(
+                    self.wrap_device(inputs),
+                    use_cache=True,
+                    do_sample=False,
+                    max_new_tokens=max_tokens,
+                    output_hidden_states=True,
+                    return_dict_in_generate=True,
+                    tokenizer=self.tokenizer,
+                    **kwargs,
+                )
+            else:
+                output = self.model.generate(
+                    **self.wrap_device(inputs),
+                    use_cache=True,
+                    do_sample=False,
+                    max_new_tokens=max_tokens,
+                    output_hidden_states=True,
+                    return_dict_in_generate=True,
+                    **kwargs,
+                )
             seq_logprobs: List[torch.Tensor] = []
             for _, hidden_states in enumerate(output.hidden_states):
                 last_hidden_states = hidden_states[-1][0]
                 logits = torch.matmul(
-                    last_hidden_states,
-                    self.model.get_output_embeddings().weight.t(),
+                    last_hidden_states.clone(),
+                    self.model.get_output_embeddings().weight.t().clone(),
                 )
                 if getattr(self.model.get_output_embeddings(), "bias",
                            None) is not None:

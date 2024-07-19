@@ -15,12 +15,12 @@ pytestmark = pytest.mark.vlm
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "<用户>(<image>./</image>)What's the content of the image?<AI>",  # noqa: E501
+    "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n(<image>./</image>)\nWhat's the content of the image?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
     "cherry_blossom":
-    "<用户>(<image>./</image>)What is the season?<AI>",
+    "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n(<image>./</image>)\nWhat is the season?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
 })
 
-models = ["openbmb/MiniCPM-V-2"]
+models = ["HwwwH/MiniCPM-Llama3-V-2_5"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -30,21 +30,9 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     output_ids, output_str, out_logprobs = vllm_output
 
     return output_ids, output_str, out_logprobs
-    output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", "", output_str)
-    assert output_str_without_image[0] == " "
-    output_str_without_image = output_str_without_image[1:]
-
-    hf_output_str = output_str_without_image + "<|end|><|endoftext|>"
-
-    tokenizer = AutoTokenizer.from_pretrained(model)
-    hf_output_ids = tokenizer.encode(output_str_without_image)
-    assert hf_output_ids[0] == 1
-    hf_output_ids = hf_output_ids[1:]
-
-    return hf_output_ids, hf_output_str, out_logprobs
 
 
-target_dtype = "bfloat16"
+target_dtype = "half"
 
 
 def run_test(
@@ -101,9 +89,6 @@ def run_test(
     hf_model_kwargs = {"_attn_implementation": "eager"}
     with hf_runner(model, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
-        # TODO: MiniCPMV.resampler need dtype set after loaded.
-        import torch
-        hf_model.model.to(torch.bfloat16)
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
@@ -134,13 +119,13 @@ def run_test(
     "size_factors",
     [
         # No image
-        # [],
+        [],
         # Single-scale
         [1.0],
         # Single-scale, batched
-        # [1.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0],
         # Multi-scale
-        # [0.25, 0.5, 1.0],
+        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
