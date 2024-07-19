@@ -109,7 +109,6 @@ def apply_fp8_linear(
     bias: Optional[torch.Tensor] = None,
     cutlass_fp8_supported: bool = True,
     use_per_token_if_dynamic: bool = False,
-    use_per_token_if_dynamic: bool = False,
 ) -> torch.Tensor:
     # ops.scaled_fp8_quant supports both dynamic and static quant.
     #   If dynamic, layer.input_scale is None and x_scale computed from x.

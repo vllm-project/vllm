@@ -302,7 +302,6 @@ def scaled_fp8_quant(
     scale_ub: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
     use_per_token_if_dynamic: bool = False,
-    use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
