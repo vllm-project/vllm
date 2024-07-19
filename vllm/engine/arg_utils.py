@@ -7,8 +7,8 @@ from typing import List, Optional, Tuple, Union
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig,
-                         TokenizerPoolConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TokenizerPoolConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
@@ -45,6 +45,7 @@ class EngineArgs:
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
+    cpu_offload_gb: int = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -66,6 +67,9 @@ class EngineArgs:
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
+    enable_prompt_adapter: bool = False
+    max_prompt_adapters: int = 1
+    max_prompt_adapter_token: int = 0
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
@@ -301,6 +305,20 @@ class EngineArgs:
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU.')
         parser.add_argument(
+            '--cpu-offload-gb',
+            type=float,
+            default=0,
+            help='The space in GiB to offload to CPU, per GPU. '
+            'Default is 0, which means no offloading. Intuitively, '
+            'this argument can be seen as a virtual way to increase '
+            'the GPU memory size. For example, if you have one 24 GB '
+            'GPU and set this to 10, virtually you can think of it as '
+            'a 34 GB GPU. Then you can load a 13B model with BF16 weight,'
+            'which requires at least 26GB GPU memory. Note that this '
+            'requires fast CPU-GPU interconnect, as part of the model is'
+            'loaded from CPU memory to GPU memory on the fly in each '
+            'model forward pass.')
+        parser.add_argument(
             '--gpu-memory-utilization',
             type=float,
             default=EngineArgs.gpu_memory_utilization,
@@ -449,6 +467,17 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
+        parser.add_argument('--enable-prompt-adapter',
+                            action='store_true',
+                            help='If True, enable handling of PromptAdapters.')
+        parser.add_argument('--max-prompt-adapters',
+                            type=int,
+                            default=EngineArgs.max_prompt_adapters,
+                            help='Max number of PromptAdapters in a batch.')
+        parser.add_argument('--max-prompt-adapter-token',
+                            type=int,
+                            default=EngineArgs.max_prompt_adapter_token,
+                            help='Max number of PromptAdapters tokens')
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
@@ -619,6 +648,11 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        assert self.cpu_offload_gb >= 0, (
+            "CPU offload space must be non-negative"
+            f", but got {self.cpu_offload_gb}")
+
         multimodal_config = MultiModalConfig()
 
         device_config = DeviceConfig(device=self.device)
@@ -652,7 +686,9 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching)
+            enable_prefix_caching=self.enable_prefix_caching,
+            cpu_offload_gb=self.cpu_offload_gb,
+        )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -726,6 +762,11 @@ class EngineArgs:
             model_loader_extra_config=self.model_loader_extra_config,
         )
 
+        prompt_adapter_config = PromptAdapterConfig(
+            max_prompt_adapters=self.max_prompt_adapters,
+            max_prompt_adapter_token=self.max_prompt_adapter_token) \
+                                        if self.enable_prompt_adapter else None
+
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
@@ -751,6 +792,7 @@ class EngineArgs:
             load_config=load_config,
             decoding_config=decoding_config,
             observability_config=observability_config,
+            prompt_adapter_config=prompt_adapter_config,
         )
 
 

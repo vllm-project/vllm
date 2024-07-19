@@ -12,7 +12,10 @@ from tests.quantization.utils import is_quant_method_supported
 from .utils import check_logprobs_close
 
 MODELS = [
+    # No bias
     "nm-testing/Meta-Llama-3-8B-Instruct-W8-Channel-A8-Dynamic-Per-Token-Test",
+    # Bias
+    "neuralmagic/Qwen2-1.5B-Instruct-quantized.w8a8"
 ]
 
 MAX_TOKENS = 32

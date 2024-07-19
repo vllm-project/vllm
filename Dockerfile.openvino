@@ -1,7 +1,7 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
-FROM ubuntu:22.04 AS dev
+FROM ubuntu:20.04 AS dev
 
 RUN apt-get update -y && \
     apt-get install -y python3-pip git
