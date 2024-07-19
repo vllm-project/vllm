@@ -145,6 +145,7 @@ class GroupCoordinator:
         self.cpu_group = None
 
         for ranks in group_ranks:
+            logger.debug("initializing device group")
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend)
             logger.debug("device group initialized")
@@ -889,6 +890,11 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
+            
+    if all([
+        envs.VLLM_DISAGG_PREFILL_ROLE is not None,
+        envs.VLLM_DISAGG_PREFILL_ROLE == "prefill"]):
+        time.sleep(1000)
     global _WORLD
     if _WORLD is None:
         ranks = list(range(world_size))
@@ -898,7 +904,6 @@ def init_distributed_environment(
             envs.VLLM_DISAGG_PREFILL_ROLE == "decode"]):
                 # sleep 10 seconds to avoid potential collisions
                 # when initializing distributed environment
-                time.sleep(10)
                 ranks = list(range(world_size, 2 * world_size))
             
         _WORLD = init_world_group(ranks, local_rank, backend)
