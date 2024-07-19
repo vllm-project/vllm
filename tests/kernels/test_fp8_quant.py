@@ -31,8 +31,7 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
 
     scale_ub = torch.mean(x).to(dtype=torch.float32, device='cuda') \
             if scale_ub else None
-    ref_out, ref_scales = ref_dynamic_per_token_quant(x,
-                                                      torch.float8_e4m3fn,
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.float8_e4m3fn,
                                                       scale_ub)
     ops_out, ops_scales = ops.dynamic_per_token_scaled_fp8_quant(x, scale_ub)
 
