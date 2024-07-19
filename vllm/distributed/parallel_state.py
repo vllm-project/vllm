@@ -145,14 +145,17 @@ class GroupCoordinator:
         self.cpu_group = None
 
         for ranks in group_ranks:
-            logger.debug("initializing device group, rank %d", self.rank)
+            if self.rank in ranks:
+                logger.debug("initializing device group, rank %d", self.rank)
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend)
-            logger.debug("device group initialized, rank %d", self.rank)
+            if self.rank in ranks:
+                logger.debug("device group initialized, rank %d", self.rank)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-            logger.debug("cpu group initialized, rank %d", self.rank)
+            if self.rank in ranks:
+                logger.debug("cpu group initialized, rank %d", self.rank)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
