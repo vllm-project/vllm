@@ -2,7 +2,7 @@ import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
                     Optional)
 from typing import Sequence as GenericSequence
-from typing import Tuple
+from typing import Tuple, cast
 
 from fastapi import Request
 from transformers import PreTrainedTokenizer
@@ -179,7 +179,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
 
-            final_res_batch_checked: List[RequestOutput] = []
             for i, final_res in enumerate(final_res_batch):
                 assert final_res is not None
 
@@ -189,7 +188,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 if final_res.prompt is None:
                     final_res.prompt = prompts[i]["prompt"]
 
-                final_res_batch_checked.append(final_res)
+            final_res_batch_checked = cast(List[RequestOutput],
+                                           final_res_batch)
 
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,

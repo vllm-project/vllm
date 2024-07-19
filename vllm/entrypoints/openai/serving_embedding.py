@@ -1,6 +1,6 @@
 import base64
 import time
-from typing import AsyncIterator, List, Optional, Tuple
+from typing import AsyncIterator, List, Optional, Tuple, cast
 
 import numpy as np
 from fastapi import Request
@@ -148,14 +148,14 @@ class OpenAIServingEmbedding(OpenAIServing):
                 if await raw_request.is_disconnected():
                     # Abort the request if the client disconnects.
                     await self.engine.abort(f"{request_id}-{i}")
-                    # TODO: Use a vllm-specific Validation Error
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
 
-            final_res_batch_checked: List[EmbeddingRequestOutput] = []
             for final_res in final_res_batch:
                 assert final_res is not None
-                final_res_batch_checked.append(final_res)
+
+            final_res_batch_checked = cast(List[EmbeddingRequestOutput],
+                                           final_res_batch)
 
             response = request_output_to_embedding_response(
                 final_res_batch_checked, request_id, created_time, model_name,
