@@ -43,11 +43,8 @@ class MultiModalInputs(_MultiModalInputsBase):
         *,
         device: torch.types.Device,
     ) -> BatchedTensors:
-        # Avoid initializing CUDA too early
-        import torch
-
         # may be list rather than tensors
-        if not isinstance(tensors[0], torch.Tensor):
+        if isinstance(tensors[0], list):
             new_tensors = []
             for new_tensor in tensors:
                 for new_t in new_tensor:

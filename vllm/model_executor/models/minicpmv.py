@@ -55,7 +55,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
-from vllm.sequence import SamplerOutput, SequenceData
+from vllm.sequence import SamplerOutput, SequenceData, IntermediateTensors
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -602,6 +602,7 @@ class MiniCPMV(nn.Module, SupportsVision):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         pixel_values: List[torch.Tensor] = None,
         **kwargs: object,
     ):
@@ -617,6 +618,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                           positions=positions,
                           kv_caches=kv_caches,
                           attn_metadata=attn_metadata,
+                          intermediate_tensors=intermediate_tensors,
                           input_embeds=vlm_embeddings)
         return output
 

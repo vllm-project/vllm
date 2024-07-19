@@ -87,10 +87,7 @@ def run_test(
             for prompts, vllm_images in inputs_per_image
         ]
 
-    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(model, dtype=dtype) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,

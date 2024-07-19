@@ -363,8 +363,8 @@ class HfRunner:
             for _, hidden_states in enumerate(output.hidden_states):
                 last_hidden_states = hidden_states[-1][0]
                 logits = torch.matmul(
-                    last_hidden_states.clone(),
-                    self.model.get_output_embeddings().weight.t().clone(),
+                    last_hidden_states,
+                    self.model.get_output_embeddings().weight.t(),
                 )
                 if getattr(self.model.get_output_embeddings(), "bias",
                            None) is not None:
@@ -390,7 +390,6 @@ class HfRunner:
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
             output_len = len(seq_logprobs_lst)
-            # output_len = seq_ids.shape[0] - input_ids.shape[1]
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
