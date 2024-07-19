@@ -1,8 +1,6 @@
-import re
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -15,9 +13,13 @@ pytestmark = pytest.mark.vlm
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n(<image>./</image>)\nWhat's the content of the image?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" \
+        "(<image>./</image>)\nWhat's the content of the image?<|eot_id|>" \
+        "<|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
     "cherry_blossom":
-    "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n(<image>./</image>)\nWhat is the season?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" \
+        "(<image>./</image>)\nWhat is the season?<|eot_id|>" \
+        "<|start_header_id|>assistant<|end_header_id|>\n\n"
 })
 
 models = ["HwwwH/MiniCPM-Llama3-V-2_5"]
