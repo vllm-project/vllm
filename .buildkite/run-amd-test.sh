@@ -73,6 +73,7 @@ HF_MOUNT="/root/.cache/huggingface"
 docker run \
         --device /dev/kfd --device /dev/dri \
         --network host \
+        --shm-size=16gb \
         --rm \
         -e HF_TOKEN \
         -v ${HF_CACHE}:${HF_MOUNT} \
