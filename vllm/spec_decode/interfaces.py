@@ -22,6 +22,9 @@ class SpeculativeProposals:
     # The valid length of each proposal; can be zero.
     proposal_lens: torch.Tensor
 
+    # A flag to mark that there's no available proposals
+    no_proposals: bool = False
+
     def __repr__(self):
         return (f"SpeculativeProposals("
                 f"proposal_token_ids={self.proposal_token_ids}, "
