@@ -145,14 +145,14 @@ class GroupCoordinator:
         self.cpu_group = None
 
         for ranks in group_ranks:
-            logger.debug("initializing device group")
+            logger.debug("initializing device group, rank %d", self.rank)
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend)
-            logger.debug("device group initialized")
+            logger.debug("device group initialized, rank %d", self.rank)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-            logger.debug("cpu group initialized")
+            logger.debug("cpu group initialized, rank %d", self.rank)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -162,11 +162,15 @@ class GroupCoordinator:
 
         assert self.cpu_group is not None
         assert self.device_group is not None
+        
+        logger.debug("Here 166 , rank %d", self.rank)
 
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
             self.device = torch.device("cpu")
+            
+        logger.debug("Here 173 , rank %d", self.rank)
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
