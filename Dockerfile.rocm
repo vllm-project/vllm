@@ -4,12 +4,15 @@ ARG BASE_IMAGE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
 
-# Whether to build CK-based flash-attention
-# If 0, will not build flash attention
-# This is useful for gfx target where flash-attention is not supported
-# (i.e. those that do not appear in `FA_GFX_ARCHS`)
-# Triton FA is used by default on ROCm now so this is unnecessary.
+# Whether to install CK-based flash-attention
+# If 0, will not install flash-attention
 ARG BUILD_FA="1"
+# If `TRY_FA_WHEEL=1`, we will try installing flash-attention from `FA_WHEEL_URL`
+# If this succeeds, we use the downloaded wheel and skip building flash-attention.
+# Otherwise, ROCm flash-attention from `FA_BRANCH` will be built for the
+# architectures specified in `FA_GFX_ARCHS`
+ARG TRY_FA_WHEEL="1"
+ARG FA_WHEEL_URL="https://github.com/ROCm/flash-attention/releases/download/v2.5.9post1-cktile-vllm/flash_attn-2.5.9.post1-cp39-cp39-linux_x86_64.whl"
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
 ARG FA_BRANCH="23a2b1c2"
 
@@ -76,18 +79,25 @@ RUN cd /opt/rocm/share/amd_smi \
 ### Flash-Attention wheel build stage
 FROM base AS build_fa
 ARG BUILD_FA
+ARG TRY_FA_WHEEL
+ARG FA_WHEEL_URL
 ARG FA_GFX_ARCHS
 ARG FA_BRANCH
 # Build ROCm flash-attention wheel if `BUILD_FA = 1`
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_FA" = "1" ]; then \
-    mkdir -p libs \
-    && cd libs \
-    && git clone https://github.com/ROCm/flash-attention.git \
-    && cd flash-attention \
-    && git checkout "${FA_BRANCH}" \
-    && git submodule update --init \
-    && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
+        if [ "${TRY_FA_WHEEL}" = "1" ] && python3 -m pip install "${FA_WHEEL_URL}"; then \
+            # If a suitable wheel exists, we download it instead of building FA
+            mkdir -p /install && wget -N "${FA_WHEEL_URL}" -P /install; \
+        else \
+            mkdir -p libs \
+            && cd libs \
+            && git clone https://github.com/ROCm/flash-attention.git \
+            && cd flash-attention \
+            && git checkout "${FA_BRANCH}" \
+            && git submodule update --init \
+            && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
+        fi; \
     # Create an empty directory otherwise as later build stages expect one
     else mkdir -p /install; \
     fi
