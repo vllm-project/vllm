@@ -300,6 +300,7 @@ def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
+    scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -336,7 +337,7 @@ def scaled_fp8_quant(
                                 device=input.device,
                                 dtype=torch.float32)
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale)
+                output, input, scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
