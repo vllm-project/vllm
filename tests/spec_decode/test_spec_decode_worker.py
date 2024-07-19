@@ -708,7 +708,6 @@ def test_populate_seq_ids_with_bonus_tokens():
     # Set the last token ID to -1 for all indices not in
     # seq_indexes_with_bonus_tokens to indicate the lack of bonus token in
     # those indices.
-    
     accepted_token_ids[mask, -1:] = -1
     worker = SpecDecodeWorker(draft_worker,
                               target_worker,
