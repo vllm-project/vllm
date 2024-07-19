@@ -120,7 +120,7 @@ COPY vllm vllm
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,target=/workspace/.git \
+    --mount=type=bind,src=.git,target=/workspace/.git \
     env CFLAGS="-march=haswell" \
         CXXFLAGS="$CFLAGS $CXXFLAGS" \
         CMAKE_BUILD_TYPE=Release \
