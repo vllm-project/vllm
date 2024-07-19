@@ -238,3 +238,11 @@ def gptq_pack(
     size_n: int,
 ):
     return pack_rows(q_w, num_bits, size_k, size_n)
+
+def awq_pack(
+    q_w: torch.Tensor,
+    num_bits: int,
+    size_k: int,
+    size_n: int,
+):
+    return pack_cols(q_w, num_bits, size_k, size_n)

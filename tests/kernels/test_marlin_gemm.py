@@ -22,7 +22,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    gptq_pack, quantize_weights, sort_weights)
+    gptq_pack, awq_pack, quantize_weights, quantize_weights_with_zp,
+    sort_weights)
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
@@ -116,16 +117,16 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
 
     assert torch.allclose(marlin_q_w_1, marlin_q_w_2)
 
+
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size", [128])#GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
-@pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
+@pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
-                            mnk_factors):
+def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
+                           mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
     size_m = m_factor
@@ -133,13 +134,6 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
     size_n = n_chunk * n_factor
 
     print(f"MNK = {size_m} {size_n} {size_k}")
-
-    # Filter act_order
-    if act_order:
-        if group_size == -1:
-            return
-        if group_size == size_k:
-            return
 
     # Normalize group_size
     if group_size == -1:
@@ -149,27 +143,20 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
     # Create input
     b_weight = rand_data((size_k, size_n))
 
-    # Quantize (and apply act_order if provided)
-    w_ref, q_w, s, g_idx, rand_perm = quantize_weights(b_weight, num_bits,
-                                                       group_size, act_order)
+    # Quantize
+    w_ref, q_w, s, zp = quantize_weights_with_zp(b_weight, num_bits,
+                                                 group_size)
 
     # Pack to GPTQ format
-    q_w_gptq = gptq_pack(q_w, num_bits, size_k, size_n)
-
-    # For act_order, sort the "weights" and "g_idx" so that group ids are
-    # increasing
-    sort_indices = torch.empty(0, dtype=torch.int, device=b_weight.device)
-    if act_order:
-        q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
+    q_w_awq = awq_pack(q_w, num_bits, size_k, size_n)
 
     # Pack to Marlin format
     weight_perm = get_weight_perm(num_bits)
     marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
 
     # Run Marlin repack GPU kernel
-    marlin_q_w_2 = ops.gptq_marlin_repack(
-        q_w_gptq,
-        sort_indices,
+    marlin_q_w_2 = ops.awq_marlin_repack(
+        q_w_awq,
         size_k,
         size_n,
         num_bits,

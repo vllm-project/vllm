@@ -118,8 +118,8 @@ __global__ void awq_marlin_repack_kernel(
       int cur_elem = tc_row + tc_offsets[i];
 
       int packed_src_0 = sh_stage_int_ptr[cur_n_packed + sh_stride * cur_elem];
-      int packed_src_1 =
-          sh_stage_int_ptr[cur_n_packed + 8 + sh_stride * cur_elem];
+      int packed_src_1 = sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) +
+                                          sh_stride * cur_elem];
 
       vals[i] = (packed_src_0 >> (cur_n_pos * num_bits)) & mask;
       vals[4 + i] = (packed_src_1 >> (cur_n_pos * num_bits)) & mask;
@@ -209,12 +209,12 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
   int const pack_factor = 32 / num_bits;
 
   // Verify B
-  TORCH_CHECK((size_k / pack_factor) == b_q_weight.size(0),
-              "Shape mismatch: b_q_weight.size(0) = ", b_q_weight.size(0),
-              ", size_k = ", size_k, ", pack_factor = ", pack_factor);
-  TORCH_CHECK(b_q_weight.size(1) == size_n,
-              "b_q_weight.size(1) = ", b_q_weight.size(1),
-              " is not size_n = ", size_n);
+  TORCH_CHECK(b_q_weight.size(0) == size_k,
+              "b_q_weight.size(0) = ", b_q_weight.size(0),
+              " is not size_k = ", size_k);
+  TORCH_CHECK((size_n / pack_factor) == b_q_weight.size(1),
+              "Shape mismatch: b_q_weight.size(1) = ", b_q_weight.size(1),
+              ", size_n = ", size_n, ", pack_factor = ", pack_factor);
 
   // Verify device and strides
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
