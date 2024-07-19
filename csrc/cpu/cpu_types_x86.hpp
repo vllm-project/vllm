@@ -313,6 +313,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(_mm512_div_ps(reg, b.reg));
   }
 
+  FP32Vec16 clamp(const FP32Vec16& min, const FP32Vec16& max) {
+    return FP32Vec16(_mm512_min_ps(max.reg, _mm512_max_ps(min.reg, reg)));
+  }
+
   float reduce_sum() const { return _mm512_reduce_add_ps(reg); }
 
   template <int group_size> float reduce_sub_sum(int idx) {
@@ -429,6 +433,32 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   void save(float *ptr) const {
     _mm256_storeu_ps(ptr, reg_low);
     _mm256_storeu_ps(ptr + 8, reg_high);
+  }
+};
+#endif
+
+#ifdef __AVX512F__
+struct INT8Vec16: public Vec<INT8Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  union AliasReg {
+    __m128i reg;
+    int8_t values[VEC_ELEM_NUM];
+  };
+
+  __m128i reg;
+  
+  explicit INT8Vec16(const FP32Vec16& vec) : reg(
+    _mm512_cvtepi32_epi8(_mm512_cvt_roundps_epi32(vec.reg, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))
+  ) {}
+
+  void save(int8_t* ptr) const {
+    _mm_storeu_epi8(ptr, reg);
+  }
+
+  void save_low(int8_t* ptr, const int num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - num));
+    _mm_mask_storeu_epi8(ptr, mask, reg);
   }
 };
 #endif

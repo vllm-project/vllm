@@ -49,6 +49,19 @@ find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
 find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
 
+#
+# _C extension
+#
+
+set(VLLM_EXT_SRC
+    "csrc/cpu/activation.cpp"
+    "csrc/cpu/attention.cpp"
+    "csrc/cpu/cache.cpp"
+    "csrc/cpu/utils.cpp"
+    "csrc/cpu/layernorm.cpp"
+    "csrc/cpu/pos_encoding.cpp"
+    "csrc/cpu/torch_bindings.cpp")
+
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
         "-mavx512f"
@@ -67,6 +80,11 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     else()
         message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
     endif()
+
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+        
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
@@ -89,18 +107,6 @@ list(APPEND LIBS "numa")
 #
 # Define extension targets
 #
-
-#
-# _C extension
-#
-set(VLLM_EXT_SRC
-    "csrc/cpu/activation.cpp"
-    "csrc/cpu/attention.cpp"
-    "csrc/cpu/cache.cpp"
-    "csrc/cpu/utils.cpp"
-    "csrc/cpu/layernorm.cpp"
-    "csrc/cpu/pos_encoding.cpp"
-    "csrc/cpu/torch_bindings.cpp")
 
 define_gpu_extension_target(
     _C
