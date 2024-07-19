@@ -145,12 +145,12 @@ class GroupCoordinator:
         self.cpu_group = None
 
         for ranks in group_ranks:
-            if self.rank in ranks:
-                logger.debug("initializing device group, rank %d", self.rank)
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend)
             if self.rank in ranks:
-                logger.debug("device group initialized, rank %d", self.rank)
+                import time
+                time.sleep(self.rank)
+                logger.debug("initializing cpu group, rank %d", self.rank)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
@@ -166,14 +166,12 @@ class GroupCoordinator:
         assert self.cpu_group is not None
         assert self.device_group is not None
         
-        logger.debug("Here 166 , rank %d", self.rank)
 
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
             self.device = torch.device("cpu")
             
-        logger.debug("Here 173 , rank %d", self.rank)
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
@@ -184,16 +182,13 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
 
-        logger.debug("Oh plz")
 
         self.pynccl_comm: Optional[PyNcclCommunicator]
         if use_pynccl and self.world_size > 1:
-            logger.debug("Before pynccl")
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
             )
-            logger.debug("Pynccl initialized")
         else:
             self.pynccl_comm = None
 
@@ -919,7 +914,6 @@ def init_distributed_environment(
             "world group already initialized with a different world size")
 
             
-    time.sleep(torch.distributed.get_rank())
     logger.debug("Success initialized _WORLD for rank %d", torch.distributed.get_rank())
     time.sleep(100)
         
