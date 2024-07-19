@@ -172,23 +172,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
     echo: Optional[bool] = Field(
         default=False,
         description=(
-            "If True, the new message will be prepended with the last message "
+            "If true, the new message will be prepended with the last message "
             "if they belong to the same role."),
     )
     add_generation_prompt: bool = Field(
         default=True,
         description=
-        ("If True, the generation prompt will be added to the chat template. "
+        ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
     )
     add_special_tokens: bool = Field(
         default=False,
         description=(
-            "If True, special tokens (e.g. BOS) will be added to the prompt "
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to False (as is the "
+            "special tokens so this should be set to false (as is the "
             "default)."),
     )
     documents: Optional[List[Dict[str, str]]] = Field(
@@ -400,7 +400,7 @@ class CompletionRequest(OpenAIBaseModel):
     add_special_tokens: bool = Field(
         default=True,
         description=(
-            "If True (the default), special tokens (e.g. BOS) will be added to "
+            "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
     include_stop_str_in_output: Optional[bool] = Field(
@@ -529,7 +529,7 @@ class CompletionRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
             raise ValueError(
-                "Stream options can only be defined when stream is True.")
+                "Stream options can only be defined when stream is true.")
         return data
 
 
