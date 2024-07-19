@@ -184,6 +184,8 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE",
                                                 "sockets")
             os.environ['CCL_ZE_IPC_EXCHANGE'] = ENV_CCL_ZE_IPC_EXCHANGE
+            os.environ["LOCAL_WORLD_SIZE"]=str(parallel_config.world_size)
+            os.environ["LOCAL_RANK"]=str(self.local_rank)
             init_distributed_environment(
                 world_size=parallel_config.world_size,
                 rank=rank,
