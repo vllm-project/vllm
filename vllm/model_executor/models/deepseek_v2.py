@@ -325,10 +325,9 @@ class DeepseekV2DecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        layer_idx: int,
+        prefix: str,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -336,6 +335,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        # DecoderLayers are created with `make_layers` which passes the prefix
+        # with the layer's index.
+        layer_idx = int(prefix.split(sep='.')[-1])
         self.self_attn = DeepseekV2Attention(
             config=config,
             hidden_size=self.hidden_size,
@@ -429,11 +431,9 @@ class DeepseekV2Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            # layer_idx and prefix are the remaining arguments
-            functools.partial(DeepseekV2DecoderLayer,
-                              config,
-                              cache_config=cache_config,
-                              quant_config=quant_config),
+            lambda prefix: DeepseekV2DecoderLayer(
+                config, prefix, cache_config=cache_config, quant_config=quant_config,
+            ),
             prefix=f"{prefix}.layers")
 
         if get_pp_group().is_last_rank:
