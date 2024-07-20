@@ -28,7 +28,6 @@ def apply_fp8_marlin_linear(
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n, )
-
     output = ops.fp8_marlin_gemm(
         a=reshaped_x,
         b_q_weight=weight,
