@@ -37,7 +37,7 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
     return (np.asarray(a) == np.asarray(b.convert(a.mode))).all()
 
 
-@pytest.mark.asyncio(scope="module")
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_fetch_image_http(image_url: str):
     image_sync = fetch_image(image_url)
@@ -45,7 +45,7 @@ async def test_fetch_image_http(image_url: str):
     assert _image_equals(image_sync, image_async)
 
 
-@pytest.mark.asyncio(scope="module")
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: Dict[str, Image.Image],

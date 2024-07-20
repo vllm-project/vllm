@@ -11,22 +11,24 @@ from vllm.version import __version__ as VLLM_VERSION
 class HTTPConnection:
     """Helper class to send HTTP requests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, reuse_client: bool = True) -> None:
         super().__init__()
+
+        self.reuse_client = reuse_client
 
         self._sync_client: Optional[requests.Session] = None
         self._async_client: Optional[aiohttp.ClientSession] = None
 
     @property
     def sync_client(self) -> requests.Session:
-        if self._sync_client is None:
+        if self._sync_client is None or not self.reuse_client:
             self._sync_client = requests.Session()
 
         return self._sync_client
 
     @property
     def async_client(self) -> aiohttp.ClientSession:
-        if self._async_client is None:
+        if self._async_client is None or not self.reuse_client:
             self._async_client = aiohttp.ClientSession()
 
         return self._async_client
@@ -155,9 +157,3 @@ class HTTPConnection:
 
 global_http_connection = HTTPConnection()
 """The global :class:`HTTPConnection` instance used by vLLM."""
-
-global_http_client = global_http_connection.sync_client
-"""The global HTTP client used by vLLM."""
-
-global_aiohttp_client = global_http_connection.async_client
-"""The global asynchronous HTTP client used by vLLM."""
