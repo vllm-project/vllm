@@ -552,9 +552,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # runner.
 
         # It returns a list of int although type annotation says list of string.
+        if len(computed_seq_block_ids) == 1:
+            return computed_seq_block_ids[0]
+
         return commonprefix([
             ids for ids in computed_seq_block_ids  # type: ignore
-            if ids != []
+            if ids
         ])
 
     def get_num_blocks_touched(self,
