@@ -627,10 +627,11 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
 
 
 def make_array_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
+    x: List[List[T]],
+    pad: T,
     dtype: npt.DTypeLike,
+    *,
+    max_len: Optional[int] = None,
 ) -> npt.NDArray:
     """
     Make a padded array from 2D inputs.
@@ -638,6 +639,9 @@ def make_array_with_pad(
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
     """
+    if max_len is None:
+        max_len = max(map(len, x), default=0)
+
     padded_x = np.full((len(x), max_len), pad, dtype=dtype)
     for ind, blocktb in enumerate(x):
         assert len(blocktb) <= max_len
@@ -647,10 +651,11 @@ def make_array_with_pad(
 
 
 def make_tensor_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
+    x: List[List[T]],
+    pad: T,
     dtype: torch.dtype,
+    *,
+    max_len: Optional[int] = None,
     device: Optional[Union[str, torch.device]] = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
@@ -661,7 +666,7 @@ def make_tensor_with_pad(
     `max_len`.
     """
     np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
-    padded_x = make_array_with_pad(x, max_len, pad, np_dtype)
+    padded_x = make_array_with_pad(x, pad, np_dtype, max_len=max_len)
 
     tensor = torch.from_numpy(padded_x).to(device)
     if pin_memory:

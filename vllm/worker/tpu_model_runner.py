@@ -236,18 +236,18 @@ class TPUModelRunner:
         # We pad the seq_len to powers of 2 to reduce the compilation overhead.
         max_prompt_len = _get_padded_prefill_len(max(prompt_lens))
         input_tokens = make_tensor_with_pad(input_tokens,
-                                            max_prompt_len,
                                             pad=0,
+                                            max_len=max_prompt_len,
                                             dtype=torch.int32,
                                             device=self.device)
         input_positions = make_tensor_with_pad(input_positions,
-                                               max_prompt_len,
                                                pad=0,
+                                               max_len=max_prompt_len,
                                                dtype=torch.int32,
                                                device=self.device)
         slot_mapping = make_tensor_with_pad(slot_mapping,
-                                            max_prompt_len,
                                             pad=_PAD_SLOT_ID,
+                                            max_len=max_prompt_len,
                                             dtype=torch.int64,
                                             device=self.device)
         prompt_lens = torch.tensor(prompt_lens,

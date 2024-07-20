@@ -465,21 +465,15 @@ class SamplingTensors:
         do_penalties = prompt_tokens or output_tokens
 
         if do_penalties:
-            prompt_max_len = max((len(tokens) for tokens in prompt_tokens),
-                                 default=0)
             prompt_t = make_tensor_with_pad(
                 prompt_tokens,
-                prompt_max_len,
                 vocab_size,
                 device="cpu",
                 dtype=torch.int64,
                 pin_memory=pin_memory,
             )
-            output_max_len = max((len(tokens) for tokens in output_tokens),
-                                 default=0)
             output_t = make_tensor_with_pad(
                 output_tokens,
-                output_max_len,
                 vocab_size,
                 device="cpu",
                 dtype=torch.int64,
