@@ -7,9 +7,9 @@ from typing import Set, Type, TypeVar, Union
 from transformers import PreTrainedTokenizer
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
+                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
@@ -376,19 +376,20 @@ class LLMEngine:
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @classmethod
-    def from_engine_args(
-        cls,
-        engine_args: EngineArgs,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-    ) -> "LLMEngine":
-        """Creates an LLM engine from the engine arguments."""
-        # Create the engine configs.
-        engine_config = engine_args.create_engine_config()
+    def _get_executor_cls(cls,
+                          engine_config: EngineConfig) -> Type[ExecutorBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         # Initialize the cluster and specify the executor class.
-        if engine_config.device_config.device_type == "neuron":
+        if isinstance(distributed_executor_backend, type):
+            if not issubclass(distributed_executor_backend, ExecutorBase):
+                raise TypeError(
+                    "distributed_executor_backend must be a subclass of "
+                    f"ExecutorBase. Got {distributed_executor_backend}.")
+            if distributed_executor_backend.uses_ray:  # type: ignore
+                initialize_ray_cluster(engine_config.parallel_config)
+            executor_class = distributed_executor_backend
+        elif engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
         elif engine_config.device_config.device_type == "tpu":
@@ -422,6 +423,19 @@ class LLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
+        return executor_class
+
+    @classmethod
+    def from_engine_args(
+        cls,
+        engine_args: EngineArgs,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+    ) -> "LLMEngine":
+        """Creates an LLM engine from the engine arguments."""
+        # Create the engine configs.
+        engine_config = engine_args.create_engine_config()
+        executor_class = cls._get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),

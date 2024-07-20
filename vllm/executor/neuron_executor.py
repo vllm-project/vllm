@@ -11,6 +11,8 @@ logger = init_logger(__name__)
 
 class NeuronExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         assert (self.lora_config is
                 None), "LoRA is not supported for Neuron backend."

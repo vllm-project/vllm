@@ -14,6 +14,8 @@ logger = init_logger(__name__)
 
 class TPUExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         assert not self.scheduler_config.chunked_prefill_enabled, (
             "Chunked prefill is not yet supported for TPU backend")
