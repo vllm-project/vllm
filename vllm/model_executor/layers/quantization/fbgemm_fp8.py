@@ -27,8 +27,9 @@ _FUSED_LAYER_NAME_MAPPING = {
 class FBGEMMFp8Config(QuantizationConfig):
     """Config class for FBGEMM Fp8."""
 
-    def __init__(self, ignore_list: List[str]):
+    def __init__(self, ignore_list: List[str], input_scale_ub: float):
         self.ignore_list = ignore_list
+        self.input_scale_ub = input_scale_ub
 
     @classmethod
     def get_name(cls) -> str:
@@ -40,7 +41,7 @@ class FBGEMMFp8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 90
+        return 89
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -49,7 +50,8 @@ class FBGEMMFp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FBGEMMFp8Config":
         ignore_list = cls.get_from_keys(config, ["modules_to_not_convert"])
-        return cls(ignore_list=ignore_list)
+        input_scale_ub = cls.get_from_keys(config, ["activation_scale_ub"])
+        return cls(ignore_list=ignore_list, input_scale_ub=input_scale_ub)
 
     def _is_layer_skipped(self, prefix: str) -> bool:
         # prefix: model.layers.0.self_attn.q_proj
@@ -132,14 +134,10 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE UPPER BOUND
-        input_scale_ub = torch.nn.Parameter(torch.zeros((1),
-                                                        dtype=torch.float32),
-                                            requires_grad=False)
-        layer.register_parameter("input_scale_ub", input_scale_ub)
-        set_weight_attrs(input_scale_ub, {
-            "ignore_warning": True,
-            **extra_weight_attrs
-        })
+        input_scale_ub = torch.nn.Parameter(
+            torch.tensor((self.quant_config.input_scale_ub), dtype=torch.float32),
+            requires_grad=False)
+        layer.input_scale_ub = input_scale_ub
 
     def process_weights_after_loading(self, layer: Module) -> None:
         weight = layer.weight
