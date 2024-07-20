@@ -76,8 +76,13 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     # WEIGHT SCALES
     # Currently Marlin doesn't support per-tensor scales, so we
     # expand it to channelwise
-    scales = layer.weight_scale.repeat(1, part_size_n).to(
-        layer.orig_dtype).to(device)
+    is_channelwise = layer.weight_scale.shape[0] == part_size_n
+    if is_channelwise:
+        scales = layer.weight_scale
+    else:
+        scales = layer.weight_scale.repeat(1, part_size_n)
+    scales = scales.to(layer.orig_dtype).to(device)
+
     # Permute scales
     marlin_scales = marlin_permute_scales(s=scales,
                                           size_k=part_size_k,

@@ -300,6 +300,8 @@ def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
+    scale_ub: Optional[torch.Tensor] = None,
+    use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -313,8 +315,12 @@ def scaled_fp8_quant(
     Args:
         input: The input tensor to be quantized to FP8
         scale: Optional scaling factor for the FP8 quantization
+        scale_ub: Optional upper bound for scaling factor in dynamic 
+            per token case
         batch_dim_padding: If specified, pad the first dimension
             of the output to at least this value.
+        use_per_token_if_dynamic: Whether to do per_tensor or per_token 
+            in the dynamic quantization case.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
@@ -328,22 +334,19 @@ def scaled_fp8_quant(
     else:
         output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+        if use_per_token_if_dynamic:
+            scale = torch.empty((input.numel() // input.shape[-1], 1),
+                                device=input.device,
+                                dtype=torch.float32)
+            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+                output, input, scale, scale_ub)
+        else:
+            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
+
     return output, scale
-
-
-def dynamic_per_token_scaled_fp8_quant(
-        input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
-    scales = torch.empty((input.numel() // input.shape[-1], 1),
-                         device=input.device,
-                         dtype=torch.float32)
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scales)
-    return output, scales
 
 
 # int8
