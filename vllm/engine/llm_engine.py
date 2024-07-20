@@ -7,6 +7,7 @@ from typing import Set, Tuple, Type, TypeVar, Union
 import torch
 from transformers import PreTrainedTokenizer
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig,
@@ -418,6 +419,9 @@ class LLMEngine:
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
                 MultiprocessingGPUExecutor)
+            assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
+                "multiprocessing distributed executor backend does not "
+                "support VLLM_USE_RAY_SPMD_WORKER=1")
             executor_class = MultiprocessingGPUExecutor
         else:
             from vllm.executor.gpu_executor import GPUExecutor
@@ -430,6 +434,7 @@ class LLMEngine:
             usage_context=usage_context,
             stat_loggers=stat_loggers,
         )
+
         return engine
 
     def __reduce__(self):
@@ -454,8 +459,11 @@ class LLMEngine:
 
         return self.tokenizer
 
-    def get_tokenizer(self) -> "PreTrainedTokenizer":
-        return self.get_tokenizer_group().get_lora_tokenizer(None)
+    def get_tokenizer(
+            self,
+            lora_request: Optional[LoRARequest] = None
+    ) -> "PreTrainedTokenizer":
+        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
     def get_tokenizer_for_seq(self,
                               sequence: Sequence) -> "PreTrainedTokenizer":

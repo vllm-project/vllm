@@ -981,6 +981,13 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         return super().parse_args(processed_args, namespace)
 
 
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
+                              **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)
+
+
 def is_encoder_decoder_model_config(model_config) -> bool:
     '''
     Extract the HF encoder/decoder model flag from the ModelConfig instance.
