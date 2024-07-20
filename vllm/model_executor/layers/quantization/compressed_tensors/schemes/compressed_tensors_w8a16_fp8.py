@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     create_per_tensor_scale_param, create_per_channel_scale_param,
-    convert_to_channelwise)
+    convert_to_channelwise, create_group_scale_param)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.utils import set_weight_attrs
@@ -18,8 +18,28 @@ __all__ = ["CompressedTensorsW8A16Fp8"]
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
-    def __init__(self, strategy: str):
+    def __init__(self, strategy: str, group_size: Optional[int] = None):
         self.strategy = strategy
+        self.pack_factor = 32 // 8
+        self.strategy = strategy
+
+        if self.strategy not in [
+                QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL,
+                QuantizationStrategy.GROUP
+        ]:
+            raise ValueError(f"Unsupported strategy: {self.strategy}")
+
+        if group_size is None:
+            if self.strategy not in [
+                    QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
+            ]:
+                raise ValueError(
+                    "Marlin kernels require tensor, channelwise, or group "
+                    "quantization, but found no group size and strategy "
+                    "is not tensor or channelwise.")
+            self.group_size = -1
+        else:
+            self.group_size = group_size
 
     def get_min_capability(self):
         # ampere and up
@@ -34,8 +54,9 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                                                     layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise,
                                                     requires_grad=False)
+            self.strategy = QuantizationStrategy.CHANNEL
 
-        prepare_fp8_layer_for_marlin(layer, strategy="channel")
+        prepare_fp8_layer_for_marlin(layer, strategy=self.strategy)
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],

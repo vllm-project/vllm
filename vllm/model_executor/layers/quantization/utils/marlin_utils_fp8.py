@@ -5,8 +5,8 @@ import torch
 import vllm._custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
-
-from .marlin_utils import marlin_make_workspace, marlin_permute_scales
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales)
 
 
 def is_fp8_marlin_supported():
@@ -15,30 +15,33 @@ def is_fp8_marlin_supported():
 
 
 def apply_fp8_marlin_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    workspace: torch.Tensor,
-    size_n: int,
-    size_k: int,
-    bias: Optional[torch.Tensor],
-) -> torch.Tensor:
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        is_k_full: bool,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP8 quantization
 
     reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (size_n, )
+    out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = ops.fp8_marlin_gemm(
-        a=reshaped_x,
-        b_q_weight=weight,
-        b_scales=weight_scale,
-        workspace=workspace,
-        num_bits=8,
-        size_m=reshaped_x.shape[0],
-        size_n=size_n,
-        size_k=size_k,
-    )
+    output = ops.fp8_marlin_gemm(a=reshaped_x,
+                                 b_q_weight=weight,
+                                 b_scales=weight_scale,
+                                 g_idx=g_idx,
+                                 perm=g_idx_sort_indices,
+                                 workspace=workspace,
+                                 num_bits=8,
+                                 size_m=reshaped_x.shape[0],
+                                 size_n=output_size_per_partition,
+                                 size_k=input_size_per_partition,
+                                 is_k_full=is_k_full)
 
     if bias is not None:
         output.add_(bias)  # In-place add
@@ -54,33 +57,34 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads.")
 
-    part_size_n = layer.output_size_per_partition
-    part_size_k = layer.input_size_per_partition
-
     device = layer.weight.device
 
-    # WORKSPACE
-    layer.workspace = marlin_make_workspace(part_size_n, device)
+    # Allocate marlin workspace.
+    layer.workspace = marlin_make_workspace(layer.output_size_per_partition,
+                                            device)
+
+    # Act-order not supported in compressed-tensors yet, so set to empty.
+    layer.g_idx = marlin_make_empty_g_idx(device)
+    layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
     # WEIGHT
     # Repack weights to marlin format
-    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=pack_fp8_to_int32(
-        layer.weight),
-                                            perm=torch.empty(0,
-                                                             dtype=torch.int,
-                                                             device=device),
-                                            size_k=part_size_k,
-                                            size_n=part_size_n,
-                                            num_bits=8)
+    marlin_qweight = ops.gptq_marlin_repack(
+        b_q_weight=pack_fp8_to_int32(layer.weight),
+        perm=layer.g_idx_sort_indices,
+        size_k=layer.input_size_per_partition,
+        size_n=layer.output_size_per_partition,
+        num_bits=8)
     layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
 
     # WEIGHT SCALES
     scales = layer.weight_scale.to(layer.orig_dtype)
     # Permute scales
-    marlin_scales = marlin_permute_scales(s=scales,
-                                          size_k=part_size_k,
-                                          size_n=part_size_n,
-                                          group_size=-1)
+    marlin_scales = marlin_permute_scales(
+        s=scales,
+        size_k=layer.input_size_per_partition,
+        size_n=layer.output_size_per_partition,
+        group_size=layer.group_size)
     layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
 
 
