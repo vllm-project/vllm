@@ -71,70 +71,64 @@ class HTTPConnection:
                                      timeout=timeout)
 
     def get_bytes(self, url: str, *, timeout: Optional[float] = None) -> bytes:
-        self._validate_http_url(url)
-
         with self.get_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return r.content
 
-    async def async_get_bytes(self,
-                              url: str,
-                              *,
-                              timeout: Optional[float] = None) -> bytes:
-        self._validate_http_url(url)
-
+    async def async_get_bytes(
+        self,
+        url: str,
+        *,
+        timeout: Optional[float] = None,
+    ) -> bytes:
         async with self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return await r.read()
 
     def get_text(self, url: str, *, timeout: Optional[float] = None) -> str:
-        self._validate_http_url(url)
-
         with self.get_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return r.text
 
-    async def async_get_text(self,
-                             url: str,
-                             *,
-                             timeout: Optional[float] = None) -> str:
-        self._validate_http_url(url)
-
+    async def async_get_text(
+        self,
+        url: str,
+        *,
+        timeout: Optional[float] = None,
+    ) -> str:
         async with self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return await r.text()
 
     def get_json(self, url: str, *, timeout: Optional[float] = None) -> str:
-        self._validate_http_url(url)
-
         with self.get_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return r.json()
 
-    async def async_get_json(self,
-                             url: str,
-                             *,
-                             timeout: Optional[float] = None) -> str:
-        self._validate_http_url(url)
-
+    async def async_get_json(
+        self,
+        url: str,
+        *,
+        timeout: Optional[float] = None,
+    ) -> str:
         async with self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return await r.json()
 
-    def download_file(self,
-                      url: str,
-                      save_path: Path,
-                      *,
-                      timeout: Optional[float] = None,
-                      chunk_size: int = 128) -> Path:
-        self._validate_http_url(url)
-
+    def download_file(
+        self,
+        url: str,
+        save_path: Path,
+        *,
+        timeout: Optional[float] = None,
+        chunk_size: int = 128,
+    ) -> Path:
         with self.get_response(url, stream=True, timeout=timeout) as r:
             r.raise_for_status()
 
@@ -144,14 +138,14 @@ class HTTPConnection:
 
         return save_path
 
-    async def async_download_file(self,
-                                  url: str,
-                                  save_path: Path,
-                                  *,
-                                  timeout: Optional[float] = None,
-                                  chunk_size: int = 128) -> Path:
-        self._validate_http_url(url)
-
+    async def async_download_file(
+        self,
+        url: str,
+        save_path: Path,
+        *,
+        timeout: Optional[float] = None,
+        chunk_size: int = 128,
+    ) -> Path:
         async with self.get_async_response(url, stream=True,
                                            timeout=timeout) as r:
             r.raise_for_status()
