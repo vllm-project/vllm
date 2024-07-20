@@ -59,14 +59,12 @@ class HTTPConnection:
         self,
         url: str,
         *,
-        stream: bool = False,
         timeout: Optional[float] = None,
     ):
         self._validate_http_url(url)
 
         return self.async_client.get(url,
                                      headers=self._headers(),
-                                     stream=stream,
                                      timeout=timeout)
 
     def get_bytes(self, url: str, *, timeout: Optional[float] = None) -> bytes:
@@ -128,7 +126,7 @@ class HTTPConnection:
         timeout: Optional[float] = None,
         chunk_size: int = 128,
     ) -> Path:
-        with self.get_response(url, stream=True, timeout=timeout) as r:
+        with self.get_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             with save_path.open("wb") as f:
@@ -145,8 +143,7 @@ class HTTPConnection:
         timeout: Optional[float] = None,
         chunk_size: int = 128,
     ) -> Path:
-        async with self.get_async_response(url, stream=True,
-                                           timeout=timeout) as r:
+        async with self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             with save_path.open("wb") as f:
