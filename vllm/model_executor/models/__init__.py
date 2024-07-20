@@ -87,13 +87,24 @@ _ROCM_UNSUPPORTED_MODELS: List[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
+_ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
+                    "Triton flash attention. For half-precision SWA support, "
+                    "please use CK flash attention by setting "
+                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
 _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
     "Qwen2ForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
+    _ROCM_SWA_REASON,
     "MistralForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
+    _ROCM_SWA_REASON,
     "MixtralForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
+    _ROCM_SWA_REASON,
+    "PaliGemmaForConditionalGeneration":
+    ("ROCm flash attention does not yet "
+     "fully support 32-bit precision on PaliGemma"),
+    "Phi3VForCausalLM":
+    ("ROCm Triton flash attention may run into compilation errors due to "
+     "excessive use of shared memory. If this happens, disable Triton FA "
+     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
 }
 
 
