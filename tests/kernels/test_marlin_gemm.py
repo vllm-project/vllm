@@ -147,7 +147,7 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
     w_ref, q_w, s, zp = quantize_weights_with_zp(b_weight, num_bits,
                                                  group_size)
 
-    # Pack to GPTQ format
+    # Pack to AWQ format
     q_w_awq = awq_pack(q_w, num_bits, size_k, size_n)
 
     # Pack to Marlin format

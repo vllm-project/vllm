@@ -111,8 +111,17 @@ __global__ void awq_marlin_repack_kernel(
     int4* sh_stage_ptr = sh + stage_size * pipe;
     uint32_t* sh_stage_int_ptr = reinterpret_cast<uint32_t*>(sh_stage_ptr);
 
-    uint32_t vals[8];
+    // Undo interleaving
+    int cur_n_pos_unpacked;
+    if constexpr (num_bits == 4) {
+      constexpr int undo_pack[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+      cur_n_pos_unpacked = undo_pack[cur_n_pos];
+    } else {
+      constexpr int undo_pack[4] = {0, 2, 1, 3};
+      cur_n_pos_unpacked = undo_pack[cur_n_pos];
+    }
 
+    uint32_t vals[8];
   #pragma unroll
     for (int i = 0; i < 4; i++) {
       int cur_elem = tc_row + tc_offsets[i];
@@ -121,8 +130,8 @@ __global__ void awq_marlin_repack_kernel(
       int packed_src_1 = sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) +
                                           sh_stride * cur_elem];
 
-      vals[i] = (packed_src_0 >> (cur_n_pos * num_bits)) & mask;
-      vals[4 + i] = (packed_src_1 >> (cur_n_pos * num_bits)) & mask;
+      vals[i] = (packed_src_0 >> (cur_n_pos_unpacked * num_bits)) & mask;
+      vals[4 + i] = (packed_src_1 >> (cur_n_pos_unpacked * num_bits)) & mask;
     }
 
     constexpr int tile_size = tile_k_size * tile_n_size / pack_factor;

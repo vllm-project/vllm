@@ -7,8 +7,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, replace_tensor, verify_marlin_supported,
+    apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
+    marlin_permute_scales, replace_tensor, verify_gptq_marlin_supported,
     verify_marlin_supports_shape)
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -38,7 +38,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             self.group_size = group_size
 
         # Verify supported on platform.
-        verify_marlin_supported(num_bits=self.num_bits,
+        verify_gptq_marlin_supported(num_bits=self.num_bits,
                                 group_size=self.group_size,
                                 is_sym=True)
 
@@ -155,7 +155,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
 
-        return apply_marlin_linear(
+        return apply_gptq_marlin_linear(
             input=x,
             weight=layer.weight_packed,
             weight_scale=layer.weight_scale,
