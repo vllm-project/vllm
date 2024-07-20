@@ -23,7 +23,8 @@ def get_air_example_data_2_asset(filename: str) -> Image.Image:
     if not image_path.exists():
         base_url = "https://air-example-data-2.s3.us-west-2.amazonaws.com/vllm_opensource_llava"
 
-        HTTP_CONNECTION.download_file(f"{base_url}/{filename}", image_path,
+        HTTP_CONNECTION.download_file(f"{base_url}/{filename}",
+                                      image_path,
                                       timeout=VLLM_IMAGE_FETCH_TIMEOUT)
 
     return Image.open(image_path)
