@@ -564,6 +564,10 @@ def get_tokenizer_pool_config(tokenizer_group_type):
         return TokenizerPoolConfig(pool_size=1,
                                    pool_type="ray",
                                    extra_config={})
+    if isinstance(tokenizer_group_type, type):
+        return TokenizerPoolConfig(pool_size=1,
+                                   pool_type=tokenizer_group_type,
+                                   extra_config={})
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 
 
