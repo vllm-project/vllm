@@ -145,18 +145,11 @@ class GroupCoordinator:
         self.cpu_group = None
 
         for ranks in group_ranks:
-            # device_group = torch.distributed.new_group(
-            #     ranks, backend=torch_distributed_backend)
-            if self.rank in ranks:
-                import time
-                time.sleep(self.rank)
-                logger.debug("initializing cpu group, rank %d, group %s", self.rank, ranks)
+            device_group = torch.distributed.new_group(
+                ranks, backend=torch_distributed_backend)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-            if self.rank in ranks:
-                logger.debug("cpu group initialized, rank %d, group %s", self.rank, ranks)
-                time.sleep(1000)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -722,10 +715,10 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: List[int], local_rank: int,
+def init_world_group(ranks: List[List[int]], local_rank: int,
                      backend: str) -> GroupCoordinator:
     return GroupCoordinator(
-        group_ranks=[ranks],
+        group_ranks=ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
         use_pynccl=False,
@@ -824,27 +817,33 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
     
 
-def offset_distributed_groups(
+def include_decoding_groups_if_disagg_enabled(
     groups: List[List[int]],
-    offset: int,
+    world_size: int,
 ) -> List[List[int]]:
     """
-        Extend original distributed group.
-        The extended part will be the original distributed group plus an offset.
+        Include the distributed group for decode
+        Only for disaggregated prefill
         
+        Example:
+            Original group: [ [0,1], [2,3] ], world_size = 4
+            Extended: [ [0,1], [2,3], [4,5], [6,7] ]
         Arguments:
             groups: original distributed group
-            offset: the offset we want to apply to the duplicated group.
-                Typically world_size // 2
+            world_size: the vLLM world size, which is half of torch.distributed.get_world_size()
     """
-    
-    logger.debug("Offset distributed groups with offset %d", offset)
-    
-    new_groups = []
-    for group in groups:
-        new_groups.append([rank + offset for rank in group])
-        
-    return new_groups
+
+    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+        assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"], (
+            "VLLM_DISAGG_PREFILL_ROLE should be either prefill or decode")
+        new_groups = []
+        for group in groups:
+            new_groups.append([rank for rank in group])
+        for group in groups:
+            new_groups.append([rank + world_size for rank in group])
+        return new_groups
+    else:
+        return groups
 
 
 def init_distributed_environment(
@@ -863,24 +862,21 @@ def init_distributed_environment(
             "distributed_init_method must be provided when initializing "
             "distributed environment")
         # this backend is used for WORLD
+        maybe_disagg_world_size = world_size
+        maybe_disagg_rank = rank
         if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-            # Disaggregated prefill is enabled
-            # world_size in vLLM is tp * pp
-            # for prefill, the ranks are [0, world_size)
-            # for decode, the ranks are [world_size, 2 * world_size)
             maybe_disagg_world_size = world_size * 2
             logger.debug(
-                "Disaggregated prefill enabled, handle torch-related changes on world size and ranks. This change is only inside `vllm/distributed/parallel_state.py`) and the other files are unchanged.")
+                "Disaggregated prefill enabled.")
             assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"], (
             "VLLM_DISAGG_PREFILL_ROLE should be either prefill or decode")
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
+                # for prefill, the ranks are [0, world_size)
                 maybe_disagg_rank = rank
             else:
                 # offset global rank by tp * pp (which is world_size)
                 maybe_disagg_rank = rank + world_size
-        else:
-            maybe_disagg_world_size = world_size
-            maybe_disagg_rank = rank
+            
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
@@ -896,22 +892,18 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
-
-            
-
         
             
     global _WORLD
     if _WORLD is None:
-        ranks = list(range(world_size))
+        ranks = [[i for i in range(world_size)]]
         # offset the distributed group
-        if all([
-            envs.VLLM_DISAGG_PREFILL_ROLE is not None,
-            envs.VLLM_DISAGG_PREFILL_ROLE == "decode"]):
-                # when initializing distributed environment
-                ranks = list(range(world_size, 2 * world_size))
+        if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+            ranks = include_decoding_groups_if_disagg_enabled(ranks, world_size)
             
         _WORLD = init_world_group(ranks, local_rank, backend)
+        logger.debug("_WORLD initialized for rank %d", torch.distributed.get_rank())
+        time.sleep(5)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
@@ -947,27 +939,21 @@ def initialize_model_parallel(
     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
     ranks 8 to 15 belong to the second box.
 
-    Disaggregated prefill will also initialize using this function.
-    Why: disaggregated prefill is similar to pipeline parallel
-     except that disaggregated prefill does not partition model
-    Methodology:
-        - Only change variables in this file
-        - Any variable outside this file should be unchanged
-    Modifications:
-        - World size in vLLM variables (like in `ParallelConfig`): unchanged
-        - World size in `torch.distributed`: doubled (2 * tp * pp)
-        - Rank:
+
+    Disaggregated prefill will also initialize its process group using this function.
+    Changes:
+        - vLLM world size: unchanged (tp * pp)
+        - torch.distributed.get_world_size():
+            - 2 * tp * pp
+            - Why: torch.distributed package sees 2 vLLM instances (prefill and decode)
+        - Global rank:
             - [0, tp * pp) for prefill
             - [tp * pp, 2 * tp * pp) for decode
         - Parallel groups
-            - Unchanged for prefill
-            - Offseted by tp * pp for decode
+            - Extend _WORLD, _TP and _PP using `include_decoding_groups_if_disagg_enabled`
             - Add a new parallel group `_DISAGG` for disaggregated prefill
-                - [0, tp * pp], [1, tp * pp + 1], .. 
+                - [ [0, tp * pp], [1, tp * pp + 1], .. ]
         - Local rank: unchanged
-            - Thanks to PP implementation, distributed operations only rely on
-             local rank. This guarantees the communications inside the
-             prefill instance and decode instance are unchanged.
     """
     
     # Get world size and rank. Ensure some consistencies.
@@ -976,36 +962,10 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)        
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-        logger.debug("Disaggregated prefill enabled, the world size obtained from torch.distributed (2 * tp * pp) should be decreased to align with vLLM world size (tp * pp)")
+        # Disaggregated prefill enabled
+        # The world_size for this vLLM instance is tp * pp, but torch.distributed contains 2 vLLM instances, its world size is 2 * tp * pp
+        # Adjust the world_size to match.
         world_size = world_size // 2
-
-    time.sleep(torch.distributed.get_rank())
-        
-        
-        
-    
-    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-        assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"], (
-            "VLLM_DISAGG_PREFILL_ROLE should be either prefill or decode")
-        logger.debug("Disaggregated prefill enabled, create _DISAGG group")
-        group_ranks = []
-        for i in range(world_size):
-            # prefill local rank: i
-            # decode global rank: i + world_size
-            group_ranks.append([i, i + world_size])
-        logger.debug("Distributed group is %s", str(group_ranks))
-        _DISAGG = init_model_parallel_group(
-            group_ranks,
-            int(envs.VLLM_DISAGG_PREFILL_ROLE == "decode"),
-            backend,
-            use_custom_allreduce=False)
-        
-    logger.debug("Success, rank %d", torch.distributed.get_rank())
-    time.sleep(1000)
-    
-    
-        
-    
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
@@ -1025,20 +985,14 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
-    if envs.VLLM_DISAGG_PREFILL_ROLE == "decode":
-        logger.debug("Current instance is decode instance")
-        logger.debug("Offset the _TP ranks by %d", world_size)
-        group_ranks = offset_distributed_groups(
-            group_ranks, 
-            world_size
-        )
-        
-
+    group_ranks = include_decoding_groups_if_disagg_enabled(group_ranks, world_size)
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     use_message_queue_broadcaster=True)
+    logger.debug("_TP initialized for rank %d", torch.distributed.get_rank())
+    time.sleep(5)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size // 
@@ -1050,18 +1004,31 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
-    if envs.VLLM_DISAGG_PREFILL_ROLE == "decode":
-        logger.debug("Current instance is decode instance")
-        logger.debug("Offset the _PP ranks by %d", world_size)
-        group_ranks = offset_distributed_groups(
-            group_ranks, 
-            world_size
-        )
+    group_ranks = include_decoding_groups_if_disagg_enabled(group_ranks, world_size)
     # pipeline parallel does not need custom allreduce
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     use_custom_allreduce=False)
+    logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
+    time.sleep(5)
+    
+    if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+        global _DISAGG
+        logger.debug("Disaggregated prefill enabled, create _DISAGG group")
+        group_ranks = []
+        for i in range(world_size):
+            # prefill local rank: i
+            # decode global rank: i + world_size
+            group_ranks.append([i, i + world_size])
+        logger.debug("Distributed group is %s", str(group_ranks))
+        _DISAGG = init_model_parallel_group(
+            group_ranks,
+            int(envs.VLLM_DISAGG_PREFILL_ROLE == "decode"),
+            backend,
+            use_custom_allreduce=False)
+        logger.debug("_DISAGG initialized for rank %d", torch.distributed.get_rank())
+        time.sleep(5)
 
 
 def ensure_model_parallel_initialized(
