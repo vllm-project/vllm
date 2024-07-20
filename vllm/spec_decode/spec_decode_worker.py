@@ -674,41 +674,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # We are skipping the logprobs. Hence don't serialize the
             # logprobs related tensors from the GPU and create empty/dummy
             # lists instead.
-            accepted_token_id_ranks_by_step = [[-1] * batch_size
-                                               for _ in range(num_steps)]
-            accepted_token_id_logprobs_by_step = [[0.0] * batch_size
-                                                  for _ in range(num_steps)]
-            topk_logprobs_by_step: List[List[List[Optional[float]]]] = [[
-                [None] * k for _ in range(batch_size)
-            ] for _ in range(num_steps)]
-            topk_indices_by_step: List[List[List[Optional[int]]]] = [[
-                [None] * k for _ in range(batch_size)
-            ] for _ in range(num_steps)]
+            (accepted_token_id_ranks_by_step,
+            accepted_token_id_logprobs_by_step,
+            topk_logprobs_by_step, topk_indices_by_step) =\
+            self._create_dummy_logprob_lists(batch_size, num_steps, k)
         else:
-            # Serialize all tensors to CPU Python lists.
-            # Organize input tensors by step instead of by sequence.
-            target_logprobs_by_step = target_logprobs.transpose(0, 1)
-
-            # Get the logprobs/rank of the accepted tokens.
-            (accepted_token_id_ranks_by_step_tensor,
-             accepted_token_id_logprobs_by_step_tensor
-             ) = get_sampled_token_logprobs(
-                 logprob_tensor=target_logprobs_by_step,
-                 sampled_token_ids=accepted_token_ids_by_step,
-             )
-            # Get the top-k logprobs (which may or may not include the
-            # logprob of the accepted token).
-            (topk_logprobs_by_step_tensor,
-             topk_indices_by_step_tensor) = target_logprobs_by_step.topk(
-                 k=self.scorer_worker.model_config.max_logprobs,
-                 dim=-1,
-             )
-            accepted_token_id_ranks_by_step = (
-                accepted_token_id_ranks_by_step_tensor.tolist())
-            accepted_token_id_logprobs_by_step = (
-                accepted_token_id_logprobs_by_step_tensor.tolist())
-            topk_logprobs_by_step = topk_logprobs_by_step_tensor.tolist()
-            topk_indices_by_step = topk_indices_by_step_tensor.tolist()
+            (accepted_token_id_ranks_by_step,
+            accepted_token_id_logprobs_by_step,
+            topk_logprobs_by_step, topk_indices_by_step) =\
+                self._create_logprob_lists_from_tensors(
+                    target_logprobs, accepted_token_ids_by_step)
 
         # Get the sequence ids and num_logprobs (sampling parameter) in the
         # batch.
@@ -759,6 +734,60 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             sampler_output_list[
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics
         return sampler_output_list
+
+    def _create_dummy_logprob_lists(
+        self, batch_size: int, num_steps: int, k: int
+    ) -> Tuple[List[List[int]], List[List[float]],
+               List[List[List[Optional[float]]]],
+               List[List[List[Optional[int]]]]]:
+        accepted_token_id_ranks_by_step = [[-1] * batch_size
+                                           for _ in range(num_steps)]
+        accepted_token_id_logprobs_by_step = [[0.0] * batch_size
+                                              for _ in range(num_steps)]
+        topk_logprobs_by_step: List[List[List[Optional[float]]]] = [
+            [[None] * k for _ in range(batch_size)] for _ in range(num_steps)
+        ]
+        topk_indices_by_step: List[List[List[Optional[int]]]] = [
+            [[None] * k for _ in range(batch_size)] for _ in range(num_steps)
+        ]
+        return (accepted_token_id_ranks_by_step,
+                accepted_token_id_logprobs_by_step, topk_logprobs_by_step,
+                topk_indices_by_step)
+
+    def _create_logprob_lists_from_tensors(
+        self,
+        target_logprobs: torch.Tensor,
+        accepted_token_ids_by_step: torch.Tensor,
+    ) -> Tuple[List[List[int]], List[List[float]],
+               List[List[List[Optional[float]]]],
+               List[List[List[Optional[int]]]]]:
+        # Serialize all tensors to CPU Python lists.
+        # Organize input tensors by step instead of by sequence.
+        target_logprobs_by_step = target_logprobs.transpose(0, 1)
+
+        # Get the logprobs/rank of the accepted tokens.
+        (accepted_token_id_ranks_by_step_tensor,
+         accepted_token_id_logprobs_by_step_tensor
+         ) = get_sampled_token_logprobs(
+             logprob_tensor=target_logprobs_by_step,
+             sampled_token_ids=accepted_token_ids_by_step,
+         )
+        # Get the top-k logprobs (which may or may not include the
+        # logprob of the accepted token).
+        (topk_logprobs_by_step_tensor,
+         topk_indices_by_step_tensor) = target_logprobs_by_step.topk(
+             k=self.scorer_worker.model_config.max_logprobs,
+             dim=-1,
+         )
+        accepted_token_id_ranks_by_step = (
+            accepted_token_id_ranks_by_step_tensor.tolist())
+        accepted_token_id_logprobs_by_step = (
+            accepted_token_id_logprobs_by_step_tensor.tolist())
+        topk_logprobs_by_step = topk_logprobs_by_step_tensor.tolist()
+        topk_indices_by_step = topk_indices_by_step_tensor.tolist()
+        return (accepted_token_id_ranks_by_step,
+                accepted_token_id_logprobs_by_step, topk_logprobs_by_step,
+                topk_indices_by_step)
 
     def _track_finished_requests(self, execute_model_req: ExecuteModelRequest):
         """
