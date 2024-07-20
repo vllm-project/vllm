@@ -167,6 +167,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-chat-completion-sampling-params
 
     # doc: begin-chat-completion-extra-params
@@ -273,22 +274,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return SamplingParams(
             n=self.n,
+            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=self.repetition_penalty,
             temperature=self.temperature,
             top_p=self.top_p,
+            top_k=self.top_k,
             min_p=self.min_p,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
-            max_tokens=self.max_tokens,
-            min_tokens=self.min_tokens,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=self.top_logprobs if self.echo else None,
-            best_of=self.best_of,
-            top_k=self.top_k,
             ignore_eos=self.ignore_eos,
+            max_tokens=self.max_tokens,
+            min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
@@ -296,6 +297,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
     @model_validator(mode='before')
@@ -477,15 +479,15 @@ class CompletionRequest(OpenAIBaseModel):
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
+            logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=self.max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            logprobs=self.logprobs,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
             prompt_logprobs=self.logprobs if self.echo else None,
             skip_special_tokens=self.skip_special_tokens,
-            spaces_between_special_tokens=(self.spaces_between_special_tokens),
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
