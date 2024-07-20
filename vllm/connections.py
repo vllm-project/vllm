@@ -156,5 +156,11 @@ class HTTPConnection:
         return save_path
 
 
-HTTP_CONNECTION = HTTPConnection()
+global_http_connection = HTTPConnection()
 """The global :class:`HTTPConnection` instance used by vLLM."""
+
+global_http_client = global_http_connection.sync_client
+"""The global HTTP client used by vLLM."""
+
+global_aiohttp_client = global_http_connection.async_client
+"""The global asynchronous HTTP client used by vLLM."""

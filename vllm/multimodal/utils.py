@@ -4,7 +4,7 @@ from typing import Union
 
 from PIL import Image
 
-from vllm.connections import HTTP_CONNECTION
+from vllm.connections import global_http_connection
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.base import MultiModalDataDict
 
@@ -28,8 +28,8 @@ def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
     By default, the image is converted into RGB format.
     """
     if image_url.startswith('http'):
-        image_raw = HTTP_CONNECTION.get_bytes(image_url,
-                                              timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+        image_raw = global_http_connection.get_bytes(
+            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -50,7 +50,7 @@ async def async_fetch_image(image_url: str,
     By default, the image is converted into RGB format.
     """
     if image_url.startswith('http'):
-        image_raw = await HTTP_CONNECTION.async_get_bytes(
+        image_raw = await global_http_connection.async_get_bytes(
             image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
         image = _load_image_from_bytes(image_raw)
 

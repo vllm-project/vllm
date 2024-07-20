@@ -4,7 +4,7 @@ from typing import Literal
 
 from PIL import Image
 
-from vllm.connections import HTTP_CONNECTION
+from vllm.connections import global_http_connection
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 
 from .base import get_cache_dir
@@ -23,9 +23,9 @@ def get_air_example_data_2_asset(filename: str) -> Image.Image:
     if not image_path.exists():
         base_url = "https://air-example-data-2.s3.us-west-2.amazonaws.com/vllm_opensource_llava"
 
-        HTTP_CONNECTION.download_file(f"{base_url}/{filename}",
-                                      image_path,
-                                      timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+        global_http_connection.download_file(f"{base_url}/{filename}",
+                                             image_path,
+                                             timeout=VLLM_IMAGE_FETCH_TIMEOUT)
 
     return Image.open(image_path)
 
