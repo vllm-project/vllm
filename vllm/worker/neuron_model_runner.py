@@ -121,13 +121,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         max_seq_len = max(seq_lens)
         assert max_seq_len > 0
         input_tokens = make_tensor_with_pad(input_tokens,
-                                            max_seq_len,
                                             pad=0,
+                                            max_len=max_seq_len,
                                             dtype=torch.long,
                                             device=self.device)
         input_positions = make_tensor_with_pad(input_positions,
-                                               max_seq_len,
                                                pad=0,
+                                               max_len=max_seq_len,
                                                dtype=torch.long,
                                                device=self.device)
         input_block_ids = torch.tensor(input_block_ids,
@@ -171,13 +171,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_block_ids.append(block_table[0])
 
         input_tokens = make_tensor_with_pad(input_tokens,
-                                            max_len=1,
                                             pad=0,
+                                            max_len=1,
                                             dtype=torch.long,
                                             device=self.device)
         input_positions = make_tensor_with_pad(input_positions,
-                                               max_len=1,
                                                pad=0,
+                                               max_len=1,
                                                dtype=torch.long,
                                                device=self.device)
         context_lens = torch.tensor(context_lens,
