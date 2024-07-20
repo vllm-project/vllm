@@ -9,10 +9,10 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, create_per_channel_scale_param)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    apply_fp8_linear, create_per_channel_scale_param)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -33,6 +33,12 @@ class FBGEMMFp8Config(QuantizationConfig):
     def __init__(self, ignore_list: List[str], input_scale_ub: float):
         self.ignore_list = ignore_list
         self.input_scale_ub = input_scale_ub
+
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
+        capability = current_platform.get_device_capability()
+        capability = capability[0] * 10 + capability[1]
+        self.use_marlin = capability < 89
 
     @classmethod
     def get_name(cls) -> str:
@@ -100,14 +106,6 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
 
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89
-
-        self.use_marlin = True
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -150,7 +148,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                                             requires_grad=False)
         layer.input_scale_ub = input_scale_ub
 
-        if self.use_marlin:
+        if self.quant_config.use_marlin:
             layer.input_size_per_partition = input_size_per_partition
             layer.output_size_per_partition = output_size_per_partition
 
@@ -158,7 +156,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         weight = layer.weight
         layer.weight = Parameter(weight.t(), requires_grad=False)
 
-        if self.use_marlin:
+        if self.quant_config.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
             # Activations not quantized for marlin.
             del layer.input_scale_ub
