@@ -44,8 +44,12 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "compressed_tensors"
 
+    # TODO (@robertgshaw2-neuralmagic): do layer skipping though here
+    # rather than though create_weights to match other methods
     def get_quant_method(
-            self, layer: torch.nn.Module
+        self,
+        layer: torch.nn.Module,
+        prefix: str,
     ) -> Optional["CompressedTensorsLinearMethod"]:
         if isinstance(layer, LinearBase):
             return CompressedTensorsLinearMethod(self)

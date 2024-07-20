@@ -109,9 +109,8 @@ class GPTQMarlin24Config(QuantizationConfig):
 
         return None
 
-    def get_quant_method(
-            self,
-            layer: torch.nn.Module) -> Optional["GPTQMarlin24LinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["GPTQMarlin24LinearMethod"]:
         if isinstance(layer, LinearBase):
             return GPTQMarlin24LinearMethod(self)
         return None
