@@ -301,7 +301,6 @@ def scaled_fp8_quant(
     scale: Optional[torch.Tensor] = None,
     scale_ub: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
-    scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
