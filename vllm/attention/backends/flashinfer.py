@@ -344,11 +344,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                         cuda_graph_pad_size)
             self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
         else:
-            max_block_table_len = max(
-                len(block_table) for block_table in self.block_tables)
             block_tables = make_tensor_with_pad(
                 self.block_tables,
-                max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
                 device=device,
