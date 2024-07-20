@@ -640,6 +640,7 @@ def make_array_with_pad(
     `max_len`.
     """
     if max_len is None:
+        # Unlike for most functions, map is faster than a genexpr over `len`
         max_len = max(map(len, x), default=0)
 
     padded_x = np.full((len(x), max_len), pad, dtype=dtype)
