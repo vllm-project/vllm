@@ -76,7 +76,8 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     # WEIGHT SCALES
     # Currently Marlin doesn't support per-tensor scales, so we
     # expand it to channelwise
-    is_channelwise = layer.weight_scale.shape[0] == part_size_n
+    is_channelwise = (len(layer.weight_scale.shape) > 0
+                      and layer.weight_scale.shape[0] == part_size_n)
     if is_channelwise:
         scales = layer.weight_scale
     else:
