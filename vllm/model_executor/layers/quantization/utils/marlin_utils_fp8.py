@@ -81,6 +81,7 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
         scales = layer.weight_scale
     else:
         scales = layer.weight_scale.repeat(1, part_size_n)
+
     scales = scales.to(layer.orig_dtype).to(device)
 
     # Permute scales
