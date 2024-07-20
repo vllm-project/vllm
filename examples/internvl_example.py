@@ -1,9 +1,5 @@
-from PIL import Image
-
 from vllm import LLM, SamplingParams
-
-# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
-# You can use `.buildkite/download-images.sh` to download them
+from vllm.assets.image import ImageAsset
 
 
 def run_internvl():
@@ -16,7 +12,7 @@ def run_internvl():
         max_num_seqs=5,
     )
 
-    image = Image.open("images/stop_sign.jpg")
+    image = ImageAsset("stop_sign").pil_image
 
     # single-image prompt
     prompt = "<image>\nWhat is the content of this image?\n"  # noqa: E501
