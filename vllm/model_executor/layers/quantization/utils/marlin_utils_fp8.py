@@ -28,6 +28,7 @@ def apply_fp8_marlin_linear(
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n, )
+
     output = ops.fp8_marlin_gemm(
         a=reshaped_x,
         b_q_weight=weight,
@@ -81,7 +82,6 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
         scales = layer.weight_scale
     else:
         scales = layer.weight_scale.repeat(1, part_size_n)
-
     scales = scales.to(layer.orig_dtype).to(device)
 
     # Permute scales
