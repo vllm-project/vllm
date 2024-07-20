@@ -315,6 +315,8 @@ def scaled_fp8_quant(
     Args:
         input: The input tensor to be quantized to FP8
         scale: Optional scaling factor for the FP8 quantization
+        scale_ub: Optional upper bound for scaling factor in dynamic 
+            per token case
         batch_dim_padding: If specified, pad the first dimension
             of the output to at least this value.
         use_per_token_if_dynamic: Whether to do per_tensor or per_token 
