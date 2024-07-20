@@ -188,7 +188,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
   ops.def(
       "dynamic_per_token_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! "
-      "scale) -> "
+      "scale, Tensor? scale_ub) -> "
       "()");
   ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
            &dynamic_per_token_scaled_fp8_quant);
