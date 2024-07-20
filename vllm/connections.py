@@ -1,4 +1,3 @@
-from functools import cached_property
 from pathlib import Path
 from typing import Mapping, Optional
 from urllib.parse import urlparse
@@ -18,14 +17,14 @@ class HTTPConnection:
         self._sync_client: Optional[requests.Session] = None
         self._async_client: Optional[aiohttp.ClientSession] = None
 
-    @cached_property
+    @property
     def sync_client(self) -> requests.Session:
         if self._sync_client is None:
             self._sync_client = requests.Session()
 
         return self._sync_client
 
-    @cached_property
+    @property
     def async_client(self) -> aiohttp.ClientSession:
         if self._async_client is None:
             self._async_client = aiohttp.ClientSession()
