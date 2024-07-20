@@ -3,7 +3,14 @@ from typing import List, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+
+try:
+    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+except ModuleNotFoundError:
+    # vllm_flash_attn is not installed, use the identical ROCm FA metadata
+    from vllm.attention.backends.rocm_flash_attn import (
+        ROCmFlashAttentionMetadata as FlashAttentionMetadata)
+
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
