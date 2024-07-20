@@ -627,7 +627,7 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
-def make_array_with_pad(
+def make_ndarray_with_pad(
     x: List[List[T]],
     pad: T,
     dtype: npt.DTypeLike,
@@ -668,7 +668,7 @@ def make_tensor_with_pad(
     `max_len`.
     """
     np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
-    padded_x = make_array_with_pad(x, pad, np_dtype, max_len=max_len)
+    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
 
     tensor = torch.from_numpy(padded_x).to(device)
     if pin_memory:
