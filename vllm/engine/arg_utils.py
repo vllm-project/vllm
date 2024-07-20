@@ -2,15 +2,20 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
+from vllm.executor.executor_base import ExecutorBase
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+        BaseTokenizerGroup)
 
 
 def nullable_str(val: str):
@@ -36,7 +41,11 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
-    distributed_executor_backend: Optional[str] = None
+    # Note: Specifying a custom executor backend by passing a class
+    # is intended for expert use only. The API may change without
+    # notice.
+    distributed_executor_backend: Optional[Union[str,
+                                                 Type[ExecutorBase]]] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -45,6 +54,7 @@ class EngineArgs:
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
+    cpu_offload_gb: int = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -61,7 +71,10 @@ class EngineArgs:
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
-    tokenizer_pool_type: str = "ray"
+    # Note: Specifying a tokenizer pool by passing a class
+    # is intended for expert use only. The API may change without
+    # notice.
+    tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
     tokenizer_pool_extra_config: Optional[dict] = None
     enable_lora: bool = False
     max_loras: int = 1
@@ -303,6 +316,20 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU.')
+        parser.add_argument(
+            '--cpu-offload-gb',
+            type=float,
+            default=0,
+            help='The space in GiB to offload to CPU, per GPU. '
+            'Default is 0, which means no offloading. Intuitively, '
+            'this argument can be seen as a virtual way to increase '
+            'the GPU memory size. For example, if you have one 24 GB '
+            'GPU and set this to 10, virtually you can think of it as '
+            'a 34 GB GPU. Then you can load a 13B model with BF16 weight,'
+            'which requires at least 26GB GPU memory. Note that this '
+            'requires fast CPU-GPU interconnect, as part of the model is'
+            'loaded from CPU memory to GPU memory on the fly in each '
+            'model forward pass.')
         parser.add_argument(
             '--gpu-memory-utilization',
             type=float,
@@ -633,6 +660,11 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        assert self.cpu_offload_gb >= 0, (
+            "CPU offload space must be non-negative"
+            f", but got {self.cpu_offload_gb}")
+
         multimodal_config = MultiModalConfig()
 
         device_config = DeviceConfig(device=self.device)
@@ -666,7 +698,9 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching)
+            enable_prefix_caching=self.enable_prefix_caching,
+            cpu_offload_gb=self.cpu_offload_gb,
+        )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,

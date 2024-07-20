@@ -72,6 +72,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
 
+  // prepare_inputs advance_step
+  ops.def("advance_step", &advance_step);
+  ops.impl("advance_step", torch::kCUDA, &advance_step);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -175,11 +179,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
-  // Compute FP8 quantized tensor and scaling factor.
+  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
   ops.def(
       "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
+
+  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! "
+      "scale, Tensor? scale_ub) -> "
+      "()");
+  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
+           &dynamic_per_token_scaled_fp8_quant);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.

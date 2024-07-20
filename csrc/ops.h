@@ -52,6 +52,11 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
+void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
+                  torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
+                  torch::Tensor& input_positions, torch::Tensor& seq_lens,
+                  torch::Tensor& slot_mapping, torch::Tensor& block_tables);
+
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
@@ -123,11 +128,15 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
-void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
-                             torch::Tensor& scale);
+void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
+                             torch::Tensor const& scale);
 
-void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
+void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor& scale);
+
+void dynamic_per_token_scaled_fp8_quant(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
+    c10::optional<torch::Tensor> const& scale_ub);
 
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,

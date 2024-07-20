@@ -166,6 +166,18 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def advance_step(num_seqs: int, num_queries: int, block_size: int,
+                 input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
+                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
+                 slot_mapping: torch.Tensor,
+                 block_tables: torch.Tensor) -> None:
+    """Advance a step on GPU for existing inputs for a multi-step runner"""
+    return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
+                                     input_tokens, sampled_token_ids,
+                                     input_positions, seq_lens, slot_mapping,
+                                     block_tables)
+
+
 # quantization ops
 # awq
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
@@ -288,6 +300,8 @@ def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
+    scale_ub: Optional[torch.Tensor] = None,
+    use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -303,6 +317,8 @@ def scaled_fp8_quant(
         scale: Optional scaling factor for the FP8 quantization
         batch_dim_padding: If specified, pad the first dimension
             of the output to at least this value.
+        use_per_token_if_dynamic: Whether to do per_tensor or per_token 
+            in the dynamic quantization case.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
@@ -316,10 +332,18 @@ def scaled_fp8_quant(
     else:
         output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+        if use_per_token_if_dynamic:
+            scale = torch.empty((input.numel() // input.shape[-1], 1),
+                                device=input.device,
+                                dtype=torch.float32)
+            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+                output, input, scale, scale_ub)
+        else:
+            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
+
     return output, scale
 
 
