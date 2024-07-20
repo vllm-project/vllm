@@ -1171,9 +1171,12 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
                 TypicalAcceptanceSampler.
-            disable_logprobs: If set to True, token log probabilities will
-                not be output in both the draft worker and the target worker.
-                If set to False, log probabilities will be output by both.
+            disable_logprobs: If set to True, token log probabilities will not
+                be returned even if requested by sampling parameters. This 
+                reduces latency by skipping logprob calculation in proposal
+                sampling, target sampling, and after accepted tokens are
+                determined. If set to False, log probabilities will be
+                returned.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config

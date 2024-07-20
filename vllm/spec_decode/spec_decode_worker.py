@@ -236,7 +236,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
-        self.disable_logprobs = disable_logprobs
+        self._disable_logprobs = disable_logprobs
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -405,6 +405,29 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # this state within spec decode worker.
             seq_group_metadata.num_speculative_tokens = 0
 
+    def _serialize_sampler_output_no_logprobs(
+            self, execute_model_req: ExecuteModelRequest,
+            sampler_output: SamplerOutput) -> SamplerOutput:
+        # We are skipping adding logprobs to the result. Since we are
+        # skipping the logprobs, the sampler has not serialized any
+        # tensors like sampled_token_ids to the cpu. We create the
+        # CompletionSequenceGroupOutput from the GPU tensors.
+        seq_ids = get_all_seq_ids(execute_model_req.seq_group_metadata_list)
+        sampled_token_ids_list = sampler_output.sampled_token_ids.tolist()
+        completion_seq_group_output_list: List[
+            CompletionSequenceGroupOutput] = []
+        for index, seq_id in enumerate(seq_ids):
+            completion_seq_group_output_list.append(
+                create_sequence_group_output(
+                    token_id=sampled_token_ids_list[index][0],
+                    token_id_logprob_rank=-1,
+                    token_id_logprob=0.0,
+                    seq_id=seq_id,
+                    topk_token_ids=[],
+                    topk_logprobs=[],
+                ))
+        return SamplerOutput(outputs=completion_seq_group_output_list)
+
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
                      skip_proposer: bool) -> List[SamplerOutput]:
@@ -431,7 +454,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 self.previous_hidden_states.update(
                     execute_model_req.seq_group_metadata_list, hidden_states)
 
-        if self.disable_logprobs:
+        sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
+            execute_model_req=execute_model_req, sampler_output=sampler_output)
+                                    if self._disable_logprobs else
+                                    sampler_output)
+        if self._disable_logprobs:
             # We are skipping adding logprobs to the result. Since we are
             # skipping the logprobs, the sampler has not serialized any
             # tensors like sampled_token_ids to the cpu. We create the
@@ -643,7 +670,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         batch_size, num_steps = accepted_token_ids.shape
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
-        if self.disable_logprobs:
+        if self._disable_logprobs:
             # We are skipping the logprobs. Hence don't serialize the
             # logprobs related tensors from the GPU and create empty/dummy
             # lists instead.
