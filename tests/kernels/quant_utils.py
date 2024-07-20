@@ -30,18 +30,25 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
     x_token_max = as_float32_tensor(x_token_max)
     if scale_ub is not None:
         x_token_max = x_token_max.clamp(max=scale_ub)
-
     scales = (x_token_max / qtype_max)[:, None]
     if quant_dtype == torch.float8_e4m3fn:
         min_scaling_factor = s_1 / (qtype_max * s_512)
         scales = scales.clamp(min=min_scaling_factor)
 
     # Quant
-    iscales = as_float32_tensor(s_1 / scales)
-    torch_out = as_float32_tensor(x) * iscales
-    torch_out = torch_out.round() if quant_dtype == torch.int8 else torch_out
-    torch_out = torch_out.clamp(qtype_traits.min,
-                                qtype_traits.max).to(quant_dtype)
+    if quant_dtype == torch.int8:
+        iscales = as_float32_tensor(s_1 / scales)
+        torch_out = as_float32_tensor(x) * iscales
+        torch_out = torch_out.round()
+        torch_out = torch_out.clamp(qtype_traits.min,
+                                    qtype_traits.max).to(quant_dtype)
+    else:
+        assert quant_dtype == torch.float8_e4m3fn
+        min_scaling_factor = s_1 / (qtype_max * s_512)
+        scales = scales.clamp(min=min_scaling_factor)
+        torch_out = as_float32_tensor(x) / scales
+        torch_out = torch_out.clamp(qtype_traits.min,
+                                    qtype_traits.max).to(quant_dtype)
 
     return torch_out, scales
 
