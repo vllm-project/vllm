@@ -31,9 +31,6 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
     if scale_ub is not None:
         x_token_max = x_token_max.clamp(max=scale_ub)
     scales = (x_token_max / qtype_max)[:, None]
-    if quant_dtype == torch.float8_e4m3fn:
-        min_scaling_factor = s_1 / (qtype_max * s_512)
-        scales = scales.clamp(min=min_scaling_factor)
 
     # Quant
     if quant_dtype == torch.int8:
