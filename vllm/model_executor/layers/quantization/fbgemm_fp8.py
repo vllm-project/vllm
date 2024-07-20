@@ -40,6 +40,8 @@ class FBGEMMFp8Config(QuantizationConfig):
         capability = capability[0] * 10 + capability[1]
         self.use_marlin = capability < 89
 
+        self.use_marlin = True
+
     @classmethod
     def get_name(cls) -> str:
         return "fbgemm_fp8"
@@ -148,10 +150,6 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                                             requires_grad=False)
         layer.input_scale_ub = input_scale_ub
 
-        if self.quant_config.use_marlin:
-            layer.input_size_per_partition = input_size_per_partition
-            layer.output_size_per_partition = output_size_per_partition
-
     def process_weights_after_loading(self, layer: Module) -> None:
         weight = layer.weight
         layer.weight = Parameter(weight.t(), requires_grad=False)
@@ -166,7 +164,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        if self.use_marlin:
+        if self.quant_config.use_marlin:
             return apply_fp8_marlin_linear(
                 input=x,
                 weight=layer.weight,
