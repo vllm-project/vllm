@@ -136,11 +136,6 @@ def awq_marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int):
     # Quantize with zp
     w_ref, q_w, s, zp = quantize_weights_with_zp(w, num_bits, group_size)
 
-    print("w_ref: shape = {}".format(w_ref.shape))
-    print("q_w: shape = {}".format(q_w.shape))
-    print("s: shape = {}".format(s.shape))
-    print("zp: shape = {}".format(zp.shape))
-
     # Reformat to marlin
     weight_perm = get_weight_perm(num_bits)
     marlin_q_w = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)

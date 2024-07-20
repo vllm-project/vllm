@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
-    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
+    MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_SUPPORTED_NUM_BITS,
     marlin_permute_scales)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
@@ -59,8 +59,8 @@ def rand_data(shape, dtype=torch.float16):
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
@@ -122,8 +122,8 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
                            mnk_factors):
@@ -170,8 +170,8 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)
@@ -358,8 +358,8 @@ def test_fp8_marlin_gemm(
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 def test_awq_marlin_gemm(
     k_chunk,
