@@ -525,7 +525,7 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
-class EmbeddingRequest(BaseModel):
+class EmbeddingRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str
@@ -597,13 +597,13 @@ class CompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class EmbeddingResponseData(BaseModel):
+class EmbeddingResponseData(OpenAIBaseModel):
     index: int
     object: str = "embedding"
     embedding: Union[List[float], str]
 
 
-class EmbeddingResponse(BaseModel):
+class EmbeddingResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
