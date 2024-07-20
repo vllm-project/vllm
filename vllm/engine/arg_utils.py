@@ -2,15 +2,20 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
+from vllm.executor.executor_base import ExecutorBase
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+        BaseTokenizerGroup)
 
 
 def nullable_str(val: str):
@@ -36,7 +41,11 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
-    distributed_executor_backend: Optional[str] = None
+    # Note: Specifying a custom executor backend by passing a class
+    # is intended for expert use only. The API may change without
+    # notice.
+    distributed_executor_backend: Optional[Union[str,
+                                                 Type[ExecutorBase]]] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -62,7 +71,10 @@ class EngineArgs:
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
-    tokenizer_pool_type: str = "ray"
+    # Note: Specifying a tokenizer pool by passing a class
+    # is intended for expert use only. The API may change without
+    # notice.
+    tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
     tokenizer_pool_extra_config: Optional[dict] = None
     enable_lora: bool = False
     max_loras: int = 1

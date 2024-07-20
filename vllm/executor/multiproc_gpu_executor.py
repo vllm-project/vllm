@@ -25,6 +25,8 @@ logger = init_logger(__name__)
 class MultiprocessingGPUExecutor(DistributedGPUExecutor):
     """Python multiprocessing-based multi-GPU executor"""
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         # Create the parallel GPU workers.
         world_size = self.parallel_config.world_size

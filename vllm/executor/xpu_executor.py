@@ -18,6 +18,8 @@ logger = init_logger(__name__)
 
 class XPUExecutor(GPUExecutor):
 
+    uses_ray: bool = False
+
     def __init__(
         self,
         model_config: ModelConfig,
