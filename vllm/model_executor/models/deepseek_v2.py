@@ -182,11 +182,9 @@ class DeepseekV2Attention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        layer_idx=None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.layer_idx = layer_idx
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -353,7 +351,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
-            layer_idx=layer_idx,
             prefix=f"{prefix}.self_attn",
         )
         if (config.n_routed_experts is not None
