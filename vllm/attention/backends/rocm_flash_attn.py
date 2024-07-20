@@ -275,6 +275,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 triton_attention)
             self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
+            if self.sliding_window != (-1, -1):
+                logger.warning("ROCm Triton FA does not currently support "
+                               "sliding window attention. If using half "
+                               "precision, please try using the ROCm CK "
+                               "FA backend instead by setting the env var "
+                               "`VLLM_USE_TRITON_FLASH_ATTN=0`")
         else:
             # if not using triton, navi3x/navi21/navi10 do not use flash-attn
             # either
@@ -434,6 +440,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         max_seqlen_k=prefill_meta.max_prefill_seq_len,
                         softmax_scale=self.scale,
                         causal=True,
+                        window_size=self.sliding_window,
+                        alibi_slopes=self.alibi_slopes,
                     )
 
                 # common code for prefill
