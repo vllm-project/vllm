@@ -40,8 +40,6 @@ class FBGEMMFp8Config(QuantizationConfig):
         capability = capability[0] * 10 + capability[1]
         self.use_marlin = capability < 89
 
-        self.use_marlin = True
-
     @classmethod
     def get_name(cls) -> str:
         return "fbgemm_fp8"
