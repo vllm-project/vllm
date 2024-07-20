@@ -155,21 +155,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: begin-chat-completion-sampling-params
     best_of: Optional[int] = None
-    use_beam_search: Optional[bool] = False
-    top_k: Optional[int] = -1
-    min_p: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.0
-    length_penalty: Optional[float] = 1.0
-    early_stopping: Optional[bool] = False
-    ignore_eos: Optional[bool] = False
-    min_tokens: Optional[int] = 0
+    use_beam_search: bool = False
+    top_k: int = -1
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+    length_penalty: float = 1.0
+    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-    skip_special_tokens: Optional[bool] = True
-    spaces_between_special_tokens: Optional[bool] = True
+    include_stop_str_in_output: bool = False
+    ignore_eos: bool = False
+    min_tokens: int = 0
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
     # doc: end-chat-completion-sampling-params
 
     # doc: begin-chat-completion-extra-params
-    echo: Optional[bool] = Field(
+    echo: bool = Field(
         default=False,
         description=(
             "If true, the new message will be prepended with the last message "
@@ -211,12 +212,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),
-    )
-    include_stop_str_in_output: Optional[bool] = Field(
-        default=False,
-        description=(
-            "Whether to include the stop string in the output. "
-            "This is only applied when the stop or stop_token_ids is set."),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -382,17 +377,18 @@ class CompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # doc: begin-completion-sampling-params
-    use_beam_search: Optional[bool] = False
-    top_k: Optional[int] = -1
-    min_p: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.0
-    length_penalty: Optional[float] = 1.0
-    early_stopping: Optional[bool] = False
+    use_beam_search: bool = False
+    top_k: int = -1
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+    length_penalty: float = 1.0
+    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-    ignore_eos: Optional[bool] = False
-    min_tokens: Optional[int] = 0
-    skip_special_tokens: Optional[bool] = True
-    spaces_between_special_tokens: Optional[bool] = True
+    include_stop_str_in_output: bool = False
+    ignore_eos: bool = False
+    min_tokens: int = 0
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-completion-sampling-params
 
@@ -402,12 +398,6 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
-    )
-    include_stop_str_in_output: Optional[bool] = Field(
-        default=False,
-        description=(
-            "Whether to include the stop string in the output. "
-            "This is only applied when the stop or stop_token_ids is set."),
     )
     response_format: Optional[ResponseFormat] = Field(
         default=None,
