@@ -109,7 +109,6 @@ class Fp8LinearMethod(LinearMethodBase):
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         self.use_marlin = capability < 89
-        self.use_marlin = True
 
     def create_weights(
         self,
