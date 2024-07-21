@@ -126,11 +126,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # rank-agnostic. However, it matters for all-gather as the ranks
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
-        # the weights for vocab embedding.
+        # the weights.
         xm_tp_rank = xm.get_ordinal()
         with patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding."
-                "get_tensor_model_parallel_rank",
+                "vllm.distributed.parallel_state.get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(
                 model_config=self.model_config,
