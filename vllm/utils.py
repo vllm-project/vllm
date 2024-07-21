@@ -923,7 +923,7 @@ class inference_mode(torch.inference_mode):
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         if self.use_inference_mode:
-            super().__init__(exc_type, exc_value, traceback)
+            super().__exit__(exc_type, exc_value, traceback)
         else:
             torch.set_grad_enabled(self.prev)
 
