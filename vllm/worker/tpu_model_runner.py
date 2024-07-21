@@ -45,6 +45,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     num_samples: int
     best_of: List[int]
     seq_groups: List[List[int]]
+    virtual_engine: int = 0
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -55,6 +56,9 @@ class ModelInputForTPU(ModelRunnerInputBase):
             "t": self.t,
             "p": self.p,
             "num_samples": self.num_samples,
+            "best_of": self.best_of,
+            "seq_groups": self.seq_groups,
+            "virtual_engine": self.virtual_engine,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -466,7 +470,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     def execute_model(
         self,
         model_input: ModelInputForTPU,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: Optional[List[Any]],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> List[SamplerOutput]:
