@@ -10,7 +10,8 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (error_on_invalid_device_count_status,
+from vllm.utils import (_run_task_with_lock,
+                        error_on_invalid_device_count_status,
                         get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
@@ -24,6 +25,8 @@ logger = init_logger(__name__)
 
 
 class RayGPUExecutor(DistributedGPUExecutor):
+
+    uses_ray: bool = True
 
     def _init_executor(self) -> None:
         # If the env var is set, it uses the Ray's compiled DAG API
@@ -46,7 +49,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 "VLLM_USE_RAY_SPMD_WORKER=1 requires "
                 "VLLM_USE_RAY_COMPILED_DAG=1")
 
-        assert self.parallel_config.distributed_executor_backend == "ray"
+        assert self.uses_ray
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
@@ -74,6 +77,20 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         return ray_remote_kwargs
 
+    def _get_worker_wrapper_args(self) -> Dict[str, Any]:
+        if self.speculative_config is not None:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+        else:
+            worker_module_name = "vllm.worker.worker"
+            worker_class_name = "Worker"
+
+        return dict(
+            worker_module_name=worker_module_name,
+            worker_class_name=worker_class_name,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         if (self.parallel_config.tensor_parallel_size == 1
@@ -96,6 +113,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Create the workers.
         driver_ip = get_ip()
+        worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -105,23 +123,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 placement_group_bundle_index=bundle_id,
             )
 
-            if self.speculative_config is not None:
-                worker_module_name = "vllm.spec_decode.spec_decode_worker"
-                worker_class_name = "create_spec_worker"
-            else:
-                worker_module_name = "vllm.worker.worker"
-                worker_class_name = "Worker"
-
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(
-                worker_module_name=worker_module_name,
-                worker_class_name=worker_class_name,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
 
             if self.use_ray_spmd_worker:
                 self.workers.append(worker)
@@ -132,10 +139,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        worker_module_name=worker_module_name,
-                        worker_class_name=worker_class_name,
-                        trust_remote_code=self.model_config.trust_remote_code,
-                    )
+                        **worker_wrapper_kwargs)
                 else:
                     # Else, added to the list of workers.
                     self.workers.append(worker)
@@ -240,27 +244,14 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # broadcasted to.
         self.non_driver_workers: List[RayWorkerWrapper] = []
 
-        tp_driver_worker_ranks = []
-        non_driver_worker_ranks = []
-        for idx, rank in enumerate(worker_ranks[1:]):
+        # Enforce rank order for correct rank to return final output.
+        for rank, worker in sorted(zip(worker_ranks[1:], self.workers)):
             # We need to skip the driver worker, which we
             # do by skipping worker_ranks[0] which is always 0.
             if rank % self.parallel_config.tensor_parallel_size == 0:
-                self.tp_driver_workers.append(self.workers[idx])
-                tp_driver_worker_ranks.append(rank)
+                self.tp_driver_workers.append(worker)
             else:
-                self.non_driver_workers.append(self.workers[idx])
-                non_driver_worker_ranks.append(rank)
-
-        # Enforce rank order for correct rank to return final output.
-        self.tp_driver_workers = [
-            worker for _, worker in sorted(
-                zip(tp_driver_worker_ranks, self.tp_driver_workers))
-        ]
-        self.non_driver_workers = [
-            worker for _, worker in sorted(
-                zip(non_driver_worker_ranks, self.non_driver_workers))
-        ]
+                self.non_driver_workers.append(worker)
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
@@ -390,7 +381,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                              f"required, but found {current_version}")
 
         from ray.dag import InputNode, MultiOutputNode
-        assert self.parallel_config.distributed_executor_backend == "ray"
+        assert self.parallel_config.use_ray
 
         # Right now, compiled DAG requires at least 1 arg. We send
         # a dummy value for now. It will be fixed soon.
@@ -413,6 +404,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
         self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
         if not self.use_ray_compiled_dag:
             self.driver_exec_method = make_async(
@@ -437,6 +429,9 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
     ) -> List[SamplerOutput]:
         assert not self.use_ray_spmd_worker, (
             "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1")
+        if not self.tp_driver_workers:
+            return await self.driver_exec_method("execute_model",
+                                                 execute_model_req)
         if self.pp_locks is None:
             # This locks each pipeline parallel stage so multiple virtual
             # engines can't execute on the same stage at the same time
@@ -447,15 +442,11 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
                 for _ in range(self.parallel_config.pipeline_parallel_size)
             ]
 
-        async def _run_task_with_lock(task, lock, *args, **kwargs):
-            async with lock:
-                return await task(*args, **kwargs)
-
-        tasks = []
-        tasks.append(
+        tasks = [
             asyncio.create_task(
                 _run_task_with_lock(self.driver_exec_method, self.pp_locks[0],
-                                    "execute_model", execute_model_req)))
+                                    "execute_model", execute_model_req))
+        ]
         for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
                                                 start=1):
             tasks.append(
