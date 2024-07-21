@@ -72,9 +72,8 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
 
 class Phi3ImageEmbeddingBase(nn.Module):
 
-    def __init__(self, wte=None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.wte = wte
         self.layer_idx: int
         self.type_feature: str
         self.img_processor: CLIPVisionModel
@@ -101,10 +100,9 @@ class Phi3ImageEmbeddingBase(nn.Module):
 class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
     """Phi3 Image embedding with HD transform."""
 
-    def __init__(self, config: PretrainedConfig, wte=None) -> None:
-        super().__init__(wte)
+    def __init__(self, config: PretrainedConfig) -> None:
+        super().__init__()
 
-        self.image_token_id = _IMAGE_TOKEN_ID
         # n_embed or hidden_size
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
@@ -461,8 +459,7 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         self.model = LlamaModel(config, cache_config, quant_config)
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_embed_tokens = Phi3HDImageEmbedding(
-            config, self.model.embed_tokens)
+        self.vision_embed_tokens = Phi3HDImageEmbedding(config)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
