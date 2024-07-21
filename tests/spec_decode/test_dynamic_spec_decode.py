@@ -32,6 +32,7 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int,
                               scorer_worker=target_worker,
                               spec_decode_sampler=mock_spec_decode_sampler(
                                   acceptance_sampler_method),
+                              disable_logprobs=False,
                               metrics_collector=metrics_collector,
                               disable_by_batch_size=disable_by_batch_size)
 
