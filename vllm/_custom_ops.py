@@ -276,14 +276,22 @@ def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                                            num_bits)
 
 
+# gptq_marlin
+def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
+                      num_bits: int) -> torch.Tensor:
+    return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+
+
 def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                     b_scales: torch.Tensor, g_idx: torch.Tensor,
-                     perm: torch.Tensor, workspace: torch.Tensor,
-                     num_bits: int, size_m: int, size_n: int, size_k: int,
-                     is_k_full: bool) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
-                                         workspace, num_bits, size_m, size_n,
-                                         size_k, is_k_full)
+                     b_scales: torch.Tensor, b_zeros: torch.Tensor,
+                     g_idx: torch.Tensor, perm: torch.Tensor,
+                     workspace: torch.Tensor, num_bits: int, size_m: int,
+                     size_n: int, size_k: int, is_k_full: bool,
+                     has_zp: bool) -> torch.Tensor:
+    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
+                                         g_idx, perm, workspace, num_bits,
+                                         size_m, size_n, size_k, is_k_full,
+                                         has_zp)
 
 
 # fp8 marlin
