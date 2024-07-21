@@ -39,8 +39,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # Verify supported on platform.
         verify_gptq_marlin_supported(num_bits=self.num_bits,
-                                group_size=self.group_size,
-                                is_sym=True)
+                                     group_size=self.group_size,
+                                     is_sym=True)
 
     def get_min_capability(self) -> int:
         # ampere and up

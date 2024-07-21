@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple
 
-import torch
 import numpy
+import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
@@ -19,18 +19,17 @@ MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
 def _check_marlin_supported(num_bits: int, group_size: int, is_sym: bool,
                             min_capability: Optional[int],
-                            has_zp: bool) -> bool:
+                            has_zp: bool) -> Tuple[bool, Optional[str]]:
     if min_capability is not None:
         major, minor = current_platform.get_device_capability()
         device_capability = major * 10 + minor
         if device_capability < min_capability:
-            return (
-                False,
-                "Marlin does not support device_capability = {}, the min_capability required is {}"
-                .format(device_capability, min_capability))
+            return (False, "Marlin does not support device_capability = {}"
+                    ", the min_capability required is {}".format(
+                        device_capability, min_capability))
 
     if num_bits not in MARLIN_SUPPORTED_NUM_BITS:
-        return (False, "Marlin does not support weight_bits = {num_bits}. "
+        return (False, "Marlin does not support weight_bits = {}. "
                 "Only weight_bits = {} are supported.".format(
                     num_bits, MARLIN_SUPPORTED_NUM_BITS))
 
@@ -66,7 +65,7 @@ def check_awq_marlin_supported(num_bits: int, group_size: int, has_zp: bool,
     return cond
 
 
-def verify_gptq_marlin_supported(num_bits: int, group_size: Optional[int],
+def verify_gptq_marlin_supported(num_bits: int, group_size: int,
                                  is_sym: bool) -> None:
     cond, err_msg = _check_marlin_supported(num_bits,
                                             group_size,
@@ -74,10 +73,11 @@ def verify_gptq_marlin_supported(num_bits: int, group_size: Optional[int],
                                             min_capability=None,
                                             has_zp=False)
     if not cond:
+        assert err_msg is not None
         raise ValueError("GPTQ" + err_msg)
 
 
-def verify_awq_marlin_supported(num_bits: int, group_size: Optional[int],
+def verify_awq_marlin_supported(num_bits: int, group_size: int,
                                 has_zp: bool) -> None:
     cond, err_msg = _check_marlin_supported(num_bits,
                                             group_size,
@@ -85,6 +85,7 @@ def verify_awq_marlin_supported(num_bits: int, group_size: Optional[int],
                                             min_capability=None,
                                             has_zp=has_zp)
     if not cond:
+        assert err_msg is not None
         raise ValueError("AWQ" + err_msg)
 
 

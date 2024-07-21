@@ -1232,8 +1232,7 @@ torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(b_q_weight.size(1) % marlin::tile_size == 0,
               "b_q_weight.size(1) = ", b_q_weight.size(1),
               " is not divisible by tile_size = ", marlin::tile_size);
-  int actual_size_n =
-      (b_q_weight.size(1) / marlin::tile_size) * pack_factor;
+  int actual_size_n = (b_q_weight.size(1) / marlin::tile_size) * pack_factor;
   TORCH_CHECK(size_n == actual_size_n, "size_n = ", size_n,
               ", actual_size_n = ", actual_size_n);
 
@@ -1274,11 +1273,9 @@ torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   num_groups = b_scales.size(0);
 
   // Verify workspace size
-  TORCH_CHECK(
-      size_n % marlin::min_thread_n == 0, "size_n = ", size_n,
-      ", is not divisible by min_thread_n = ", marlin::min_thread_n);
-  int min_workspace_size =
-      (size_n / marlin::min_thread_n) * marlin::max_par;
+  TORCH_CHECK(size_n % marlin::min_thread_n == 0, "size_n = ", size_n,
+              ", is not divisible by min_thread_n = ", marlin::min_thread_n);
+  int min_workspace_size = (size_n / marlin::min_thread_n) * marlin::max_par;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = ", workspace.numel(),
               " is below min_workspace_size = ", min_workspace_size);

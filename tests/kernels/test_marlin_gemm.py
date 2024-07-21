@@ -13,16 +13,16 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_SUPPORTED_NUM_BITS,
-    marlin_permute_scales, marlin_make_empty_g_idx)
+    marlin_make_empty_g_idx, marlin_permute_scales)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    MarlinWorkspace, get_weight_perm, marlin_quantize, marlin_weights,
-    awq_marlin_quantize)
+    MarlinWorkspace, awq_marlin_quantize, get_weight_perm, marlin_quantize,
+    marlin_weights)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    gptq_pack, awq_pack, quantize_weights, quantize_weights_with_zp,
+    awq_pack, gptq_pack, quantize_weights, quantize_weights_with_zp,
     sort_weights)
 
 ACT_ORDER_OPTS = [False, True]

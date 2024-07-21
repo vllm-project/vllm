@@ -115,7 +115,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         if quant_method != "gptq":
             return False
-        
+
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
