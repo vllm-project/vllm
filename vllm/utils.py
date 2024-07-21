@@ -897,20 +897,6 @@ def error_on_invalid_device_count_status():
                 "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
 
 
-def inference_mode():
-    """A device-agnostic wrapper of `torch.inference_mode`.
-
-    This wrapper is recommended because some hardware backends such as TPU
-    do not support `torch.inference_mode`. In such a case, this class falls
-    back to `torch.no_grad`.
-    """
-    if is_tpu():
-        # Fall back to `torch.no_grad()`.
-        return torch.no_grad()
-    else:
-        return torch.inference_mode(mode=True)
-
-
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.

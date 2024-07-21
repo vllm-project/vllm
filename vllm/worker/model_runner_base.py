@@ -5,9 +5,9 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
-from vllm.utils import inference_mode
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -164,7 +164,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @inference_mode()
+    @current_platform.inference_mode()
     def execute_model(
         self,
         model_input: T,
