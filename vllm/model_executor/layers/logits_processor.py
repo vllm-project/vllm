@@ -41,7 +41,8 @@ class LogitsProcessor(nn.Module):
         self.org_vocab_size = org_vocab_size or vocab_size
         # Soft cap the logits. Used in Gemma 2.
         self.soft_cap = soft_cap
-        self.use_all_gather = is_tpu()
+        # Whether to use gather or all-gather to gather the logits.
+        self.use_gather = not is_tpu()
 
     def forward(
         self,
@@ -79,12 +80,12 @@ class LogitsProcessor(nn.Module):
         logits = lm_head.linear_method.apply(lm_head,
                                              hidden_states,
                                              bias=embedding_bias)
-        if self.use_all_gather:
-            # Gather might not be supported for some devices such as TPUs.
+        if self.use_gather:
+            logits = tensor_model_parallel_gather(logits)
+        else:
+            # Gather is not supported for some devices such as TPUs.
             # Use all-gather instead.
             logits = tensor_model_parallel_all_gather(logits)
-        else:
-            logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[:, :self.org_vocab_size]

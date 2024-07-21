@@ -1068,8 +1068,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return self.base_layer.soft_cap
 
     @property
-    def use_all_gather(self):
-        return self.base_layer.use_all_gather
+    def use_gather(self):
+        return self.base_layer.use_gather
 
     @property
     def org_vocab_size(self):
