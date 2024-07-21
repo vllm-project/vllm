@@ -9,7 +9,9 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
-namespace gptq_marlin {
+namespace marlin {
+
+// Marlin params
 
 // 8 warps are a good choice since every SM has 4 schedulers and having more
 // than 1 warp per schedule allows some more latency hiding. At the same time,
@@ -25,6 +27,15 @@ static constexpr int min_thread_k = 64;
 static constexpr int tile_size = 16;
 static constexpr int max_par = 16;
 
+// Repack params
+static constexpr int repack_stages = 8;
+
+static constexpr int repack_threads = 256;
+
+static constexpr int tile_k_size = tile_size;
+static constexpr int tile_n_size = tile_k_size * 4;
+
+// Helpers
 template <typename T, int n>
 struct Vec {
   T elems[n];
@@ -73,4 +84,4 @@ __device__ inline void cp_async_wait() {
 
 #endif
 
-}  // namespace gptq_marlin
+}  // namespace marlin
