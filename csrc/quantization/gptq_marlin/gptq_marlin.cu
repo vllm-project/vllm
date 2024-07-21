@@ -294,6 +294,31 @@ __device__ inline typename ScalarType<half>::FragB dequant_4bit_zp<half>(
   return frag_b;
 }
 
+template <>
+__device__ inline typename ScalarType<nv_bfloat16>::FragB
+dequant_4bit_zp<nv_bfloat16>(int q) {
+  static constexpr uint32_t MASK = 0x000f000f;
+  static constexpr uint32_t EX = 0x43004300;
+
+  // Guarantee that the `(a & b) | c` operations are LOP3s.
+
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  q >>= 4;
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+
+  typename ScalarType<nv_bfloat16>::FragB frag_b;
+  static constexpr uint32_t MUL = 0x3F803F80;
+  static constexpr uint32_t ADD = 0xC300C300;
+
+  frag_b[0] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&lo),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  frag_b[1] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&hi),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  return frag_b;
+}
+
 template <typename scalar_t>
 __device__ inline typename ScalarType<scalar_t>::FragB dequant_8bit_zp(int q) {
   STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
@@ -316,6 +341,35 @@ __device__ inline typename ScalarType<half>::FragB dequant_8bit_zp<half>(
                       *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
   frag_b[1] = __hsub2(*reinterpret_cast<half2*>(&hi),
                       *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
+  return frag_b;
+}
+
+template <>
+__device__ inline typename ScalarType<nv_bfloat16>::FragB
+dequant_8bit_zp<nv_bfloat16>(int q) {
+  typename ScalarType<nv_bfloat16>::FragB frag_b;
+
+  float fp32_intermediates[4];
+  uint32_t* fp32_intermediates_casted =
+      reinterpret_cast<uint32_t*>(fp32_intermediates);
+
+  static constexpr uint32_t fp32_base = 0x4B000000;
+  fp32_intermediates_casted[0] = __byte_perm(q, fp32_base, 0x7650);
+  fp32_intermediates_casted[1] = __byte_perm(q, fp32_base, 0x7652);
+  fp32_intermediates_casted[2] = __byte_perm(q, fp32_base, 0x7651);
+  fp32_intermediates_casted[3] = __byte_perm(q, fp32_base, 0x7653);
+
+  fp32_intermediates[0] -= 8388608.f;
+  fp32_intermediates[1] -= 8388608.f;
+  fp32_intermediates[2] -= 8388608.f;
+  fp32_intermediates[3] -= 8388608.f;
+
+  uint32_t* bf16_result_ptr = reinterpret_cast<uint32_t*>(&frag_b);
+  bf16_result_ptr[0] = __byte_perm(fp32_intermediates_casted[0],
+                                   fp32_intermediates_casted[1], 0x7632);
+  bf16_result_ptr[1] = __byte_perm(fp32_intermediates_casted[2],
+                                   fp32_intermediates_casted[3], 0x7632);
+
   return frag_b;
 }
 
@@ -1954,61 +2008,33 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, void* zp,
       thread_m_blocks = exec_cfg.max_m_blocks;
     }
 
-    // TODO: Check if this can be simplified.
-    if constexpr (std::is_same<scalar_t, half>::value) {
-      if (false) {
-      }
+    if (false) {
+    }
+    GPTQ_CALL_IF(4, 16, 4, 256)
+    GPTQ_CALL_IF(4, 8, 8, 256)
+    GPTQ_CALL_IF(4, 8, 4, 128)
+    GPTQ_CALL_IF(4, 4, 8, 128)
+    GPTQ_CALL_IF(8, 16, 4, 256)
+    GPTQ_CALL_IF(8, 8, 8, 256)
+    GPTQ_CALL_IF(8, 8, 4, 128)
+    GPTQ_CALL_IF(8, 4, 8, 128)
 
-      // float case
-      GPTQ_CALL_IF(4, 16, 4, 256)
-      GPTQ_CALL_IF(4, 8, 8, 256)
-      GPTQ_CALL_IF(4, 8, 4, 128)
-      GPTQ_CALL_IF(4, 4, 8, 128)
-      GPTQ_CALL_IF(8, 16, 4, 256)
-      GPTQ_CALL_IF(8, 8, 8, 256)
-      GPTQ_CALL_IF(8, 8, 4, 128)
-      GPTQ_CALL_IF(8, 4, 8, 128)
-
-      AWQ_CALL_IF(4, 16, 4, 256)
-      AWQ_CALL_IF(4, 8, 8, 256)
-      AWQ_CALL_IF(4, 8, 4, 128)
-      AWQ_CALL_IF(4, 4, 8, 128)
-      AWQ_CALL_IF(8, 16, 4, 256)
-      AWQ_CALL_IF(8, 8, 8, 256)
-      AWQ_CALL_IF(8, 8, 4, 128)
-      AWQ_CALL_IF(8, 4, 8, 128)
-      else {
-        TORCH_CHECK(
-            false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n, ", ",
-            prob_k, "]", ", has_act_order = ", has_act_order,
-            ", num_groups = ", num_groups, ", group_size = ", group_size,
-            ", thread_m_blocks = ", thread_m_blocks,
-            ", thread_n_blocks = ", thread_n_blocks,
-            ", thread_k_blocks = ", thread_k_blocks, ", num_bits = ", num_bits);
-      }
-
-    } else {
-      // bfloat case, has no AWQ support yet
-      if (false) {
-      }
-      GPTQ_CALL_IF(4, 16, 4, 256)
-      GPTQ_CALL_IF(4, 8, 8, 256)
-      GPTQ_CALL_IF(4, 8, 4, 128)
-      GPTQ_CALL_IF(4, 4, 8, 128)
-      GPTQ_CALL_IF(8, 16, 4, 256)
-      GPTQ_CALL_IF(8, 8, 8, 256)
-      GPTQ_CALL_IF(8, 8, 4, 128)
-      GPTQ_CALL_IF(8, 4, 8, 128)
-
-      else {
-        TORCH_CHECK(
-            false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n, ", ",
-            prob_k, "]", ", has_act_order = ", has_act_order,
-            ", num_groups = ", num_groups, ", group_size = ", group_size,
-            ", thread_m_blocks = ", thread_m_blocks,
-            ", thread_n_blocks = ", thread_n_blocks,
-            ", thread_k_blocks = ", thread_k_blocks, ", num_bits = ", num_bits);
-      }
+    AWQ_CALL_IF(4, 16, 4, 256)
+    AWQ_CALL_IF(4, 8, 8, 256)
+    AWQ_CALL_IF(4, 8, 4, 128)
+    AWQ_CALL_IF(4, 4, 8, 128)
+    AWQ_CALL_IF(8, 16, 4, 256)
+    AWQ_CALL_IF(8, 8, 8, 256)
+    AWQ_CALL_IF(8, 8, 4, 128)
+    AWQ_CALL_IF(8, 4, 8, 128)
+    else {
+      TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
+                  ", ", prob_k, "]", ", has_act_order = ", has_act_order,
+                  ", num_groups = ", num_groups, ", group_size = ", group_size,
+                  ", thread_m_blocks = ", thread_m_blocks,
+                  ", thread_n_blocks = ", thread_n_blocks,
+                  ", thread_k_blocks = ", thread_k_blocks,
+                  ", num_bits = ", num_bits);
     }
 
     A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
