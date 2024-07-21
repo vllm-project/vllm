@@ -28,8 +28,7 @@ from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -42,34 +41,45 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import NemotronConfig
-from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+
 
 def _cast_if_autocast_enabled(*args):
     if not torch.is_autocast_enabled():
         return args
     else:
-        return torch.cuda.amp.autocast_mode._cast(args, torch.get_autocast_gpu_dtype())
+        return torch.cuda.amp.autocast_mode._cast(
+            args, torch.get_autocast_gpu_dtype())
+
 
 class NemotronLayerNorm1P(nn.LayerNorm):
-    def __init__(self, normalized_shape: Union[int, List[int], torch.Size], eps: float = 1e-5, elementwise_affine: bool = True,
-                 bias: bool = True, device=None, dtype=None):
-        super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
+
+    def __init__(self,
+                 normalized_shape: Union[int, List[int], torch.Size],
+                 eps: float = 1e-5,
+                 elementwise_affine: bool = True,
+                 bias: bool = True,
+                 device=None,
+                 dtype=None):
+        super().__init__(normalized_shape, eps, elementwise_affine, bias,
+                         device, dtype)
+
     def forward(
-            self, 
-            x: torch.Tensor,
-            residual: Optional[torch.Tensor] = None,
-        ) -> torch.Tensor:
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if residual is not None:
             x = x + residual
             residual = x
-        args = _cast_if_autocast_enabled(x, self.normalized_shape, self.weight + 1, self.bias, self.eps)
+        args = _cast_if_autocast_enabled(x, self.normalized_shape,
+                                         self.weight + 1, self.bias, self.eps)
         with torch.cuda.amp.autocast(enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
@@ -87,12 +97,11 @@ class NemotronMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.up_proj = ColumnParallelLinear(
-            input_size=hidden_size,
-            output_size=intermediate_size,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.up_proj")
+        self.up_proj = ColumnParallelLinear(input_size=hidden_size,
+                                            output_size=intermediate_size,
+                                            bias=bias,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.up_proj")
         self.down_proj = RowParallelLinear(input_size=intermediate_size,
                                            output_size=hidden_size,
                                            bias=bias,
@@ -242,9 +251,9 @@ class NemotronDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = NemotronLayerNorm1P(config.hidden_size,
-                                       eps=config.norm_eps)
-        self.post_attention_layernorm = NemotronLayerNorm1P(config.hidden_size,
-                                                eps=config.norm_eps)
+                                                   eps=config.norm_eps)
+        self.post_attention_layernorm = NemotronLayerNorm1P(
+            config.hidden_size, eps=config.norm_eps)
 
     def forward(
         self,
@@ -304,12 +313,13 @@ class NemotronModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: NemotronDecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+                                                cache_config=cache_config,
+                                                quant_config=quant_config,
+                                                prefix=prefix),
             prefix=f"{prefix}.layers")
         if get_pp_group().is_last_rank:
-            self.norm = NemotronLayerNorm1P(config.hidden_size, eps=config.norm_eps)
+            self.norm = NemotronLayerNorm1P(config.hidden_size,
+                                            eps=config.norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -367,8 +377,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA):
 
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj", "o_proj", "up_proj", "down_proj", "embed_tokens",
-        "lm_head"
+        "qkv_proj", "o_proj", "up_proj", "down_proj", "embed_tokens", "lm_head"
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -397,10 +406,10 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA):
         self.lora_config = lora_config
 
         self.model = NemotronModel(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config,
-                                prefix="model")
+                                   cache_config,
+                                   quant_config,
+                                   lora_config=lora_config,
+                                   prefix="model")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:

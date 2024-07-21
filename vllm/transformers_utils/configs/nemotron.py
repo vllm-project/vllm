@@ -18,23 +18,26 @@
 from transformers import PretrainedConfig
 from transformers.utils import logging
 
-
 logger = logging.get_logger(__name__)
 
 
 class NemotronConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`NemotronModel`]. It is used to instantiate an Nemotron
-    model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
-    defaults will yield a similar configuration to that of the Nemotron-8B.
+    This is the configuration class to store the configuration of a
+    [`NemotronModel`]. It is used to instantiate an Nemotron model
+    according to the specified arguments, defining the model architecture.
+    Instantiating a configuration with the defaults will yield a similar
+    configuration to that of the Nemotron-8B.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PretrainedConfig`] and can be
+    used to control the model outputs. Read the documentation from
+    [`PretrainedConfig`] for more information.
 
 
     Args:
         vocab_size (`int`, *optional*, defaults to 32000):
-            Vocabulary size of the Nemotron model. Defines the number of different tokens that can be represented by the
+            Vocabulary size of the Nemotron model. Defines the number of
+            different tokens that can be represented by the
             `inputs_ids` passed when calling [`NemotronModel`]
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
@@ -43,28 +46,38 @@ class NemotronConfig(PretrainedConfig):
         num_hidden_layers (`int`, *optional*, defaults to 32):
             Number of hidden layers in the Transformer decoder.
         num_attention_heads (`int`, *optional*, defaults to 32):
-            Number of attention heads for each attention layer in the Transformer decoder.
+            Number of attention heads for each attention layer in the
+            Transformer decoder.
         head_dim (`int`, *optional*, defaults to None):
-            Projection weights dimension in multi-head attention. Set to hidden_size // num_attention_heads if None
+            Projection weights dimension in multi-head attention. Set to
+            hidden_size // num_attention_heads if None
         num_key_value_heads (`int`, *optional*):
-            This is the number of key_value heads that should be used to implement Grouped Query Attention. If
-            `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
-            `num_key_value_heads=1 the model will use Multi Query Attention (MQA) otherwise GQA is used. When
-            converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
-            by meanpooling all the original heads within that group. For more details checkout [this
-            paper](https://arxiv.org/pdf/2305.13245.pdf). If it is not specified, will default to
-            `num_attention_heads`.
+            This is the number of key_value heads that should be used to
+            implement Grouped Query Attention. If
+            `num_key_value_heads=num_attention_heads`, the model will use
+            Multi Head Attention (MHA), if
+            `num_key_value_heads=1 the model will use Multi Query Attention
+            (MQA) otherwise GQA is used. When converting a multi-head
+            checkpoint to a GQA checkpoint, each group key and value
+            head should be constructed by meanpooling all the original
+            heads within that group. For more details checkout 
+            [this paper](https://arxiv.org/pdf/2305.13245.pdf). If it
+            is not specified, will default to `num_attention_heads`.
         hidden_act (`str` or `function`, *optional*, defaults to `"silu"`):
-            The non-linear activation function (function or string) in the decoder.
+            The non-linear activation function (function or string) in the
+            decoder.
         max_position_embeddings (`int`, *optional*, defaults to 2048):
-            The maximum sequence length that this model might ever be used with.
+            The maximum sequence length that this model might ever be used
+            with.
         initializer_range (`float`, *optional*, defaults to 0.02):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+            The standard deviation of the truncated_normal_initializer for
+            initializing all weight matrices.
         norm_eps (`float`, *optional*, defaults to 1e-06):
             The epsilon used by the normalization layers.
         use_cache (`bool`, *optional*, defaults to `True`):
-            Whether or not the model should return the last key/values attentions (not used by all models). Only
-            relevant if `config.is_decoder=True`.
+            Whether or not the model should return the last key/values
+            attentions (not used by all models). Only relevant if
+            `config.is_decoder=True`.
         pad_token_id (`int`, *optional*):
             Padding token id.
         bos_token_id (`int`, *optional*, defaults to 1):
@@ -76,19 +89,20 @@ class NemotronConfig(PretrainedConfig):
         rope_theta (`float`, *optional*, defaults to 10000.0):
             The base period of the RoPE embeddings.
         rope_scaling (`Dict`, *optional*):
-            Dictionary containing the scaling configuration for the RoPE embeddings. Currently supports two scaling
-            strategies: linear and dynamic. Their scaling factor must be a float greater than 1. The expected format is
-            `{"type": strategy name, "factor": scaling factor}`. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum. See the following thread for more information on how
-            these scaling strategies behave:
-            https://www.reddit.com/r/LocalLLaMA/comments/14mrgpr/dynamically_scaled_rope_further_increases/. This is an
-            experimental feature, subject to breaking API changes in future versions.
+            Dictionary containing the scaling configuration for the RoPE
+            embeddings. Currently supports two scaling strategies: linear
+            and dynamic. Their scaling factor must be a float greater than 1.
+            The expected format is `{"type": strategy name,
+            "factor": scaling factor}`. When using this flag, don't update
+            `max_position_embeddings` to the expected new maximum.
         attention_bias (`bool`, *optional*, defaults to `False`):
-            Whether to use a bias in the query, key, value and output projection layers during self-attention.
+            Whether to use a bias in the query, key, value and output
+            projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
         mlp_bias (`bool`, *optional*, defaults to `False`):
-            Whether to use a bias in up_proj and down_proj layers in the MLP layers.
+            Whether to use a bias in up_proj and down_proj layers in the MLP
+            layers.
 
     ```python
     >>> from transformers import NemotronModel, NemotronConfig
@@ -138,7 +152,8 @@ class NemotronConfig(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
-        self.head_dim = head_dim if head_dim is not None else hidden_size // num_attention_heads
+        self.head_dim = head_dim if head_dim is not None else (
+            hidden_size // num_attention_heads)
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -172,15 +187,21 @@ class NemotronConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if not isinstance(self.rope_scaling, dict) or len(self.rope_scaling) != 2:
+        if not isinstance(self.rope_scaling,
+                          dict) or len(self.rope_scaling) != 2:
             raise ValueError(
-                "`rope_scaling` must be a dictionary with two fields, `type` and `factor`, " f"got {self.rope_scaling}"
-            )
+                "`rope_scaling` must be a dictionary with two fields, "
+                f"`type` and `factor`, got {self.rope_scaling}")
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
+        if rope_scaling_type is None or rope_scaling_type not in [
+                "linear", "dynamic"
+        ]:
             raise ValueError(
-                f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
-            )
-        if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}")
+                "`rope_scaling`'s type field must be one of ['linear', "
+                f"'dynamic'], got {rope_scaling_type}")
+        if rope_scaling_factor is None or not isinstance(
+                rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
+            raise ValueError(
+                "`rope_scaling`'s factor field must be a float > 1, got "
+                f"{rope_scaling_factor}")
