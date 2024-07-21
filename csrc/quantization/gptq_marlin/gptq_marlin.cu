@@ -1072,8 +1072,6 @@ __global__ void Marlin(
 
     int pipe = full_pipe % stages;
 
-    static_assert(!has_act_order);
-
     if constexpr (group_blocks == -1) {
       for (int i = 0; i < num_ints_per_thread; i++) {
         frag_qzp[k % 2][i] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd + i];
@@ -1956,38 +1954,61 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, void* zp,
       thread_m_blocks = exec_cfg.max_m_blocks;
     }
 
-    // Define kernel configurations
-    if (false) {
-    }
-    // GPTQ_CALL_IF(4, 32, 2, 256)
-    // GPTQ_CALL_IF(4, 16, 4, 256)
-    // GPTQ_CALL_IF(4, 8, 8, 256)
-    // GPTQ_CALL_IF(4, 8, 4, 128)
-    // GPTQ_CALL_IF(4, 4, 8, 128)
-    // GPTQ_CALL_IF(8, 32, 2, 256)
-    // GPTQ_CALL_IF(8, 16, 4, 256)
-    // GPTQ_CALL_IF(8, 8, 8, 256)
-    // GPTQ_CALL_IF(8, 8, 4, 128)
-    // GPTQ_CALL_IF(8, 4, 8, 128)
+    // TODO: Check if this can be simplified.
+    if constexpr (std::is_same<scalar_t, half>::value) {
+      if (false) {
+      }
 
-    AWQ_CALL_IF(4, 32, 2, 256)
-    AWQ_CALL_IF(4, 16, 4, 256)
-    AWQ_CALL_IF(4, 8, 8, 256)
-    AWQ_CALL_IF(4, 8, 4, 128)
-    AWQ_CALL_IF(4, 4, 8, 128)
-    AWQ_CALL_IF(8, 32, 2, 256)
-    AWQ_CALL_IF(8, 16, 4, 256)
-    AWQ_CALL_IF(8, 8, 8, 256)
-    AWQ_CALL_IF(8, 8, 4, 128)
-    AWQ_CALL_IF(8, 4, 8, 128)
-    else {
-      TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
-                  ", ", prob_k, "]", ", has_act_order = ", has_act_order,
-                  ", num_groups = ", num_groups, ", group_size = ", group_size,
-                  ", thread_m_blocks = ", thread_m_blocks,
-                  ", thread_n_blocks = ", thread_n_blocks,
-                  ", thread_k_blocks = ", thread_k_blocks,
-                  ", num_bits = ", num_bits);
+      // float case
+      GPTQ_CALL_IF(4, 16, 4, 256)
+      GPTQ_CALL_IF(4, 8, 8, 256)
+      GPTQ_CALL_IF(4, 8, 4, 128)
+      GPTQ_CALL_IF(4, 4, 8, 128)
+      GPTQ_CALL_IF(8, 16, 4, 256)
+      GPTQ_CALL_IF(8, 8, 8, 256)
+      GPTQ_CALL_IF(8, 8, 4, 128)
+      GPTQ_CALL_IF(8, 4, 8, 128)
+
+      AWQ_CALL_IF(4, 16, 4, 256)
+      AWQ_CALL_IF(4, 8, 8, 256)
+      AWQ_CALL_IF(4, 8, 4, 128)
+      AWQ_CALL_IF(4, 4, 8, 128)
+      AWQ_CALL_IF(8, 16, 4, 256)
+      AWQ_CALL_IF(8, 8, 8, 256)
+      AWQ_CALL_IF(8, 8, 4, 128)
+      AWQ_CALL_IF(8, 4, 8, 128)
+      else {
+        TORCH_CHECK(
+            false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n, ", ",
+            prob_k, "]", ", has_act_order = ", has_act_order,
+            ", num_groups = ", num_groups, ", group_size = ", group_size,
+            ", thread_m_blocks = ", thread_m_blocks,
+            ", thread_n_blocks = ", thread_n_blocks,
+            ", thread_k_blocks = ", thread_k_blocks, ", num_bits = ", num_bits);
+      }
+
+    } else {
+      // bfloat case, has no AWQ support yet
+      if (false) {
+      }
+      GPTQ_CALL_IF(4, 16, 4, 256)
+      GPTQ_CALL_IF(4, 8, 8, 256)
+      GPTQ_CALL_IF(4, 8, 4, 128)
+      GPTQ_CALL_IF(4, 4, 8, 128)
+      GPTQ_CALL_IF(8, 16, 4, 256)
+      GPTQ_CALL_IF(8, 8, 8, 256)
+      GPTQ_CALL_IF(8, 8, 4, 128)
+      GPTQ_CALL_IF(8, 4, 8, 128)
+
+      else {
+        TORCH_CHECK(
+            false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n, ", ",
+            prob_k, "]", ", has_act_order = ", has_act_order,
+            ", num_groups = ", num_groups, ", group_size = ", group_size,
+            ", thread_m_blocks = ", thread_m_blocks,
+            ", thread_n_blocks = ", thread_n_blocks,
+            ", thread_k_blocks = ", thread_k_blocks, ", num_bits = ", num_bits);
+      }
     }
 
     A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
@@ -2023,8 +2044,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(b_q_weight.size(1) % marlin::tile_size == 0,
               "b_q_weight.size(1) = ", b_q_weight.size(1),
               " is not divisible by tile_size = ", marlin::tile_size);
-  int actual_size_n =
-      (b_q_weight.size(1) / marlin::tile_size) * pack_factor;
+  int actual_size_n = (b_q_weight.size(1) / marlin::tile_size) * pack_factor;
   TORCH_CHECK(size_n == actual_size_n, "size_n = ", size_n,
               ", actual_size_n = ", actual_size_n);
 
@@ -2114,11 +2134,9 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   }
 
   // Verify workspace size
-  TORCH_CHECK(
-      size_n % marlin::min_thread_n == 0, "size_n = ", size_n,
-      ", is not divisible by min_thread_n = ", marlin::min_thread_n);
-  int min_workspace_size =
-      (size_n / marlin::min_thread_n) * marlin::max_par;
+  TORCH_CHECK(size_n % marlin::min_thread_n == 0, "size_n = ", size_n,
+              ", is not divisible by min_thread_n = ", marlin::min_thread_n);
+  int min_workspace_size = (size_n / marlin::min_thread_n) * marlin::max_par;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = ", workspace.numel(),
               " is below min_workspace_size = ", min_workspace_size);
@@ -2133,15 +2151,14 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, marlin::max_par);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
-    // TODO: Add bfloat16 back
-    // marlin::marlin_mm_f16i4<nv_bfloat16>(
-    //     a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-    //     c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
-    //     b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-    //     a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-    //     workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
-    //     num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-    //     thread_k, thread_n, sms, marlin::max_par);
+    marlin::marlin_mm_f16i4<nv_bfloat16>(
+        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
+        c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
+        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
+        a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
+        workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
+        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
+        thread_k, thread_n, sms, marlin::max_par);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }

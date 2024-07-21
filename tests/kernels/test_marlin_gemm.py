@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_SUPPORTED_NUM_BITS,
-    marlin_permute_scales)
+    marlin_permute_scales, marlin_make_empty_g_idx)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -205,6 +205,8 @@ def test_gptq_marlin_gemm(
     w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
         b_weight, num_bits, group_size, act_order)
 
+    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
 
@@ -212,6 +214,7 @@ def test_gptq_marlin_gemm(
         a_input,
         marlin_q_w,
         marlin_s,
+        marlin_zp,
         g_idx,
         sort_indices,
         workspace.scratch,
@@ -220,6 +223,7 @@ def test_gptq_marlin_gemm(
         b_weight.shape[1],
         a_input.shape[1],
         is_k_full,
+        has_zp=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
 

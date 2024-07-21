@@ -68,7 +68,6 @@ class AWQMarlinConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        print("inside hf_quant_cfg = {}".format(hf_quant_cfg))
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
 
         print("  can_convert = {}".format(can_convert))
