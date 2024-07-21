@@ -193,7 +193,7 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
             input_width=width,
         )
     elif isinstance(image_data, torch.Tensor):
-        return
+        image_feature_size = image_data.shape[0]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
