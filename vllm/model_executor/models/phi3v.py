@@ -156,7 +156,8 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                 image_sizes: torch.Tensor) -> torch.FloatTensor:
         """
         process image and return vision embeddings.
-        
+
+        pixel_values: (num_images, num_crops, c, h, w)
         output: (num_images, num_img_tokens, hidden_size)
         """
         num_images, num_crops, c, h, w = pixel_values.shape
