@@ -132,8 +132,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--return-tokens-as-token-ids",
         action="store_true",
         help="When --max-logprobs is specified, represents single tokens as"
-             "strings of the form 'token_id:{token_id}' so that tokens that"
-             "are not JSON-encodable can be identified.")
+        "strings of the form 'token_id:{token_id}' so that tokens that"
+        "are not JSON-encodable can be identified.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser
