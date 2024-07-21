@@ -1,7 +1,10 @@
+import types
 from typing import List, Optional, Type
 
 import pytest
+import torch
 from PIL.Image import Image
+from transformers import GenerationConfig
 
 from vllm.model_executor.models.internvl import (IMG_CONTEXT, IMG_END,
                                                  IMG_START,
@@ -21,7 +24,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<image>\nWhat is the season?\n",
 })
 
-models = ["OpenGVLab/InternVL2-4B", "OpenGVLab/InternVL2-8B"]
+models = ["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"]
 
 
 class InternVLProcessor:
@@ -42,6 +45,51 @@ class InternVLProcessor:
         prompt = self.tokenizer(text, return_tensors="pt")
         prompt.update({"pixel_values": pixel_values})
         return prompt
+
+
+# copied from https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py
+def generate(
+    self,
+    pixel_values: torch.FloatTensor,
+    input_ids: torch.FloatTensor,
+    attention_mask: Optional[torch.LongTensor] = None,
+    visual_features: Optional[torch.FloatTensor] = None,
+    generation_config: Optional[GenerationConfig] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    **generate_kwargs,
+) -> torch.LongTensor:
+    """Generate method for InternVL2 model without fixed use_cache."""
+    assert self.img_context_token_id is not None
+    if pixel_values is not None:
+        if visual_features is not None:
+            vit_embeds = visual_features
+        else:
+            vit_embeds = self.extract_feature(pixel_values)
+        input_embeds = self.language_model.get_input_embeddings()(input_ids)
+        B, N, C = input_embeds.shape
+        input_embeds = input_embeds.reshape(B * N, C)
+
+        input_ids = input_ids.reshape(B * N)
+        selected = (input_ids == self.img_context_token_id)
+        assert selected.sum() != 0
+        input_embeds[selected] = vit_embeds.reshape(-1,
+                                                    C).to(input_embeds.device)
+
+        input_embeds = input_embeds.reshape(B, N, C)
+    else:
+        input_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+    outputs = self.language_model.generate(
+        inputs_embeds=input_embeds,
+        attention_mask=attention_mask,
+        generation_config=generation_config,
+        output_hidden_states=output_hidden_states,
+        return_dict=return_dict,
+        **generate_kwargs,
+    )
+
+    return outputs
 
 
 def run_test(
@@ -80,7 +128,7 @@ def run_test(
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
-                     max_model_len=2048,
+                     max_model_len=4096,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
@@ -100,11 +148,14 @@ def run_test(
         hf_model.processor = InternVLProcessor(hf_model)
         hf_model.model.get_output_embeddings = lambda: \
             hf_model.model.language_model.get_output_embeddings()
+        hf_model.model.generate = types.MethodType(generate, hf_model.model)
+        eos_token_id = hf_model.tokenizer.eos_token_id
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images)
+                                                    images=hf_images,
+                                                    eos_token_id=eos_token_id)
             for prompts, hf_images in inputs_per_image
         ]
 

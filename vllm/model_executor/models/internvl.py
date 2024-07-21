@@ -697,6 +697,24 @@ class InternVLChatModel(nn.Module, SupportsVision):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
+                if "wqkv" in name:
+                    config = self.config.llm_config
+                    kv_groups = (config.num_attention_heads //
+                                 config.num_key_value_heads)
+                    head_dim = config.hidden_size // config.num_attention_heads
+                    loaded_weight = loaded_weight.view(-1, 2 + kv_groups,
+                                                       head_dim,
+                                                       loaded_weight.shape[-1])
+                    wq, wk, wv = torch.split(loaded_weight, [kv_groups, 1, 1],
+                                             dim=1)
+                    wq = wq.reshape(-1, wq.shape[-1])
+                    wk = wk.reshape(-1, wk.shape[-1])
+                    wv = wv.reshape(-1, wv.shape[-1])
+                    weight_loader = param.weight_loader
+                    weight_loader(param, wq, 'q')
+                    weight_loader(param, wk, 'k')
+                    weight_loader(param, wv, 'v')
+                    continue
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
