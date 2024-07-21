@@ -10,13 +10,14 @@ from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
 
 class TargetModelRunner(ModelRunner):
     """Specialized model runner for speculative decoding target model.
-    In speculative decoding, the log probabilities selected may not be the
-    same ones as selected by the target model sampling. This means that the
-    time spent in the log probability calculation of the target model is time
-    wasted, since we calculate log probabilities after deciding which tokens
-    are accepted. For this reason disabling log probabilities in the target
-    model will make decode faster. The model runner sets the SamplingMetadata
-    parameters according to whether log probabilities are requested or not. 
+    In speculative decoding, the log probabilities selected finally may not
+    be the same ones as selected by the target model sampling. This means
+    that the time spent in the log probability calculation of the target model
+    is time wasted, since we calculate log probabilities after deciding which
+    tokens are accepted. For this reason disabling log probabilities in the
+    target model will make decode faster. The model runner sets the
+    SamplingMetadata parameters according to whether log probabilities are
+    requested or not. 
     """
 
     def __init__(self,
