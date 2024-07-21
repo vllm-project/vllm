@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -117,16 +118,30 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     def load_model(self) -> None:
         self.device = self.device_config.device
 
-        model = get_model(
-            model_config=self.model_config,
-            load_config=self.load_config,
-            device_config=self.device_config,
-            parallel_config=self.parallel_config,
-            cache_config=self.cache_config,
-            scheduler_config=self.scheduler_config,
-            multimodal_config=self.multimodal_config,
-            lora_config=None,
-        )
+        # NOTE(woosuk): While the executor assigns the TP ranks to the worker
+        # process, the ranks can be different from the ranks internally assigned
+        # by the xm runtime. Therefore, there is a mismatch in the rank
+        # assignment between the gloo (cpu) runtime and the xm (tpu) runtime.
+        # This is not a problem in linear layers because all-reduce is
+        # rank-agnostic. However, it matters for all-gather as the ranks
+        # determine the order of concatenating the output tensors.
+        # As a workaround, we use the xm's rank assignment only when loading
+        # the weights for vocab embedding.
+        xm_tp_rank = xm.get_ordinal()
+        with patch(
+                "vllm.model_executor.layers.vocab_parallel_embedding."
+                "get_tensor_model_parallel_rank",
+                return_value=xm_tp_rank):
+            model = get_model(
+                model_config=self.model_config,
+                load_config=self.load_config,
+                device_config=self.device_config,
+                parallel_config=self.parallel_config,
+                cache_config=self.cache_config,
+                scheduler_config=self.scheduler_config,
+                multimodal_config=self.multimodal_config,
+                lora_config=None,
+            )
         model = model.eval()
         xm.wait_device_ops()
 
