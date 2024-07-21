@@ -3,48 +3,14 @@
 import time
 from typing import Any, Dict, List, Literal, Optional, Union
 
-import openai.types.chat
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-# pydantic needs the TypedDict from typing_extensions
-from typing_extensions import Annotated, Required, TypedDict
+from typing_extensions import Annotated
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
-
-
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
-
-    type: Required[str]
-    """The type of the content part."""
-
-
-ChatCompletionContentPartParam = Union[
-    openai.types.chat.ChatCompletionContentPartParam,
-    CustomChatCompletionContentPartParam]
-
-
-class CustomChatCompletionMessageParam(TypedDict, total=False):
-    """Enables custom roles in the Chat Completion API."""
-    role: Required[str]
-    """The role of the message's author."""
-
-    content: Union[str, List[ChatCompletionContentPartParam]]
-    """The contents of the message."""
-
-    name: str
-    """An optional name for the participant.
-
-    Provides the model information to differentiate between participants of the
-    same role.
-    """
-
-
-ChatCompletionMessageParam = Union[
-    openai.types.chat.ChatCompletionMessageParam,
-    CustomChatCompletionMessageParam]
 
 
 class OpenAIBaseModel(BaseModel):
