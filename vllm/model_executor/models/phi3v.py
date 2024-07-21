@@ -152,12 +152,9 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.vocab_size = config.vocab_size
         self.type_feature = config.img_processor.get('type_feature', 'patch')
 
-    def forward(
-        self,
-        input_ids: torch.LongTensor,
-        pixel_values: torch.FloatTensor,
-        image_sizes: torch.Tensor,
-    ) -> torch.FloatTensor:
+    def forward(self, input_ids: torch.LongTensor,
+                pixel_values: torch.FloatTensor,
+                image_sizes: torch.Tensor) -> torch.FloatTensor:
         """process and merge text embeddings with image embeddings."""
 
         # (batch_size, max_num_crops, 3, height, width)
@@ -282,12 +279,6 @@ class Phi3VImagePixelInputs(TypedDict):
 
     This should be in `(height, width)` format.
     """
-
-
-class Phi3VImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size, num_channels, height, width)`"""
 
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
