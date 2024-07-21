@@ -588,7 +588,10 @@ class EngineArgs:
             help='If set to True, token log probabilities are not returned '
             'during speculative decoding. If set to False, log probabilities '
             'are returned according to the settings in SamplingParams. If '
-            'not specified, it defaults to True.')
+            'not specified, it defaults to True. Disabling log probabilities '
+            'during speculative decoding reduces latency by skipping logprob '
+            'calculation in proposal sampling, target sampling, and after '
+            'accepted tokens are determined.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,

@@ -410,8 +410,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             sampler_output: SamplerOutput) -> SamplerOutput:
         """
         Creates and returns a `SamplerOutput` with only the sampled token IDs 
-        being serialized to the CPU and populated in
-        `CompletionSequenceGroupOutput`.
+        being serialized to CPU & populated in `CompletionSequenceGroupOutput`.
         All other parameters in `CompletionSequenceGroupOutput` related to log 
         probabilities are skipped.
 
@@ -659,8 +658,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
         if self._disable_logprobs:
             # We are skipping the logprobs. Hence don't serialize the
-            # logprobs related tensors from the GPU and create empty/dummy
-            # lists instead.
+            # logprobs related tensors from the GPU. Instead create
+            # empty/dummy lists.
             (accepted_token_id_ranks_by_step,
             accepted_token_id_logprobs_by_step,
             topk_logprobs_by_step, topk_indices_by_step) =\
@@ -670,6 +669,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         else:
             # Organize input tensors by step instead of by sequence.
             target_logprobs_by_step = target_logprobs.transpose(0, 1)
+            # Serialize all tensors into Python lists.
             (accepted_token_id_ranks_by_step,
             accepted_token_id_logprobs_by_step,
             topk_logprobs_by_step, topk_indices_by_step) =\
@@ -731,7 +731,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self,
         batch_size: int,
         num_steps: int,
-        top_k: int,
+        num_top_k: int,
     ) -> Tuple[List[List[int]], List[List[float]],
                List[List[List[Optional[float]]]],
                List[List[List[Optional[int]]]]]:
@@ -744,14 +744,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             - The log probabilities of the accepted tokens,
               shaped (num_steps, batch_size)
             - The log probabilities of the top k tokens,
-              shaped (num_steps, batch_size, top_k)
+              shaped (num_steps, batch_size, num_top_k)
             - The token IDs of the top k tokens,
-              shaped (num_steps, batch_size, top_k)
+              shaped (num_steps, batch_size, num_top_k)
 
         Args:
             batch_size (int): The size of the batch.
             num_steps (int): The number of steps in the sequence.
-            top_k (int): The number of top-k token log probabilities to return.
+            num_top_k (int): The number of top-k token log probabilities to
+            return.
         
         Returns:
             A tuple containing four dummy lists as described above.
@@ -761,10 +762,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_id_logprobs_by_step = [[0.0] * batch_size
                                               for _ in range(num_steps)]
         topk_logprobs_by_step: List[List[List[Optional[float]]]] = [[
-            [None] * top_k for _ in range(batch_size)
+            [None] * num_top_k for _ in range(batch_size)
         ] for _ in range(num_steps)]
         topk_indices_by_step: List[List[List[Optional[int]]]] = [[
-            [None] * top_k for _ in range(batch_size)
+            [None] * num_top_k for _ in range(batch_size)
         ] for _ in range(num_steps)]
         return (accepted_token_id_ranks_by_step,
                 accepted_token_id_logprobs_by_step, topk_logprobs_by_step,
@@ -774,7 +775,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self,
         target_logprobs_by_step: torch.Tensor,
         accepted_token_ids_by_step: torch.Tensor,
-        top_k: int,
+        num_top_k: int,
     ) -> Tuple[List[List[int]], List[List[float]],
                List[List[List[Optional[float]]]],
                List[List[List[Optional[int]]]]]:
@@ -787,9 +788,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             - The log probabilities of the accepted tokens,
               shaped (num_steps, batch_size)
             - The log probabilities of the top k tokens,
-              shaped (num_steps, batch_size, top_k)
+              shaped (num_steps, batch_size, num_top_k)
             - The token IDs of the top k tokens,
-              shaped (num_steps, batch_size, top_k)
+              shaped (num_steps, batch_size, num_top_k)
 
         Args:
             target_logprobs_by_step (torch.Tensor): Tensor representing the
@@ -797,7 +798,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             shaped (num_steps, batch_size, vocab_size)
             accepted_token_ids_by_step (torch.Tensor): Tensor representing
             the accepted  token_ids, shaped (num_steps, batch_size) 
-            top_k (int): The number of top-k token log probabilities to return.
+            num_top_k (int): The number of top-k token log probabilities to
+            return.
         
         Returns:
             A tuple containing the lists as described above.
@@ -814,7 +816,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # logprob of the accepted token).
         (topk_logprobs_by_step_tensor,
          topk_indices_by_step_tensor) = target_logprobs_by_step.topk(
-             k=top_k,
+             k=num_top_k,
              dim=-1,
          )
         accepted_token_id_ranks_by_step = (
