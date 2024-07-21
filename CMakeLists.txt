@@ -33,7 +33,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # versions are derived from Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.3.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.4.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -101,7 +101,7 @@ elseif(HIP_FOUND)
   # ROCm 5.X and 6.X
   if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
       NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM})
-    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM} "
+    message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
 else()
