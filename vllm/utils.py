@@ -897,6 +897,31 @@ def error_on_invalid_device_count_status():
                 "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
 
 
+class inference_mode(torch.inference_mode):
+
+    def __init__(self, mode: bool = True) -> None:
+        self.inference_mode = not is_tpu()
+        if self.inference_mode:
+            super().__init__(mode)
+        else:
+            # No grad.
+            self.prev = False
+            self.mode = mode
+
+    def __enter__(self) -> None:
+        if self.inference_mode:
+            super().__enter__()
+        else:
+            self.prev = torch.is_grad_enabled()
+            torch.set_grad_enabled(False)
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        if self.inference_mode:
+            super().__init__(exc_type, exc_value, traceback)
+        else:
+            torch.set_grad_enabled(self.prev)
+
+
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
