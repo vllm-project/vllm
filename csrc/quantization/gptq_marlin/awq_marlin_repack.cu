@@ -258,8 +258,6 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
   if (false) {
   }
   CALL_IF(4)
-  CALL_IF(4)
-  CALL_IF(8)
   CALL_IF(8)
   else {
     TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits);
