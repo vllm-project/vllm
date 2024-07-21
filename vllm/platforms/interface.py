@@ -32,8 +32,8 @@ class Platform:
         """A device-specific wrapper of `torch.inference_mode`.
 
         This wrapper is recommended because some hardware backends such as TPU
-        do not support `torch.inference_mode`. In such a case, this class falls
-        back to `torch.no_grad`.
+        do not support `torch.inference_mode`. In such a case, they will fall
+        back to `torch.no_grad` by overriding this method.
         """
         return torch.inference_mode(mode=True)
 
