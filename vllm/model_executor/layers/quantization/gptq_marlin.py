@@ -10,10 +10,10 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_marlin_linear, check_marlin_supported, marlin_is_k_full,
+    apply_gptq_marlin_linear, check_gptq_marlin_supported, marlin_is_k_full,
     marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx, replace_tensor,
-    verify_marlin_supported, verify_marlin_supports_shape)
+    verify_gptq_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
@@ -37,9 +37,9 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.lm_head_quantized = lm_head_quantized
 
         # Verify supported on platform.
-        verify_marlin_supported(num_bits=self.weight_bits,
-                                group_size=self.group_size,
-                                is_sym=self.is_sym)
+        verify_gptq_marlin_supported(num_bits=self.weight_bits,
+                                     group_size=self.group_size,
+                                     is_sym=self.is_sym)
 
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
@@ -77,7 +77,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        can_convert = cls.is_marlin_compatible(hf_quant_cfg)
+        can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (user_quant is None or user_quant == "marlin")
 
@@ -105,22 +105,27 @@ class GPTQMarlinConfig(QuantizationConfig):
         return []
 
     @classmethod
-    def is_marlin_compatible(cls, quant_config: Dict[str, Any]):
+    def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.
+        quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits", None)
         group_size = quant_config.get("group_size", None)
         sym = quant_config.get("sym", None)
         desc_act = quant_config.get("desc_act", None)
+
+        if quant_method != "gptq":
+            return False
 
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
             return False
 
-        return check_marlin_supported(num_bits=num_bits,
-                                      group_size=group_size,
-                                      is_sym=sym,
-                                      min_capability=cls.get_min_capability())
+        return check_gptq_marlin_supported(
+            num_bits=num_bits,
+            group_size=group_size,
+            is_sym=sym,
+            min_capability=cls.get_min_capability())
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
@@ -278,6 +283,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             layer.g_idx = marlin_make_empty_g_idx(device)
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
+        # No zero-point
+        layer.zp = marlin_make_empty_g_idx(device)
+
         # Repack weights from autogptq format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
             layer.qweight,
@@ -302,10 +310,11 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return apply_marlin_linear(
+        return apply_gptq_marlin_linear(
             input=x,
             weight=layer.qweight,
             weight_scale=layer.scales,
+            weight_zp=layer.zp,
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
