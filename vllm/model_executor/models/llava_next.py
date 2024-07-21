@@ -248,8 +248,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             org_num_embeddings=self.language_model.org_vocab_size,
             quant_config=quant_config)
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.text_config.vocab_size, logit_scale)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.text_config.vocab_size,
+                                                logit_scale)
         self.sampler = Sampler()
 
         self.image_newline = nn.Parameter(
