@@ -898,25 +898,31 @@ def error_on_invalid_device_count_status():
 
 
 class inference_mode(torch.inference_mode):
+    """A device-agnostic wrapper of `torch.inference_mode`.
+
+    This wrapper is recommended because some hardware backends such as TPU
+    do not support `torch.inference_mode`. In such as case, this class falls
+    back to `torch.no_grad`.
+    """
 
     def __init__(self, mode: bool = True) -> None:
-        self.inference_mode = not is_tpu()
-        if self.inference_mode:
+        self.use_inference_mode = not is_tpu()
+        if self.use_inference_mode:
             super().__init__(mode)
         else:
-            # No grad.
+            # Fall back to torch.no_grad().
             self.prev = False
             self.mode = mode
 
     def __enter__(self) -> None:
-        if self.inference_mode:
+        if self.use_inference_mode:
             super().__enter__()
         else:
             self.prev = torch.is_grad_enabled()
             torch.set_grad_enabled(False)
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        if self.inference_mode:
+        if self.use_inference_mode:
             super().__init__(exc_type, exc_value, traceback)
         else:
             torch.set_grad_enabled(self.prev)
