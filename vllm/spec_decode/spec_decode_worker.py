@@ -783,7 +783,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Creates and returns four lists representing token probabilities and
         their ranks.
 
-        This method initializes and returns:
+        This method initializes and returns four lists containing:
             - The ranks of the accepted tokens, shaped (num_steps, batch_size)
             - The log probabilities of the accepted tokens,
               shaped (num_steps, batch_size)
