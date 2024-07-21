@@ -2,12 +2,12 @@ from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          load_chat_template,
                                          parse_chat_message_content)
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
                                               ErrorResponse,
