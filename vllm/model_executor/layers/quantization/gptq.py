@@ -240,7 +240,7 @@ class GPTQLinearMethod(LinearMethodBase):
             qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
                 weight_dtype=weight_dtype,
                 lowp_mode=lowp_mode,
-                act_quant_mode=act_quant_mode_dict["PER_IC_BLOCK"],
+                act_quant_mode=act_quant_mode_dict["PER_BATCH_IC_BLOCK"],
                 group_size=self.quant_config.group_size,
             )
             qconfig = _woq_enable_weight_cache_for_large_batch(
