@@ -283,6 +283,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             layer.g_idx = marlin_make_empty_g_idx(device)
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
+        # No zero-point
+        layer.zp = marlin_make_empty_g_idx(device)
+
         # Repack weights from autogptq format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
             layer.qweight,
@@ -311,6 +314,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             input=x,
             weight=layer.qweight,
             weight_scale=layer.scales,
+            weight_zp=layer.zp,
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,

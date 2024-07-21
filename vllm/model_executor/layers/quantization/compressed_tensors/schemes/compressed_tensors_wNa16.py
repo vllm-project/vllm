@@ -135,6 +135,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.g_idx = marlin_make_empty_g_idx(device)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
+        # No zero-point
+        layer.weight_zp = marlin_make_empty_g_idx(device)
+
         # Repack weights from compressed-tensors format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
             layer.weight_packed.t().contiguous(),
@@ -159,6 +162,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             input=x,
             weight=layer.weight_packed,
             weight_scale=layer.weight_scale,
+            weight_zp=layer.weight_zp,
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,

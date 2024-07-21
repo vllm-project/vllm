@@ -236,6 +236,7 @@ def apply_gptq_marlin_linear(
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
         g_idx: torch.Tensor,
         g_idx_sort_indices: torch.Tensor,
         workspace: torch.Tensor,
@@ -250,6 +251,7 @@ def apply_gptq_marlin_linear(
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   weight,
                                   weight_scale,
+                                  weight_zp,
                                   g_idx,
                                   g_idx_sort_indices,
                                   workspace,
@@ -257,7 +259,8 @@ def apply_gptq_marlin_linear(
                                   size_m=reshaped_x.shape[0],
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
-                                  is_k_full=is_k_full)
+                                  is_k_full=is_k_full,
+                                  has_zp=False)
 
     if bias is not None:
         output.add_(bias)  # In-place add
