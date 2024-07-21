@@ -157,7 +157,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         input_ids: torch.LongTensor,
         pixel_values: torch.FloatTensor,
         image_sizes: torch.Tensor,
-        image_embeds: torch.Tensor,
     ) -> torch.FloatTensor:
         """process and merge text embeddings with image embeddings."""
 
@@ -535,15 +534,9 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                 data=self._validate_pixel_values(pixel_values),
                 image_sizes=self._validate_image_sizes(image_sizes))
 
+        # TODO: Enable image embeddings for Phi3-Vision
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeds. "
-                                 f"Got type: {type(image_embeds)}")
-
-            return Phi3VImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            raise NotImplementedError("Embeddings input is not supported yet")
 
     def forward(self,
                 input_ids: torch.Tensor,
