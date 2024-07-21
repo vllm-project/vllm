@@ -7,6 +7,7 @@ import torch
 
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
+from vllm.utils import inference_mode
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -163,7 +164,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @torch.inference_mode()
+    @inference_mode()
     def execute_model(
         self,
         model_input: T,
