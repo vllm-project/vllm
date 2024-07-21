@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -59,7 +59,12 @@ class LlavaImagePixelInputs(TypedDict):
     """Shape: `(batch_size, num_channels, height, width)`"""
 
 
-LlavaImageInputs = LlavaImagePixelInputs
+class LlavaImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+
+
+LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageEmbeddingInputs]
 
 
 def get_max_llava_image_tokens(ctx: InputContext):
@@ -174,18 +179,28 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+            return LlavaImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
 
-        return LlavaImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return LlavaImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
@@ -219,6 +234,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
     def _process_image_input(self,
                              image_input: LlavaImageInputs) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
         assert self.vision_tower is not None
         image_features = self._process_image_pixels(image_input)
         return self.multi_modal_projector(image_features)

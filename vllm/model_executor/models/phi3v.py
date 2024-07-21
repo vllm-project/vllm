@@ -152,9 +152,13 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.vocab_size = config.vocab_size
         self.type_feature = config.img_processor.get('type_feature', 'patch')
 
-    def forward(self, input_ids: torch.LongTensor,
-                pixel_values: torch.FloatTensor,
-                image_sizes: torch.Tensor) -> torch.FloatTensor:
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        pixel_values: torch.FloatTensor,
+        image_sizes: torch.Tensor,
+        image_embeds: torch.Tensor,
+    ) -> torch.FloatTensor:
         """process and merge text embeddings with image embeddings."""
 
         # (batch_size, max_num_crops, 3, height, width)
@@ -279,6 +283,12 @@ class Phi3VImagePixelInputs(TypedDict):
 
     This should be in `(height, width)` format.
     """
+
+
+class Phi3VImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(batch_size, num_channels, height, width)`"""
 
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
@@ -503,22 +513,37 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
             self, **kwargs: object) -> Optional[Phi3VImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is None:
             return None
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is None and image_embeds is None:
+            return None
 
-        if not isinstance(image_sizes, torch.Tensor):
-            raise ValueError("Incorrect type of image sizes. "
-                             f"Got type: {type(image_sizes)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        return Phi3VImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-            image_sizes=self._validate_image_sizes(image_sizes))
+            if not isinstance(image_sizes, torch.Tensor):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
+
+            return Phi3VImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+                image_sizes=self._validate_image_sizes(image_sizes))
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeds. "
+                                 f"Got type: {type(image_embeds)}")
+
+            return Phi3VImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
 
     def forward(self,
                 input_ids: torch.Tensor,

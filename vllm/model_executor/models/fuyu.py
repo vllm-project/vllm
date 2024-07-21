@@ -16,7 +16,7 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -60,6 +60,14 @@ class FuyuImagePixelInputs(TypedDict):
     Shape: 
     (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
     """
+
+
+class FuyuImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+
+
+FuyuImageInputs = Union[FuyuImagePixelInputs, FuyuImageEmbeddingInputs]
 
 
 def _calculate_num_image_tokens(
@@ -249,6 +257,16 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
                                         data=image_patches)
         return None
 
+    def _process_image_input(self,
+                             image_input: FuyuImageInputs) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        assert self.vision_embed_tokens is not None
+        vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
+        return vision_embeddings
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -261,8 +279,7 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
-            vision_embeddings, _ = self.vision_embed_tokens(
-                image_input["data"])
+            vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)
             inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
                                                     vision_embeddings,

@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 from PIL import Image
@@ -148,7 +148,13 @@ class PaliGemmaImagePixelInputs(TypedDict):
     """Shape: (batch_size, num_channels, height, width)"""
 
 
-PaliGemmaImageInputs = PaliGemmaImagePixelInputs
+class PaliGemmaImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+
+
+PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
+                             PaliGemmaImageEmbeddingInputs]
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -198,18 +204,28 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[PaliGemmaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+            return PaliGemmaImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
 
-        return PaliGemmaImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return PaliGemmaImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
 
     def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
@@ -232,6 +248,9 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
 
     def _process_image_input(
             self, image_input: PaliGemmaImageInputs) -> torch.Tensor:
+
+        if image_input["type"] == "pixel_values":
+            return image_input["data"]
 
         assert self.vision_tower is not None
         image_features = self._process_image_pixels(image_input)
