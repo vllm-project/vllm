@@ -63,7 +63,9 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 model_config: ModelConfig,
                  served_model_names: List[str],
                  lora_modules: Optional[List[LoRAModulePath]],
                  prompt_adapters: Optional[List[PromptAdapterPath]],
@@ -425,9 +427,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append(None)
             else:
                 token = self._get_decoded_token(
-                        step_top_logprobs[token_id],
-                        token_id,
-                        return_as_token_id=self.return_tokens_as_token_ids)
+                    step_top_logprobs[token_id],
+                    token_id,
+                    return_as_token_id=self.return_tokens_as_token_ids)
                 token_logprob = max(step_top_logprobs[token_id].logprob,
                                     -9999.0)
                 out_tokens.append(token)
