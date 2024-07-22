@@ -1,4 +1,3 @@
-from math import isnan
 from typing import List
 
 import pytest
@@ -168,4 +167,4 @@ def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
 
     for i in range(len(results_logprobs_none)):
         assert results_logprobs_none[i].outputs[0].logprobs is None
-        assert isnan(results_logprobs_none[i].outputs[0].cumulative_logprob)
+        assert results_logprobs_none[i].outputs[0].cumulative_logprob is None
