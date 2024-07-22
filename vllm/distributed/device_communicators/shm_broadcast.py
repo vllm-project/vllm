@@ -108,8 +108,15 @@ class ShmRingBuffer:
             # created by the process. The following patch is a workaround.
             with patch("multiprocessing.resource_tracker.register",
                        lambda *args, **kwargs: None):
-                self.shared_memory = shared_memory.SharedMemory(name=name)
-            assert self.shared_memory.size == self.total_bytes_of_buffer
+                try:
+                    self.shared_memory = shared_memory.SharedMemory(name=name)
+                    assert (
+                        self.shared_memory.size == self.total_bytes_of_buffer)
+                except FileNotFoundError:
+                    # we might deserialize the object in a different node
+                    # in this case, this object is not used,
+                    # and we should suppress the error
+                    pass
 
     def __reduce__(self):
         return (
@@ -119,9 +126,10 @@ class ShmRingBuffer:
         )
 
     def __del__(self):
-        self.shared_memory.close()
-        if self.is_creator:
-            self.shared_memory.unlink()
+        if hasattr(self, "shared_memory"):
+            self.shared_memory.close()
+            if self.is_creator:
+                self.shared_memory.unlink()
 
     @contextmanager
     def get_data(self, current_idx: int):
@@ -170,7 +178,7 @@ class MessageQueue:
         self.n_remote_reader = n_remote_reader
 
         if connect_ip is None:
-            connect_ip = get_ip()
+            connect_ip = get_ip() if n_remote_reader > 0 else "127.0.0.1"
 
         context = Context()
 
@@ -229,6 +237,8 @@ class MessageQueue:
             remote_subscribe_port=remote_subscribe_port,
             remote_sync_port=remote_sync_port,
         )
+
+        logger.info("vLLM message queue communication handle: %s", self.handle)
 
     def export_handle(self) -> Handle:
         return self.handle
@@ -335,8 +345,8 @@ class MessageQueue:
                     time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
-                    if time.monotonic(
-                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                    if (time.monotonic() - start_time >
+                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.warning(
                             "No available block found in %s second. ",
                             VLLM_RINGBUFFER_WARNING_INTERVAL)
@@ -389,8 +399,8 @@ class MessageQueue:
                     time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
-                    if time.monotonic(
-                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                    if (time.monotonic() - start_time >
+                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.warning(
                             "No available block found in %s second. ",
                             VLLM_RINGBUFFER_WARNING_INTERVAL)
@@ -426,7 +436,6 @@ class MessageQueue:
 
     def dequeue(self):
         if self._is_local_reader:
-            overflow = False
             with self.acquire_read() as buf:
                 overflow = buf[0] == 1
                 if not overflow:

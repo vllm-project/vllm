@@ -1,3 +1,4 @@
+import os
 import re
 from typing import List, Optional, Tuple, Type
 
@@ -6,7 +7,7 @@ from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
+from vllm.utils import is_cpu, is_hip
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
@@ -18,8 +19,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "cherry_blossom":
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
-    "boardwalk":
-    "<|user|>\n<|image_1|>\nWhat's in this image?<|end|>\n<|assistant|>\n",
 })
 
 models = ["microsoft/Phi-3-vision-128k-instruct"]
@@ -48,6 +47,12 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 target_dtype = "half"
 if is_cpu():
     target_dtype = "bfloat16"
+
+# ROCm Triton FA can run into shared memory issues with these models,
+# use other backends in the meantime
+# FIXME (mattwong, gshtrasb, hongxiayan)
+if is_hip():
+    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 
 def run_test(

@@ -32,11 +32,13 @@ async def _async_serving_chat_init():
                                            model_config,
                                            served_model_names=[MODEL_NAME],
                                            response_role="assistant",
-                                           chat_template=CHAT_TEMPLATE)
+                                           chat_template=CHAT_TEMPLATE,
+                                           lora_modules=None,
+                                           prompt_adapters=None,
+                                           request_logger=None)
     return serving_completion
 
 
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
-    assert serving_completion.tokenizer is not None
-    assert serving_completion.tokenizer.chat_template == CHAT_TEMPLATE
+    assert serving_completion.chat_template == CHAT_TEMPLATE

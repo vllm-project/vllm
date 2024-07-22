@@ -34,6 +34,7 @@ class Attention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         if cache_config is not None:
@@ -47,15 +48,16 @@ class Attention(nn.Module):
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
-        # The default kv_scale is set to 1.0. This is ignored
+        # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
         # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
-        # expect the pre-quantized kv_scale to be loaded along
+        # expect the pre-quantized k/v_scale to be loaded along
         # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
-        self._kv_scale = 1.0
+        self._k_scale = 1.0
+        self._v_scale = 1.0
         quant_method = quant_config.get_quant_method(
-            self) if quant_config else None
+            self, prefix=prefix) if quant_config else None
         if quant_method is not None:
             assert isinstance(quant_method, Fp8KVCacheMethod)
             # TODO (mgoin): kv cache dtype should be specified in the FP8
@@ -66,8 +68,8 @@ class Attention(nn.Module):
                                      "fp8 checkpoints.")
                 # When FP8 quantization is enabled, we make a parameter
                 # "kv_scale" so that it can be loaded from FP8 checkpoint.
-                # The kv_scale will then be converted back to self._kv_scale
-                # in a native float32 value after weight loading.
+                # The k/v_scale will then be converted back to
+                # self._kv_scale in a native float32 value after weight loading
                 self.quant_method = quant_method
                 self.quant_method.create_weights(self)
 
@@ -98,7 +100,8 @@ class Attention(nn.Module):
                                  value,
                                  kv_cache,
                                  attn_metadata,
-                                 self._kv_scale,
+                                 self._k_scale,
+                                 self._v_scale,
                                  attn_type=attn_type)
 
     def extra_repr(self) -> str:

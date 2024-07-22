@@ -10,9 +10,10 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_marlin_supported, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, marlin_sort_g_idx, replace_tensor,
-    verify_marlin_supported, verify_marlin_supports_shape)
+    apply_gptq_marlin_linear, check_gptq_marlin_supported, marlin_is_k_full,
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
+    marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx, replace_tensor,
+    verify_gptq_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
@@ -36,9 +37,9 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.lm_head_quantized = lm_head_quantized
 
         # Verify supported on platform.
-        verify_marlin_supported(num_bits=self.weight_bits,
-                                group_size=self.group_size,
-                                is_sym=self.is_sym)
+        verify_gptq_marlin_supported(num_bits=self.weight_bits,
+                                     group_size=self.group_size,
+                                     is_sym=self.is_sym)
 
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
@@ -76,7 +77,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        can_convert = cls.is_marlin_compatible(hf_quant_cfg)
+        can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (user_quant is None or user_quant == "marlin")
 
@@ -93,9 +94,8 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def get_quant_method(
-            self,
-            layer: torch.nn.Module) -> Optional["GPTQMarlinLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["GPTQMarlinLinearMethod"]:
         if (isinstance(layer, LinearBase) or
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQMarlinLinearMethod(self)
@@ -105,22 +105,27 @@ class GPTQMarlinConfig(QuantizationConfig):
         return []
 
     @classmethod
-    def is_marlin_compatible(cls, quant_config: Dict[str, Any]):
+    def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.
+        quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits", None)
         group_size = quant_config.get("group_size", None)
         sym = quant_config.get("sym", None)
         desc_act = quant_config.get("desc_act", None)
+
+        if quant_method != "gptq":
+            return False
 
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
             return False
 
-        return check_marlin_supported(num_bits=num_bits,
-                                      group_size=group_size,
-                                      is_sym=sym,
-                                      min_capability=cls.get_min_capability())
+        return check_gptq_marlin_supported(
+            num_bits=num_bits,
+            group_size=group_size,
+            is_sym=sym,
+            min_capability=cls.get_min_capability())
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
@@ -145,6 +150,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     ) -> None:
         del output_size
         output_size_per_partition = sum(output_partition_sizes)
+        is_row_parallel = input_size != input_size_per_partition
 
         # Normalize group_size
         if self.quant_config.group_size != -1:
@@ -158,32 +164,19 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             input_size=input_size,
             group_size=group_size)
 
-        # Detect sharding of scales/zp
-
-        # By default, no sharding over "input dim"
-        scales_and_zp_size = input_size // group_size
-        scales_and_zp_input_dim = None
-
-        if self.quant_config.desc_act:
-            # Act-order case
-            assert self.quant_config.group_size != -1
-
-            is_k_full = input_size_per_partition == input_size
-
+        # Determine sharding
+        if marlin_repeat_scales_on_all_ranks(self.quant_config.desc_act,
+                                             self.quant_config.group_size,
+                                             is_row_parallel):
+            # By setting scale_dim == None, weight_loader will
+            # repeat the scales on each GPU in TP>1 case.
+            scales_and_zp_input_dim = None
+            scales_and_zp_size = input_size // group_size
         else:
-            # No act-order case
-
-            # K is always full due to full alignment with
-            # group-size and shard of scales/zp
-            is_k_full = True
-
-            # If this is a row-parallel case, then shard scales/zp
-            if (input_size != input_size_per_partition
-                    and self.quant_config.group_size != -1):
-                scales_and_zp_size = input_size_per_partition // group_size
-                scales_and_zp_input_dim = 0
-
-        # Init buffers
+            # By setting scale_dim == 0, weight_loader will
+            # shard the scales in TP>1 case.
+            scales_and_zp_input_dim = 0
+            scales_and_zp_size = input_size_per_partition // group_size
 
         # Quantized weights
         qweight = Parameter(
@@ -268,13 +261,15 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
-        layer.is_k_full = is_k_full
+        layer.is_k_full = marlin_is_k_full(self.quant_config.desc_act,
+                                           is_row_parallel)
 
     # Checkpoints are serialized in AutoGPTQ format, which is different from the
     # marlin format. This function is called after the weights are loaded.
     # Here, we handle the repacking, including the activation reordering case.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
+
         # Allocate marlin workspace
         layer.workspace = marlin_make_workspace(
             layer.output_size_per_partition, device)
@@ -287,6 +282,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         else:
             layer.g_idx = marlin_make_empty_g_idx(device)
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+
+        # No zero-point
+        layer.zp = marlin_make_empty_g_idx(device)
 
         # Repack weights from autogptq format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
@@ -312,22 +310,16 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        reshaped_x = x.reshape(-1, x.shape[-1])
-        out_shape = x.shape[:-1] + (layer.output_size_per_partition, )
-
-        output = ops.gptq_marlin_gemm(reshaped_x,
-                                      layer.qweight,
-                                      layer.scales,
-                                      g_idx=layer.g_idx,
-                                      perm=layer.g_idx_sort_indices,
-                                      workspace=layer.workspace,
-                                      num_bits=self.quant_config.weight_bits,
-                                      size_m=reshaped_x.shape[0],
-                                      size_n=layer.output_size_per_partition,
-                                      size_k=layer.input_size_per_partition,
-                                      is_k_full=layer.is_k_full)
-
-        if bias is not None:
-            output.add_(bias)  # In-place add
-
-        return output.reshape(out_shape)
+        return apply_gptq_marlin_linear(
+            input=x,
+            weight=layer.qweight,
+            weight_scale=layer.scales,
+            weight_zp=layer.zp,
+            g_idx=layer.g_idx,
+            g_idx_sort_indices=layer.g_idx_sort_indices,
+            workspace=layer.workspace,
+            num_bits=self.quant_config.weight_bits,
+            output_size_per_partition=layer.output_size_per_partition,
+            input_size_per_partition=layer.input_size_per_partition,
+            is_k_full=layer.is_k_full,
+            bias=bias)

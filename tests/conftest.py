@@ -3,11 +3,7 @@ import gc
 import os
 import sys
 from collections import UserList
-from dataclasses import dataclass
-from functools import cached_property
-from pathlib import Path
-from typing import (Any, Dict, List, Literal, Optional, Tuple, TypedDict,
-                    TypeVar)
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar
 
 import pytest
 import torch
@@ -18,23 +14,21 @@ from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
                           AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.multimodal.utils import fetch_image
 from vllm.sequence import SampleLogprobs
-from vllm.utils import cuda_device_count_stateless, is_cpu
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
+                        is_cpu)
 
 logger = init_logger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
-
-_IMAGE_DIR = Path(_TEST_DIR) / "images"
-"""You can use `.buildkite/download-images.sh` to download the assets."""
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -43,24 +37,9 @@ def _read_prompts(filename: str) -> List[str]:
         return prompts
 
 
-@dataclass(frozen=True)
-class ImageAsset:
-    name: Literal["stop_sign", "cherry_blossom", "boardwalk"]
-
-    @cached_property
-    def pil_image(self) -> Image.Image:
-        if self.name == "boardwalk":
-            return fetch_image(
-                "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-            )
-
-        return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
-
-
 class _ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
-    boardwalk: str
 
 
 if sys.version_info < (3, 9):
@@ -79,7 +58,6 @@ class _ImageAssets(_ImageAssetsBase):
         super().__init__([
             ImageAsset("stop_sign"),
             ImageAsset("cherry_blossom"),
-            ImageAsset("boardwalk")
         ])
 
     def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
@@ -89,10 +67,7 @@ class _ImageAssets(_ImageAssetsBase):
         The order of the returned prompts matches the order of the
         assets when iterating through this object.
         """
-        return [
-            prompts["stop_sign"], prompts["cherry_blossom"],
-            prompts["boardwalk"]
-        ]
+        return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
 IMAGE_ASSETS = _ImageAssets()
@@ -150,12 +125,6 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-}
-
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
 
@@ -177,8 +146,7 @@ class HfRunner:
         is_vision_model: bool = False,
         is_sparseml_model: bool = False,
     ) -> None:
-        assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
 
@@ -589,6 +557,10 @@ def get_tokenizer_pool_config(tokenizer_group_type):
     if tokenizer_group_type == "ray":
         return TokenizerPoolConfig(pool_size=1,
                                    pool_type="ray",
+                                   extra_config={})
+    if isinstance(tokenizer_group_type, type):
+        return TokenizerPoolConfig(pool_size=1,
+                                   pool_type=tokenizer_group_type,
                                    extra_config={})
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 

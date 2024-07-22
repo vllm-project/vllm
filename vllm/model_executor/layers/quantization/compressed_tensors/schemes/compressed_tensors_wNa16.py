@@ -7,10 +7,10 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_marlin_linear, marlin_is_k_full, marlin_make_empty_g_idx,
+    apply_gptq_marlin_linear, marlin_is_k_full, marlin_make_empty_g_idx,
     marlin_make_workspace, marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx, replace_tensor,
-    verify_marlin_supported, verify_marlin_supports_shape)
+    verify_gptq_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsWNA16"]
@@ -46,9 +46,13 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.act_order = act_order
 
         # Verify supported on platform.
-        verify_marlin_supported(num_bits=self.num_bits,
-                                group_size=self.group_size,
-                                is_sym=True)
+        verify_gptq_marlin_supported(num_bits=self.num_bits,
+                                     group_size=self.group_size,
+                                     is_sym=True)
+
+    def get_min_capability(self) -> int:
+        # ampere and up
+        return 80
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -157,6 +161,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             layer.weight_g_idx = marlin_make_empty_g_idx(device)
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
+        # No zero-point
+        layer.weight_zp = marlin_make_empty_g_idx(device)
+
         # Repack weights from compressed-tensors format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
             layer.weight_packed.t().contiguous(),
@@ -175,15 +182,19 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             group_size=self.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-        return apply_marlin_linear(
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
+                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+
+        return apply_gptq_marlin_linear(
             input=x,
             weight=layer.weight_packed,
             weight_scale=layer.weight_scale,
+            weight_zp=layer.weight_zp,
             g_idx=layer.weight_g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
             num_bits=self.num_bits,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
-            is_k_full=layer.is_k_full)
+            is_k_full=True,
+            bias=bias)
