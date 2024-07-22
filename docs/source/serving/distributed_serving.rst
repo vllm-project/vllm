@@ -82,8 +82,20 @@ After that, on any node, you can use vLLM as usual, just as you have all the GPU
     $     --tensor-parallel-size 8 \
     $     --pipeline-parallel-size 2
 
+You can also use tensor parallel without pipeline parallel, just set the tensor parallel size to the number of GPUs in the cluster. For example, if you have 16 GPUs in 2 nodes (8GPUs per node), you can set the tensor parallel size to 16:
+
+.. code-block:: console
+
+    $ vllm serve /path/to/the/model/in/the/container \
+    $     --tensor-parallel-size 16
+
+To make tensor parallel performant, you should make sure the communication between nodes is efficient, e.g. using high-speed network cards like Infiniband. To correctly set up the cluster to use Infiniband, append additional arguments like ``--privileged --uts=host -e UCX_TLS=self,shm,tcp -e NCCL_P2P_LEVEL=NVL -e NCCL_NET_GDR_LEVEL=PIX -e NCCL_IB_HCA='mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8' -e NCCL_IB_PCI_RELAXED_ORDERING=1`` to the ``run_cluster.sh`` script. Please contact your system administrator for more information on how to set up the flags. One way to confirm if the Infiniband is working is to run vLLM with ``NCCL_DEBUG=TRACE`` environment variable set, and check the logs for the NCCL version and the network used.
+
 .. warning::
     After you start the Ray cluster, you'd better also check the GPU-GPU communication between nodes. It can be non-trivial to set up. Please refer to the `sanity check script <https://docs.vllm.ai/en/latest/getting_started/debugging.html>`_ for more information.
 
 .. warning::
+
     Please make sure you downloaded the model to all the nodes (with the same path), or the model is downloaded to some distributed file system that is accessible by all nodes.
+
+    When you use huggingface repo id to refer to the model, you should append your huggingface token to the ``run_cluster.sh`` script, e.g. ``-e HF_TOKEN=``. The recommended way is to download the model first, and then use the path to refer to the model.
