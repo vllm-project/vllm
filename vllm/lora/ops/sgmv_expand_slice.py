@@ -82,7 +82,6 @@ def _sgmv_expand_slice_kernel(
                               other=0)
         if CAST_TYPE:
             tiled_a = tiled_a.to(lora_ptr.dtype.element_ty)
-        # TODO Can I use D=A@B+C ?
         accumulator += tl.dot(
             tiled_a,
             tiled_b,

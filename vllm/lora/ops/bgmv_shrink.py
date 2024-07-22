@@ -51,7 +51,6 @@ def _bgmv_shrink_kernel(
     accumulator = tl.zeros((BLOCK_N, ), dtype=tl.float32)
     for k in range(0, K, BLOCK_K * SPLIT_K):
         current_k = k + offset_k
-        # vector load
         current_k_c = tl.max_contiguous(current_k, BLOCK_K)
         tiled_a = tl.load(
             a_ptr + current_k_c,

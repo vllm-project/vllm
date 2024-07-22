@@ -66,7 +66,6 @@ def _bgmv_expand_kernel(
     c_ptr = out_ptr + cur_batch * cm_stride + pid_sn * split_n_length
     for n in range(0, split_n_length, BLOCK_N):
         current_n = n + offset_n
-        # vector load
         current_n_c = tl.max_contiguous(current_n, BLOCK_N)
         b_ptr_mask = (current_n[:, None] < split_n_length) & (offset_k[None, :]
                                                               < K)

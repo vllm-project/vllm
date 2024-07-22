@@ -78,7 +78,7 @@ class LibEntry(triton.KernelInterface):
         entry_key = self.key(spec_args, dns_args, const_args)
 
         if entry_key not in self.kernel_cache:
-            # compiling the kernel also completes the related computations
+            # compile the kernel also completes the related computations
             kernel = self.fn.run(*args, **kwargs)
             fn = self.fn
             # collect constexpr arguments for grid computation
@@ -109,6 +109,7 @@ class LibEntry(triton.KernelInterface):
                     constexprs[p.name] = p.default  #default=inspect._empty
             self.kernel_cache[entry_key] = (kernel, constexprs)
         else:
+            # load kernel from cache directly
             kernel, constexprs = self.kernel_cache[entry_key]
 
             if callable(grid):
@@ -145,6 +146,15 @@ def libentry():
         The runtime overhead of Triton kernels is the reason for the lower 
         performance of small kernels, particularly evident with smaller models. 
         Using this decorator can reduce Triton runtime overhead.
+    How:
+        The `run` function of JITFunction needs to accomplish:
+            - Parameter binding using inspect
+            - KernelArg type wrapping
+            - Cache key calculation
+        When dealing with small size, these steps can become bottlenecks in 
+        Triton runtime. Libentry simplifies these steps to reduce runtime 
+        overhead, thereby improving the runtime expenses of small kernels.
+
     """
 
     def decorator(fn):
