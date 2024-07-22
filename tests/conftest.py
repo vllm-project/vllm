@@ -435,12 +435,18 @@ class HfRunner:
             generation_config.do_sample = False
             generation_config.top_k = None
             generation_config.num_beams = 1
+            generation_config.repetition_penalty=1.0
+            # generation_config.temperature = 0.0
+            generation_config.top_p = 1.0
+            # generation_config.min_p = 0.0
+            generation_config.length_penalty = 1.0
+            generation_config.early_stopping = False
 
             output = self.model.generate(
                 self.wrap_device(encoder_input_ids),
                 decoder_input_ids=self.wrap_device(decoder_input_ids),
                 use_cache=True,
-                do_sample=False,
+                # do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
@@ -652,6 +658,7 @@ class VllmRunner:
         num_logprobs: int,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
+                                                use_beam_search=False,
                                                 max_tokens=max_tokens,
                                                 logprobs=num_logprobs)
         '''
