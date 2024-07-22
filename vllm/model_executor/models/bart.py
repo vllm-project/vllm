@@ -22,11 +22,15 @@ from typing import Iterable, List, Optional, Tuple
 import torch
 from torch import nn
 from transformers import BartConfig
-from vllm.model_executor.layers.activation import get_act_fn
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, LoRAConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -36,9 +40,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
 
 logger = logging.get_logger(__name__)
 
@@ -136,9 +137,10 @@ class BartEncoderAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        self.d_model = config.d_model
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = self.num_heads
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = self.total_num_heads
         self.head_dim = embed_dim // num_heads
         self.config = config
 
@@ -148,31 +150,58 @@ class BartEncoderAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        # self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        # self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        # self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-        out_proj_has_bias = True
-        self.out_proj = RowParallelLinear(
-            embed_dim,
-            embed_dim,
-            bias=out_proj_has_bias,
+        self.qkv_proj = QKVParallelLinear(
+            self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=bias,
             quant_config=quant_config,
         )
 
-        self.attn = Attention(self.num_heads,
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tp_world_size == 0
+        self.num_heads = self.total_num_heads // tp_world_size
+
+        if self.total_num_kv_heads >= tp_world_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_world_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_world_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.attn = Attention(self.total_num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.num_kv_heads,
+                              num_kv_heads=self.total_num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        # q = self.q_proj(hidden_states)
+        # k = self.k_proj(hidden_states)
+        # v = self.v_proj(hidden_states)
+
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         attn_output = self.attn(q,
                                 k,
@@ -197,9 +226,10 @@ class BartDecoderSelfAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        self.d_model = config.d_model
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = self.num_heads
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = self.total_num_heads
         self.head_dim = embed_dim // num_heads
         self.config = config
 
@@ -209,31 +239,58 @@ class BartDecoderSelfAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        # self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        # self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        # self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-        out_proj_has_bias = True
-        self.out_proj = RowParallelLinear(
-            embed_dim,
-            embed_dim,
-            bias=out_proj_has_bias,
+        self.qkv_proj = QKVParallelLinear(
+            self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=bias,
             quant_config=quant_config,
         )
 
-        self.attn = Attention(self.num_heads,
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tp_world_size == 0
+        self.num_heads = self.total_num_heads // tp_world_size
+
+        if self.total_num_kv_heads >= tp_world_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_world_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_world_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.attn = Attention(self.total_num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.num_kv_heads,
+                              num_kv_heads=self.total_num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        # q = self.q_proj(hidden_states)
+        # k = self.k_proj(hidden_states)
+        # v = self.v_proj(hidden_states)
+
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         attn_output = self.attn(q,
                                 k,
@@ -815,15 +872,15 @@ class BartForConditionalGeneration(nn.Module):
         return next_tokens
 
     stacked_params_mapping = {
-        "query": {
+        "q_proj": {
             "param_name": "qkv_proj",
             "shard_id": "q",
         },
-        "key": {
+        "k_proj": {
             "param_name": "qkv_proj",
             "shard_id": "k",
         },
-        "value": {
+        "v_proj": {
             "param_name": "qkv_proj",
             "shard_id": "v",
         },
@@ -847,11 +904,13 @@ class BartForConditionalGeneration(nn.Module):
     def _rename_stacked_param(
         self,
         name: str,
+        cross_attn_keyword: str = 'encoder_attn',
     ) -> Tuple[str, Optional[str]]:
-        for key, mapping in self.stacked_params_mapping.items():
-            if key in name:
-                name = name.replace(key, mapping["param_name"])
-                return name, mapping["shard_id"]
+        if cross_attn_keyword not in name:
+            for key, mapping in self.stacked_params_mapping.items():
+                if key in name:
+                    name = name.replace(key, mapping["param_name"])
+                    return name, mapping["shard_id"]
         return name, None
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

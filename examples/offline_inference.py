@@ -1,6 +1,7 @@
+from utils import override_backend_env_var_context_manager
+
 from vllm import LLM, SamplingParams
 from vllm.utils import STR_XFORMERS_ATTN_VAL
-from utils import override_backend_env_var_context_manager
 
 # Sample prompts.
 prompts = [
