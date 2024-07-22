@@ -462,7 +462,7 @@ def test_prefill_schedule_max_lora():
                                            lora_request=LoRARequest(
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
-                                               lora_local_path="abc"))
+                                               lora_path="abc"))
         waiting.append(seq_group)
     # Add two more requests to verify lora is prioritized.
     # 0: Lora, 1: Lora, 2: regular, 3: regular
@@ -760,7 +760,7 @@ def test_schedule_swapped_max_loras():
                                            lora_request=LoRARequest(
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
-                                               lora_local_path="abc"))
+                                               lora_path="abc"))
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
