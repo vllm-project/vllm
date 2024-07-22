@@ -108,9 +108,38 @@ Performance tips
 
     $ export VLLM_CPU_KVCACHE_SPACE=40
     $ export VLLM_CPU_OMP_THREADS_BIND=0-29 
-    $ python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m
+    $ vllm serve facebook/opt-125m
 
-- If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU core using ``VLLM_CPU_OMP_THREADS_BIND``.
+- If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU core using ``VLLM_CPU_OMP_THREADS_BIND``. On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
+
+.. code-block:: console
+
+    $ lscpu -e # check the mapping between logical CPU cores and physical CPU cores
+
+.. code-block:: console
+    # The "CPU" column means the logical CPU core IDs, and the "CORE" column means the physical core IDs. On this platform, two logical cores are sharing one physical core. 
+    CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ      MHZ
+    0    0      0    0 0:0:0:0          yes 2401.0000 800.0000  800.000
+    1    0      0    1 1:1:1:0          yes 2401.0000 800.0000  800.000
+    2    0      0    2 2:2:2:0          yes 2401.0000 800.0000  800.000
+    3    0      0    3 3:3:3:0          yes 2401.0000 800.0000  800.000
+    4    0      0    4 4:4:4:0          yes 2401.0000 800.0000  800.000
+    5    0      0    5 5:5:5:0          yes 2401.0000 800.0000  800.000
+    6    0      0    6 6:6:6:0          yes 2401.0000 800.0000  800.000
+    7    0      0    7 7:7:7:0          yes 2401.0000 800.0000  800.000
+    8    0      0    0 0:0:0:0          yes 2401.0000 800.0000  800.000
+    9    0      0    1 1:1:1:0          yes 2401.0000 800.0000  800.000
+    10   0      0    2 2:2:2:0          yes 2401.0000 800.0000  800.000
+    11   0      0    3 3:3:3:0          yes 2401.0000 800.0000  800.000
+    12   0      0    4 4:4:4:0          yes 2401.0000 800.0000  800.000
+    13   0      0    5 5:5:5:0          yes 2401.0000 800.0000  800.000
+    14   0      0    6 6:6:6:0          yes 2401.0000 800.0000  800.000
+    15   0      0    7 7:7:7:0          yes 2401.0000 800.0000  800.000
+
+.. code-block:: console
+    $ # On this platform, it is recommend to only bind openMP threads on logical CPU cores 0-7 or 8-15
+    $ export VLLM_CPU_OMP_THREADS_BIND=0-7 
+    $ python examples/offline_inference.py
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using ``VLLM_CPU_OMP_THREADS_BIND`` to avoid cross NUMA node memory access.
 
