@@ -1,3 +1,5 @@
+from typing import List, Optional
+
 from transformers import PretrainedConfig
 
 
@@ -5,9 +7,7 @@ from transformers import PretrainedConfig
 # transformers once the new release with Chameleon support
 # is available.
 class ChameleonConfig(PretrainedConfig):
-
     model_type = "chameleon"
-    is_composition = True
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -31,7 +31,7 @@ class ChameleonConfig(PretrainedConfig):
         rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
-        qk_layernorm=False,
+        model_parallel_size=1,
         swin_norm=False,
         vq_config=None,
         vocabulary_map=None,
@@ -46,10 +46,6 @@ class ChameleonConfig(PretrainedConfig):
         self.num_attention_heads = num_attention_heads
         self.mlp_bias = mlp_bias
 
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
-
         self.num_key_value_heads = num_key_value_heads
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
@@ -60,10 +56,14 @@ class ChameleonConfig(PretrainedConfig):
         self._rope_scaling_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
-        self.qk_layernorm = qk_layernorm
+        self.model_parallel_size = model_parallel_size
         self.swin_norm = swin_norm
-        # vq config is currently ignored
-        # self.vq_config = ChameleonVQConfig(**vq_config)
+
+        if vq_config is None:
+            vq_config = {}
+
+        self.vq_config = ChameleonVQVAEConfig(**vq_config)
+
         self.vocabulary_map = vocabulary_map
 
         super().__init__(
@@ -99,3 +99,40 @@ class ChameleonConfig(PretrainedConfig):
             raise ValueError(
                 "`rope_scaling`'s factor field must be a float > 1, "
                 f"got {rope_scaling_factor}")
+
+
+class ChameleonVQVAEConfig(PretrainedConfig):
+
+    model_type = "chameleon_vqgan"
+
+    def __init__(
+        self,
+        embed_dim: int = 256,
+        num_embeddings: int = 8192,
+        double_latent: bool = False,
+        latent_channels: int = 256,
+        resolution: int = 512,
+        in_channels: int = 3,
+        base_channels: int = 128,
+        channel_multiplier: List[int] = [1, 1, 2, 2, 4],  #noqa
+        num_res_blocks: int = 2,
+        attn_resolutions: Optional[List[int]] = None,
+        dropout: float = 0.0,
+        attn_type: str = "vanilla",
+        initializer_range=0.02,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
+        self.num_embeddings = num_embeddings
+        self.double_latent = double_latent
+        self.latent_channels = latent_channels
+        self.resolution = resolution
+        self.in_channels = in_channels
+        self.base_channels = base_channels
+        self.channel_multiplier = channel_multiplier
+        self.num_res_blocks = num_res_blocks
+        self.attn_resolutions = attn_resolutions
+        self.dropout = dropout
+        self.attn_type = attn_type
+        self.initializer_range = initializer_range
