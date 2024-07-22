@@ -3,6 +3,7 @@ import gc
 import time
 import warnings
 import weakref
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
                     Tuple, Type, TypeVar, Union)
 
@@ -48,7 +49,8 @@ from vllm.prompt_adapter.worker_manager import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
+from vllm.utils import (CudaMemoryProfiler, flatten_2d_lists,
+                        get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -75,7 +77,7 @@ _NUM_WARMUP_ITERS = 2
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
     """
     This base class contains metadata needed for the base model forward pass
@@ -125,7 +127,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
         return cls(**tensor_dict)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclass(frozen=True)
 class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     """
     Used by the ModelRunner.
@@ -169,56 +171,41 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
 class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     """Build ModelInputForGPU from SequenceGroupMetadata."""
 
-    # Compute function names for each sequence in
-    # a sequence group. The order of the functions matters
-    PER_SEQ_COMPUTE_FN_NAMES = (
-        "_compute_lens",
-        "_compute_for_prefix_cache_hit",
-        "_compute_for_sliding_window",
-        "_compute_lora_input",
-    )
-    # Compute function names for each sequence group.
-    # The order of the functions matters
-    PER_SEQ_GROUP_COMPUTE_FN_NAMES = (
-        "_compute_prompt_adapter_input",
-        "_compute_multi_modal_input",
-    )
-
-    @dataclasses.dataclass
+    @dataclass
     class InterDataForSeqGroup:
         """Intermediate data for the current sequence group."""
         # From sequence group metadata.
         request_id: str
         seq_ids: List[int]
-        n_seqs: int
         is_prompt: bool
         block_tables: Optional[Dict[int, List[int]]]
         computed_block_nums: List[int]
+        n_seqs: int = 0
 
         # Input tokens and positions.
-        input_tokens: List[List[int]]
-        input_positions: List[List[int]]
+        input_tokens: List[List[int]] = field(default_factory=list)
+        input_positions: List[List[int]] = field(default_factory=list)
 
         # The sequence length (may be capped to the sliding window).
-        seq_lens: List[int]
+        seq_lens: List[int] = field(default_factory=list)
         # The original sequence length (before applying sliding window).
         # This is used to compute slot mapping.
-        orig_seq_lens: List[int]
+        orig_seq_lens: List[int] = field(default_factory=list)
         # The query length.
-        query_lens: List[int]
+        query_lens: List[int] = field(default_factory=list)
         # The number of tokens that are already computed.
-        context_lens: List[int]
+        context_lens: List[int] = field(default_factory=list)
         # The current sliding window block.
-        curr_sliding_window_blocks: List[int]
+        curr_sliding_window_blocks: List[int] = field(default_factory=list)
 
         # LoRA inputs.
-        lora_index_mapping: List[List[int]]
-        lora_prompt_mapping: List[List[int]]
-        lora_requests: Set[LoRARequest]
+        lora_index_mapping: List[List[int]] = field(default_factory=list)
+        lora_prompt_mapping: List[List[int]] = field(default_factory=list)
+        lora_requests: Set[LoRARequest] = field(default_factory=set)
 
         # Prompt adapter inputs.
-        prompt_adapter_index_mapping: List[int]
-        prompt_adapter_prompt_mapping: List[int]
+        prompt_adapter_index_mapping: List[int] = field(default_factory=list)
+        prompt_adapter_prompt_mapping: List[int] = field(default_factory=list)
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
 
         # Multi-modal inputs.
@@ -227,16 +214,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Whether the prefix cache is hit (prefill only).
         prefix_cache_hit: bool = False
 
-        def __init__(self, request_id: str, seq_ids: List[int],
-                     is_prompt: bool, block_tables: Optional[Dict[int,
-                                                                  List[int]]],
-                     computed_block_nums: List[int]):
-            self.request_id = request_id
-            self.seq_ids = seq_ids
-            self.is_prompt = is_prompt
-            self.block_tables = block_tables
-            self.computed_block_nums = computed_block_nums
-            self.n_seqs = len(seq_ids)
+        def __post_init__(self):
+            self.n_seqs = len(self.seq_ids)
 
             self.input_tokens = [[] for _ in range(self.n_seqs)]
             self.input_positions = [[] for _ in range(self.n_seqs)]
@@ -248,15 +227,26 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             self.lora_index_mapping = [[] for _ in range(self.n_seqs)]
             self.lora_prompt_mapping = [[] for _ in range(self.n_seqs)]
-            self.lora_requests = set()
-
-            self.prompt_adapter_index_mapping = []
-            self.prompt_adapter_prompt_mapping = []
 
     def __init__(self,
                  runner: "GPUModelRunnerBase",
                  finished_requests_ids: Optional[List[str]] = None):
         super().__init__()
+        # Compute functions for each sequence in a sequence group.
+        # WARNING: The order of the functions matters!
+        self.per_seq_compute_fns = (
+            self._compute_lens,
+            self._compute_for_prefix_cache_hit,
+            self._compute_for_sliding_window,
+            self._compute_lora_input,
+        )
+        # Compute functions for each sequence group.
+        # WARNING: The order of the functions matters!
+        self.per_seq_group_compute_fns = (
+            self._compute_prompt_adapter_input,
+            self._compute_multi_modal_input,
+        )
+
         self.runner = runner
         self.model_input_cls = self.runner._model_input_cls
         self.attn_backend = self.runner.attn_backend
@@ -270,6 +260,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.finished_requests_ids = finished_requests_ids
         self.decode_only = True
 
+        # Intermediate data (data in CPU before going to GPU) for
+        # the current sequence group.
         self.inter_data_list: List[
             ModelInputForGPUBuilder.InterDataForSeqGroup] = []
 
@@ -460,26 +452,26 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.inter_data_list.append(inter_data)
 
         for seq_idx in range(n_seqs):
-            for fn_name in self.PER_SEQ_COMPUTE_FN_NAMES:
-                getattr(self, fn_name)(inter_data, seq_idx, seq_group_metadata)
-        for fn_name in self.PER_SEQ_GROUP_COMPUTE_FN_NAMES:
-            getattr(self, fn_name)(inter_data, seq_group_metadata)
+            for per_seq_fn in self.per_seq_compute_fns:
+                per_seq_fn(inter_data, seq_idx, seq_group_metadata)
+        for per_seq_group_fn in self.per_seq_group_compute_fns:
+            per_seq_group_fn(inter_data, seq_group_metadata)
 
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
         create on-device tensors.
         """
         # Combine intermediate data.
-        input_tokens = [
-            t for data in self.inter_data_list for ts in data.input_tokens
-            for t in ts
-        ]
+        input_tokens = flatten_2d_lists([
+            flatten_2d_lists(inter_data.input_tokens)
+            for inter_data in self.inter_data_list
+        ])
         if not input_tokens:
             return self.model_input_cls()
-        input_positions = [
-            p for data in self.inter_data_list for ps in data.input_positions
-            for p in ps
-        ]
+        input_positions = flatten_2d_lists([
+            flatten_2d_lists(inter_data.input_positions)
+            for inter_data in self.inter_data_list
+        ])
         seq_lens = []
         max_decode_seq_len = 0
         for inter_data in self.inter_data_list:
@@ -487,9 +479,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             if not inter_data.is_prompt:
                 max_decode_seq_len = max(max_decode_seq_len,
                                          max(inter_data.seq_lens))
-        query_lens = [
-            q for data in self.inter_data_list for q in data.query_lens
-        ]
+        query_lens = flatten_2d_lists(
+            [inter_data.query_lens for inter_data in self.inter_data_list])
         # Mapping from request IDs to sequence IDs. Used for Jamba models
         # that manages the cache by itself.
         request_ids_to_seq_ids = {
@@ -536,15 +527,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.enable_lora:
             lora_requests = set(r for data in self.inter_data_list
                                 for r in data.lora_requests)
-            lora_index_mapping = [
-                m for data in self.inter_data_list
-                for ms in data.lora_index_mapping for m in ms
-            ]
+            lora_index_mapping = flatten_2d_lists([
+                inter_data.lora_index_mapping
+                for inter_data in self.inter_data_list
+            ])
             lora_index_mapping.extend([0] * cuda_graph_pad_size)
-            lora_prompt_mapping = [
-                m for data in self.inter_data_list
-                for ms in data.lora_prompt_mapping for m in ms
-            ]
+            lora_prompt_mapping = flatten_2d_lists([
+                inter_data.lora_prompt_mapping
+                for inter_data in self.inter_data_list
+            ])
             lora_mapping = LoRAMapping(
                 lora_index_mapping,
                 lora_prompt_mapping,
@@ -553,22 +544,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Prompt adapter data.
         prompt_adapter_requests: Set[PromptAdapterRequest] = set()
         prompt_adapter_mapping = None
-        if self.enable_prompt_adapter:
-            prompt_adapter_requests = set(
-                data.prompt_adapter_request for data in self.inter_data_list
-                if data.prompt_adapter_request is not None)
-            prompt_adapter_index_mapping = [
-                m for data in self.inter_data_list
-                for m in data.prompt_adapter_index_mapping
-            ]
-            prompt_adapter_index_mapping.extend([0] * cuda_graph_pad_size)
-            prompt_adapter_prompt_mapping = [
-                m for data in self.inter_data_list
-                for m in data.prompt_adapter_prompt_mapping
-            ]
+        if self.enable_prompt_adapter and self.inter_data_list[0].is_prompt:
+            assert len(self.inter_data_list) == 1
+            if self.inter_data_list[0].prompt_adapter_request is not None:
+                prompt_adapter_requests = set(
+                    [self.inter_data_list[0].prompt_adapter_request])
             prompt_adapter_mapping = PromptAdapterMapping(
-                prompt_adapter_index_mapping,
-                prompt_adapter_prompt_mapping,
+                self.inter_data_list[0].prompt_adapter_index_mapping,
+                self.inter_data_list[0].prompt_adapter_prompt_mapping,
             )
 
         # Multi-modal data.
@@ -1528,15 +1511,3 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _is_block_tables_empty(block_tables: Union[None, Dict]):
-    """
-    Check if block_tables is None or a dictionary with all None values.
-    """
-    if block_tables is None:
-        return True
-    if isinstance(block_tables, dict) and all(
-            value is None for value in block_tables.values()):
-        return True
-    return False
