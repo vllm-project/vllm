@@ -23,7 +23,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                  strategy: str,
                  num_bits: int,
                  group_size: Optional[int] = None,
-                 act_order: bool = False):
+                 actorder: bool = False):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
@@ -39,11 +39,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         else:
             self.group_size = group_size
 
-        if act_order and self.group_size == -1:
-            # In this case, act_order == True is the same as act_order == False
+        if actorder and self.group_size == -1:
+            # In this case, actorder == True is the same as actorder == False
             # (since we have only one group per output channel)
-            act_order = False
-        self.act_order = act_order
+            actorder = False
+        self.actorder = actorder
 
         # Verify supported on platform.
         verify_gptq_marlin_supported(num_bits=self.num_bits,
@@ -92,7 +92,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.register_parameter("weight_packed", weight)
 
         # WEIGHT SCALE
-        if marlin_repeat_scales_on_all_ranks(self.act_order, self.group_size,
+        if marlin_repeat_scales_on_all_ranks(self.actorder, self.group_size,
                                              is_row_parallel):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
@@ -140,7 +140,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
-        layer.is_k_full = marlin_is_k_full(self.act_order, is_row_parallel)
+        layer.is_k_full = marlin_is_k_full(self.actorder, is_row_parallel)
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from marlin format. Handle repacking here.
@@ -152,7 +152,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             layer.output_size_per_partition, device)
 
         # Handle sorting for activation reordering if needed.
-        if self.act_order:
+        if self.actorder:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.weight_g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "weight_g_idx", g_idx)
@@ -176,7 +176,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         marlin_scales = marlin_permute_scales(
             layer.weight_scale.squeeze().t().contiguous(),
             size_k=(layer.input_size
-                    if self.act_order else layer.input_size_per_partition),
+                    if self.actorder else layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
             group_size=self.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
