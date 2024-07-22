@@ -796,7 +796,7 @@ class ModelRunner:
                 is_prompt=True,
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
-                block_tables=None,
+                block_tables={},
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=fake_multi_modal_input,
