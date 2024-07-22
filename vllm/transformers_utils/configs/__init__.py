@@ -6,11 +6,12 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
-
+from vllm.transformers_utils.configs.teleflm import TeleFLMConfig
 __all__ = [
     "ChatGLMConfig",
     "DbrxConfig",
     "MPTConfig",
     "RWConfig",
     "JAISConfig",
+    "TeleFLMConfig"
 ]
