@@ -1,0 +1,11 @@
+# bash ./run-lm-eval-gsm-vllm-baseline.sh -m neuralmagic/Mistral-7B-Instruct-v0.3-GPTQ-4bit -b "auto" -l 250 -f 5 -t 4
+model_name: "neuralmagic/Mistral-7B-Instruct-v0.3-GPTQ-4bit"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.448
+  - name: "exact_match,flexible-extract"
+    value: 0.446
+limit: 250
+num_fewshot: 5

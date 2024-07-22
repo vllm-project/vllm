@@ -1,0 +1,11 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m TechxGenus/Meta-Llama-3-8B-Instruct-AWQ -b auto -l 1000 -f 5 -t 1
+model_name: "TechxGenus/Meta-Llama-3-8B-Instruct-AWQ"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.716
+  - name: "exact_match,flexible-extract"
+    value: 0.715
+limit: 1000
+num_fewshot: 5
