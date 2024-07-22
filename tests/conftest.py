@@ -22,8 +22,9 @@ from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
-from vllm.utils import (cuda_device_count_stateless, is_cpu,
-                        to_enc_dec_tuple_list, zip_enc_dec_prompt_lists)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
+                        is_cpu, to_enc_dec_tuple_list,
+                        zip_enc_dec_prompt_lists)
 
 logger = init_logger(__name__)
 
@@ -146,12 +147,6 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-}
-
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
 
@@ -174,8 +169,7 @@ class HfRunner:
         is_sparseml_model: bool = False,
         is_encoder_decoder_model: bool = False,
     ) -> None:
-        assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
 
@@ -710,6 +704,10 @@ def get_tokenizer_pool_config(tokenizer_group_type):
     if tokenizer_group_type == "ray":
         return TokenizerPoolConfig(pool_size=1,
                                    pool_type="ray",
+                                   extra_config={})
+    if isinstance(tokenizer_group_type, type):
+        return TokenizerPoolConfig(pool_size=1,
+                                   pool_type=tokenizer_group_type,
                                    extra_config={})
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 

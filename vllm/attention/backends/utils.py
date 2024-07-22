@@ -185,11 +185,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                     input_block_tables[i, :len(block_table)] = block_table
             block_tables = torch.tensor(input_block_tables, device=device)
         else:
-            max_block_table_len = max(
-                len(block_table) for block_table in self.block_tables)
             block_tables = make_tensor_with_pad(
                 self.block_tables,
-                max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
                 device=device,
@@ -226,6 +223,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
+            block_tables=block_tables,
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
