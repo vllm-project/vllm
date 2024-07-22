@@ -196,7 +196,8 @@ struct ScaledEpilogueBias
 template <typename Arch, template <typename> typename ArchGuard,
           typename ElementAB_, typename ElementD_,
           template <typename, typename> typename Epilogue_, typename TileShape,
-          typename WarpShape, typename InstructionShape, int32_t MainLoopStages>
+          typename WarpShape, typename InstructionShape, int32_t MainLoopStages,
+          typename FP8MathOperator = cutlass::arch::OpMultiplyAdd>
 struct cutlass_2x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
@@ -208,7 +209,7 @@ struct cutlass_2x_gemm {
   using Operator =
       typename std::conditional<std::is_same_v<ElementAB, int8_t>,
                                 cutlass::arch::OpMultiplyAddSaturate,
-                                cutlass::arch::OpMultiplyAdd>::type;
+                                FP8MathOperator>::type;
 
   using OutputTileThreadMap =
       cutlass::epilogue::threadblock::OutputTileThreadLayout<

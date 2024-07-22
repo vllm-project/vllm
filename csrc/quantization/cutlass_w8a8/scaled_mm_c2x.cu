@@ -1,5 +1,10 @@
+#include <stddef.h>
+#include <torch/all.h>
+#include "cutlass/cutlass.h"
+
 #include "scaled_mm_c2x.cuh"
 #include "scaled_mm_c2x_sm80_dispatch.cuh"
+#include "scaled_mm_c2x_sm89_dispatch.cuh"
 
 /*
    This file defines quantized GEMM operations using the CUTLASS 2.x API, for
@@ -119,16 +124,12 @@ void cutlass_scaled_mm_sm89_epilogue(torch::Tensor& out, torch::Tensor const& a,
     TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
     if (out.dtype() == torch::kBFloat16) {
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
-          cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, cutlass::float_e4m3_t,
-          cutlass::bfloat16_t, Epilogue, TileShape, WarpShape, InstructionShape,
-          5>>(out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+      return vllm::cutlass_gemm_sm89_dispatch<cutlass::float_e4m3_t, cutlass::bfloat16_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
-          cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, cutlass::float_e4m3_t,
-          cutlass::half_t, Epilogue, TileShape, WarpShape, InstructionShape,
-          5>>(out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+      return vllm::cutlass_gemm_sm89_dispatch<cutlass::float_e4m3_t, cutlass::half_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   }
 }
