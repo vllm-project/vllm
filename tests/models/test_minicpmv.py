@@ -22,7 +22,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
         "<|start_header_id|>assistant<|end_header_id|>\n\n"
 })
 
-models = ["/data1/hezhihui/release/MiniCPM-Llama3-V-2_5"]
+models = ["HwwwH/MiniCPM-Llama3-V-2_5"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
