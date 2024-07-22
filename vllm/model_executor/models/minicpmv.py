@@ -29,10 +29,6 @@ from typing import Iterable, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-try:
-    import timm
-except ImportError:
-    raise ImportError('Please install timm==0.9.10') from ImportError
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -418,6 +414,10 @@ class MiniCPMV(nn.Module, SupportsVision):
 
     def init_vision_module(self):
         if self.version == 2.0:
+            try:
+                import timm
+            except ImportError:
+                raise ImportError('Please install timm==0.9.10') from ImportError
             default_dtype = torch.get_default_dtype()
             torch.set_default_dtype(torch.float16)
             model = timm.create_model('vit_so400m_patch14_siglip_384.webli',
