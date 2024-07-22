@@ -5,6 +5,14 @@ import torch
 SUPPORTED_NUM_BITS = [4, 8]
 SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
+# Note: this is a hack. We should update each model to register the
+# stacked params and get it from there instead in a future PR.
+# fused_name: List[shard_name]
+FUSED_LAYER_NAME_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"]
+}
+
 
 def get_pack_factor(num_bits):
     assert num_bits in SUPPORTED_NUM_BITS, f"Unsupported num_bits = {num_bits}"
