@@ -1,8 +1,6 @@
-from .data import (ExplicitEncoderDecoderPrompt,
-                   ExplicitEncoderDecoderPromptStrict, LLMInputs, ParsedText,
-                   ParsedTokens, PromptInputs, PromptStrictInputs, TextPrompt,
-                   TextTokensPrompt, TokensPrompt, get_prompt_type,
-                   is_valid_encoder_decoder_llm_inputs,
+from .data import (ExplicitEncoderDecoderPrompt, LLMInputs, ParsedText,
+                   ParsedTokens, PromptInputs, TextPrompt, TokensPrompt,
+                   get_prompt_type, is_valid_encoder_decoder_llm_inputs,
                    is_valid_encoder_decoder_prompt, parse_and_batch_prompt)
 from .registry import InputContext, InputRegistry
 
@@ -21,8 +19,6 @@ __all__ = [
     "parse_and_batch_prompt",
     "TextPrompt",
     "TokensPrompt",
-    "TextTokensPrompt",
-    "PromptStrictInputs",
     "PromptInputs",
     "LLMInputs",
     "INPUT_REGISTRY",
@@ -31,6 +27,5 @@ __all__ = [
     "get_prompt_type",
     "is_valid_encoder_decoder_prompt",
     "is_valid_encoder_decoder_llm_inputs",
-    "ExplicitEncoderDecoderPromptStrict",
     "ExplicitEncoderDecoderPrompt",
 ]

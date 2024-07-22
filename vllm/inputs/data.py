@@ -94,27 +94,7 @@ class TokensPrompt(TypedDict):
     """
 
 
-class TextTokensPrompt(TypedDict):
-    """It is assumed that :attr:`prompt` is consistent with
-    :attr:`prompt_token_ids`. This is currently used in
-    :class:`AsyncLLMEngine` for logging both the text and token IDs."""
-
-    prompt: str
-    """The prompt text."""
-
-    prompt_token_ids: List[int]
-    """The token IDs of the prompt."""
-
-    multi_modal_data: NotRequired["MultiModalDataDict"]
-    """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
-    """
-
-
-DecoderOnlyPromptInputs = Union[str, TextPrompt, TokensPrompt,
-                                TextTokensPrompt]
-StrictDecoderOnlyPromptInputs = Union[str, TextPrompt, TokensPrompt]
+DecoderOnlyPromptInputs = Union[str, TextPrompt, TokensPrompt]
 
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
@@ -129,22 +109,6 @@ class ExplicitEncoderDecoderPrompt(TypedDict):
     decoder_prompt: DecoderOnlyPromptInputs
 
 
-class ExplicitEncoderDecoderPromptStrict(TypedDict):
-    """Represents an encoder/decoder model input prompt,
-    comprising an encoder prompt and a decoder prompt.
-    Strictly forbid a prompt containing both text and
-    tokens.
-
-    Only the encoder prompt may have multi-modal data.
-    """
-
-    encoder_prompt: StrictDecoderOnlyPromptInputs
-
-    decoder_prompt: StrictDecoderOnlyPromptInputs
-
-
-PromptStrictInputs = Union[StrictDecoderOnlyPromptInputs,
-                           ExplicitEncoderDecoderPromptStrict]
 """
 The inputs to the LLM, which can take one of the following forms:
 
@@ -156,11 +120,8 @@ PromptInputs = Union[DecoderOnlyPromptInputs, ExplicitEncoderDecoderPrompt]
 """Same as :const:`PromptStrictInputs` but additionally accepts
 :class:`TextTokensPrompt`."""
 
-AllPromptInputs = Union[PromptInputs, ExplicitEncoderDecoderPromptStrict]
-"""All possible input prompt options, strict or non-strict"""
 
-
-def get_prompt_type(prompt: AllPromptInputs, ) -> str:
+def get_prompt_type(prompt: PromptInputs, ) -> str:
     """
     Get the type-name of the prompt argument instance, given that
     isinstance() cannot apply to TypedDict subclasses directly.
@@ -169,7 +130,6 @@ def get_prompt_type(prompt: AllPromptInputs, ) -> str:
     required_keys_dict = {
         'TextPrompt': ['prompt'],
         'TokensPrompt': ['prompt_token_ids'],
-        'TextTokensPrompt': ['prompt', 'prompt_token_ids'],
         'ExplicitEncoderDecoder': ['encoder_prompt', 'decoder_prompt'],
     }
 
@@ -191,7 +151,7 @@ def get_prompt_type(prompt: AllPromptInputs, ) -> str:
     raise ValueError(f"Invalid prompt {prompt}")
 
 
-def is_valid_encoder_decoder_prompt(prompt: AllPromptInputs, ) -> bool:
+def is_valid_encoder_decoder_prompt(prompt: PromptInputs, ) -> bool:
     """
     Return True if prompt has the correct structure for an encoder/decoder
     prompt.
