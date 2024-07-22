@@ -21,8 +21,11 @@ from vllm.platforms import current_platform
 
 class CompressedTensorsConfig(QuantizationConfig):
 
-    def __init__(self, target_scheme_map: Dict[str, Any], ignore: List[str],
-                 quant_format: str, kv_cache_scheme: Optional[Dict[str, Any]] = None):
+    def __init__(self,
+                 target_scheme_map: Dict[str, Any],
+                 ignore: List[str],
+                 quant_format: str,
+                 kv_cache_scheme: Optional[Dict[str, Any]] = None):
 
         self.ignore = ignore
         self.quant_format = quant_format

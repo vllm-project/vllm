@@ -225,6 +225,7 @@ def get_compressed_tensors_cache_scale(name: str) -> Optional[str]:
     # If no matches, return None
     return None
 
+
 def _is_equal_or_regex_match(value: str,
                              target: str,
                              check_contains: bool = False) -> bool:
