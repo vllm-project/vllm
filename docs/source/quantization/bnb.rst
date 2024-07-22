@@ -15,11 +15,10 @@ Below are the steps to utilize BitsAndBytes with vLLM.
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
 
-Read quantized checkpoint.
-
 You can find bitsandbytes quantized models on https://huggingface.co/models?other=bitsandbytes.
 And usually, these repositories have a config.json file that includes a quantization_config section.
 
+Read quantized checkpoint.
 --------------------------
 
 .. code-block:: python
