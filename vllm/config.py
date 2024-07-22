@@ -791,7 +791,7 @@ class SchedulerConfig:
             if enable_chunked_prefill:
                 # It is the values that have the best balance between ITL
                 # and TTFT on A100. Note it is not optimized for throughput.
-                self.max_num_batched_tokens = 512
+                self.max_num_batched_tokens = 2048
             elif embedding_mode:
                 # For embedding, choose specific value for higher throughput
                 self.max_num_batched_tokens = max(
