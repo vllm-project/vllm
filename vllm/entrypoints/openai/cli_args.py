@@ -130,6 +130,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "using app.add_middleware(). ")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+
+    parser.add_argument('--max-log-len',
+                        type=int,
+                        default=None,
+                        help='Max number of prompt characters or prompt '
+                        'ID numbers being printed in log.'
+                        '\n\nDefault: Unlimited')
+
     return parser
 
 

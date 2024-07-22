@@ -6,6 +6,7 @@ import aiohttp
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
@@ -44,9 +45,17 @@ def parse_args():
                         type=nullable_str,
                         default="assistant",
                         help="The role name to return if "
-                        "`request.add_generation_prompt=true`.")
+                        "`request.add_generation_prompt=True`.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+
+    parser.add_argument('--max-log-len',
+                        type=int,
+                        default=None,
+                        help='Max number of prompt characters or prompt '
+                        'ID numbers being printed in log.'
+                        '\n\nDefault: Unlimited')
+
     return parser.parse_args()
 
 
@@ -114,11 +123,20 @@ async def main(args):
     # When using single vLLM without engine_use_ray
     model_config = await engine.get_model_config()
 
+    if args.disable_log_requests:
+        request_logger = None
+    else:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
+
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
         served_model_names,
         args.response_role,
+        lora_modules=None,
+        prompt_adapters=None,
+        request_logger=request_logger,
+        chat_template=None,
     )
 
     # Submit all requests in the file to the engine "concurrently".

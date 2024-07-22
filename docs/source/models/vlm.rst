@@ -30,7 +30,7 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     internally for each model.
 
 
-To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
+To pass an image to the model, note the following in :class:`vllm.inputs.PromptInputs`:
 
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 

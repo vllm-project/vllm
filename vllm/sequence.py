@@ -5,7 +5,8 @@ import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
+from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
+                    Union)
 
 import torch
 
@@ -438,7 +439,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.request_id = request_id
