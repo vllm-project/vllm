@@ -78,7 +78,7 @@ class LibEntry(triton.KernelInterface):
         entry_key = self.key(spec_args, dns_args, const_args)
 
         if entry_key not in self.kernel_cache:
-            # compile kernel
+            # compiling the kernel also completes the related computations
             kernel = self.fn.run(*args, **kwargs)
             fn = self.fn
             # collect constexpr arguments for grid computation
@@ -100,38 +100,43 @@ class LibEntry(triton.KernelInterface):
                 else:
                     raise RuntimeError("Invalid Runtime Function")
                 fn = fn.fn
+            # In vLLM, certain kernels like fused_moe_kernel get the
+            # best_config(as kwargs) from a configuration json file, rather
+            # than using Autotuner & Heuristics. Therefore, all their constexprs
+            # (tl.constexpr) are assigned values through the following loop.
             for p in self.jit_function.params:
                 if p.is_constexpr and p.name not in constexprs:
-                    constexprs[p.name] = p.default
+                    constexprs[p.name] = p.default  #default=inspect._empty
             self.kernel_cache[entry_key] = (kernel, constexprs)
-            return
         else:
             kernel, constexprs = self.kernel_cache[entry_key]
 
-        if callable(grid):
-            # collect all arguments to the grid fn，ie:
-            # 1. args,
-            # 2. kwargs,
-            # 3. all all other captured arguments in CompiledKernel from
-            # Autotunner & Heuristics when kwargs & captured args conflict,
-            # captured args have higher priority
-            filterd_constexprs = {
-                k: v
-                for k, v in constexprs.items() if v is not inspect._empty
-            }
-            meta = {
-                **dict(zip(self.arg_names, args)),
-                **kwargs,
-                **filterd_constexprs,
-            }
-            grid = grid(meta)
-        if isinstance(grid, tuple):
-            grid = grid + (1, 1)
-        elif isinstance(grid, list):
-            grid = grid + [1, 1]
+            if callable(grid):
+                # collect all arguments to the grid fn，ie:
+                # 1. args,
+                # 2. kwargs,
+                # 3. all all other captured arguments in CompiledKernel from
+                # Autotunner & Heuristics when kwargs & captured args conflict,
+                # captured args have higher priority
+                # 4. We must filter out captured args with default value firstly
+                constexprs = {
+                    k: v
+                    for k, v in constexprs.items() if v is not inspect._empty
+                }
 
-        kernel[grid[0:3]](*k_args)
-        return
+                meta = {
+                    **dict(zip(self.arg_names, args)),
+                    **kwargs,
+                    **constexprs,
+                }
+            grid = grid(meta)
+            if isinstance(grid, tuple):
+                grid = grid + (1, 1)
+            elif isinstance(grid, list):
+                grid = grid + [1, 1]
+            kernel[grid[0:3]](*k_args)
+        # maintaining the same return  type as the JITFunction.run
+        return kernel
 
 
 def libentry():
