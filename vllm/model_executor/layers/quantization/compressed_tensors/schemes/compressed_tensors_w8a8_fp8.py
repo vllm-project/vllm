@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear, create_per_channel_scale_param,
     create_per_tensor_scale_param, cutlass_fp8_supported,
     requantize_with_max_scale)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import ModelWeightParameter
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -66,16 +66,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         layer.logical_widths = output_partition_sizes
 
         # WEIGHT
-        weight = torch.nn.Parameter(torch.empty(output_size_per_partition,
-                                                input_size_per_partition,
-                                                dtype=torch.float8_e4m3fn),
-                                    requires_grad=False)
+        weight = torch.nn.ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader
+        )
         layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {
-            "input_dim": 1,
-            "output_dim": 0,
-            "weight_loader": weight_loader,
-        })
 
         # WEIGHT SCALE
         layer_kwargs = {"weight_loader": weight_loader}
