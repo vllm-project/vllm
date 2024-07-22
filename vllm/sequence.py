@@ -457,24 +457,25 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        self._first_seq = next(iter(self.seqs_dict.values()))
 
     @property
     def prompt(self) -> Optional[str]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).prompt
+        return self._first_seq.prompt
 
     @property
     def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).prompt_token_ids
+        return self._first_seq.prompt_token_ids
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).multi_modal_data
+        return self._first_seq.multi_modal_data
 
     @property
     def lora_int_id(self) -> int:

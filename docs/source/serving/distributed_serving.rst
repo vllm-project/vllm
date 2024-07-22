@@ -35,22 +35,19 @@ To run multi-GPU serving, pass in the :code:`--tensor-parallel-size` argument wh
 
 .. code-block:: console
 
-    $ python -m vllm.entrypoints.openai.api_server \
-    $     --model facebook/opt-13b \
+    $ vllm serve facebook/opt-13b \
     $     --tensor-parallel-size 4
 
 You can also additionally specify :code:`--pipeline-parallel-size` to enable pipeline parallelism. For example, to run API server on 8 GPUs with pipeline parallelism and tensor parallelism:
 
 .. code-block:: console
 
-    $ python -m vllm.entrypoints.openai.api_server \
-    $     --model gpt2 \
+    $ vllm serve gpt2 \
     $     --tensor-parallel-size 4 \
-    $     --pipeline-parallel-size 2 \
-    $     --distributed-executor-backend ray
+    $     --pipeline-parallel-size 2
 
 .. note::
-    Pipeline parallel is a beta feature. It is only supported for online serving and the ray backend for now, as well as LLaMa and GPT2 style models.
+    Pipeline parallel is a beta feature. It is only supported for online serving as well as LLaMa, GPT2, and Mixtral style models.
 
 To scale vLLM beyond a single machine, install and start a `Ray runtime <https://docs.ray.io/en/latest/ray-core/starting-ray.html>`_ via CLI before running vLLM:
 
