@@ -5,7 +5,7 @@ AutoAWQ
 
 .. warning::
 
-   Please note that Marlin kernels are up to 2.59x faster than the AWQ GEMM kernel which is under-optimized in vLLM. You can use the faster kernels by passing setting the `quantization` parameter in vLLM to `awq_marlin` instead of `awq`.
+   Please note that Marlin kernels are up to 2.59x faster than the AWQ GEMM kernel which is under-optimized in vLLM. You can use the faster kernels by passing setting the `quantization` parameter in vLLM to ``awq_marlin`` instead of ``awq``.
 
 To create a new 4-bit quantized model, you can leverage `AutoAWQ <https://github.com/casper-hansen/AutoAWQ>`_. 
 Quantizing reduces the model's precision from FP16 to INT4 which effectively reduces the file size by ~70%.
