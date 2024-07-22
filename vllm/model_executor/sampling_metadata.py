@@ -334,6 +334,7 @@ class SamplingTensors:
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
+        do_temperatures_scaling = False
 
         # We need one base seed per Triton slice.
         seeds_to_generate = (extra_seeds_to_generate +
@@ -361,6 +362,8 @@ class SamplingTensors:
                 # (i.e., greedy sampling or beam search).
                 # Set the temperature to 1 to avoid division by zero.
                 temperature = 1.0
+            if temperature != 1.0:
+                do_temperatures_scaling = True
             if not do_top_p_top_k and (top_p < 1.0 - _SAMPLING_EPS
                                        or top_k != vocab_size):
                 do_top_p_top_k = True
@@ -422,12 +425,28 @@ class SamplingTensors:
                 sampling_seeds.append(seq_seeds)
             sample_indices.extend(seq_group.sample_indices)
 
-        sampling_tensors = SamplingTensors.from_lists(
-            temperatures, top_ps, top_ks, min_ps, presence_penalties,
-            frequency_penalties, repetition_penalties, sampling_seeds,
-            sample_indices, prompt_tokens, output_tokens, vocab_size,
-            extra_seeds_to_generate, device, dtype)
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
+        sampling_tensors = (
+            SamplingTensors.from_lists(
+                temperatures,
+                top_ps,
+                top_ks,
+                min_ps,
+                presence_penalties,
+                frequency_penalties,
+                repetition_penalties,
+                sampling_seeds,
+                sample_indices,
+                prompt_tokens,
+                output_tokens,
+                vocab_size,
+                extra_seeds_to_generate,
+                device,
+                dtype,
+            )
+            if (do_temperatures_scaling or do_penalties or do_top_p_top_k or do_min_p)
+            else None
+        )
+        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p, do_temperatures_scaling)
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],
