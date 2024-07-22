@@ -249,10 +249,13 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
 
     # Expect consumed blocks to be new blocks required to support the new slots.
     expected_consumed_blocks = len(
-        chunk_list(
-            list(
-                range(prompt_len + num_slots_to_append + num_lookahead_slots)),
-            block_size)) - len(chunk_list(list(range(prompt_len)), block_size))
+        list(
+            chunk_list(
+                list(
+                    range(prompt_len + num_slots_to_append +
+                          num_lookahead_slots)),
+                block_size))) - len(
+                    list(chunk_list(list(range(prompt_len)), block_size)))
     assert num_consumed_blocks == expected_consumed_blocks
 
 
