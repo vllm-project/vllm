@@ -12,7 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
-from vllm.utils import (enable_trace_function_call_for_thread, inference_mode,
+from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
