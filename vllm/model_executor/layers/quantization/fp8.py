@@ -8,7 +8,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   fused_moe)
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -24,6 +25,14 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
 
+# Note: this is a hack. We should update each model to register the
+# stacked params and get it from there instead in a future PR.
+# fused_name: List[shard_name]
+_FUSED_LAYER_NAME_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"]
+}
+
 
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
@@ -32,6 +41,7 @@ class Fp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
+        ignored_layers: Optional[List[str]] = None,
     ) -> None:
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
@@ -41,6 +51,7 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
+        self.ignored_layers = ignored_layers or []
 
     @classmethod
     def get_name(cls) -> str:
@@ -63,14 +74,45 @@ class Fp8Config(QuantizationConfig):
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        ignored_layers = cls.get_from_keys(config, ["ignored_layers"])
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-                   activation_scheme=activation_scheme)
+                   activation_scheme=activation_scheme,
+                   ignored_layers=ignored_layers)
+
+    def _is_layer_skipped(self, prefix: str) -> bool:
+        # prefix: model.layers.0.self_attn.q_proj
+        # proj_name: q_proj
+        proj_name = prefix.split(".")[-1]
+        if proj_name in _FUSED_LAYER_NAME_MAPPING:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard_proj_name)
+                for shard_proj_name in _FUSED_LAYER_NAME_MAPPING[proj_name]
+            ]
+
+            is_skipped = None
+            for shard_prefix in shard_prefixes:
+                is_shard_skipped = shard_prefix in self.ignored_layers
+
+                if is_skipped is None:
+                    is_skipped = is_shard_skipped
+                elif is_shard_skipped != is_skipped:
+                    raise ValueError(
+                        f"Detected some but not all shards of {prefix} "
+                        "are quantized. All shards of fused layers "
+                        "to have the same precision.")
+        else:
+            is_skipped = prefix in self.ignored_layers
+
+        assert is_skipped is not None
+        return is_skipped
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
+            if self._is_layer_skipped(prefix):
+                return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
             return Fp8MoEMethod(self)
