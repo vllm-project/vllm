@@ -25,4 +25,4 @@ docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
 docker exec cpu-test bash -c "cd tests;
   pip install pytest Pillow protobuf
   cd ../
-  pytest -v -s tests/models -m \"not vlm\" --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py --ignore=tests/models/test_jamba.py" # Mamba on CPU is not supported
+  pytest -v -s tests/models -m \"not vlm\" --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py --ignore=tests/models/test_jamba.py --ignore=tests/models/test_danube3_4b.py" # Mamba on CPU is not supported

@@ -1,28 +1,16 @@
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
-This tests bigger models and use half precision.
+This tests danube3 separately because its head size isn't supported on CPU yet.
 
-Run `pytest tests/models/test_big_models.py`.
+Run `pytest tests/models/test_danube3_4b.py`.
 """
 import pytest
-import torch
 
 from .utils import check_outputs_equal
 
-MODELS = [
-    "meta-llama/Llama-2-7b-hf",
-    # "mistralai/Mistral-7B-v0.1",  # Tested by test_mistral.py
-    # "Deci/DeciLM-7b",  # Broken
-    # "tiiuae/falcon-7b",  # Broken
-    "EleutherAI/gpt-j-6b",
-    # "mosaicml/mpt-7b",  # Broken
-    # "Qwen/Qwen1.5-0.5B"  # Broken,
-]
+MODELS = ["h2oai/h2o-danube3-4b-base"]
 
-#TODO: remove this after CPU float16 support ready
-target_dtype = "float"
-if torch.cuda.is_available():
-    target_dtype = "half"
+target_dtype = "bfloat16"
 
 
 @pytest.mark.parametrize("model", MODELS)
