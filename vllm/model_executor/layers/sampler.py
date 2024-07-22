@@ -1,5 +1,6 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
+from math import nan
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -960,7 +961,7 @@ def _get_sampled_logprob_if_needed(
         if num_logprobs is None and not use_beam_search:
             for next_token_id in next_token_ids:
                 # Use a dummy logprob
-                sampled_logprobs.append({next_token_id: Logprob(0.0)})
+                sampled_logprobs.append({next_token_id: Logprob(nan)})
         else:
             # Pre-select items from tensor. tolist() is faster than repetitive
             # `.item()` calls.
