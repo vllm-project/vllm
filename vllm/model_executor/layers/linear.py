@@ -709,7 +709,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                          param: BasevLLMParameter,
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[str] = None):
-
         param_data = param.data
         if loaded_shard_id is None:  # special case for certain models
             if param.output_dim is None:
@@ -935,7 +934,7 @@ class RowParallelLinear(LinearBase):
             weight_loader=(self.weight_loader_v2 if isinstance(
                 self.quant_method, CompressedTensorsLinearMethod) else
                            self.weight_loader),
-            prefix=predix)
+            prefix=prefix)
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")
@@ -978,7 +977,6 @@ class RowParallelLinear(LinearBase):
 
     def weight_loader_v2(self, param: BasevLLMParameter,
                          loaded_weight: torch.Tensor):
-
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(self, input_):
