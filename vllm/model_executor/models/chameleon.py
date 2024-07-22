@@ -54,7 +54,7 @@ class ChameleonImagePixelInputs(TypedDict):
     """Shape: `(batch_size, num_channels, height, width)`"""
 
 
-def get_max_chameleon_image_tokens():
+def get_max_chameleon_image_tokens(ctx: InputContext):
     return CHAMELEON_IMAGE_SEQ_LENGTH
 
 
