@@ -554,13 +554,21 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         prompt_adapter_requests: Set[PromptAdapterRequest] = set()
         prompt_adapter_mapping = None
         if self.enable_prompt_adapter:
-            assert len(self.inter_data_list) == 1
-            if self.inter_data_list[0].prompt_adapter_request is not None:
-                prompt_adapter_requests = set(
-                    [self.inter_data_list[0].prompt_adapter_request])
+            prompt_adapter_requests = set(
+                data.prompt_adapter_request for data in self.inter_data_list
+                if data.prompt_adapter_request is not None)
+            prompt_adapter_index_mapping = [
+                m for data in self.inter_data_list
+                for m in data.prompt_adapter_index_mapping
+            ]
+            prompt_adapter_index_mapping.extend([0] * cuda_graph_pad_size)
+            prompt_adapter_prompt_mapping = [
+                m for data in self.inter_data_list
+                for m in data.prompt_adapter_prompt_mapping
+            ]
             prompt_adapter_mapping = PromptAdapterMapping(
-                self.inter_data_list[0].prompt_adapter_index_mapping,
-                self.inter_data_list[0].prompt_adapter_prompt_mapping,
+                prompt_adapter_index_mapping,
+                prompt_adapter_prompt_mapping,
             )
 
         # Multi-modal data.
