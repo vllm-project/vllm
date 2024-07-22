@@ -5,21 +5,19 @@ AutoAWQ
 
 .. warning::
 
-   Please note that AWQ support in vLLM is under-optimized at the moment. We would recommend using the unquantized version of the model for better
-   accuracy and higher throughput. Currently, you can use AWQ as a way to reduce memory footprint. As of now, it is more suitable for low latency
-   inference with small number of concurrent requests. vLLM's AWQ implementation have lower throughput than unquantized version.
+   Please note that Marlin kernels are up to 2.59x faster than the AWQ GEMM kernel which is under-optimized in vLLM. You can use the faster kernels by passing setting the `quantization` parameter in vLLM to `awq_marlin` instead of `awq`.
 
 To create a new 4-bit quantized model, you can leverage `AutoAWQ <https://github.com/casper-hansen/AutoAWQ>`_. 
 Quantizing reduces the model's precision from FP16 to INT4 which effectively reduces the file size by ~70%.
 The main benefits are lower latency and memory usage.
 
-You can quantize your own models by installing AutoAWQ or picking one of the `400+ models on Huggingface <https://huggingface.co/models?sort=trending&search=awq>`_. 
+You can quantize your own models by installing AutoAWQ or picking one of the `3000+ models on Huggingface <https://huggingface.co/models?sort=trending&search=awq>`_. 
 
 .. code-block:: console
 
     $ pip install autoawq
 
-After installing AutoAWQ, you are ready to quantize a model. Here is an example of how to quantize Vicuna 7B v1.5:
+After installing AutoAWQ, you are ready to quantize a model. Plesae refer to the `AutoAWQ documentation <https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization>`_ for further details. Here is an example of how to quantize Vicuna 7B v1.5:
 
 .. code-block:: python
 
