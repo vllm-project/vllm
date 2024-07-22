@@ -116,7 +116,6 @@ Performance tips
 
     $ lscpu -e # check the mapping between logical CPU cores and physical CPU cores
 
-.. code-block:: console
     # The "CPU" column means the logical CPU core IDs, and the "CORE" column means the physical core IDs. On this platform, two logical cores are sharing one physical core. 
     CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ      MHZ
     0    0      0    0 0:0:0:0          yes 2401.0000 800.0000  800.000
@@ -136,8 +135,7 @@ Performance tips
     14   0      0    6 6:6:6:0          yes 2401.0000 800.0000  800.000
     15   0      0    7 7:7:7:0          yes 2401.0000 800.0000  800.000
 
-.. code-block:: console
-    $ # On this platform, it is recommend to only bind openMP threads on logical CPU cores 0-7 or 8-15
+    # On this platform, it is recommend to only bind openMP threads on logical CPU cores 0-7 or 8-15
     $ export VLLM_CPU_OMP_THREADS_BIND=0-7 
     $ python examples/offline_inference.py
 
