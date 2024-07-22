@@ -234,18 +234,18 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         super().__init__()
         # Compute functions for each sequence in a sequence group.
         # WARNING: The order of the functions matters!
-        self.per_seq_compute_fns = (
+        self.per_seq_compute_fns = [
             self._compute_lens,
             self._compute_for_prefix_cache_hit,
             self._compute_for_sliding_window,
             self._compute_lora_input,
-        )
+        ]
         # Compute functions for each sequence group.
         # WARNING: The order of the functions matters!
-        self.per_seq_group_compute_fns = (
+        self.per_seq_group_compute_fns = [
             self._compute_prompt_adapter_input,
             self._compute_multi_modal_input,
-        )
+        ]
 
         self.runner = runner
         self.model_input_cls = self.runner._model_input_cls
