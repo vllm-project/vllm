@@ -52,7 +52,7 @@ def get_bsz_seq_len(input_ids):
         return shp[:2]
 
 
-class BartLearnedPositionalEmbedding(nn.Embedding):
+class BartLearnedPositionalEmbedding(VocabParallelEmbedding):
     """
     This module learns positional embeddings up to a fixed maximum size.
     """
