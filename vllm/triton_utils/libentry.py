@@ -154,6 +154,10 @@ def libentry():
         When dealing with small size, these steps can become bottlenecks in 
         Triton runtime. Libentry simplifies these steps to reduce runtime 
         overhead, thereby improving the runtime expenses of small kernels.
+    NOTE:
+        When Triton is upgraded to version 3.0.0, libentry can be removed,
+        see: https://github.com/vllm-project/vllm/pull/5036#issuecomment-2243396245
+        
 
     """
 
