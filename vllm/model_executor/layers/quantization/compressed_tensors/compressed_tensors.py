@@ -190,9 +190,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
-                    act_order=weight_quant.actorder,
                     group_size=weight_quant.group_size,
-                )
+                    actorder=weight_quant.actorder)
 
         # Detect If Activation Quantization.
         if is_activation_quantization_format(self.quant_format):
