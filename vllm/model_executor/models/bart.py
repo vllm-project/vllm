@@ -320,9 +320,10 @@ class BartCrossAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        self.d_model = config.d_model
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = self.num_heads
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = self.total_num_heads
         self.head_dim = embed_dim // num_heads
         self.config = config
 
@@ -332,22 +333,42 @@ class BartCrossAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-
-        out_proj_has_bias = True
-        self.out_proj = RowParallelLinear(
-            embed_dim,
-            embed_dim,
-            bias=out_proj_has_bias,
+        self.qkv_proj = QKVParallelLinear(
+            self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=bias,
             quant_config=quant_config,
         )
 
-        self.attn = Attention(self.num_heads,
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tp_world_size == 0
+        self.num_heads = self.total_num_heads // tp_world_size
+
+        if self.total_num_kv_heads >= tp_world_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_world_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_world_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.attn = Attention(self.total_num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.num_kv_heads,
+                              num_kv_heads=self.total_num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
@@ -359,11 +380,22 @@ class BartCrossAttention(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        q = self.q_proj(decoder_hidden_states)
-        k=None if encoder_hidden_states is None else \
-            self.k_proj(encoder_hidden_states)
-        v=None if encoder_hidden_states is None else \
-            self.v_proj(encoder_hidden_states)
+        # q = self.q_proj(decoder_hidden_states)
+        # k=None if encoder_hidden_states is None else \
+        #     self.k_proj(encoder_hidden_states)
+        # v=None if encoder_hidden_states is None else \
+        #     self.v_proj(encoder_hidden_states)
+
+        # (afeldman-nm 2024/07/22) TODO:
+        # Need a more efficient solution for q/k/v
+        qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
+        q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if encoder_hidden_states is None:
+            k=None
+            v=None
+        else:
+            qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
+            _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         attn_output = self.attn(q,
                                 k,
@@ -913,13 +945,11 @@ class BartForConditionalGeneration(nn.Module):
     def _rename_stacked_param(
         self,
         name: str,
-        cross_attn_keyword: str = 'encoder_attn',
     ) -> Tuple[str, Optional[str]]:
-        if cross_attn_keyword not in name:
-            for key, mapping in self.stacked_params_mapping.items():
-                if key in name:
-                    name = name.replace(key, mapping["param_name"])
-                    return name, mapping["shard_id"]
+        for key, mapping in self.stacked_params_mapping.items():
+            if key in name:
+                name = name.replace(key, mapping["param_name"])
+                return name, mapping["shard_id"]
         return name, None
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
