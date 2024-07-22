@@ -60,3 +60,28 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
     assert torch.allclose(ref_scale, ops_scale)
     assert torch.allclose(ref_out.to(dtype=torch.float32),
                           ops_out.to(dtype=torch.float32))
+
+
+# Regression test for a case with large activations where an int32 index cannot
+# represent the number of elements.
+@torch.inference_mode()
+@pytest.mark.parametrize("seed", SEEDS)
+def test_fp8_quant_large(seed: int) -> None:
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    num_tokens = 1024000  # Mistral-Nemo's max_position_embeddings
+    hidden_size = 1152  # Smallest hidden_size to reproduce the error
+    dtype = torch.bfloat16
+
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
+    ref_out, scale = ref_dynamic_per_tensor_fp8_quant(x)
+    ops_out, _ = ops.scaled_fp8_quant(x, scale)
+
+    # Minimize memory footprint in this test by freeing x and upconverting
+    # the outputs in place. (torch.allclose does not support fp8)
+    del x
+    ref_out = ref_out.to(dtype=dtype)
+    ops_out = ops_out.to(dtype=dtype)
+
+    assert torch.allclose(ref_out, ops_out)
