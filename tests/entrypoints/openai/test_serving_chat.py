@@ -32,7 +32,10 @@ async def _async_serving_chat_init():
                                            model_config,
                                            served_model_names=[MODEL_NAME],
                                            response_role="assistant",
-                                           chat_template=CHAT_TEMPLATE)
+                                           chat_template=CHAT_TEMPLATE,
+                                           lora_modules=None,
+                                           prompt_adapters=None,
+                                           request_logger=None)
     return serving_completion
 
 
