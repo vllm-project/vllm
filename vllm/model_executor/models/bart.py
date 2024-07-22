@@ -151,7 +151,14 @@ class BartEncoderAttention(nn.Module):
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        out_proj_has_bias = True
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=out_proj_has_bias,
+            quant_config=quant_config,
+        )
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -174,7 +181,7 @@ class BartEncoderAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER)
 
-        output = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -205,7 +212,14 @@ class BartDecoderSelfAttention(nn.Module):
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        out_proj_has_bias = True
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=out_proj_has_bias,
+            quant_config=quant_config,
+        )
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -228,7 +242,7 @@ class BartDecoderSelfAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.DECODER)
 
-        output = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -259,7 +273,14 @@ class BartCrossAttention(nn.Module):
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        out_proj_has_bias = True
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=out_proj_has_bias,
+            quant_config=quant_config,
+        )
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -289,7 +310,7 @@ class BartCrossAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER_DECODER)
 
-        output = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
