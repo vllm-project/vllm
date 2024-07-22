@@ -42,7 +42,7 @@ docker run \
     --entrypoint /bin/bash \
     --network host \
     --name node \
-    --ipc host \
+    --shm-size 10.24g \
     --gpus all \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     ${ADDITIONAL_ARGS} \

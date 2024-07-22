@@ -53,7 +53,7 @@ You can also additionally specify :code:`--pipeline-parallel-size` to enable pip
 .. note::
     Pipeline parallel is a beta feature. It is only supported for online serving and the ray backend for now, as well as LLaMa and GPT2 style models.
 
-Multi-node Inference and Serving
+Multi-Node Inference and Serving
 --------------------------------
 
 If a single node does not have enough GPUs to hold the model, you can run the model using multiple nodes. It is important to make sure the execution environment is the same on all nodes, including the model path, the Python environment. The recommended way is to use docker images to ensure the same environment, and hide the heterogeneity of the host machines via mapping them into the same docker configuration.
@@ -64,15 +64,25 @@ Pick a node as the head node, and run the following command:
 
 .. code-block:: console
 
-    $ bash run_cluster.sh vllm/vllm-openai ip_of_head_node /path/to/the/huggingface/home/in/this/node --head
+    $ bash run_cluster.sh \
+    $                   vllm/vllm-openai \
+    $                   ip_of_head_node \
+    $                   /path/to/the/huggingface/home/in/this/node \
+    $                   --head
 
 On the rest of the worker nodes, run the following command:
 
 .. code-block:: console
 
-    $ bash run_cluster.sh vllm/vllm-openai ip_of_head_node /path/to/the/huggingface/home/in/this/node --worker
+    $ bash run_cluster.sh \
+    $                   vllm/vllm-openai \
+    $                   ip_of_head_node \
+    $                   /path/to/the/huggingface/home/in/this/node \
+    $                   --worker
 
-Then you get a ray cluster of containers. On any node, use ``docker exec -it node /bin/bash`` to enter the container, execute ``ray status`` to check the status of the Ray cluster. You should see the right number of nodes and GPUs.
+Then you get a ray cluster of containers. Note that you need to keep the shells running these commands alive to hold the cluster. Any shell disconnect will terminate the cluster.
+
+Then, on any node, use ``docker exec -it node /bin/bash`` to enter the container, execute ``ray status`` to check the status of the Ray cluster. You should see the right number of nodes and GPUs.
 
 After that, on any node, you can use vLLM as usual, just as you have all the GPUs on one node. The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs in 2 nodes (8GPUs per node), you can set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
