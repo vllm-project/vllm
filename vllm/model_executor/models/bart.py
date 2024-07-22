@@ -36,6 +36,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 
 logger = logging.get_logger(__name__)
 
@@ -310,8 +313,24 @@ class BartEncoderLayer(nn.Module):
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = get_act_fn(config.activation_function,
                                         quant_config)
-        self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
-        self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
+
+        ffn_hidden_size = self.embed_dim
+        ffn_intermediate_size = config.encoder_ffn_dim
+        ffn_has_bias = True
+        self.fc1 = ColumnParallelLinear(
+            ffn_hidden_size,
+            ffn_intermediate_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+        self.act = get_act_fn("gelu", quant_config, ffn_intermediate_size)
+        self.fc2 = RowParallelLinear(
+            ffn_intermediate_size,
+            ffn_hidden_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
@@ -336,9 +355,10 @@ class BartEncoderLayer(nn.Module):
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
         residual = hidden_states
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
+        fc1_out, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(fc1_out)
 
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
 
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -386,8 +406,23 @@ class BartDecoderLayer(nn.Module):
             config=config,
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.fc1 = nn.Linear(self.embed_dim, config.decoder_ffn_dim)
-        self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
+
+        ffn_hidden_size = self.embed_dim
+        ffn_intermediate_size = config.encoder_ffn_dim
+        ffn_has_bias = True
+        self.fc1 = ColumnParallelLinear(
+            ffn_hidden_size,
+            ffn_intermediate_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+        self.fc2 = RowParallelLinear(
+            ffn_intermediate_size,
+            ffn_hidden_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
     def forward(
@@ -436,9 +471,10 @@ class BartDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
+        fc1_out, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(fc1_out)
 
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
 
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)

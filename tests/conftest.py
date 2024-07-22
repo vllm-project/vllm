@@ -435,7 +435,7 @@ class HfRunner:
             generation_config.do_sample = False
             generation_config.top_k = None
             generation_config.num_beams = 1
-            generation_config.repetition_penalty=1.0
+            generation_config.repetition_penalty = 1.0
             # generation_config.temperature = 0.0
             generation_config.top_p = 1.0
             # generation_config.min_p = 0.0
