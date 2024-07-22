@@ -222,7 +222,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
 
         # Multi-modal inputs.
-        multi_modal_inputs_list: Optional[MultiModalInputs] = None
+        multi_modal_inputs: Optional[MultiModalInputs] = None
 
         # Whether the prefix cache is hit (prefill only).
         prefix_cache_hit: bool = False
@@ -439,7 +439,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             return
 
         mm_kwargs = self.multi_modal_input_mapper(mm_data)
-        inter_data.multi_modal_inputs_list = mm_kwargs
+        inter_data.multi_modal_inputs = mm_kwargs
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
@@ -565,8 +565,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Multi-modal data.
         multi_modal_inputs_list = [
-            m for data in self.inter_data_list
-            for m in [data.multi_modal_inputs_list] if m
+            data.multi_modal_inputs for data in self.inter_data_list
+            if data.multi_modal_inputs is not None
         ]
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
                                                     device=self.runner.device)
