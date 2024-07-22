@@ -8,7 +8,7 @@ from PIL import Image
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
@@ -33,6 +33,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from vllm.transformers_utils.configs import (ChameleonConfig,
                                              ChameleonVQVAEConfig)
 from vllm.utils import print_warning_once
+
+from .interfaces import SupportsVision
 
 logger = init_logger(__name__)
 
@@ -875,16 +877,18 @@ class ChameleonModel(nn.Module):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_chameleon_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_chameleon)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_chameleon)
-class ChameleonForConditionalGeneration(nn.Module):
+class ChameleonForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(
         self,
         config: ChameleonConfig,
+        multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
+        self.multimodal_config = multimodal_config
         self.model = ChameleonModel(config, cache_config, quant_config)
         self.unpadded_vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(
