@@ -103,7 +103,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && export SCCACHE_BUCKET=vllm-build-sccache \
+        && if [ "$CUDA_VERSION" = "11.8.0" ]; then \
+            export SCCACHE_BUCKET=vllm-build-sccache-2; \
+           else \
+            export SCCACHE_BUCKET=vllm-build-sccache; \
+           fi \
         && export SCCACHE_REGION=us-west-2 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
