@@ -1,7 +1,6 @@
 import asyncio
 import importlib
 import inspect
-import os
 import re
 import signal
 from contextlib import asynccontextmanager
@@ -45,6 +44,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
+server: uvicorn.Server
 engine: AsyncLLMEngine
 engine_args: AsyncEngineArgs
 openai_serving_chat: OpenAIServingChat
@@ -196,7 +196,12 @@ def build_app(args):
                 and not engine.is_running):
             logger.fatal("AsyncLLMEngine has failed, terminating server "
                          "process")
-            os.kill(os.getpid(), signal.SIGTERM)
+            # See discussions here on shutting down a uvicorn server
+            # https://github.com/encode/uvicorn/discussions/1103
+            # In this case we cannot await the server shutdown here because
+            # this handler must first return to close the connection for
+            # this request.
+            server.should_exit = True
 
         return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -207,7 +212,7 @@ def build_app(args):
         if not args.keep_alive_on_engine_death:
             logger.fatal("AsyncLLMEngine is already dead, terminating server "
                          "process")
-            os.kill(os.getpid(), signal.SIGTERM)
+            server.should_exit = True
 
         return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -313,6 +318,8 @@ async def build_server(
         methods = ', '.join(route.methods)
         logger.info("Route: %s, Methods: %s", route.path, methods)
 
+    # Configure and build the uvicorn server
+    # See `uvicorn.run()` for reference
     config = uvicorn.Config(
         app,
         host=args.host,
