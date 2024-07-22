@@ -170,7 +170,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         else:
             raise FusionFail(f"unsupported getitem indexing arg: {arg}.")
 
-    def convert_slice_args(self, args: Tuple[torch.fx.node.Argument], inputs: Dict[str, torch.fx.node.Argument]) -> str:
+    def convert_slice_args(self, args: Tuple[torch.fx.node.Argument],
+                           inputs: Dict[str, torch.fx.node.Argument]) -> str:
         idx = 1 if isinstance(args[0], EllipsisType) else 0
 
         assert isinstance(args[idx], slice)
@@ -197,7 +198,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             return False
         return True
 
-    def translate_getitem(self, n: torch.fx.Node, inputs: Dict[str, torch.fx.node.Argument]) -> str:
+    def translate_getitem(self, n: torch.fx.Node,
+                          inputs: Dict[str, torch.fx.node.Argument]) -> str:
         # Note: The default (non-simple slice) implementation causes extra
         # copies of the input to be made.
         call_str = ''
@@ -253,9 +255,11 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         for node in reversed(nodes):
             if isinstance(node, torch.fx.Node):
                 torch.fx.node.map_arg(
-                    node.args, lambda n, node=node: register_last_uses(n, node))
+                    node.args,
+                    lambda n, node=node: register_last_uses(n, node))
                 torch.fx.node.map_arg(
-                    node.kwargs, lambda n, node=node: register_last_uses(n, node))
+                    node.kwargs,
+                    lambda n, node=node: register_last_uses(n, node))
 
         return user_to_last_uses
 
@@ -281,7 +285,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         return to_delete_str
 
     # # Ok what do we want here. This function should just swap the actual const value for its name
-    def arg_swap(self, arg: torch.fx.node.Argument, inputs: Dict[str, torch.fx.node.Argument]) -> str:
+    def arg_swap(self, arg: torch.fx.node.Argument,
+                 inputs: Dict[str, torch.fx.node.Argument]) -> str:
         # assert isinstance(arg, float, int)
         # Return the name
         try:
@@ -294,7 +299,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 return str(arg)
         except ValueError:
             return str(arg)
-    
+
     # # Ok now we need a processor that deals with tuple arguments properly
     def make_fused_op(
             self, op: str, inputs: Dict[str, torch.fx.node.Argument],
@@ -326,7 +331,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         cxx_arg_sig = ''
         sep = ''
         #TODO: Does this work? arg_schema_type should support non-fx-node types
-        arg_types = [f"{arg_schema_type(inp, True)}" for inp in inputs.values()]
+        arg_types = [
+            f"{arg_schema_type(inp, True)}" for inp in inputs.values()
+        ]
         logger.debug("fused op argument types: %s", arg_types)
         for i, name in enumerate(inputs.keys()):
             # Don't use const refs here so inputs can be deleted when no

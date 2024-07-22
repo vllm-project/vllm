@@ -63,7 +63,8 @@ def build_extension(lib_name: str,
     )
 
 
-def arg_schema_type(n: torch.fx.node.Argument, add_prefix: bool = False) -> str:
+def arg_schema_type(n: torch.fx.node.Argument,
+                    add_prefix: bool = False) -> str:
     """
     Get the schema or C++ type for a fused op argument.
     """
@@ -74,7 +75,8 @@ def arg_schema_type(n: torch.fx.node.Argument, add_prefix: bool = False) -> str:
     else:
         if n.type is not None:
             ty = n.type.__name__
-        elif n.meta.get('type') and n.meta.get('type').__name__ != 'FakeTensor':
+        elif n.meta.get(
+                'type') and n.meta.get('type').__name__ != 'FakeTensor':
             ty = n.meta.get('type').__name__
             if ty == 'Size':
                 return 'std::vector<int64_t> const' if add_prefix else 'int[]'
@@ -89,11 +91,11 @@ def arg_schema_type(n: torch.fx.node.Argument, add_prefix: bool = False) -> str:
 
     return ty if not add_prefix else f"torch::{ty}"
 
-    
+
 # TODO: maybe pass in the full dicitonary here for naming purposes?
 def generate_op_schema(
-        inputs: Dict[str, torch.fx.node.Argument], outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
+        inputs: Dict[str, torch.fx.node.Argument],
+        outputs: List[torch.fx.Node], nodes: List[torch.fx.Node],
         kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> str:
     sep = "("
     arg_sig = ""

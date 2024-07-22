@@ -16,18 +16,17 @@ from .code_cache import CodeCache
 from .fused_op_generator import FusionFail
 from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
-from .utils import (FlowGraph, SubGraph, lazy_graph_print_tabular,
-                    mangle_name, node_function_target, is_simple_call,  contains_constant, generate_const_name, extract_constant_vals)
-
+from .utils import (FlowGraph, SubGraph, lazy_graph_print_tabular, mangle_name,
+                    node_function_target, is_simple_call, contains_constant,
+                    generate_const_name, extract_constant_vals)
 
 from collections import OrderedDict
 
 logger = init_logger(__name__)
 
 
-        
-
-def remove_constants(sub_graph: SubGraph, inputs_dict: Dict[str, torch.fx.node.Argument]):
+def remove_constants(sub_graph: SubGraph,
+                     inputs_dict: Dict[str, torch.fx.node.Argument]):
     # inputs : Dict[str, torch.fx.node.Arugment] = {}
     # iterate over each node in the subgraph
     for n in sub_graph.nodes:
@@ -45,6 +44,7 @@ def remove_constants(sub_graph: SubGraph, inputs_dict: Dict[str, torch.fx.node.A
                     inputs_dict[const_name] = const_val
                 # Add the name and the node to the dictionary???
 
+
 def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     """
     Fuse all the nodes in the given sub-graph into a single function call.
@@ -52,7 +52,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     outputs = sub.outputs
     inputs = sub.inputs
 
-    inputs_dict : Dict[str, torch.fx.node.Arugment] = OrderedDict()
+    inputs_dict: Dict[str, torch.fx.node.Arugment] = OrderedDict()
     for input in inputs:
         inputs_dict[input.name] = input
     remove_constants(sub, inputs_dict)
@@ -76,8 +76,8 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
 
         def generate() -> Optional[Callable]:
             fgen = NaiveFusedOpGenerator()
-            return fgen.make_fused_op(fn_key, inputs_dict, outputs, nodes_to_fuse,
-                                      kwargs)
+            return fgen.make_fused_op(fn_key, inputs_dict, outputs,
+                                      nodes_to_fuse, kwargs)
 
         fn = cc.lookup_or_create(fn_key, generate)
 
@@ -105,7 +105,9 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     # not be required after transformation anyway.
     # Should pass in inputs_dict.values() or something like this.
     new_args = list(inputs_dict.values())
-    cf = sub.module.graph.call_function(fn, args=tuple(new_args), kwargs=kwargs)
+    cf = sub.module.graph.call_function(fn,
+                                        args=tuple(new_args),
+                                        kwargs=kwargs)
     logger.debug("fused op: %s, num_outputs=%s", cf.format_node(),
                  len(outputs))
 
