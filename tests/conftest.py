@@ -22,8 +22,9 @@ from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
-from vllm.utils import (cuda_device_count_stateless, is_cpu,
-                        to_enc_dec_tuple_list, zip_enc_dec_prompt_lists)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
+                        is_cpu, to_enc_dec_tuple_list,
+                        zip_enc_dec_prompt_lists)
 
 logger = init_logger(__name__)
 
@@ -146,12 +147,6 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-}
-
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
 
@@ -174,8 +169,7 @@ class HfRunner:
         is_sparseml_model: bool = False,
         is_encoder_decoder_model: bool = False,
     ) -> None:
-        assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
 
@@ -441,12 +435,18 @@ class HfRunner:
             generation_config.do_sample = False
             generation_config.top_k = None
             generation_config.num_beams = 1
+            generation_config.repetition_penalty = 1.0
+            # generation_config.temperature = 0.0
+            generation_config.top_p = 1.0
+            # generation_config.min_p = 0.0
+            generation_config.length_penalty = 1.0
+            generation_config.early_stopping = False
 
             output = self.model.generate(
                 self.wrap_device(encoder_input_ids),
                 decoder_input_ids=self.wrap_device(decoder_input_ids),
                 use_cache=True,
-                do_sample=False,
+                # do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
@@ -658,6 +658,7 @@ class VllmRunner:
         num_logprobs: int,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
+                                                use_beam_search=False,
                                                 max_tokens=max_tokens,
                                                 logprobs=num_logprobs)
         '''
@@ -710,6 +711,10 @@ def get_tokenizer_pool_config(tokenizer_group_type):
     if tokenizer_group_type == "ray":
         return TokenizerPoolConfig(pool_size=1,
                                    pool_type="ray",
+                                   extra_config={})
+    if isinstance(tokenizer_group_type, type):
+        return TokenizerPoolConfig(pool_size=1,
+                                   pool_type=tokenizer_group_type,
                                    extra_config={})
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 

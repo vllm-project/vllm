@@ -48,6 +48,7 @@ with override_backend_env_var_context_manager(STR_XFORMERS_ATTN_VAL):
         model="facebook/bart-large-cnn",
         enforce_eager=True,
         dtype=dtype,
+        # tensor_parallel_size=4,
     )
     # Generate texts from the prompts. The output is a list of
     # RequestOutput objects that contain the prompt, generated

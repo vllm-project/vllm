@@ -1,3 +1,4 @@
+import functools
 import importlib
 from typing import Dict, List, Optional, Type
 
@@ -15,6 +16,9 @@ _GENERATION_MODELS = {
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
+    "ChameleonForCausalLM":
+    ("chameleon", "ChameleonForConditionalGeneration"
+     ),  #TODO(ywang96): fix model name when huggingface fixes it
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -96,17 +100,36 @@ _ROCM_UNSUPPORTED_MODELS: List[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
+_ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
+                    "Triton flash attention. For half-precision SWA support, "
+                    "please use CK flash attention by setting "
+                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
 _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
     "Qwen2ForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
+    _ROCM_SWA_REASON,
     "MistralForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
+    _ROCM_SWA_REASON,
     "MixtralForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
+    _ROCM_SWA_REASON,
+    "PaliGemmaForConditionalGeneration":
+    ("ROCm flash attention does not yet "
+     "fully support 32-bit precision on PaliGemma"),
+    "Phi3VForCausalLM":
+    ("ROCm Triton flash attention may run into compilation errors due to "
+     "excessive use of shared memory. If this happens, disable Triton FA "
+     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
 }
 
 
 class ModelRegistry:
+
+    @staticmethod
+    @functools.lru_cache(maxsize=128)
+    def _get_model(model_arch: str):
+        module_name, model_cls_name = _MODELS[model_arch]
+        module = importlib.import_module(
+            f"vllm.model_executor.models.{module_name}")
+        return getattr(module, model_cls_name, None)
 
     @staticmethod
     def load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
@@ -124,10 +147,7 @@ class ModelRegistry:
                     "Model architecture %s is partially supported by ROCm: %s",
                     model_arch, _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
 
-        module_name, model_cls_name = _MODELS[model_arch]
-        module = importlib.import_module(
-            f"vllm.model_executor.models.{module_name}")
-        return getattr(module, model_cls_name, None)
+        return ModelRegistry._get_model(model_arch)
 
     @staticmethod
     def get_supported_archs() -> List[str]:

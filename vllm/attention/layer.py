@@ -34,6 +34,7 @@ class Attention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         if cache_config is not None:
@@ -56,7 +57,7 @@ class Attention(nn.Module):
         self._k_scale = 1.0
         self._v_scale = 1.0
         quant_method = quant_config.get_quant_method(
-            self) if quant_config else None
+            self, prefix=prefix) if quant_config else None
         if quant_method is not None:
             assert isinstance(quant_method, Fp8KVCacheMethod)
             # TODO (mgoin): kv cache dtype should be specified in the FP8

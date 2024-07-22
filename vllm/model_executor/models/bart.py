@@ -22,17 +22,21 @@ from typing import Iterable, List, Optional, Tuple
 import torch
 from torch import nn
 from transformers import BartConfig
-from transformers.activations import ACT2FN
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, LoRAConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -49,7 +53,7 @@ def get_bsz_seq_len(input_ids):
         return shp[:2]
 
 
-class BartLearnedPositionalEmbedding(nn.Embedding):
+class BartLearnedPositionalEmbedding(VocabParallelEmbedding):
     """
     This module learns positional embeddings up to a fixed maximum size.
     """
@@ -113,12 +117,31 @@ class BartScaledWordEmbedding(VocabParallelEmbedding):
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
-                 embed_scale: Optional[float] = 1.0):
+                 embed_scale: float = 1.0):
         super().__init__(num_embeddings, embedding_dim)
         self.embed_scale = embed_scale
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().forward(input_ids) * self.embed_scale
+
+
+class BartParallelLMHead(ParallelLMHead):
+    """
+    This module overrides ParallelLMHead's
+    forward by dividing by embeddings scale,
+    yielding effectively the inverse of
+    BartScaledWordEmbedding
+    """
+
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 embed_scale: float = 1.0):
+        super().__init__(num_embeddings, embedding_dim)
+        self.embed_scale = embed_scale
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return super().forward(input_ids) / self.embed_scale
 
 
 class BartEncoderAttention(nn.Module):
@@ -133,9 +156,10 @@ class BartEncoderAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        self.d_model = config.d_model
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = self.num_heads
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = self.total_num_heads
         self.head_dim = embed_dim // num_heads
         self.config = config
 
@@ -145,10 +169,37 @@ class BartEncoderAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.qkv_proj = QKVParallelLinear(
+            self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tp_world_size == 0
+        self.num_heads = self.total_num_heads // tp_world_size
+
+        if self.total_num_kv_heads >= tp_world_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_world_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_world_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -160,9 +211,9 @@ class BartEncoderAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         attn_output = self.attn(q,
                                 k,
@@ -171,7 +222,7 @@ class BartEncoderAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER)
 
-        output = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -187,9 +238,10 @@ class BartDecoderSelfAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        self.d_model = config.d_model
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = self.num_heads
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = self.total_num_heads
         self.head_dim = embed_dim // num_heads
         self.config = config
 
@@ -199,10 +251,37 @@ class BartDecoderSelfAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.qkv_proj = QKVParallelLinear(
+            self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tp_world_size == 0
+        self.num_heads = self.total_num_heads // tp_world_size
+
+        if self.total_num_kv_heads >= tp_world_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_world_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_world_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -214,9 +293,9 @@ class BartDecoderSelfAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         attn_output = self.attn(q,
                                 k,
@@ -225,7 +304,7 @@ class BartDecoderSelfAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.DECODER)
 
-        output = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -241,9 +320,10 @@ class BartCrossAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        self.d_model = config.d_model
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_kv_heads = self.num_heads
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = self.total_num_heads
         self.head_dim = embed_dim // num_heads
         self.config = config
 
@@ -253,10 +333,37 @@ class BartCrossAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.qkv_proj = QKVParallelLinear(
+            self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=bias,
+            quant_config=quant_config,
+        )
+
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tp_world_size == 0
+        self.num_heads = self.total_num_heads // tp_world_size
+
+        if self.total_num_kv_heads >= tp_world_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_world_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_world_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -273,11 +380,24 @@ class BartCrossAttention(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        q = self.q_proj(decoder_hidden_states)
-        k=None if encoder_hidden_states is None else \
-            self.k_proj(encoder_hidden_states)
-        v=None if encoder_hidden_states is None else \
-            self.v_proj(encoder_hidden_states)
+        # q = self.q_proj(decoder_hidden_states)
+        # k=None if encoder_hidden_states is None else \
+        #     self.k_proj(encoder_hidden_states)
+        # v=None if encoder_hidden_states is None else \
+        #     self.v_proj(encoder_hidden_states)
+
+        # (afeldman-nm 2024/07/22) TODO:
+        # Need a more efficient solution for q/k/v
+        qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
+        q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
+        if encoder_hidden_states is None:
+            k = None
+            v = None
+        else:
+            qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
+            _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
+                                    dim=-1)
 
         attn_output = self.attn(q,
                                 k,
@@ -286,7 +406,7 @@ class BartCrossAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER_DECODER)
 
-        output = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -308,9 +428,26 @@ class BartEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config)
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.activation_fn = ACT2FN[config.activation_function]
-        self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
-        self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
+        self.activation_fn = get_act_fn(config.activation_function,
+                                        quant_config)
+
+        ffn_hidden_size = self.embed_dim
+        ffn_intermediate_size = config.encoder_ffn_dim
+        ffn_has_bias = True
+        self.fc1 = ColumnParallelLinear(
+            ffn_hidden_size,
+            ffn_intermediate_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+        self.act = get_act_fn("gelu", quant_config, ffn_intermediate_size)
+        self.fc2 = RowParallelLinear(
+            ffn_intermediate_size,
+            ffn_hidden_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
@@ -335,9 +472,10 @@ class BartEncoderLayer(nn.Module):
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
         residual = hidden_states
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
+        fc1_out, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(fc1_out)
 
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
 
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -370,7 +508,8 @@ class BartDecoderLayer(nn.Module):
             config=config,
             cache_config=cache_config,
             quant_config=quant_config)
-        self.activation_fn = ACT2FN[config.activation_function]
+        self.activation_fn = get_act_fn(config.activation_function,
+                                        quant_config)
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         '''
@@ -384,8 +523,23 @@ class BartDecoderLayer(nn.Module):
             config=config,
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.fc1 = nn.Linear(self.embed_dim, config.decoder_ffn_dim)
-        self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
+
+        ffn_hidden_size = self.embed_dim
+        ffn_intermediate_size = config.encoder_ffn_dim
+        ffn_has_bias = True
+        self.fc1 = ColumnParallelLinear(
+            ffn_hidden_size,
+            ffn_intermediate_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+        self.fc2 = RowParallelLinear(
+            ffn_intermediate_size,
+            ffn_hidden_size,
+            bias=ffn_has_bias,
+            quant_config=quant_config,
+        )
+
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
     def forward(
@@ -434,9 +588,10 @@ class BartDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
+        fc1_out, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(fc1_out)
 
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
 
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -702,9 +857,13 @@ class BartForConditionalGeneration(nn.Module):
 
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
-        self.lm_head = BartScaledWordEmbedding(config.vocab_size,
-                                               config.d_model,
-                                               embed_scale=embed_scale)
+        # self.lm_head = BartScaledWordEmbedding(config.vocab_size,
+        #                                        config.d_model,
+        #                                        embed_scale=embed_scale)
+
+        self.lm_head = BartParallelLMHead(config.vocab_size,
+                                          config.d_model,
+                                          embed_scale=embed_scale)
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
@@ -756,15 +915,15 @@ class BartForConditionalGeneration(nn.Module):
         return next_tokens
 
     stacked_params_mapping = {
-        "query": {
+        "q_proj": {
             "param_name": "qkv_proj",
             "shard_id": "q",
         },
-        "key": {
+        "k_proj": {
             "param_name": "qkv_proj",
             "shard_id": "k",
         },
-        "value": {
+        "v_proj": {
             "param_name": "qkv_proj",
             "shard_id": "v",
         },

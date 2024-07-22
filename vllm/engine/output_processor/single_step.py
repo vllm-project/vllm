@@ -90,7 +90,11 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             for parent_seq in parent_seqs
         }
         for sample in samples:
-            parent_child_dict[sample.parent_seq_id].append(sample)
+            # Guard against a KeyError which can occur if the request was
+            # aborted while the output was generated
+            if (child_list :=
+                    parent_child_dict.get(sample.parent_seq_id)) is not None:
+                child_list.append(sample)
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
