@@ -27,10 +27,9 @@ from functools import partial
 from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image
-
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
 from transformers.configuration_utils import PretrainedConfig
@@ -417,7 +416,8 @@ class MiniCPMV(nn.Module, SupportsVision):
             try:
                 import timm
             except ImportError:
-                raise ImportError('Please install timm==0.9.10') from ImportError
+                raise ImportError(
+                    'Please install timm==0.9.10') from ImportError
             default_dtype = torch.get_default_dtype()
             torch.set_default_dtype(torch.float16)
             model = timm.create_model('vit_so400m_patch14_siglip_384.webli',
