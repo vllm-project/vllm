@@ -204,7 +204,7 @@ class BartEncoderAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.total_num_kv_heads,
+                              num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
@@ -286,7 +286,7 @@ class BartDecoderSelfAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.total_num_kv_heads,
+                              num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
@@ -368,7 +368,7 @@ class BartCrossAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.total_num_kv_heads,
+                              num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
