@@ -247,8 +247,8 @@ struct cutlass_2x_gemm {
 
 template <typename Gemm, typename... EpilogueArgs>
 inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
-                         torch::Tensor const& b,
-                         EpilogueArgs&&... epilogue_params) {
+                                torch::Tensor const& b,
+                                EpilogueArgs&&... epilogue_params) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -310,9 +310,10 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 }
 
 template <typename Gemm, typename FallbackGemm, typename... EpilogueArgs>
-inline void fallback_cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
-                                  torch::Tensor const& b,
-                                  EpilogueArgs&&... args) {
+inline void fallback_cutlass_gemm_caller(torch::Tensor& out,
+                                         torch::Tensor const& a,
+                                         torch::Tensor const& b,
+                                         EpilogueArgs&&... args) {
   // In some cases, the GPU isn't able to accommodate the
   // shared memory requirements of the Gemm. In such cases, use
   // the FallbackGemm instead.

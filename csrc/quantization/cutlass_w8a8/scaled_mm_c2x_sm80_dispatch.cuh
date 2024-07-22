@@ -3,10 +3,11 @@
 #include "scaled_mm_c2x.cuh"
 
 /**
- * This file defines Gemm kernel configurations for SM80 based on the Gemm shape.
+ * This file defines Gemm kernel configurations for SM80 based on the Gemm
+ * shape.
  */
 
- namespace vllm {
+namespace vllm {
 
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
@@ -71,9 +72,10 @@ struct sm80_config_M16 {
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-inline void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
-                                torch::Tensor const& b,
-                                EpilogueArgs&&... args) {
+inline void cutlass_gemm_sm80_dispatch(torch::Tensor& out,
+                                       torch::Tensor const& a,
+                                       torch::Tensor const& b,
+                                       EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, int8_t>());
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
@@ -134,4 +136,4 @@ inline void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& 
   }
 }
 
-} // namespace vllm
+}  // namespace vllm
