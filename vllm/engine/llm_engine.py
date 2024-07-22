@@ -434,7 +434,7 @@ class LLMEngine:
         if self.tokenizer:
             eos_token_id = self.tokenizer.get_lora_tokenizer(
                 lora_request).eos_token_id
-        else:
+        elif not self.get_model_config().skip_tokenizer_init:
             logger.warning("Use None for EOS token id because tokenizer is "
                            "not initialized")
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
