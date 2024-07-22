@@ -49,18 +49,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         if world_size > 1:
             maybe_set_triton_cache_manager()
 
-        cuda_device_count = cuda_device_count_stateless()
-        # Use confusing message for more common TP-only case.
-        assert tensor_parallel_size <= cuda_device_count, (
-            f"please set tensor_parallel_size ({tensor_parallel_size}) "
-            f"to less than max local gpu count ({cuda_device_count})")
-
-        assert world_size <= cuda_device_count, (
-            f"please ensure that world_size ({world_size}) "
-            f"is less than than max local gpu count ({cuda_device_count})")
-
-        error_on_invalid_device_count_status()
-
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
         # 127.0.0.1 for communication.
@@ -123,6 +111,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
     def _check_executor_parameters(self):
         world_size = self.parallel_config.tensor_parallel_size
+        tensor_parallel_size = self.parallel_config.tensor_parallel_size
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -130,8 +119,17 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                 "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
             })
 
-        assert world_size <= cuda_device_count_stateless(), (
-            "please set tensor_parallel_size to less than max local gpu count")
+        cuda_device_count = cuda_device_count_stateless()
+
+        assert tensor_parallel_size <= cuda_device_count, (
+            f"please set tensor_parallel_size ({tensor_parallel_size}) "
+            f"to less than max local gpu count ({cuda_device_count})")
+
+        assert world_size <= cuda_device_count, (
+            f"please ensure that world_size ({world_size}) "
+            f"is less than than max local gpu count ({cuda_device_count})")
+
+        error_on_invalid_device_count_status()
 
     def shutdown(self):
         if (worker_monitor := getattr(self, "worker_monitor",

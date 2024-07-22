@@ -1,3 +1,4 @@
+import vllm.envs as envs
 from vllm.executor.multiproc_gpu_executor import (
     MultiprocessingGPUExecutor, MultiprocessingGPUExecutorAsync)
 from vllm.executor.xpu_executor import XPUExecutor
@@ -11,7 +12,10 @@ class MultiprocessingXPUExecutor(MultiprocessingGPUExecutor, XPUExecutor):
     """Python multiprocessing-based multi-XPU executor"""
 
     def _check_executor_parameters(self):
-        pass
+        mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+        if mp_method != "spawn":
+            raise RuntimeError(
+                "XPU multiprocess executor only support spawn as mp method")
 
 
 class MultiprocessingXPUExecutorAsync(MultiprocessingXPUExecutor,
