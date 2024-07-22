@@ -98,8 +98,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
 
+        logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
         # Create the workers.
         driver_ip = get_ip()
+        logger.info("driver_ip: %s", driver_ip)
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -131,6 +133,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 self.workers.append(worker)
             else:
                 worker_ip = ray.get(worker.get_node_ip.remote())
+                logger.info("worker_ip: %s", worker_ip)
                 if worker_ip == driver_ip and self.driver_dummy_worker is None:
                     # If the worker is on the same node as the driver, we use it
                     # as the resource holder for the driver process.
@@ -144,6 +147,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # Else, added to the list of workers.
                     self.workers.append(worker)
 
+        logger.info("workers: %s", self.workers)
+        logger.info("driver_dummy_worker: %s", self.driver_dummy_worker)
         if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
             raise ValueError(
                 "Ray does not allocate any GPUs on the driver node. Consider "
@@ -165,8 +170,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.workers = sorted(self.workers, key=sort_by_driver_then_worker_ip)
 
         # Get the set of GPU IDs used on each node.
-        worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
-                                                    use_dummy_driver=True)
+        worker_node_and_gpu_ids = self._run_workers(
+            "get_node_and_gpu_ids", use_dummy_driver=True, use_local_driver=False)
 
         # the order in `worker_node_and_gpu_ids` does not necessarily match
         # the machine boundaries. We need to make sure that workers in the
@@ -301,6 +306,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
+        use_local_driver: bool = True,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
@@ -324,6 +330,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
         if max_concurrent_workers:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
+
+        if self.use_ray_spmd_worker:
+            # Ray DAG already includes the task for the dummy driver
+            # worker.
+            use_dummy_driver = False
+            # The physical driver does not participate either.
+            use_local_driver = False
 
         count = len(self.workers) if not \
             async_run_tensor_parallel_workers_only \
@@ -352,26 +365,20 @@ class RayGPUExecutor(DistributedGPUExecutor):
             return ray_worker_outputs
 
         driver_worker_output = []
-        # In SPMD mode, the driver worker is the same as any other worker,
-        # so we only explicitly execute on the driver worker if using a
-        # non-SPMD worker class.
-        if not self.use_ray_spmd_worker:
-            driver_args = args if all_args is None else all_args[0]
-            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
+        driver_args = args if all_args is None else all_args[0]
+        driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
 
-            # Start the driver worker after all the ray workers.
-            if not use_dummy_driver:
-                driver_worker_output = [
-                    self.driver_worker.execute_method(method, *driver_args,
-                                                      **driver_kwargs)
-                ]
-            else:
-                assert self.driver_dummy_worker is not None
-                driver_worker_output = [
-                    ray.get(
-                        self.driver_dummy_worker.execute_method.remote(
-                            method, *driver_args, **driver_kwargs))
-                ]
+        # Start the driver worker after all the ray workers.
+        if use_dummy_driver:
+            assert self.driver_dummy_worker is not None
+            driver_worker_output.append(
+                ray.get(
+                    self.driver_dummy_worker.execute_method.remote(
+                        method, *driver_args, **driver_kwargs)))
+        if use_local_driver:
+            driver_worker_output.append(
+                self.driver_worker.execute_method(method, *driver_args,
+                                                  **driver_kwargs))
 
         # Get the results of the ray workers.
         if self.workers:

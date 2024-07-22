@@ -51,6 +51,7 @@ class Worker(LocalOrDistributedWorkerBase):
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
+        print(f"worker __init__, rank = {rank}")
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.parallel_config.rank = rank
