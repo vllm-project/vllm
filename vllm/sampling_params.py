@@ -8,7 +8,6 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
