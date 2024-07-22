@@ -461,12 +461,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         """Finalize the builder intermediate data and
         create on-device tensors.
         """
-        # Combine intermediate data.
+        # Combine and flatten intermediate data.
         input_tokens = flatten_2d_lists([
             flatten_2d_lists(inter_data.input_tokens)
             for inter_data in self.inter_data_list
         ])
         if not input_tokens:
+            # This may happen when all prefill requests hit
+            # prefix caching and there is no decode request.
             return self.model_input_cls()
         input_positions = flatten_2d_lists([
             flatten_2d_lists(inter_data.input_positions)
