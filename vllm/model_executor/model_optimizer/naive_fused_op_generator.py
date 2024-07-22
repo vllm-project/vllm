@@ -170,7 +170,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         else:
             raise FusionFail(f"unsupported getitem indexing arg: {arg}.")
 
-    def convert_slice_args(self, args: Tuple[torch.fx.node.Argument]) -> str:
+    def convert_slice_args(self, args: Tuple[torch.fx.node.Argument], inputs: Dict[str, torch.fx.node.Argument]) -> str:
         idx = 1 if isinstance(args[0], EllipsisType) else 0
 
         assert isinstance(args[idx], slice)
@@ -179,6 +179,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         stop = self.convert_getitem_arg(args[idx].stop)
         step = f", {self.convert_getitem_arg(args[idx].step)}" if args[
             idx].step is not None else ""
+        if args[idx].start is not None:
+            start = self.arg_swap(args[idx].start, inputs)
+        elif args[idx].stop is not None:
+            stop = self.arg_swap(args[idx].stop, inputs)
         return f"{idx}, {start}, {stop}{step}"
 
     def is_simple_slice(self, arg: torch.fx.node.Argument) -> bool:
@@ -193,7 +197,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             return False
         return True
 
-    def translate_getitem(self, n: torch.fx.Node) -> str:
+    def translate_getitem(self, n: torch.fx.Node, inputs: Dict[str, torch.fx.node.Argument]) -> str:
         # Note: The default (non-simple slice) implementation causes extra
         # copies of the input to be made.
         call_str = ''
@@ -208,7 +212,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         if self.is_simple_slice(idx):
             call_str = (f"  auto {self.sanitize(n.name)} = "
                         f"{self.sanitize(str(tensor))}.slice("
-                        f"{self.convert_slice_args(idx)});")
+                        f"{self.convert_slice_args(idx, inputs)});")
         elif isinstance(idx, int):
             call_str = (f"  auto {self.sanitize(n.name)} = "
                         f"{self.sanitize(str(tensor))}[{idx}];")
@@ -232,7 +236,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         return call_str
 
     def last_uses(
-        self, nodes: List[torch.fx.Node]
+        self, nodes: List[torch.fx.node.Argument]
     ) -> Dict[torch.fx.Node, List[torch.fx.Node]]:
         """
         Collect last uses locations for all variables in the set of nodes being
@@ -247,10 +251,11 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 user_to_last_uses.setdefault(user, []).append(n)
 
         for node in reversed(nodes):
-            torch.fx.node.map_arg(
-                node.args, lambda n, node=node: register_last_uses(n, node))
-            torch.fx.node.map_arg(
-                node.kwargs, lambda n, node=node: register_last_uses(n, node))
+            if isinstance(node, torch.fx.Node):
+                torch.fx.node.map_arg(
+                    node.args, lambda n, node=node: register_last_uses(n, node))
+                torch.fx.node.map_arg(
+                    node.kwargs, lambda n, node=node: register_last_uses(n, node))
 
         return user_to_last_uses
 
@@ -275,8 +280,24 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 n.name) + " = torch::Tensor();"
         return to_delete_str
 
+    # # Ok what do we want here. This function should just swap the actual const value for its name
+    def arg_swap(self, arg: torch.fx.node.Argument, inputs: Dict[str, torch.fx.node.Argument]) -> str:
+        # assert isinstance(arg, float, int)
+        # Return the name
+        try:
+            # if this arg is in the list of external args and it's a const, substitute it in. Otherwise just stringify the value
+            # What about duplicates? Like slice dimensions?
+            key = list(inputs.keys())[list(inputs.values()).index(arg)]
+            if "const" in key:
+                return key
+            else:
+                return str(arg)
+        except ValueError:
+            return str(arg)
+    
+    # # Ok now we need a processor that deals with tuple arguments properly
     def make_fused_op(
-            self, op: str, inputs: List[torch.fx.Node],
+            self, op: str, inputs: Dict[str, torch.fx.node.Argument],
             outputs: List[torch.fx.Node], nodes: List[torch.fx.Node],
             kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
         """
@@ -300,19 +321,24 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         fn_names = [self.rename(node_function_target(n)) for n in nodes]
 
-        user_to_last_uses = self.last_uses(inputs + nodes)
+        user_to_last_uses = self.last_uses(list(inputs.values()) + nodes)
 
         cxx_arg_sig = ''
         sep = ''
-        arg_types = [f"{arg_schema_type(inp, True)}" for inp in inputs]
+        #TODO: Does this work? arg_schema_type should support non-fx-node types
+        arg_types = [f"{arg_schema_type(inp, True)}" for inp in inputs.values()]
         logger.debug("fused op argument types: %s", arg_types)
-        for i, n in enumerate(inputs):
+        for i, name in enumerate(inputs.keys()):
             # Don't use const refs here so inputs can be deleted when no
             # longer needed.
             if arg_types[i] == 'torch::Tensor':
-                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {n}"
+                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {name}"
+            elif arg_types[i] == 'float':
+                cxx_arg_sig = cxx_arg_sig + sep + f"double {name}"
+            elif arg_types[i] == 'int':
+                cxx_arg_sig = cxx_arg_sig + sep + f"int64_t {name}"
             else:
-                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]} const& {n}"
+                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]} const& {name}"
             sep = ", "
 
         arg_sig = generate_op_schema(inputs, outputs, nodes, kwargs)
@@ -352,8 +378,9 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             input_types = [argument_type_str(inp) for inp in n.args]
             comment_str = f"  // ({', '.join(input_types)}) -> {return_type}"
 
+            # If the node is a slice
             if fn == '_operator_getitem':
-                call_str = self.translate_getitem(n)
+                call_str = self.translate_getitem(n, inputs)
                 assert kwargs.get(n.name) is None or len(kwargs[n.name]) == 0
             else:
                 if return_type is None:
@@ -373,14 +400,21 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
                 sep = ''
                 for i, inp in enumerate(n.args[first_arg:]):
+                    # const_num = 1
+                    # # what do we want to do here?
+                    # if contains_constant(inp):
+                    #     generate_const_name(n, const_num)
+                    #     inp = extract_constant_vals(inp)
                     # bit of a hack for optional/empty tensor arguments
                     if inp is None:
                         # {} should work for both default Tensor and
                         # std::optional<Tensor>
                         call_str = call_str + sep + "{}"
+                    elif isinstance(inp, (int, float)):
+                        call_str = call_str + sep + self.arg_swap(inp, inputs)
                     elif isinstance(inp, tuple):
-                        call_str = call_str + sep + "{" + ','.join(
-                            [str(t) for t in inp]) + "}"
+                        call_str = call_str + sep + "{" + ', '.join(
+                            [self.arg_swap(t, inputs) for t in inp]) + "}"
                     else:
                         call_str = call_str + sep + self.rename(
                             self.sanitize(str(inp), '::'))
@@ -453,6 +487,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             (f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) '
              f'{oc} m.impl("{op}", &{op}); {cc}'))
 
+        #TODO: generate_meta_function doesn't even use the inputs or outputs arguments
         return self.build_op(
             op, f"torch.ops.fused_ops{self.N}.{op}", arg_sig,
             generate_meta_function(inputs, outputs, nodes, kwargs))

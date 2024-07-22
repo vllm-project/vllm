@@ -63,19 +63,24 @@ def build_extension(lib_name: str,
     )
 
 
-def arg_schema_type(n: torch.fx.Node, add_prefix: bool = False) -> str:
+def arg_schema_type(n: torch.fx.node.Argument, add_prefix: bool = False) -> str:
     """
     Get the schema or C++ type for a fused op argument.
     """
-    if n.type is not None:
-        ty = n.type.__name__
-    elif n.meta.get('type') and n.meta.get('type').__name__ != 'FakeTensor':
-        ty = n.meta.get('type').__name__
-        if ty == 'Size':
-            return 'std::vector<int64_t> const' if add_prefix else 'int[]'
+    if isinstance(n, float):
+        return "float"
+    elif isinstance(n, int):
+        return "int"
     else:
-        # this default is a bit sketchy
-        ty = "Tensor"
+        if n.type is not None:
+            ty = n.type.__name__
+        elif n.meta.get('type') and n.meta.get('type').__name__ != 'FakeTensor':
+            ty = n.meta.get('type').__name__
+            if ty == 'Size':
+                return 'std::vector<int64_t> const' if add_prefix else 'int[]'
+        else:
+            # this default is a bit sketchy
+            ty = "Tensor"
 
     builtin_types = {"int": "int64_t", "float": "double"}
 
@@ -84,16 +89,19 @@ def arg_schema_type(n: torch.fx.Node, add_prefix: bool = False) -> str:
 
     return ty if not add_prefix else f"torch::{ty}"
 
-
+    
+# TODO: maybe pass in the full dicitonary here for naming purposes?
 def generate_op_schema(
-        inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
+        inputs: Dict[str, torch.fx.node.Argument], outputs: List[torch.fx.Node],
         nodes: List[torch.fx.Node],
         kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> str:
     sep = "("
     arg_sig = ""
-    for i, n in enumerate(inputs):
-        arg_type = arg_schema_type(n).replace(".", "::")
-        arg_name = n.name.replace(".", "_")
+    for name in inputs.keys():
+        arg_type = arg_schema_type(inputs[name]).replace(".", "::")
+        # arg_name = arg_schema_name(n)
+        #TODO is this right? Shouldn't we still use arg_schema_name for the tensors?
+        arg_name = name
         arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
         sep = ", "
 

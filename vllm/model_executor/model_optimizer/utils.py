@@ -196,7 +196,7 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
     for n in nodes:
         fn = node_function_target(n)
         types = [
-            argument_type_str(arg, True).replace("torch.", "")
+            argument_type_str(arg).replace("torch.", "")
             for arg in n.args
         ]
         ktypes = [
@@ -689,3 +689,36 @@ class SubGraph:
         ] for n in self.outputs]
 
         return tabulate(node_specs, headers=headers)
+
+def contains_constant(arg: torch.fx.node.Argument):
+    # TODO: tuple isn't right unless its composed of constants????
+    if isinstance(arg, tuple):
+        return True
+    elif isinstance(arg, (str, int, float, bool)):
+        return True
+    else:
+        return False
+
+# This takes in an fx node that has at least one const argument. 
+# Count should be incremented by the caller. Once for each const argument
+def generate_const_name(node: torch.fx.node, count):
+    return f"{node.name}_const_{count}"
+
+def extract_constant_vals(arg: torch.fx.node.Argument):
+    if isinstance(arg, tuple):
+        val = ()
+        for elem in arg:
+            val += extract_constant_vals(elem)
+        return val
+    if isinstance(arg, slice):
+        if arg.stop:
+            assert arg.start == None
+            return (arg.stop,)
+        else:
+            assert arg.start is not None
+            assert arg.stop == None
+            return (arg.start,)
+    elif isinstance(arg, (str, int, float, bool)):
+        return (arg,)
+    else:
+        return ()

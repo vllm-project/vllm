@@ -17,10 +17,33 @@ from .fused_op_generator import FusionFail
 from .naive_fused_op_generator import NaiveFusedOpGenerator
 from .register import FUSABLE
 from .utils import (FlowGraph, SubGraph, lazy_graph_print_tabular,
-                    mangle_name, node_function_target, is_simple_call)
+                    mangle_name, node_function_target, is_simple_call,  contains_constant, generate_const_name, extract_constant_vals)
+
+
+from collections import OrderedDict
 
 logger = init_logger(__name__)
 
+
+        
+
+def remove_constants(sub_graph: SubGraph, inputs_dict: Dict[str, torch.fx.node.Argument]):
+    # inputs : Dict[str, torch.fx.node.Arugment] = {}
+    # iterate over each node in the subgraph
+    for n in sub_graph.nodes:
+        count = 1
+        # itereate over each of that nodes arguments
+        for i in range(len(n.args)):
+            arg = n.args[i]
+            # detect that the argument is a constant
+            if contains_constant(arg):
+                # generate a name for that constant and maybe an fx node????
+                const_vals = extract_constant_vals(arg)
+                for const_val in const_vals:
+                    const_name = generate_const_name(n, count)
+                    count += 1
+                    inputs_dict[const_name] = const_val
+                # Add the name and the node to the dictionary???
 
 def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     """
@@ -29,6 +52,12 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     outputs = sub.outputs
     inputs = sub.inputs
 
+    inputs_dict : Dict[str, torch.fx.node.Arugment] = OrderedDict()
+    for input in inputs:
+        inputs_dict[input.name] = input
+    remove_constants(sub, inputs_dict)
+    # c = 10.0
+    # inputs.append(c)
     sub.topo_sort()
 
     # Collect all the nodes that will need to be fused (and erased) later.
@@ -47,7 +76,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
 
         def generate() -> Optional[Callable]:
             fgen = NaiveFusedOpGenerator()
-            return fgen.make_fused_op(fn_key, inputs, outputs, nodes_to_fuse,
+            return fgen.make_fused_op(fn_key, inputs_dict, outputs, nodes_to_fuse,
                                       kwargs)
 
         fn = cc.lookup_or_create(fn_key, generate)
@@ -74,7 +103,9 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
 
     # Note: we do not update the meta info for cf here.  It should
     # not be required after transformation anyway.
-    cf = sub.module.graph.call_function(fn, args=tuple(inputs), kwargs=kwargs)
+    # Should pass in inputs_dict.values() or something like this.
+    new_args = list(inputs_dict.values())
+    cf = sub.module.graph.call_function(fn, args=tuple(new_args), kwargs=kwargs)
     logger.debug("fused op: %s, num_outputs=%s", cf.format_node(),
                  len(outputs))
 
@@ -372,10 +403,11 @@ def pointwise_fusion(cc: CodeCache,
             continue
         logger.debug("Fusing sub-module (last_input=%s):\n%s",
                      sub.last_input(), sub.tabular())
+        # remove_constants(sub)
         fuse_graph_nodes(cc, sub)
-        logger.debug("Post fusion sub-module:\n%s", sub.tabular())
+        # logger.debug("Post fusion sub-module:\n%s", sub.tabular())
 
-    logger.debug("Post fusion module:")
-    logger.debug(lazy_graph_print_tabular(mod.graph))
+    # logger.debug("Post fusion module:")
+    # logger.debug(lazy_graph_print_tabular(mod.graph))
 
     return mod
