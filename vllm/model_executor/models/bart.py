@@ -201,7 +201,7 @@ class BartEncoderAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.attn = Attention(self.total_num_heads,
+        self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.total_num_kv_heads,
@@ -283,7 +283,7 @@ class BartDecoderSelfAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.attn = Attention(self.total_num_heads,
+        self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.total_num_kv_heads,
@@ -365,7 +365,7 @@ class BartCrossAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.attn = Attention(self.total_num_heads,
+        self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.total_num_kv_heads,
@@ -389,13 +389,15 @@ class BartCrossAttention(nn.Module):
         # (afeldman-nm 2024/07/22) TODO:
         # Need a more efficient solution for q/k/v
         qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
-        q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
         if encoder_hidden_states is None:
-            k=None
-            v=None
+            k = None
+            v = None
         else:
             qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
-            _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
+                                    dim=-1)
 
         attn_output = self.attn(q,
                                 k,
