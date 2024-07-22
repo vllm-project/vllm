@@ -43,6 +43,7 @@ CHAMELEON_IMAGE_SEQ_LENGTH = 1024
 CHAMELEON_IMAGE_TOKEN_ID = 8711
 CHAMELEON_IMAGE_START_TOKEN_ID = 8197
 CHAMELEON_IMAGE_END_TOKEN_ID = 8196
+CHAMELEON_SEP_TOKEN_ID = 8710
 
 
 class ChameleonImagePixelInputs(TypedDict):
@@ -120,6 +121,11 @@ def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
         pad_token_left=CHAMELEON_IMAGE_START_TOKEN_ID,
         pad_token_right=CHAMELEON_IMAGE_END_TOKEN_ID,
     )
+
+    # Appending sep token for chat mode to follow default processor
+    # behavior
+    new_prompt += tokenizer.sep_token
+    new_token_ids += [CHAMELEON_SEP_TOKEN_ID]
 
     # NOTE: Create a defensive copy of the original inputs
     return LLMInputs(prompt_token_ids=new_token_ids,
