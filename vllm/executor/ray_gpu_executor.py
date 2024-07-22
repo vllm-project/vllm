@@ -393,7 +393,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
 
     def __del__(self):
-        if self.forward_dag is not None:
+        if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
             for worker in self.workers:
@@ -470,7 +470,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         return await asyncio.gather(*coros)
 
     def __del__(self):
-        if self.forward_dag is not None:
+        if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
             for worker in self.workers:
