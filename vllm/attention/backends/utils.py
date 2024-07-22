@@ -223,6 +223,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
+            block_tables=block_tables,
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
