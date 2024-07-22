@@ -123,13 +123,12 @@ class LibEntry(triton.KernelInterface):
                     k: v
                     for k, v in constexprs.items() if v is not inspect._empty
                 }
-
                 meta = {
                     **dict(zip(self.arg_names, args)),
                     **kwargs,
                     **constexprs,
                 }
-            grid = grid(meta)
+                grid = grid(meta)
             if isinstance(grid, tuple):
                 grid = grid + (1, 1)
             elif isinstance(grid, list):
