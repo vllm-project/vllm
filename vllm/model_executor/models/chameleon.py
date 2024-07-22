@@ -464,7 +464,7 @@ class ChameleonVQVAEVectorQuantizer(nn.Module):
 # Copied from transformers.models.chameleon.modeling_chameleon.ChameleonVQVAEEncoderConvDownsample #noqa
 class ChameleonVQVAEEncoderConvDownsample(nn.Module):
 
-    def __init__(self, in_channels):
+    def __init__(self, in_channels: int):
         super().__init__()
         self.conv = nn.Conv2d(in_channels,
                               in_channels,
@@ -472,7 +472,7 @@ class ChameleonVQVAEEncoderConvDownsample(nn.Module):
                               stride=2,
                               padding=0)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         # no asymmetric padding in torch conv, must do it ourselves
         hidden_states = F.pad(hidden_states,
                               pad=(0, 1, 0, 1),
@@ -487,8 +487,8 @@ class ChameleonVQVAEEncoderResnetBlock(nn.Module):
 
     def __init__(
         self,
-        config,
-        in_channels,
+        config: ChameleonVQVAEConfig,
+        in_channels: int,
         out_channels=None,
         conv_shortcut=False,
     ):
@@ -531,7 +531,7 @@ class ChameleonVQVAEEncoderResnetBlock(nn.Module):
                                                     stride=1,
                                                     padding=0)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         residual = hidden_states
         hidden_states = self.norm1(hidden_states)
         hidden_states *= torch.sigmoid(hidden_states)
@@ -554,7 +554,7 @@ class ChameleonVQVAEEncoderResnetBlock(nn.Module):
 # Copied from transformers.models.chameleon.modeling_chameleon.ChameleonVQVAEEncoderAttnBlock #noqa
 class ChameleonVQVAEEncoderAttnBlock(nn.Module):
 
-    def __init__(self, in_channels):
+    def __init__(self, in_channels: int):
         super().__init__()
         self.in_channels = in_channels
 
@@ -583,7 +583,7 @@ class ChameleonVQVAEEncoderAttnBlock(nn.Module):
                                         stride=1,
                                         padding=0)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
         query_states = self.q(hidden_states)
@@ -614,7 +614,7 @@ class ChameleonVQVAEEncoderAttnBlock(nn.Module):
 # Copied from transformers.models.chameleon.modeling_chameleon.ChameleonVQVAEEncoder #noqa
 class ChameleonVQVAEEncoder(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: ChameleonVQVAEConfig):
         super().__init__()
 
         self.num_resolutions = len(config.channel_multiplier)
@@ -688,7 +688,7 @@ class ChameleonVQVAEEncoder(nn.Module):
             padding=1,
         )
 
-    def forward(self, pixel_values: torch.LongTensor):
+    def forward(self, pixel_values: torch.Tensor):
         # downsampling
         hidden_states = [self.conv_in(pixel_values)]
         for i_level in range(self.num_resolutions):
@@ -722,7 +722,7 @@ class ChameleonVQVAE(nn.Module):
     _no_split_modules = ["ChameleonVQVAEVectorQuantizer"]
 
     def __init__(self, config: ChameleonVQVAEConfig):
-
+        super().__init__()
         self.encoder = ChameleonVQVAEEncoder(config)
         self.quantize = ChameleonVQVAEVectorQuantizer(config)
         self.quant_conv = torch.nn.Conv2d(config.latent_channels,
@@ -731,7 +731,7 @@ class ChameleonVQVAE(nn.Module):
                                                config.latent_channels, 1)
         self.eval()  # Chameleon's VQ model is frozen
 
-    def encode(self, pixel_values: torch.LongTensor):
+    def encode(self, pixel_values: torch.Tensor):
         hidden_states = self.encoder(pixel_values)
         hidden_states = self.quant_conv(hidden_states)
         quant, emb_loss, indices = self.quantize(hidden_states)
@@ -744,7 +744,7 @@ class ChameleonImageVocabularyMapping:
     A class for mapping discrete image tokens from VQGAN to BPE tokens.
     """
 
-    def __init__(self, vocab_map):
+    def __init__(self, vocab_map: Dict[str, int]):
         self.vocab_map = vocab_map
         self.image_token_id = vocab_map.get("<image>")
 
@@ -893,6 +893,20 @@ class ChameleonForConditionalGeneration(nn.Module):
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+
+        expected_dims = (3, CHAMELEON_CROP_SIZE_HEIGHT,
+                         CHAMELEON_CROP_SIZE_WIDTH)
+        actual_dims = tuple(data.shape[1:])
+
+        if actual_dims != expected_dims:
+            expected_expr = ("batch_size", *map(str, expected_dims))
+            raise ValueError(
+                f"The expected shape of pixel values is {expected_expr}. "
+                f"You supplied {tuple(data.shape)}.")
+
+        return data
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[ChameleonImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -923,7 +937,8 @@ class ChameleonForConditionalGeneration(nn.Module):
 
         if image_input is not None:
             assert self.model.vqmodel is not None
-            image_tokens = self.model.get_image_tokens(image_input["data"])
+            image_tokens = self.model.get_image_tokens(image_input["data"].to(
+                self.config.torch_dtype))
             image_token_id = self.model.vocabulary_mapping.image_token_id
             special_image_mask = input_ids == image_token_id
             image_tokens = image_tokens.to(input_ids.device, input_ids.dtype)
@@ -973,6 +988,7 @@ class ChameleonForConditionalGeneration(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            use_default_weight_loading = False
             if "vqmodel" in name:
                 if self.model.vqmodel is not None:
                     # We only do sharding for language model and
