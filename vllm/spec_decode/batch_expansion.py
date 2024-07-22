@@ -4,8 +4,7 @@ from typing import Iterator, List, Tuple
 import torch
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata, SequenceGroupState,
-                           get_all_seq_ids)
+                           SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.util import (nvtx_range, sampler_output_to_torch,
@@ -259,8 +258,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         return target_seq_group_metadata_list
 
+    @staticmethod
     def _create_single_target_seq_group_metadata(
-        self,
         seq_group_metadata: SequenceGroupMetadata,
         seq_id: SeqId,
         target_seq_id: TargetSeqId,
@@ -293,14 +292,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         for data in new_seq_data_dict.values():
             data.update_num_computed_tokens(data.get_len() - 1)
 
-        if (seq_group_metadata.state is not None
-                and seq_group_metadata.state.generator is not None):
-            generator = torch.Generator(
-                device=seq_group_metadata.state.generator.device)
-            generator.set_state(seq_group_metadata.state.generator.get_state())
-            state = SequenceGroupState(generator=generator)
-        else:
-            state = None
+        generator = seq_group_metadata.generator
+        if generator is not None:
+            orig_generator = generator
+            generator = torch.Generator(device=orig_generator.device)
+            generator.set_state(orig_generator.get_state())
 
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
@@ -312,7 +308,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             },
             lora_request=None,
             token_chunk_size=1,
-            state=state,
+            generator=generator,
         )
 
     def _split_scoring_output(

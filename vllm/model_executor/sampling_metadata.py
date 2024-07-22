@@ -207,7 +207,6 @@ def _prepare_seq_groups(
         seq_ids = list(seq_group_metadata.seq_data.keys())
         sampling_params = seq_group_metadata.sampling_params
         is_prompt = seq_group_metadata.is_prompt
-        generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
@@ -216,10 +215,6 @@ def _prepare_seq_groups(
         do_sample = seq_group_metadata.do_sample
 
         if seq_group_metadata.is_prompt:
-            if sampling_params.seed is not None:
-                seq_group_metadata.state.generator = torch.Generator(
-                    device=device).manual_seed(sampling_params.seed)
-
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
@@ -279,9 +274,6 @@ def _prepare_seq_groups(
             logit_idx += sample_len
             sample_idx += sample_len
 
-        if sampling_params.seed is not None:
-            generator = seq_group_metadata.state.generator
-
         seq_groups.append(
             SequenceGroupToSample(
                 seq_ids=seq_ids,
@@ -289,7 +281,7 @@ def _prepare_seq_groups(
                 seq_data=seq_group_metadata.seq_data,
                 seq_len=seq_len,
                 query_len=query_len,
-                generator=generator,
+                generator=seq_group_metadata.generator,
                 is_prompt=is_prompt,
                 prompt_logprob_indices=list(prompt_logprob_indices),
                 sample_indices=list(sample_indices)))

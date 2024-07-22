@@ -594,17 +594,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_extra_kwargs = {}
         if isinstance(self.spec_decode_sampler,
                       SpecDecodeStochasticBaseSampler):
-
             # Get sequence group state
-            generators = []
-            for seq_group_metadata in seq_group_metadata_list:
-                if (seq_group_metadata.state is not None
-                        and seq_group_metadata.state.generator is not None):
-                    generators.append(seq_group_metadata.state.generator)
-                else:
-                    generators.append(None)
-
-            sampler_extra_kwargs["generators"] = generators
+            sampler_extra_kwargs["generators"] = [
+                sgm.generator for sgm in seq_group_metadata_list
+            ]
 
         accepted_token_ids = self.spec_decode_sampler(
             target_probs=proposal_verifier_probs,

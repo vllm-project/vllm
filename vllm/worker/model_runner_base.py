@@ -139,6 +139,8 @@ class ModelRunnerBase(ABC, Generic[T]):
     ModelRunnerInputBase subclass.
     """
 
+    device: torch.device
+
     @abstractmethod
     def make_model_input_from_broadcasted_tensor_dict(
         self,
