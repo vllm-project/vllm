@@ -131,6 +131,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     tokenizer,
                     truncate_prompt_tokens=sampling_params.
                     truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
                     **{prompt_arg: prompt})
                 prompt_ids, prompt_text = prompt_formats
 

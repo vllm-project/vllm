@@ -369,6 +369,12 @@ class CompletionRequest(OpenAIBaseModel):
             "Whether to include the stop string in the output. "
             "This is only applied when the stop or stop_token_ids is set."),
     )
+    add_special_tokens: Optional[bool] = Field(
+        default=True,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt."
+            "Default is True (same as HuggingFace Tokenizer)."),
+    )
     response_format: Optional[ResponseFormat] = Field(
         default=None,
         description=
