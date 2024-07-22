@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 import openai
 import ray
 import requests
+from transformers import AutoTokenizer
 
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -49,7 +50,13 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    def __init__(self, cli_args: List[str], *, auto_port: bool = True) -> None:
+    def __init__(
+        self,
+        model: str,
+        cli_args: List[str],
+        *,
+        auto_port: bool = True,
+    ) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -68,12 +75,10 @@ class RemoteOpenAIServer:
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        self.proc = subprocess.Popen(
-            [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] +
-            cli_args,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr)
+        self.proc = subprocess.Popen(["vllm", "serve"] + [model] + cli_args,
+                                     env=env,
+                                     stdout=sys.stdout,
+                                     stderr=sys.stderr)
         self._wait_for_server(url=self.url_for("health"),
                               timeout=self.MAX_SERVER_START_WAIT_S)
 
@@ -118,6 +123,99 @@ class RemoteOpenAIServer:
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
         )
+
+
+def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
+    """
+    Launch API server with two different sets of arguments and compare the
+    results of the API calls. The arguments are after the model name.
+    """
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
+    prompt = "Hello, my name is"
+    token_ids = tokenizer(prompt)["input_ids"]
+    results = []
+    for args in (arg1, arg2):
+        with RemoteOpenAIServer(model, args) as server:
+            client = server.get_client()
+
+            # test models list
+            models = client.models.list()
+            models = models.data
+            served_model = models[0]
+            results.append({
+                "test": "models_list",
+                "id": served_model.id,
+                "root": served_model.root,
+            })
+
+            # test with text prompt
+            completion = client.completions.create(model=model,
+                                                   prompt=prompt,
+                                                   max_tokens=5,
+                                                   temperature=0.0)
+
+            results.append({
+                "test": "single_completion",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
+
+            # test using token IDs
+            completion = client.completions.create(
+                model=model,
+                prompt=token_ids,
+                max_tokens=5,
+                temperature=0.0,
+            )
+
+            results.append({
+                "test": "token_ids",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
+
+            # test simple list
+            batch = client.completions.create(
+                model=model,
+                prompt=[prompt, prompt],
+                max_tokens=5,
+                temperature=0.0,
+            )
+
+            results.append({
+                "test": "simple_list",
+                "text0": batch.choices[0].text,
+                "text1": batch.choices[1].text,
+            })
+
+            # test streaming
+            batch = client.completions.create(
+                model=model,
+                prompt=[prompt, prompt],
+                max_tokens=5,
+                temperature=0.0,
+                stream=True,
+            )
+            texts = [""] * 2
+            for chunk in batch:
+                assert len(chunk.choices) == 1
+                choice = chunk.choices[0]
+                texts[choice.index] += choice.text
+            results.append({
+                "test": "streaming",
+                "texts": texts,
+            })
+
+    n = len(results) // 2
+    arg1_results = results[:n]
+    arg2_results = results[n:]
+    for arg1_result, arg2_result in zip(arg1_results, arg2_results):
+        assert arg1_result == arg2_result, \
+            f"Results for {model=} are not the same with {arg1=} and {arg2=}"
 
 
 def init_test_distributed_environment(
