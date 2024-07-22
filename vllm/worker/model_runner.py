@@ -691,7 +691,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     dummy_lora_request = LoRARequest(
                         lora_name=f"warmup_{lora_id}",
                         lora_int_id=lora_id,
-                        lora_local_path="/not/a/real/path",
+                        lora_path="/not/a/real/path",
                     )
                     self.lora_manager.add_dummy_lora(dummy_lora_request,
                                                      rank=LORA_WARMUP_RANK)
