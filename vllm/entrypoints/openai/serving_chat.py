@@ -223,13 +223,15 @@ class OpenAIServingChat(OpenAIServing):
                         if (request.stream_options
                                 and request.stream_options.include_usage):
                             if (request.stream_options.continuous_usage_stats
-                                    or output.finish_reason is not None):
+                                    or res.outputs[i].finish_reason
+                                    is not None):
                                 prompt_tokens = len(res.prompt_token_ids)
                                 completion_tokens = 0
                                 usage = UsageInfo(
                                     prompt_tokens=prompt_tokens,
                                     completion_tokens=completion_tokens,
-                                    total_tokens=prompt_tokens + completion_tokens,
+                                    total_tokens=prompt_tokens +
+                                    completion_tokens,
                                 )
                             if request.stream_options.continuous_usage_stats:
                                 chunk.usage = usage
@@ -265,16 +267,22 @@ class OpenAIServingChat(OpenAIServing):
                                     model=model_name)
                                 if (request.stream_options and
                                         request.stream_options.include_usage):
-                                    if (request.stream_options.continuous_usage_stats
-                                            or output.finish_reason is not None):
-                                        prompt_tokens = len(res.prompt_token_ids)
-                                        completion_tokens = len(res.outputs[i].token_ids)
+                                    if (request.stream_options.
+                                            continuous_usage_stats
+                                            or res.outputs[i].finish_reason
+                                            is not None):
+                                        prompt_tokens = len(
+                                            res.prompt_token_ids)
+                                        completion_tokens = len(
+                                            res.outputs[i].token_ids)
                                         usage = UsageInfo(
                                             prompt_tokens=prompt_tokens,
                                             completion_tokens=completion_tokens,
-                                            total_tokens=prompt_tokens + completion_tokens,
+                                            total_tokens=prompt_tokens +
+                                            completion_tokens,
                                         )
-                                    if request.stream_options.continuous_usage_stats:
+                                    if (request.stream_options.
+                                            continuous_usage_stats):
                                         chunk.usage = usage
                                     else:
                                         chunk.usage = None
@@ -343,7 +351,8 @@ class OpenAIServingChat(OpenAIServing):
                                 usage = UsageInfo(
                                     prompt_tokens=prompt_tokens,
                                     completion_tokens=completion_tokens,
-                                    total_tokens=prompt_tokens + completion_tokens,
+                                    total_tokens=prompt_tokens +
+                                    completion_tokens,
                                 )
                             if request.stream_options.continuous_usage_stats:
                                 chunk.usage = usage
@@ -375,7 +384,8 @@ class OpenAIServingChat(OpenAIServing):
                                 usage = UsageInfo(
                                     prompt_tokens=prompt_tokens,
                                     completion_tokens=completion_tokens,
-                                    total_tokens=prompt_tokens + completion_tokens,
+                                    total_tokens=prompt_tokens +
+                                    completion_tokens,
                                 )
                             if request.stream_options.continuous_usage_stats:
                                 chunk.usage = usage
