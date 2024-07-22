@@ -44,7 +44,6 @@ class LibEntry(triton.KernelInterface):
 
     def run(self, *args, **kwargs):
         grid = kwargs["grid"]
-
         # collect all the arguments
         spec_args = []  # specialize arguments
         dns_args = []  # do not specialize arguments
@@ -118,7 +117,7 @@ class LibEntry(triton.KernelInterface):
             # captured args have higher priority
             filterd_constexprs = {
                 k: v
-                for k, v in constexprs.items() if not isinstance(v, type)
+                for k, v in constexprs.items() if v is not inspect._empty
             }
             meta = {
                 **dict(zip(self.arg_names, args)),

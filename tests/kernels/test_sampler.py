@@ -205,9 +205,3 @@ def test_get_sequence_seeds(seed):
         assert new_seq_seed_extra_entropy != new_seq_seed
         assert seq_seed != new_seq_seed
         seq_seed = new_seq_seed
-
-
-if __name__ == "__main__":
-    pytest.main([
-        "/home/sobey/Code/Code_leejee/vllm_main/vllm/tests/kernels/test_sampler.py::test_sample_prompt_logprobs"
-    ])
