@@ -22,8 +22,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def __init__(self,
                  strategy: str,
                  num_bits: int,
-                 act_order: bool = False,
-                 group_size: Optional[int] = None):
+                 group_size: Optional[int] = None,
+                 act_order: bool = False):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
