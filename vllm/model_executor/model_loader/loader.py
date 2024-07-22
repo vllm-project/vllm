@@ -541,7 +541,26 @@ class ShardedStateLoader(BaseModelLoader):
                                 "loading tensor of shape %s into "
                                 "parameter '%s' of shape %s", tensor.shape,
                                 key, param_shape)
-                        param_data.copy_(tensor)
+
+                        def maybe_set_scale(key, child=model):
+                            key_split = key.split('.', 1)
+                            if len(key_split) == 1:
+                                param = getattr(child, key_split[0])
+                                if hasattr(param, 'fp_quantizer') and param.use_meta_tensor:
+                                    fp8_data, scale = tensor.split(param.fp_quantizer.group_size, -1)
+                                    setattr(
+                                        param, 
+                                        'data', 
+                                        fp8_data.to(param.data.device).reshape(param.orig_shape[-1], param.orig_shape[-2])
+                                    )
+                                    setattr(param.fp_quantizer, 'scale', scale.to(param.data.device))
+                            else:
+                                maybe_set_scale(key_split[-1], getattr(child, key_split[0]))
+
+                        if param_data.dtype == torch.uint8:
+                            maybe_set_scale(key)
+                        else:
+                            param_data.copy_(tensor)
                         state_dict.pop(key)
             if state_dict:
                 raise ValueError(
@@ -576,6 +595,20 @@ class ShardedStateLoader(BaseModelLoader):
                 part_idx += 1
                 total_size = 0
                 state_dict_part = {}
+
+            def maybe_get_scale(key, child=model):
+                key_split = key.split('.', 1)
+                if len(key_split) == 1:
+                    param = getattr(child, key_split[0]) if hasattr(child, key_split[0]) else None
+                    return param.scale if hasattr(param, 'scale') else None
+                else:
+                    return maybe_get_scale(key_split[-1], getattr(child, key_split[0]))
+
+            scale = maybe_get_scale(key)
+            if scale is not None:
+                tensor = tensor.reshape(scale.shape[0], -1)
+                tensor = torch.cat((tensor.cpu(), scale.cpu()), -1).contiguous()
+
             state_dict_part[key] = tensor
             total_size += param_size
         if len(state_dict_part) > 0:

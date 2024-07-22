@@ -112,19 +112,21 @@ class ArcticMoE(nn.Module):
                                          self.num_experts,
                                          bias=False,
                                          params_dtype=self.params_dtype,
-                                         quant_config=quant_config)
+                                         quant_config=None) # gate's projection is cheap and should not be quantized!
             if self.is_quant:
                 self.ws = DeepSpeedFPParameter(
                     torch.Size((self.num_experts, 2 * self.intermediate_size,
                                 self.hidden_size)),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
+                    use_meta_tensor=False
                 )
                 self.w2s = DeepSpeedFPParameter(
                     torch.Size((self.num_experts, self.hidden_size,
                                 self.intermediate_size)),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
+                    use_meta_tensor=False
                 )
             else:
                 self.ws = nn.Parameter(
