@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -117,12 +117,31 @@ class BartScaledWordEmbedding(VocabParallelEmbedding):
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
-                 embed_scale: Optional[float] = 1.0):
+                 embed_scale: float = 1.0):
         super().__init__(num_embeddings, embedding_dim)
         self.embed_scale = embed_scale
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().forward(input_ids) * self.embed_scale
+
+
+class BartParallelLMHead(ParallelLMHead):
+    """
+    This module overrides ParallelLMHead's
+    forward by dividing by embeddings scale,
+    yielding effectively the inverse of
+    BartScaledWordEmbedding
+    """
+
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 embed_scale: float = 1.0):
+        super().__init__(num_embeddings, embedding_dim)
+        self.embed_scale = embed_scale
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return super().forward(input_ids) / self.embed_scale
 
 
 class BartEncoderAttention(nn.Module):
@@ -149,10 +168,6 @@ class BartEncoderAttention(nn.Module):
                              f"(got `embed_dim`: {self.embed_dim}"
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
-
-        # self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        # self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        # self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
         self.qkv_proj = QKVParallelLinear(
             self.d_model,
@@ -196,9 +211,6 @@ class BartEncoderAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        # q = self.q_proj(hidden_states)
-        # k = self.k_proj(hidden_states)
-        # v = self.v_proj(hidden_states)
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -239,10 +251,6 @@ class BartDecoderSelfAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        # self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        # self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        # self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-
         self.qkv_proj = QKVParallelLinear(
             self.d_model,
             self.d_model // self.total_num_heads,
@@ -285,9 +293,6 @@ class BartDecoderSelfAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        # q = self.q_proj(hidden_states)
-        # k = self.k_proj(hidden_states)
-        # v = self.v_proj(hidden_states)
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -818,9 +823,13 @@ class BartForConditionalGeneration(nn.Module):
 
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
-        self.lm_head = BartScaledWordEmbedding(config.vocab_size,
-                                               config.d_model,
-                                               embed_scale=embed_scale)
+        # self.lm_head = BartScaledWordEmbedding(config.vocab_size,
+        #                                        config.d_model,
+        #                                        embed_scale=embed_scale)
+
+        self.lm_head = BartParallelLMHead(config.vocab_size,
+                                          config.d_model,
+                                          embed_scale=embed_scale)
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
