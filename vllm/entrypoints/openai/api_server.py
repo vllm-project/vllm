@@ -192,7 +192,8 @@ def build_app(args):
         """On generic runtime error, check to see if the engine has died.
         It probably has, in which case the server will no longer be able to
         handle requests. Trigger a graceful shutdown with a SIGTERM."""
-        if engine.errored and not engine.is_running:
+        if (not args.keep_alive_on_engine_death and engine.errored
+                and not engine.is_running):
             logger.fatal("AsyncLLMEngine has failed, terminating server "
                          "process")
             os.kill(os.getpid(), signal.SIGTERM)
@@ -203,9 +204,10 @@ def build_app(args):
     async def engine_dead_handler(_, __):
         """Kill the server if the async engine is already dead. It will
         not handle any further requests."""
-        logger.fatal("AsyncLLMEngine is already dead, terminating server "
-                     "process")
-        os.kill(os.getpid(), signal.SIGTERM)
+        if not args.keep_alive_on_engine_death:
+            logger.fatal("AsyncLLMEngine is already dead, terminating server "
+                         "process")
+            os.kill(os.getpid(), signal.SIGTERM)
 
         return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
