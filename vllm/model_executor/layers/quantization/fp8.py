@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FUSED_LAYER_NAME_MAPPING)
+    is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, create_per_tensor_scale_param,
     cutlass_fp8_supported, per_tensor_dequantize, requantize_with_max_scale)
@@ -68,44 +68,17 @@ class Fp8Config(QuantizationConfig):
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
-        ignored_layers = cls.get_from_keys(config, ["ignored_layers"])
+        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
                    activation_scheme=activation_scheme,
                    ignored_layers=ignored_layers)
-
-    def _is_layer_skipped(self, prefix: str) -> bool:
-        # prefix: model.layers.0.self_attn.q_proj
-        # proj_name: q_proj
-        proj_name = prefix.split(".")[-1]
-        if proj_name in FUSED_LAYER_NAME_MAPPING:
-            shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name)
-                for shard_proj_name in FUSED_LAYER_NAME_MAPPING[proj_name]
-            ]
-
-            is_skipped = None
-            for shard_prefix in shard_prefixes:
-                is_shard_skipped = shard_prefix in self.ignored_layers
-
-                if is_skipped is None:
-                    is_skipped = is_shard_skipped
-                elif is_shard_skipped != is_skipped:
-                    raise ValueError(
-                        f"Detected some but not all shards of {prefix} "
-                        "are quantized. All shards of fused layers "
-                        "to have the same precision.")
-        else:
-            is_skipped = prefix in self.ignored_layers
-
-        assert is_skipped is not None
-        return is_skipped
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
-            if self._is_layer_skipped(prefix):
+            if is_layer_skipped(prefix, self.ignored_layers):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
