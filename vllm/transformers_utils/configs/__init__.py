@@ -8,7 +8,7 @@ from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
-
+from vllm.transformers_utils.configs.teleflm import TeleFLMConfig
 __all__ = [
     "ChatGLMConfig",
     "DbrxConfig",
@@ -17,4 +17,5 @@ __all__ = [
     "JAISConfig",
     "MedusaConfig",
     "MLPSpeculatorConfig",
+    "TeleFLMConfig",
 ]
