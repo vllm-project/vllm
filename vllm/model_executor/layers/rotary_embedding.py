@@ -733,6 +733,36 @@ class GemmaRotaryEmbedding(RotaryEmbedding):
         return inv_freq
 
 
+class ExtendedRotaryEmbedding(RotaryEmbedding):
+
+    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
+        inv_freqs = super()._compute_inv_freq(base)
+        return self.apply_scaling(inv_freqs)
+
+    def apply_scaling(self, freqs: torch.Tensor):
+        scale_factor = 8
+        low_freq_factor = 1
+        high_freq_factor = 4
+        old_context_len = 8192
+
+        low_freq_wavelen = old_context_len / low_freq_factor
+        high_freq_wavelen = old_context_len / high_freq_factor
+        new_freqs = []
+        for freq in freqs:
+            wavelen = 2 * math.pi / freq
+            if wavelen < high_freq_wavelen:
+                new_freqs.append(freq)
+            elif wavelen > low_freq_wavelen:
+                new_freqs.append(freq / scale_factor)
+            else:
+                assert low_freq_wavelen != high_freq_wavelen
+                smooth = (old_context_len / wavelen - low_freq_factor) / (
+                    high_freq_factor - low_freq_factor)
+                new_freqs.append((1 - smooth) * freq / scale_factor +
+                                 smooth * freq)
+        return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
+
+
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
 
 
@@ -767,9 +797,13 @@ def get_rope(
         scaling_type = rope_scaling["type"]
         # The correct one should be "longrope" but keep "su" here
         # for backward compatible
-        if scaling_type != "su" and scaling_type != "longrope":
+        if scaling_type not in {"su", "longrope", "extended"}:
             scaling_factor = rope_scaling["factor"]
-        if scaling_type == "linear":
+        if scaling_type == "extended":
+            rotary_emb = ExtendedRotaryEmbedding(head_size, rotary_dim,
+                                                 max_position, base,
+                                                 is_neox_style, dtype)
+        elif scaling_type == "linear":
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
                                                       max_position, base,
                                                       is_neox_style,

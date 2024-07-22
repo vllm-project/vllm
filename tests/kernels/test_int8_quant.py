@@ -3,6 +3,8 @@ import torch
 
 # ruff: noqa: F401
 import vllm._C
+from tests.kernels.quant_utils import ref_dynamic_per_token_quant
+from vllm._custom_ops import scaled_int8_quant
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
@@ -21,23 +23,16 @@ def test_dynamic_scaled_int8_quant(num_tokens: int, hidden_size: int,
                                    dtype: torch.dtype, seed: int) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    int8_traits = torch.iinfo(torch.int8)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
 
-    x_token_max, _ = x.max(dim=1)
-    x_token_max = x_token_max.to(dtype=torch.float32)
-    scales = (x_token_max / float(127.0))[:, None].to(device="cuda",
-                                                      dtype=torch.float32)
-    torch_out = (x / scales).round().clamp(int8_traits.min,
-                                           int8_traits.max).to(torch.int8)
+    # reference
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.int8)
+    # kernel
+    ops_out, ops_scales = scaled_int8_quant(x)
 
-    ops_out = torch.empty_like(x, dtype=torch.int8, device="cuda")
-    scales_out = torch.empty_like(scales, dtype=torch.float32, device="cuda")
-    torch.ops._C.dynamic_scaled_int8_quant(ops_out, x, scales_out)
-
-    assert torch.allclose(scales_out, scales)
-    assert torch.allclose(torch_out, ops_out,
+    assert torch.allclose(ops_scales, ref_scales)
+    assert torch.allclose(ops_out, ref_out,
                           atol=1)  # big atol to account for rounding errors
 
 
@@ -55,12 +50,11 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
     int8_traits = torch.iinfo(torch.int8)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
+    scale = torch.tensor([scale], dtype=torch.float32, device="cuda")
 
     out1 = (x / scale).round().clamp(int8_traits.min,
                                      int8_traits.max).to(torch.int8)
-    out2 = torch.empty_like(x, dtype=torch.int8)
-    scale_argument = torch.tensor([scale], dtype=torch.float32, device="cuda")
+    out2, _ = scaled_int8_quant(x, scale)
 
-    torch.ops._C.static_scaled_int8_quant(out2, x, scale_argument)
     assert torch.allclose(out1, out2,
                           atol=1)  # big atol to account for rounding errors

@@ -7,12 +7,13 @@ from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
 from transformers import PreTrainedTokenizer
 
 import vllm.envs as envs
-from vllm.config import DecodingConfig, ModelConfig
+from vllm.config import DecodingConfig, EngineConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.metrics import StatLoggerBase
+from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
@@ -130,7 +131,10 @@ class RequestTracker:
         """Process a request output from the engine."""
         request_id = request_output.request_id
 
-        self._request_streams[request_id].put(request_output)
+        # Guard against a KeyError which can occur if the request was aborted
+        # while the output was generated
+        if (stream := self._request_streams.get(request_id)) is not None:
+            stream.put(request_output)
         if request_output.finished:
             if verbose:
                 logger.info("Finished request %s.", request_id)
@@ -385,25 +389,19 @@ class AsyncLLMEngine:
         self._request_tracker: RequestTracker
 
     @classmethod
-    def from_engine_args(
-        cls,
-        engine_args: AsyncEngineArgs,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-    ) -> "AsyncLLMEngine":
-        """Creates an async LLM engine from the engine arguments."""
-        # Create the engine configs.
-        engine_config = engine_args.create_engine_config()
-
-        if engine_args.engine_use_ray:
-            from vllm.executor import ray_utils
-            ray_utils.assert_ray_available()
-
+    def _get_executor_cls(
+            cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
-
-        if engine_config.device_config.device_type == "neuron":
+        if isinstance(distributed_executor_backend, type):
+            if not issubclass(distributed_executor_backend, ExecutorAsyncBase):
+                raise TypeError(
+                    "distributed_executor_backend must be a subclass of "
+                    f"ExecutorAsyncBase. Got {distributed_executor_backend}.")
+            if distributed_executor_backend.uses_ray:  # type: ignore
+                initialize_ray_cluster(engine_config.parallel_config)
+            executor_class = distributed_executor_backend
+        elif engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
         elif engine_config.device_config.device_type == "tpu":
@@ -442,9 +440,29 @@ class AsyncLLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
+        return executor_class
+
+    @classmethod
+    def from_engine_args(
+        cls,
+        engine_args: AsyncEngineArgs,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+    ) -> "AsyncLLMEngine":
+        """Creates an async LLM engine from the engine arguments."""
+        # Create the engine configs.
+        engine_config = engine_args.create_engine_config()
+
+        if engine_args.engine_use_ray:
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
+
+        executor_class = cls._get_executor_cls(engine_config)
+
         # Create the async LLM engine.
         engine = cls(
-            distributed_executor_backend == "ray",
+            executor_class.uses_ray,
             engine_args.engine_use_ray,
             **engine_config.to_dict(),
             executor_class=executor_class,
@@ -480,11 +498,16 @@ class AsyncLLMEngine:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
-    async def get_tokenizer(self) -> "PreTrainedTokenizer":
+    async def get_tokenizer(
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> "PreTrainedTokenizer":
         if self.engine_use_ray:
-            return await self.engine.get_tokenizer.remote()  # type: ignore
-        else:
-            return self.engine.get_tokenizer()
+            return await self.engine.get_tokenizer.remote(  # type: ignore
+                lora_request)
+
+        return await (self.engine.get_tokenizer_group().
+                      get_lora_tokenizer_async(lora_request))
 
     def start_background_loop(self) -> None:
         """Start the background loop."""

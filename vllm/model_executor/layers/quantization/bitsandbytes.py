@@ -60,9 +60,8 @@ class BitsAndBytesConfig(QuantizationConfig):
             target_modules = cls.get_from_keys(config, ["target_modules"])
         return cls(adapter_name, target_modules)
 
-    def get_quant_method(
-            self,
-            layer: torch.nn.Module) -> Optional["BitsAndBytesLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["BitsAndBytesLinearMethod"]:
         if isinstance(layer, LinearBase):
             return BitsAndBytesLinearMethod(self)
         return None
