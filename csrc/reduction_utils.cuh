@@ -30,6 +30,11 @@ __inline__ __device__ T _max(T a, T b) {
 }
 
 template <typename T>
+__inline__ __device__ T _min(T a, T b) {
+  return min(a, b);
+}
+
+template <typename T>
 __inline__ __device__ T _sum(T a, T b) {
   return a + b;
 }
@@ -51,14 +56,17 @@ __inline__ __device__ T warpReduce(T val, ReduceFnType<T> fn) {
                 "numLanes is not a positive power of 2!");
   static_assert(numLanes <= WARP_SIZE);
 #pragma unroll
-  for (int mask = numLanes >> 1; mask > 0; mask >>= 1)
-    val = fn(val, VLLM_SHFL_XOR_SYNC(val, mask));
+  for (int mask = numLanes >> 1; mask > 0; mask >>= 1) {
+    auto const other_idx = threadIdx.x ^ mask;
+    auto const other_val = VLLM_SHFL_XOR_SYNC(val, mask);
+    val = other_idx < blockDim.x ? fn(val, other_val) : val;
+  }
 
   return val;
 }
 
 template <typename T, int maxBlockSize = 1024>
-__inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn) {
+__inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn, T init = T{}) {
   static_assert(maxBlockSize <= 1024);
   if constexpr (maxBlockSize > WARP_SIZE) {
     val = warpReduce<T>(val, fn);
@@ -72,8 +80,7 @@ __inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn) {
 
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane]
-                                                        : (T)(0.0f);
+    val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane] : init;
     val = warpReduce<T, _nextPow2(maxActiveLanes)>(val, fn);
   } else {
     // A single warpReduce is equal to blockReduce
@@ -85,6 +92,12 @@ __inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn) {
 template <typename T, int maxBlockSize = 1024>
 __inline__ __device__ T blockReduceMax(T val) {
   return blockReduce<T, maxBlockSize>(val, detail::_max<T>);
+}
+
+template <typename T, int maxBlockSize = 1024>
+__inline__ __device__ T blockReduceMin(T val) {
+  auto const max_val = std::numeric_limits<T>::max();
+  return blockReduce<T, maxBlockSize>(val, detail::_min<T>, max_val);
 }
 
 template <typename T, int maxBlockSize = 1024>

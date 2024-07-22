@@ -70,6 +70,64 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   }
 }
 
+template <typename scalar_t, typename scale_type, typename azp_type>
+__global__ void dynamic_scaled_int8_azp_quant_kernel(
+    scalar_t const* __restrict__ input, int8_t* __restrict__ out,
+    scale_type* scale, azp_type* azp, const int hidden_size) {
+  int const token_idx = blockIdx.x;
+
+  // Scan for the min and max value for this token
+  float max_val = 0.0f;
+  float min_val = std::numeric_limits<float>::max();
+  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+    auto val = static_cast<float>(input[token_idx * hidden_size + i]);
+    max_val = fmaxf(max_val, val);
+    min_val = fminf(min_val, val);
+  }
+
+  // Reduce the max and min values across the block
+  max_val = blockReduceMax(max_val);
+  //  if (threadIdx.x == 0 and blockIdx.x == DEBUG_TOKEN) printf("MIN:");
+  min_val = blockReduceMin(min_val);
+
+  __shared__ scale_type scale_sh;
+  __shared__ azp_type azp_sh;
+
+  // Compute the scale and zero point and store them, only on the first thread
+  if (threadIdx.x == 0) {
+    float scale_val = (max_val - min_val) / 255.0f;
+    auto const azp_float = roundf(min_val / scale_val + 128.0f);
+    auto const azp_val = static_cast<azp_type>(azp_float);
+
+    // Azp was rounded, which may cause the range to be slightly off.
+    // Expand the range to make sure all values are representable.
+    auto const min_nozp = static_cast<float>(azp_val - 128);
+    auto const max_nozp = static_cast<float>(azp_val + 127);
+    auto no_div_0 = [&](float num, float div) {
+      return div == 0.0f ? scale_val : num / div;
+    };
+
+    scale_val = fmaxf(no_div_0(max_val, max_nozp), no_div_0(min_val, min_nozp));
+
+    // Store the scale and azp
+    scale[token_idx] = scale_sh = scale_val;
+    azp[token_idx] = azp_sh = azp_val;
+  }
+
+  // Wait for the scale and azp to be computed
+  __syncthreads();
+
+  float const scale_val = scale_sh;
+  azp_type const azp_val = azp_sh;
+
+  // Quantize the values
+  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+    auto val = static_cast<float>(input[token_idx * hidden_size + i]);
+    auto quant_val = static_cast<int8_t>(roundf(val / scale_val) - azp_val);
+    out[token_idx * hidden_size + i] = quant_val;
+  }
+}
+
 }  // namespace vllm
 
 void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
@@ -96,7 +154,7 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
 void dynamic_scaled_int8_quant(
     torch::Tensor& out,          // [..., hidden_size]
     torch::Tensor const& input,  // [..., hidden_size]
-    torch::Tensor& scales) {
+    torch::Tensor& scales, c10::optional<torch::Tensor> const& azp) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
 
@@ -107,9 +165,17 @@ void dynamic_scaled_int8_quant(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {
-        vllm::dynamic_scaled_int8_quant_kernel<scalar_t, float>
-            <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),
-                                         out.data_ptr<int8_t>(),
-                                         scales.data_ptr<float>(), hidden_size);
+        if (!azp) {
+          vllm::dynamic_scaled_int8_quant_kernel<scalar_t, float>
+              <<<grid, block, 0, stream>>>(
+                  input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
+                  scales.data_ptr<float>(), hidden_size);
+        } else {
+          vllm::dynamic_scaled_int8_azp_quant_kernel<scalar_t, float, int32_t>
+              <<<grid, block, 0, stream>>>(
+                  input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
+                  scales.data_ptr<float>(), azp->data_ptr<int32_t>(),
+                  hidden_size);
+        }
       });
 }

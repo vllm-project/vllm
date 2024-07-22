@@ -33,6 +33,49 @@ def test_dynamic_scaled_int8_quant(num_tokens: int, hidden_size: int,
     assert torch.allclose(ops_out, ref_out,
                           atol=1)  # big atol to account for rounding errors
 
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
+                                       dtype: torch.dtype, seed: int) -> None:
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    int8_traits = torch.iinfo(torch.int8)
+
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000 - 300
+
+    x_token_max, _ = x.to(dtype=torch.float32).max(dim=1, keepdim=True)
+    x_token_min, _ = x.to(dtype=torch.float32).min(dim=1, keepdim=True)
+
+    # this is why we can't have nice things
+    proper_round = lambda x: torch.floor(x + 0.5)
+
+    # calculate scale and azp, and adjust the range
+    scales = (x_token_max - x_token_min) / torch.tensor(255.0)
+    azps = proper_round(x_token_min / scales + 128.0).to(torch.int32)
+    min_nozp, max_nozp = azps - 128.0, azps + 127.0
+
+    # for all elements that are 0, make result equal to scale
+    no_div_by_zero = lambda x, div: torch.where(div == 0, scales, x / div)
+    scales = torch.max(no_div_by_zero(x_token_max, max_nozp), no_div_by_zero(x_token_min, min_nozp))
+
+    torch_out = (x / scales - azps).round().to(torch.int8)
+    assert torch_out.min() >= int8_traits.min and torch_out.max() <= int8_traits.max
+
+    ops_out = torch.empty_like(x, dtype=torch.int8, device="cuda")
+    scales_out = torch.empty_like(scales, dtype=torch.float32, device="cuda")
+    azp_out = torch.empty_like(azps, dtype=torch.int32, device="cuda")
+    torch.ops._C.dynamic_scaled_int8_quant(ops_out, x, scales_out, azp_out)
+
+    if (not torch.allclose(scales_out, scales)):
+        print(torch.argmax(torch.abs(scales_out - scales)))
+    assert torch.allclose(scales_out, scales)
+    assert torch.allclose(azp_out, azps)
+    assert torch.allclose(torch_out, ops_out,
+                          atol=1)  # big atol to account for rounding errors
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
