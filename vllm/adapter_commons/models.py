@@ -31,7 +31,7 @@ class AdapterLRUCache(LRUCache[T]):
         super().__init__(capacity)
         self.deactivate_fn = deactivate_fn
 
-    def _on_remove(self, key: Hashable, value: T):
+    def _on_remove(self, key: Hashable, value: Optional[T]):
         logger.debug("Removing adapter int id: %d", key)
         self.deactivate_fn(key)
         return super()._on_remove(key, value)
@@ -59,46 +59,46 @@ class AdapterModelManager(ABC):
 
     @property
     @abstractmethod
-    def adapter_slots(self):
-        ...
+    def adapter_slots(self) -> int:
+        raise NotImplementedError
 
     @property
     @abstractmethod
-    def capacity(self):
-        ...
+    def capacity(self) -> int:
+        raise NotImplementedError
 
     @abstractmethod
     def activate_adapter(self, adapter_id: int) -> bool:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def deactivate_adapter(self, adapter_id: int) -> bool:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def add_adapter(self, adapter: Any) -> bool:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def set_adapter_mapping(self, mapping: Any) -> None:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def remove_adapter(self, adapter_id: int) -> bool:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
-    def remove_all_adapters(self):
-        ...
+    def remove_all_adapters(self) -> None:
+        raise NotImplementedError
 
     @abstractmethod
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def list_adapters(self) -> Dict[int, Any]:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def pin_adapter(self, adapter_id: int) -> bool:
-        ...
+        raise NotImplementedError
