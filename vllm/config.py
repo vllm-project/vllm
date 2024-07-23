@@ -814,7 +814,7 @@ class SchedulerConfig:
         if enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
-                max_num_batched_tokens)
+                self.max_num_batched_tokens)
 
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
