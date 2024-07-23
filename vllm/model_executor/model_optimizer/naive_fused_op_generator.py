@@ -182,10 +182,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         stop = self.convert_getitem_arg(args[idx].stop)
         step = f", {self.convert_getitem_arg(args[idx].step)}" if args[
             idx].step is not None else ""
-        if args[idx].start is not None:
-            start = arg_swap(args[idx].start, inputs)
-        elif args[idx].stop is not None:
-            stop = arg_swap(args[idx].stop, inputs)
+        # if args[idx].start is not None:
+        #     start = arg_swap(args[idx].start, inputs)
+        # elif args[idx].stop is not None:
+        #     stop = arg_swap(args[idx].stop, inputs)
         return f"{idx}, {start}, {stop}{step}"
 
     def is_simple_slice(self, arg: torch.fx.node.Argument) -> bool:
@@ -255,13 +255,13 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 user_to_last_uses.setdefault(user, []).append(n)
 
         for node in reversed(nodes):
-            if isinstance(node, torch.fx.Node):
-                torch.fx.node.map_arg(
-                    node.args,
-                    lambda n, node=node: register_last_uses(n, node))
-                torch.fx.node.map_arg(
-                    node.kwargs,
-                    lambda n, node=node: register_last_uses(n, node))
+            # if isinstance(node, torch.fx.Node):
+            torch.fx.node.map_arg(
+                node.args,
+                lambda n, node=node: register_last_uses(n, node))
+            torch.fx.node.map_arg(
+                node.kwargs,
+                lambda n, node=node: register_last_uses(n, node))
 
         return user_to_last_uses
 
@@ -323,14 +323,14 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             # Don't use const refs here so inputs can be deleted when no
             # longer needed.
             if arg_types[i] == 'torch::Tensor':
-                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {name}"
+                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {inputs[name]}"
             elif arg_types[i] == 'float':
                 cxx_arg_sig = cxx_arg_sig + sep + f"double {name}"
             elif arg_types[i] == 'int':
                 cxx_arg_sig = cxx_arg_sig + sep + f"int64_t {name}"
             else:
                 cxx_arg_sig = cxx_arg_sig + sep + (f"{arg_types[i]} "
-                                                   f"const& {name}")
+                                                   f"const& {inputs[name]}")
             sep = ", "
 
         arg_sig = generate_op_schema(inputs, outputs, nodes, kwargs)

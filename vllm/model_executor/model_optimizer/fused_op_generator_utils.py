@@ -68,21 +68,21 @@ def arg_schema_type(n: torch.fx.node.Argument,
     """
     Get the schema or C++ type for a fused op argument.
     """
-    if isinstance(n, float):
-        return "float"
-    elif isinstance(n, int):
-        return "int"
+    # if isinstance(n, float):
+    #     return "float"
+    # elif isinstance(n, int):
+    #     return "int"
+    # else:
+    if n.type is not None:
+        ty = n.type.__name__
+    elif n.meta.get(
+            'type') and n.meta.get('type').__name__ != 'FakeTensor':
+        ty = n.meta.get('type').__name__
+        if ty == 'Size':
+            return 'std::vector<int64_t> const' if add_prefix else 'int[]'
     else:
-        if n.type is not None:
-            ty = n.type.__name__
-        elif n.meta.get(
-                'type') and n.meta.get('type').__name__ != 'FakeTensor':
-            ty = n.meta.get('type').__name__
-            if ty == 'Size':
-                return 'std::vector<int64_t> const' if add_prefix else 'int[]'
-        else:
-            # this default is a bit sketchy
-            ty = "Tensor"
+        # this default is a bit sketchy
+        ty = "Tensor"
 
     builtin_types = {"int": "int64_t", "float": "double"}
 
@@ -100,7 +100,7 @@ def generate_op_schema(
     arg_sig = ""
     for name in inputs:
         arg_type = arg_schema_type(inputs[name]).replace(".", "::")
-        arg_name = name.replace(".", "_")
+        arg_name = inputs[name].name.replace(".", "_")
         arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
         sep = ", "
 
