@@ -563,9 +563,7 @@ class FlashAttentionImpl(AttentionImpl):
 
                 print("Recv out, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
                 output[:num_prefill_tokens] = get_disagg_group().recv(output[:num_prefill_tokens].shape, output.dtype)
-            import time
-            time.sleep(10)
-
+                
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             output[num_prefill_tokens:] = flash_attn_with_kvcache(
