@@ -349,8 +349,6 @@ run_serving_tests() {
   done
 }
 
-
-
 main() {
   check_gpus
   check_hf_token
