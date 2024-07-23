@@ -59,7 +59,7 @@ class ModelOptFp8Config(QuantizationConfig):
                    activation_scheme=activation_scheme)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+            self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
         from vllm.model_executor.layers.quantization.fp8 import Fp8KVCacheMethod # Avoid circular import
