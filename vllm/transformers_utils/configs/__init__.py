@@ -1,3 +1,5 @@
+from vllm.transformers_utils.configs.chameleon import (ChameleonConfig,
+                                                       ChameleonVQVAEConfig)
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
@@ -10,6 +12,8 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
 __all__ = [
+    "ChameleonConfig",
+    "ChameleonVQVAEConfig",
     "ChatGLMConfig",
     "DbrxConfig",
     "MPTConfig",
