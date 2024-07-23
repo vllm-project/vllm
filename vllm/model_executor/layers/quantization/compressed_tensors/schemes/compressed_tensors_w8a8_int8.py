@@ -19,6 +19,10 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
 
+    def get_min_capability(self) -> int:
+        # turing and up
+        return 75
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # Cutlass kernels need transposed weight.

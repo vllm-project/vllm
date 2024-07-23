@@ -8,10 +8,10 @@
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3
+ARG PYTHON_VERSION=3.10
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -21,13 +21,16 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
     && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
-    && python3 --version \
-    && python3 -m pip --version
+    && python3 --version
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git curl sudo
+    && apt-get install -y git curl sudo
+
+# Install pip s.t. it will be compatible with our PYTHON_VERSION
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+RUN python3 -m pip --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -58,7 +61,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 
-ARG PYTHON_VERSION=3
+ARG PYTHON_VERSION=3.10
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
@@ -100,7 +103,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && export SCCACHE_BUCKET=vllm-build-sccache \
+        && if [ "$CUDA_VERSION" = "11.8.0" ]; then \
+            export SCCACHE_BUCKET=vllm-build-sccache-2; \
+           else \
+            export SCCACHE_BUCKET=vllm-build-sccache; \
+           fi \
         && export SCCACHE_REGION=us-west-2 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
@@ -149,12 +156,27 @@ RUN pip --verbose wheel -r requirements-mamba.txt \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
+ARG PYTHON_VERSION=3.10
 WORKDIR /vllm-workspace
 
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
+    && python3 --version
+
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git vim
+    && apt-get install -y python3-pip git vim curl libibverbs-dev
+
+# Install pip s.t. it will be compatible with our PYTHON_VERSION
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+RUN python3 -m pip --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
