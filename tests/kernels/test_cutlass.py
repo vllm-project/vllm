@@ -106,8 +106,8 @@ def cutlass_int8_gemm_helper(m: int,
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
 
-@pytest.mark.parametrize("m", [512, 222, 100, 33, 1])
-@pytest.mark.parametrize("n", [2048, 256, 1024])
+@pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 100, 33])
+@pytest.mark.parametrize("n", [2048, 4096, 8192, 16384, 24576, 256, 1024])
 @pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
@@ -117,19 +117,6 @@ def cutlass_int8_gemm_helper(m: int,
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
                           per_out_ch: bool, use_bias: bool):
     cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
-
-@pytest.mark.parametrize("m", [16, 32, 64, 128, 256, 512])
-@pytest.mark.parametrize("n", [1024, 8192, 10240])
-@pytest.mark.parametrize("k", [128])
-@pytest.mark.parametrize("per_act_token", [False])
-@pytest.mark.parametrize("per_out_ch", [False])
-@pytest.mark.parametrize("use_bias", [False])
-@pytest.mark.skipif(capability < 89,
-                    reason="FP8 is not supported on this GPU type.")
-def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
-                          per_out_ch: bool, use_bias: bool):
-    cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
-
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
