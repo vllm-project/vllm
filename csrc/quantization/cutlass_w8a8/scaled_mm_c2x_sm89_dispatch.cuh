@@ -10,12 +10,28 @@
 
 namespace vllm {
 
+template <typename InType, typename OutType,
+          template <typename, typename> typename Epilogue>
+struct sm89_fallback_gemm {
+  // Shared Memory required by this Gemm - 61440 bytes
+  static_assert(std::is_same<InType, int8_t>());
+  using TileShape = typename cutlass::gemm::GemmShape<64, 128, 64>;
+  using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+  using FP8MathOperator = typename cutlass::arch::OpMultiplyAdd;
+  using Cutlass2xGemm =
+      cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90, InType, OutType,
+                      Epilogue, TileShape, WarpShape, InstructionShape, 5,
+                      FP8MathOperator>;
+};
+
 struct sm89_config_default {
 
   // M in (256, inf)
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
+  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -32,25 +48,28 @@ struct sm89_config_default {
     if (np2 <= 4096) {
       using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else if (np2 <= 8192) {
       using TileShape = typename cutlass::gemm::GemmShape<256, 128, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          3, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          3, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
 
     } else {
       using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     }
   }
 };
@@ -61,6 +80,7 @@ struct sm89_config_M256 {
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
+  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -77,17 +97,19 @@ struct sm89_config_M256 {
     if (np2 <= 4096) {
       using TileShape = typename cutlass::gemm::GemmShape<64, 128, 128>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          3, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          3, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else  {
       using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } 
   }
 };
@@ -98,6 +120,7 @@ struct sm89_config_M128 {
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
+  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -114,24 +137,28 @@ struct sm89_config_M128 {
     if (np2 <= 8192) {
       using TileShape = typename cutlass::gemm::GemmShape<64, 128, 128>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          3, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          3, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
+
     } else if (np2 <= 16384) {
       using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else {
       using TileShape = typename cutlass::gemm::GemmShape<128, 64, 128>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          3, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          3, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     }
 
   }
@@ -141,6 +168,7 @@ struct sm89_config_M64 {
 
   // M in (32, 64]
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -159,28 +187,31 @@ struct sm89_config_M64 {
       using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
       using FP8MathOperator = typename cutlass::arch::OpMultiplyAdd;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     }  else if (np2 <= 16384) {
       using TileShape = typename cutlass::gemm::GemmShape<64, 128, 128>;
       using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
       using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          3, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          3, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else {
       using TileShape = typename cutlass::gemm::GemmShape<64, 64, 128>;
       using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
       using FP8MathOperator = typename cutlass::arch::OpMultiplyAdd;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     }
 
   }
@@ -191,6 +222,7 @@ struct sm89_config_M32 {
   // M in (16, 32]
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
+  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -208,26 +240,29 @@ struct sm89_config_M32 {
       using TileShape = typename cutlass::gemm::GemmShape<32, 64, 128>;
       using WarpShape = typename cutlass::gemm::GemmShape<16, 64, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else if (np2 <= 16384) {
       using TileShape = typename cutlass::gemm::GemmShape<32, 128, 128>;
       using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          4, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          4, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else {
       using TileShape = typename cutlass::gemm::GemmShape<32, 64, 128>;
       using WarpShape = typename cutlass::gemm::GemmShape<16, 64, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          5, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          5, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     }
   }
 };
@@ -238,6 +273,7 @@ struct sm89_config_M16 {
   using WarpShape = typename cutlass::gemm::GemmShape<16, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
+  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
   static const int32_t MainLoopStages = 5; 
 
   template <typename InType, typename OutType,
@@ -255,24 +291,27 @@ struct sm89_config_M16 {
     if (np2 <= 8192) {
       using TileShape = typename cutlass::gemm::GemmShape<16, 64, 128>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          MainLoopStages, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          MainLoopStages, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else if (np2 <= 24576) {
       using TileShape = typename cutlass::gemm::GemmShape<16, 128, 64>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          MainLoopStages, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          MainLoopStages, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else {
       using TileShape = typename cutlass::gemm::GemmShape<32, 64, 128>;
 
-      return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
+      return vllm::fallback_cutlass_gemm_caller<vllm::cutlass_2x_gemm<
           cutlass::arch::Sm89, vllm::enable_sm89_to_sm90, InType, OutType,
           Epilogue, TileShape, WarpShape, InstructionShape,
-          MainLoopStages, FP8MathOperator>>(out, a, b, std::forward<EpilogueArgs>(args)...);
+          MainLoopStages, FP8MathOperator>,
+          FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     }
   }
 };
@@ -287,8 +326,6 @@ inline void cutlass_gemm_sm89_dispatch(torch::Tensor& out,
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
-
-  // TODO check shared memory requirements
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
