@@ -166,7 +166,7 @@ class NemotronConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
-        self.rope_percent = rope_percent
+        self.rope_percent = rope_percent or kwargs.get("rope_percentage", None)
         self._rope_scaling_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
