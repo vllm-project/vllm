@@ -15,19 +15,11 @@ class BitsAndBytesConfig(QuantizationConfig):
     Reference: https://arxiv.org/abs/2305.14314
     """
 
-    def __init__(
-        self,
-        adapter_name_or_path: str,
-        target_modules: List[str],
-    ) -> None:
-
-        self.adapter_name_or_path = adapter_name_or_path
-        self.target_modules = target_modules
+    def __init__(self, ) -> None:
+        pass
 
     def __repr__(self) -> str:
-        return (
-            f"BitsAndBytesConfig(adapter_name_or_path={self.adapter_name_or_path}"
-        )
+        return "BitsAndBytesConfig"
 
     @classmethod
     def get_name(self) -> str:
@@ -49,16 +41,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BitsAndBytesConfig":
-        adapter_name = cls.get_from_keys(config, ["adapter_name_or_path"])
-        default_target_modules = [
-            "gate_proj", "down_proj", "up_proj", "q_proj", "k_proj", "v_proj",
-            "o_proj"
-        ]
-        if adapter_name == "":
-            target_modules = default_target_modules
-        else:
-            target_modules = cls.get_from_keys(config, ["target_modules"])
-        return cls(adapter_name, target_modules)
+        return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["BitsAndBytesLinearMethod"]:

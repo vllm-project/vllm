@@ -676,8 +676,8 @@ class EngineArgs:
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
-            self.load_format != "bitsandbytes":
+           self.qlora_adapter_name_or_path is not None) and \
+           self.load_format != "bitsandbytes":
             raise ValueError(
                 "BitsAndBytes quantization and QLoRA adapter only support "
                 f"'bitsandbytes' load format, but got {self.load_format}")
