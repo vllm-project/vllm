@@ -12,6 +12,7 @@ VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
     --port 8100 \
     -tp 4 \
     --enable-prefix-caching &
+    
 
 # decoding instance
 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
