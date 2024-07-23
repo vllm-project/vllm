@@ -66,8 +66,8 @@ class Fp8Config(QuantizationConfig):
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
                    activation_scheme=activation_scheme)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
@@ -214,7 +214,8 @@ class Fp8LinearMethod(LinearMethodBase):
             weight_scale=layer.weight_scale,
             input_scale=layer.input_scale,
             bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported)
+            cutlass_fp8_supported=self.cutlass_fp8_supported,
+            use_per_token_if_dynamic=False)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

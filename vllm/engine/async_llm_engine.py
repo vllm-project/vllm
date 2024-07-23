@@ -1,17 +1,19 @@
 import asyncio
 import time
 from functools import partial
-from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
-                    Set, Tuple, Type, Union)
+from typing import (AsyncIterator, Callable, Dict, Iterable, List, Mapping,
+                    Optional, Set, Tuple, Type, Union)
 
 from transformers import PreTrainedTokenizer
 
 import vllm.envs as envs
-from vllm.config import DecodingConfig, ModelConfig
+from vllm.config import DecodingConfig, EngineConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.metrics import StatLoggerBase
+from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
@@ -129,7 +131,10 @@ class RequestTracker:
         """Process a request output from the engine."""
         request_id = request_output.request_id
 
-        self._request_streams[request_id].put(request_output)
+        # Guard against a KeyError which can occur if the request was aborted
+        # while the output was generated
+        if (stream := self._request_streams.get(request_id)) is not None:
+            stream.put(request_output)
         if request_output.finished:
             if verbose:
                 logger.info("Finished request %s.", request_id)
@@ -146,7 +151,10 @@ class RequestTracker:
             logger.info("Finished request %s.", request_id)
         self.abort_request(request_id)
 
-    def add_request(self, request_id: str,
+    def add_request(self,
+                    request_id: str,
+                    *,
+                    verbose: bool = False,
                     **engine_add_request_kwargs) -> AsyncStream:
         """Add a request to be sent to the engine on the next background
         loop iteration."""
@@ -160,6 +168,9 @@ class RequestTracker:
         }))
 
         self.new_requests_event.set()
+
+        if verbose:
+            logger.info("Added request %s.", request_id)
 
         return stream
 
@@ -294,14 +305,14 @@ class _AsyncLLMEngine(LLMEngine):
         return self.input_processor(llm_inputs)
 
     async def add_request_async(
-            self,
-            request_id: str,
-            inputs: PromptInputs,
-            params: Union[SamplingParams, PoolingParams],
-            arrival_time: Optional[float] = None,
-            lora_request: Optional[LoRARequest] = None,
-            trace_headers: Optional[Dict[str, str]] = None,
-            prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -348,8 +359,6 @@ class AsyncLLMEngine:
             async frontend will be executed in a separate process as the
             model workers.
         log_requests: Whether to log the requests.
-        max_log_len: Maximum number of prompt characters or prompt ID numbers
-            being printed in log.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
         *args: Arguments for :class:`LLMEngine`.
@@ -363,13 +372,11 @@ class AsyncLLMEngine:
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
-                 max_log_len: Optional[int] = None,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
-        self.max_log_len = max_log_len
         self.engine = self._init_engine(*args, **kwargs)
 
         self.background_loop: Optional[asyncio.Future] = None
@@ -384,24 +391,19 @@ class AsyncLLMEngine:
         self._request_tracker: RequestTracker
 
     @classmethod
-    def from_engine_args(
-        cls,
-        engine_args: AsyncEngineArgs,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-    ) -> "AsyncLLMEngine":
-        """Creates an async LLM engine from the engine arguments."""
-        # Create the engine configs.
-        engine_config = engine_args.create_engine_config()
-
-        if engine_args.engine_use_ray:
-            from vllm.executor import ray_utils
-            ray_utils.assert_ray_available()
-
+    def _get_executor_cls(
+            cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
-
-        if engine_config.device_config.device_type == "neuron":
+        if isinstance(distributed_executor_backend, type):
+            if not issubclass(distributed_executor_backend, ExecutorAsyncBase):
+                raise TypeError(
+                    "distributed_executor_backend must be a subclass of "
+                    f"ExecutorAsyncBase. Got {distributed_executor_backend}.")
+            if distributed_executor_backend.uses_ray:  # type: ignore
+                initialize_ray_cluster(engine_config.parallel_config)
+            executor_class = distributed_executor_backend
+        elif engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
         elif engine_config.device_config.device_type == "tpu":
@@ -440,17 +442,37 @@ class AsyncLLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
+        return executor_class
+
+    @classmethod
+    def from_engine_args(
+        cls,
+        engine_args: AsyncEngineArgs,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+    ) -> "AsyncLLMEngine":
+        """Creates an async LLM engine from the engine arguments."""
+        # Create the engine configs.
+        engine_config = engine_args.create_engine_config()
+
+        if engine_args.engine_use_ray:
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
+
+        executor_class = cls._get_executor_cls(engine_config)
+
         # Create the async LLM engine.
         engine = cls(
-            distributed_executor_backend == "ray",
+            executor_class.uses_ray,
             engine_args.engine_use_ray,
             **engine_config.to_dict(),
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
             log_stats=not engine_args.disable_log_stats,
-            max_log_len=engine_args.max_log_len,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
         )
         return engine
 
@@ -477,11 +499,16 @@ class AsyncLLMEngine:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
-    async def get_tokenizer(self) -> "PreTrainedTokenizer":
+    async def get_tokenizer(
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> "PreTrainedTokenizer":
         if self.engine_use_ray:
-            return await self.engine.get_tokenizer.remote()  # type: ignore
-        else:
-            return self.engine.get_tokenizer()
+            return await self.engine.get_tokenizer.remote(  # type: ignore
+                lora_request)
+
+        return await (self.engine.get_tokenizer_group().
+                      get_lora_tokenizer_async(lora_request))
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
@@ -641,30 +668,9 @@ class AsyncLLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncStream:
-        if self.log_requests:
-            if isinstance(inputs, str):
-                shortened_prompt = inputs
-                shortened_token_ids = None
-            else:
-                shortened_prompt = inputs.get("prompt")
-                shortened_token_ids = inputs.get("prompt_token_ids")
-
-            max_log_len = self.max_log_len
-            if max_log_len is not None:
-                if shortened_prompt is not None:
-                    shortened_prompt = shortened_prompt[:max_log_len]
-                if shortened_token_ids is not None:
-                    shortened_token_ids = shortened_token_ids[:max_log_len]
-
-            logger.info(
-                "Received request %s: prompt: %r, "
-                "params: %s, prompt_token_ids: %s, "
-                "lora_request: %s.", request_id, shortened_prompt, params,
-                shortened_token_ids, lora_request)
-
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()
@@ -680,6 +686,7 @@ class AsyncLLMEngine:
 
         stream = self._request_tracker.add_request(
             request_id,
+            verbose=self.log_requests,
             inputs=inputs,
             params=params,
             arrival_time=arrival_time,
@@ -695,7 +702,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
@@ -778,7 +785,7 @@ class AsyncLLMEngine:
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
     ) -> AsyncIterator[EmbeddingRequestOutput]:
         """Generate outputs for a request from an embedding model.
 
@@ -856,7 +863,7 @@ class AsyncLLMEngine:
         params: Union[SamplingParams, PoolingParams],
         *,
         lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
@@ -957,3 +964,19 @@ class AsyncLLMEngine:
             )
         else:
             return self.engine.is_tracing_enabled()
+
+    def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
+        if self.engine_use_ray:
+            ray.get(
+                self.engine.add_logger.remote(  # type: ignore
+                    logger_name=logger_name, logger=logger))
+        else:
+            self.engine.add_logger(logger_name=logger_name, logger=logger)
+
+    def remove_logger(self, logger_name: str) -> None:
+        if self.engine_use_ray:
+            ray.get(
+                self.engine.remove_logger.remote(  # type: ignore
+                    logger_name=logger_name))
+        else:
+            self.engine.remove_logger(logger_name=logger_name)

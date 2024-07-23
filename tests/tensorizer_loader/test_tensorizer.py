@@ -214,12 +214,12 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
 
     ## Start OpenAI API server
     openai_args = [
-        "--model", model_ref, "--dtype", "float16", "--load-format",
+        "--dtype", "float16", "--load-format",
         "tensorizer", "--model-loader-extra-config",
         json.dumps(model_loader_extra_config),
     ]
 
-    with RemoteOpenAIServer(openai_args) as server:
+    with RemoteOpenAIServer(model_ref, openai_args) as server:
         print("Server ready.")
 
         client = server.get_client()
