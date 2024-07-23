@@ -45,11 +45,13 @@ class MultiModalInputs(_MultiModalInputsBase):
     ) -> BatchedTensors:
         # may be list rather than tensors
         if isinstance(tensors[0], list):
-            new_tensors = []
-            for new_tensor in tensors:
-                for new_t in new_tensor:
-                    new_tensors.append(new_t.to(device))
-            return new_tensors
+            return [
+                [
+                    t.to(device=device) for t in tensor[0]
+                ]
+                for tensor in tensors
+            ]
+        
         unbatched_shape = tensors[0].shape[1:]
 
         for tensor in tensors:

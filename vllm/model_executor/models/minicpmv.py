@@ -386,10 +386,7 @@ class MiniCPMV(nn.Module, SupportsVision):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        if 'MiniCPM-Llama3-V-2_5' in self.config._name_or_path:
-            self.version = 2.5
-        else:
-            self.version = 2.0
+        self.version = self.config.version
         self.llm = self.init_llm(config, cache_config, quant_config)
         self.vpm = self.init_vision_module()
         param_dtype = torch.get_default_dtype()
@@ -526,6 +523,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                     i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
                 ]
                 if all_pixel_values:
+                    tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
                     max_patches = torch.max(tgt_sizes[:, 0] * tgt_sizes[:, 1])
                     all_pixel_values = torch.nn.utils.rnn.pad_sequence(
                         all_pixel_values, batch_first=True, padding_value=0.0)
@@ -547,18 +545,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                         vision_embedding, tgt_sizes)
 
                 else:  # no image
-                    if self.training:
-                        dummy_image = torch.zeros((1, 3, 224, 224),
-                                                  device=device,
-                                                  dtype=dtype)
-                        tgt_sizes = torch.Tensor([[
-                            (224 // self.config.patch_size),
-                            math.ceil(224 / self.config.patch_size)
-                        ]]).type(torch.int32)
-                        dummy_feature = self.resampler(
-                            self.vpm(dummy_image).last_hidden_state, tgt_sizes)
-                    else:
-                        dummy_feature = []
+                    dummy_feature = []
                     vision_hidden_states = dummy_feature
         else:
             vision_hidden_states = data["vision_hidden_states"]
@@ -596,6 +583,18 @@ class MiniCPMV(nn.Module, SupportsVision):
                 vision_hidden_states.view(-1, vision_hidden_states.shape[-1]))
         return vlm_embedding, vision_hidden_states
 
+    def process_multimodal_inputs(self, inputs):
+        pixel_values = []
+        tgt_sizes = []
+        for b in range(len(inputs["pixel_values"])):
+            pixel_values += inputs["pixel_values"][b]
+            tgt_sizes += inputs["tgt_sizes"][b]
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": inputs["input_ids"],
+            "tgt_sizes": tgt_sizes
+        }
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -603,14 +602,15 @@ class MiniCPMV(nn.Module, SupportsVision):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        pixel_values: List[torch.Tensor] = None,
         **kwargs: object,
     ):
         inputs = {
-            "pixel_values": [] if pixel_values is None else pixel_values,
+            "pixel_values": kwargs.pop("pixel_values", []),
             "input_ids": input_ids,
             "tgt_sizes": kwargs.pop("tgt_sizes", None),
         }
+
+        inputs = self.process_multimodal_inputs(inputs)
 
         vlm_embeddings, vision_hidden_states = self.get_embedding(inputs)
 
