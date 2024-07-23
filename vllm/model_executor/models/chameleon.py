@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from torch import nn
+from transformers import ChameleonConfig, ChameleonVQVAEConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -30,8 +31,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
-from vllm.transformers_utils.configs import (ChameleonConfig,
-                                             ChameleonVQVAEConfig)
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsVision
