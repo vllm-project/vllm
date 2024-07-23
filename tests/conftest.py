@@ -13,6 +13,7 @@ from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForSeq2SeqLM,
                           AutoModelForVision2Seq, AutoTokenizer, BatchEncoding)
 
+from tests.models.utils import DecoderPromptType
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
@@ -115,7 +116,9 @@ def example_prompts() -> List[str]:
 
 
 @pytest.fixture
-def example_encoder_decoder_prompts() -> Tuple[List[str], List[str]]:
+def example_encoder_decoder_prompts() \
+    -> Dict[DecoderPromptType,
+            Tuple[List[str], List[Optional[str]]]]:
     '''
     Returns an encoder prompt list and a decoder prompt list, wherein each pair
     of same-index entries in both lists corresponds to an (encoder prompt,
@@ -126,15 +129,24 @@ def example_encoder_decoder_prompts() -> Tuple[List[str], List[str]]:
     * Encoder prompt list
     * Decoder prompt list (reverse of encoder prompt list)
     '''
+
     encoder_prompts = []
     for filename in _TEST_PROMPTS:
         encoder_prompts += _read_prompts(filename)
 
-    prompt_list = zip_enc_dec_prompt_lists(encoder_prompts, 
-                                           encoder_prompts[::-1])
+    custom_decoder_prompts = encoder_prompts[::-1]
+    empty_str_decoder_prompts = [""] * len(encoder_prompts)
+    none_decoder_prompts = [None] * len(encoder_prompts)
 
-    # Encoder prompts, decoder prompts
-    return [prompt_list[1]]
+    # NONE decoder prompt type
+    return {
+        DecoderPromptType.NONE:
+        zip_enc_dec_prompt_lists(encoder_prompts, none_decoder_prompts),
+        DecoderPromptType.EMPTY_STR:
+        zip_enc_dec_prompt_lists(encoder_prompts, empty_str_decoder_prompts),
+        DecoderPromptType.CUSTOM:
+        zip_enc_dec_prompt_lists(encoder_prompts, custom_decoder_prompts),
+    }
 
 
 @pytest.fixture
@@ -420,7 +432,7 @@ class HfRunner:
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
 
-        # decoder_start_token_id = getattr(self.model.config, 
+        # decoder_start_token_id = getattr(self.model.config,
         #                                  'decoder_start_token_id',
         #                                  None)
 
@@ -438,8 +450,8 @@ class HfRunner:
             # # If the decoder input ids do not begin with decoder start
             # # token, HF transformers will likely add it automatically.
             # # This becomes important information later.
-            # implicit_decoder_start_token=(True 
-            # if decoder_input_ids.shape[1] < 1 else 
+            # implicit_decoder_start_token=(True
+            # if decoder_input_ids.shape[1] < 1 else
             # (decoder_input_ids[0][0] ==decoder_start_token_id))
 
             from transformers.generation.configuration_utils import (
