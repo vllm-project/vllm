@@ -3,14 +3,14 @@
 Run `pytest tests/models/test_mamba.py`.
 """
 import pytest
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextGenerationPipeline
-import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .utils import check_outputs_equal
 
 MODELS = [
     "state-spaces/mamba-370m-hf",
 ]
+
 
 # Use lower-level interfaces to create this greedy generator, as mamba will
 # choke on the model_kwarg 'attention_mask' if hf_model.generate_greedy is used.
@@ -19,24 +19,22 @@ def generate_greedy(model_name, example_prompts, max_tokens):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
-    generator = TextGenerationPipeline(model=model, tokenizer=tokenizer, 
-                                       device=torch.cuda.current_device() 
-                                       if torch.cuda.is_available() else -1)
-
     # Generate texts from the prompts
     outputs = []
     for prompt in example_prompts:
         # Tokenize the input prompt with truncation
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
         input_ids = inputs["input_ids"].to(model.device)
-        
+
         # Generate text using the model's generate method directly
         generated_ids = model.generate(input_ids, max_new_tokens=max_tokens)
-        generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+        generated_text = tokenizer.decode(generated_ids[0],
+                                          skip_special_tokens=True)
 
         outputs.append((generated_ids[0].tolist(), generated_text))
 
     return outputs
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
