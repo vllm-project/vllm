@@ -255,12 +255,12 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             output = []
 
-        request_outputs = self._process_model_outputs(
+        request_outputs, num_generation_tokens = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+        self.do_log_stats(scheduler_outputs, output, num_generation_tokens)
 
         # Tracing
         self.do_tracing(scheduler_outputs)

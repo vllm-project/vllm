@@ -44,7 +44,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+                        outputs: List[SequenceGroupOutput]) -> int:
         """Append all new tokens to sequences in the sequence group. Fork any
         surviving beam candidates; free any unsurviving ones.
 
@@ -80,7 +80,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             seq_group.prompt_logprobs.extend(prompt_logprobs)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
+                                        outputs: SequenceGroupOutput) -> int:
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
@@ -98,6 +98,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
+        num_generation_tokens = 0
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
             child_samples: List[SequenceOutput] = parent_child_dict[
@@ -117,6 +118,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 child = parent.fork(new_child_seq_id)
                 child.append_token_id(child_sample.output_token,
                                       child_sample.logprobs)
+                num_generation_tokens += 1
                 child_seqs.append((child, parent))
             # Continue the parent sequence for the last child sample.
             # We reuse the parent sequence here to reduce redundant memory
@@ -124,6 +126,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             last_child_sample = child_samples[-1]
             parent.append_token_id(last_child_sample.output_token,
                                    last_child_sample.logprobs)
+            num_generation_tokens += 1
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
@@ -158,7 +161,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 if seq is parent and seq.is_finished():
                     for scheduler in self.scheduler:
                         scheduler.free_seq(seq)
-            return
+            return num_generation_tokens
 
         # Beam search case
         # Select the child sequences to keep in the sequence group.
@@ -261,6 +264,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 seq_group.remove(seq.seq_id)
                 for scheduler in self.scheduler:
                     scheduler.free_seq(seq)
+        return num_generation_tokens
 
     def _check_beam_search_early_stopping(
         self,

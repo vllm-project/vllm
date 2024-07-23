@@ -59,7 +59,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "(e.g., speculative decode uses multi step workers).")
 
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+                        outputs: List[SequenceGroupOutput]) -> int:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
@@ -87,12 +87,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         ]
         assert valid_samples
 
-        self._process_seq_outputs(seq, valid_samples,
-                                  sequence_group.sampling_params)
+        return self._process_seq_outputs(seq, valid_samples,
+                                         sequence_group.sampling_params)
 
     def _process_seq_outputs(self, seq: Sequence,
                              valid_samples: List[SequenceOutput],
-                             sampling_params: SamplingParams) -> None:
+                             sampling_params: SamplingParams) -> int:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
 
@@ -119,12 +119,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
+        num_generation_tokens = 0
         for output_token_id, output_logprob in zip(output_token_ids,
                                                    output_logprobs):
             seq.append_token_id(
                 token_id=output_token_id,
                 logprobs=output_logprob,
             )
+            num_generation_tokens += 1
 
             new_char_count = 0
             if sampling_params.detokenize:
@@ -143,3 +145,4 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         if seq.is_finished():
             for scheduler in self.scheduler:
                 scheduler.free_seq(seq)
+        return num_generation_tokens

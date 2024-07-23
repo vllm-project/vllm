@@ -62,7 +62,7 @@ class SequenceGroupOutputProcessor(ABC):
 
     @abstractmethod
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+                        outputs: List[SequenceGroupOutput]) -> int:
         """Process new token ids for the sequence group. Handles logic such as
         detokenization, stop checking, and freeing/forking sequences in the
         scheduler.

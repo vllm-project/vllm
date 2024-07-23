@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, TypeVar, Union
+from typing import Set, Tuple, Type, TypeVar, Union
 
 from transformers import PreTrainedTokenizer
 
@@ -794,7 +794,7 @@ class LLMEngine:
         scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    ) -> Tuple[List[Union[RequestOutput, EmbeddingRequestOutput]], int]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
@@ -808,6 +808,7 @@ class LLMEngine:
             output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
+        num_generation_tokens = 0
         for scheduled_seq_group, outputs, seq_group_meta in zip(
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
@@ -820,7 +821,8 @@ class LLMEngine:
 
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if seq_group_meta.do_sample:
-                self.output_processor.process_outputs(seq_group, outputs)
+                num_generation_tokens += self.output_processor.process_outputs(
+                    seq_group, outputs)
 
         # Free the finished sequence groups.
         for scheduler in self.scheduler:
@@ -837,7 +839,7 @@ class LLMEngine:
         for seq_group in ignored_seq_groups:
             request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
-        return request_outputs
+        return request_outputs, num_generation_tokens
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -913,12 +915,12 @@ class LLMEngine:
         else:
             output = []
 
-        request_outputs = self._process_model_outputs(
+        request_outputs, num_generation_tokens = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+        self.do_log_stats(scheduler_outputs, output, num_generation_tokens)
 
         # Tracing
         self.do_tracing(scheduler_outputs)
@@ -943,20 +945,21 @@ class LLMEngine:
             raise KeyError(f"Logger with name {logger_name} does not exist.")
         del self.stat_loggers[logger_name]
 
-    def do_log_stats(
-            self,
-            scheduler_outputs: Optional[SchedulerOutputs] = None,
-            model_output: Optional[List[SamplerOutput]] = None) -> None:
+    def do_log_stats(self,
+                     scheduler_outputs: Optional[SchedulerOutputs] = None,
+                     model_output: Optional[List[SamplerOutput]] = None,
+                     num_generation_tokens: Optional[int] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            stats = self._get_stats(scheduler_outputs, model_output)
+            stats = self._get_stats(scheduler_outputs, model_output,
+                                    num_generation_tokens)
             for logger in self.stat_loggers.values():
                 logger.log(stats)
 
-    def _get_stats(
-            self,
-            scheduler_outputs: Optional[SchedulerOutputs],
-            model_output: Optional[List[SamplerOutput]] = None) -> Stats:
+    def _get_stats(self,
+                   scheduler_outputs: Optional[SchedulerOutputs],
+                   model_output: Optional[List[SamplerOutput]] = None,
+                   num_generation_tokens: Optional[int] = None) -> Stats:
         """Get Stats to be Logged to Prometheus.
 
         Args:
@@ -1079,9 +1082,13 @@ class LLMEngine:
             #   num_generation_tokens = num_batched_tokens - num_prompt_tokens
             #   + num_generation_tokens_from_prefill_groups (since we generate
             #   one token on prefills on iters where the prefill finishes).
-            num_generation_tokens_iter = (
-                scheduler_outputs.num_batched_tokens - num_prompt_tokens_iter +
-                num_generation_tokens_from_prefill_groups)
+            if num_generation_tokens is not None:
+                num_generation_tokens_iter = num_generation_tokens
+            else:
+                num_generation_tokens_iter = (
+                    scheduler_outputs.num_batched_tokens -
+                    num_prompt_tokens_iter +
+                    num_generation_tokens_from_prefill_groups)
 
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
