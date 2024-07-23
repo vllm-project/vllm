@@ -50,6 +50,11 @@ static constexpr int _nextPow2(unsigned int num) {
   return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
 }
 
+template <typename T>
+__device__ __host__ static constexpr T ceil_div(T a, T b) {
+  return (a + b - 1) / b;
+}
+
 template <typename T, int numLanes = WARP_SIZE>
 __inline__ __device__ T warpReduce(T val, ReduceFnType<T> fn) {
   static_assert(numLanes > 0 && (numLanes & (numLanes - 1)) == 0,
@@ -65,6 +70,8 @@ __inline__ __device__ T warpReduce(T val, ReduceFnType<T> fn) {
   return val;
 }
 
+// Make sure you call __syncthreads() between different blockReduce calls, as
+// they are allowed to use the same shared memory.
 template <typename T, int maxBlockSize = 1024>
 __inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn, T init = T{}) {
   static_assert(maxBlockSize <= 1024);
@@ -72,7 +79,10 @@ __inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn, T init = T{}) {
     val = warpReduce<T>(val, fn);
     // Calculates max number of lanes that need to participate in the last
     // warpReduce
-    constexpr int maxActiveLanes = (maxBlockSize + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int maxActiveLanes =
+        ceil_div<unsigned int>(maxBlockSize, WARP_SIZE);
+    // shared memory can be reused between function calls, make static
+    // explicitly.
     static __shared__ T shared[maxActiveLanes];
     int lane = threadIdx.x % WARP_SIZE;
     int wid = threadIdx.x / WARP_SIZE;
@@ -80,8 +90,11 @@ __inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn, T init = T{}) {
 
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane] : init;
-    val = warpReduce<T, _nextPow2(maxActiveLanes)>(val, fn);
+    auto const num_sh_lanes = ceil_div<unsigned int>(blockDim.x, WARP_SIZE);
+    val = threadIdx.x < num_sh_lanes ? shared[lane] : init;
+    if (wid == 0) {
+      val = warpReduce<T>(val, fn);
+    }
   } else {
     // A single warpReduce is equal to blockReduce
     val = warpReduce<T, _nextPow2(maxBlockSize)>(val, fn);
@@ -91,7 +104,8 @@ __inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn, T init = T{}) {
 
 template <typename T, int maxBlockSize = 1024>
 __inline__ __device__ T blockReduceMax(T val) {
-  return blockReduce<T, maxBlockSize>(val, detail::_max<T>);
+  auto const min_val = std::numeric_limits<T>::lowest();
+  return blockReduce<T, maxBlockSize>(val, detail::_max<T>, min_val);
 }
 
 template <typename T, int maxBlockSize = 1024>

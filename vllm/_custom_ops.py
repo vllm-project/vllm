@@ -392,15 +392,20 @@ def scaled_fp8_quant(
 # int8
 def scaled_int8_quant(
         input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+        scale: Optional[torch.Tensor] = None,
+        azp : Optional[torch.Tensor] = None,
+        symmetric: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
-    Quantize the input tensor to int8 and return the quantized tensor and scale.
+    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
 
     Args:
         input: The input tensor to be quantized to int8.
         scale: Optional scaling factor for the int8 quantization.
             When not provided, we invoke dynamic-per-token quantization.
+        azp: Optional zero-point for the int8 quantization.
+            Must be provided for asymmetric quantization if `scale` is provided.
+        symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
       Tuple[Torch.Tensor, Torch.Tensor] : Output int8 tensor and scales.
@@ -408,15 +413,17 @@ def scaled_int8_quant(
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
+        assert not symmetric, "Asymmetric quantization per-tensor not supported yet."
         torch.ops._C.static_scaled_int8_quant(output, input, scale)
-        return output, scale
+        return output, scale, None
 
     # dynamic-per-token quantization.
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
                                device=input.device,
                                dtype=torch.float32)
+    input_azp = None if symmetric else torch.empty_like(input_scales, dtype=torch.int32)
     torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
-    return output, input_scales
+    return output, input_scales, input_azp
 
 
 # qqq ops

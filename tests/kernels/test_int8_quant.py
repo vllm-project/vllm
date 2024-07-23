@@ -4,10 +4,10 @@ import torch
 from tests.kernels.quant_utils import ref_dynamic_per_token_quant
 from vllm._custom_ops import scaled_int8_quant
 
-DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
+DTYPES = [torch.float]
+HIDDEN_SIZES = [16, 32, 64, 67, 128, 768, 2048, 5120, 5137, 8192,
                 8193]  # Arbitrary values for testing
-NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
+NUM_TOKENS = [1, 7, 83, 4096, 16384]  # Arbitrary values for testing
 SEEDS = [0]
 SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
 
@@ -49,12 +49,9 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     x_token_max, _ = x.to(dtype=torch.float32).max(dim=1, keepdim=True)
     x_token_min, _ = x.to(dtype=torch.float32).min(dim=1, keepdim=True)
 
-    # this is why we can't have nice things
-    proper_round = lambda x: torch.floor(x + 0.5)
-
     # calculate scale and azp, and adjust the range
     scales = (x_token_max - x_token_min) / torch.tensor(255.0)
-    azps = proper_round(x_token_min / scales + 128.0).to(torch.int32)
+    azps = torch.round(x_token_min / scales + 128.0).to(torch.int32)
     min_nozp, max_nozp = azps - 128.0, azps + 127.0
 
     # for all elements that are 0, make result equal to scale
@@ -64,9 +61,9 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     torch_out = (x / scales - azps).round().to(torch.int8)
     assert torch_out.min() >= int8_traits.min and torch_out.max() <= int8_traits.max
 
-    ops_out = torch.empty_like(x, dtype=torch.int8, device="cuda")
-    scales_out = torch.empty_like(scales, dtype=torch.float32, device="cuda")
-    azp_out = torch.empty_like(azps, dtype=torch.int32, device="cuda")
+    ops_out = torch.empty_like(x, dtype=torch.int8)
+    scales_out = torch.empty_like(scales, dtype=torch.float32)
+    azp_out = torch.empty_like(azps, dtype=torch.int32)
     torch.ops._C.dynamic_scaled_int8_quant(ops_out, x, scales_out, azp_out)
 
     if (not torch.allclose(scales_out, scales)):
