@@ -16,10 +16,18 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 
+# This group is used for KV cache transfer in disaggregated prefilling
+from vllm.distributed import get_disagg_group
+
+# To identify if the VLLM_DISAGG_PREFILL_ROLE is set or no
+import vllm.envs as envs
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (GPUModelRunnerBase,
                                           ModelInputForGPUBuilder)
 
+logger = init_logger(__name__)
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -466,6 +474,21 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        if all([
+            kv_cache is not None, # we are not in profile run
+            prefill_meta is not None, # during prefill stage
+            envs.VLLM_DISAGG_PREFILL_ROLE is not None, # disagg prefill enabled
+        ]):
+            if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
+                logger.debug("Sending key & value, ", key.shape, key.dtype, value.shape, value.dtype)
+                get_disagg_group().send(key)
+                get_disagg_group().send(value)
+            else:
+                logger.debug("Recving key & value, ", key.shape, key.dtype, value.shape, value.dtype)
+                key = get_disagg_group().recv(key.shape, key.dtype)
+                value = get_disagg_group().recv(value.shape, value.dtype)
+
+
         if kv_cache is not None:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
@@ -473,7 +496,6 @@ class FlashAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            print("I am in flash attn")
             ops.reshape_and_cache_flash(
                 key,
                 value,
@@ -525,19 +547,37 @@ class FlashAttentionImpl(AttentionImpl):
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                output[:num_prefill_tokens] = flash_attn_varlen_func(
-                    q=query,
-                    k=key_cache,
-                    v=value_cache,
-                    cu_seqlens_q=prefill_meta.query_start_loc,
-                    max_seqlen_q=prefill_meta.max_query_len,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_k=max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    alibi_slopes=self.alibi_slopes,
-                    block_table=prefill_meta.block_tables,
-                )
+
+                if not all([
+                    envs.VLLM_DISAGG_PREFILL_ROLE is not None,
+                    envs.VLLM_DISAGG_PREFILL_ROLE == "decode",
+                ]): # Only skip prefill for disagg decode instance
+                    output[:num_prefill_tokens] = flash_attn_varlen_func(
+                        q=query,
+                        k=key_cache,
+                        v=value_cache,
+                        cu_seqlens_q=prefill_meta.query_start_loc,
+                        max_seqlen_q=prefill_meta.max_query_len,
+                        cu_seqlens_k=prefill_meta.seq_start_loc,
+                        max_seqlen_k=max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        alibi_slopes=self.alibi_slopes,
+                        block_table=prefill_meta.block_tables,
+                    )
+                    output.view(num_tokens, hidden_size)
+
+                if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+                    # communication for disaggregated prefill.
+                    if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
+                        logger.info("Sending output, " , output.shape, output.dtype)
+                        get_disagg_group().send(output)
+                    else:
+                        logger.info("Recv output, " , output.shape, output.dtype)
+                        # Kuntai: This assume that output has the same dtype as key
+                        # Is this assumption true?
+                        output = get_disagg_group().recv([num_tokens, hidden_size], key.dtype)
+                        
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
