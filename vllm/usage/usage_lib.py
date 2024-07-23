@@ -16,6 +16,7 @@ import requests
 import torch
 
 import vllm.envs as envs
+from vllm.connections import global_http_connection
 from vllm.version import __version__ as VLLM_VERSION
 
 _config_home = envs.VLLM_CONFIG_ROOT
@@ -204,7 +205,8 @@ class UsageMessage:
 
     def _send_to_server(self, data):
         try:
-            requests.post(_USAGE_STATS_SERVER, json=data)
+            global_http_client = global_http_connection.get_sync_client()
+            global_http_client.post(_USAGE_STATS_SERVER, json=data)
         except requests.exceptions.RequestException:
             # silently ignore unless we are using debug log
             logging.debug("Failed to send usage data to server")
