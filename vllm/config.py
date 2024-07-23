@@ -1494,22 +1494,31 @@ def _get_and_verify_max_len(
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     # The correct one should be "longrope", kept "su" here
     # to be backward compatible
-    if rope_scaling is not None and rope_scaling["type"] not in {
-            "su", "longrope", "extended"
-    }:
-        if disable_sliding_window:
+    if rope_scaling is not None:
+        if "type" in rope_scaling:
+            rope_type = rope_scaling["type"]
+        elif "rope_type" in rope_scaling:
+            rope_type = rope_scaling["rope_type"]
+        else:
+            raise ValueError(
+                "rope_scaling must have a 'type' or 'rope_type' key.")
+
+        if rope_type not in ("su", "longrope", "llama3") and disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.
             raise NotImplementedError(
                 "Disabling sliding window is not supported for models "
                 "with rope_scaling. Please raise an issue so we can "
                 "investigate.")
-        assert "factor" in rope_scaling
-        scaling_factor = rope_scaling["factor"]
-        if rope_scaling["type"] == "yarn":
-            derived_max_model_len = rope_scaling[
-                "original_max_position_embeddings"]
-        derived_max_model_len *= scaling_factor
+
+        if rope_type != "llama3":
+            assert "factor" in rope_scaling
+            scaling_factor = rope_scaling["factor"]
+
+            if rope_type == "yarn":
+                derived_max_model_len = rope_scaling[
+                    "original_max_position_embeddings"]
+            derived_max_model_len *= scaling_factor
 
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
