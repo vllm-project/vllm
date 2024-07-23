@@ -108,8 +108,15 @@ class ShmRingBuffer:
             # created by the process. The following patch is a workaround.
             with patch("multiprocessing.resource_tracker.register",
                        lambda *args, **kwargs: None):
-                self.shared_memory = shared_memory.SharedMemory(name=name)
-            assert self.shared_memory.size == self.total_bytes_of_buffer
+                try:
+                    self.shared_memory = shared_memory.SharedMemory(name=name)
+                    assert (
+                        self.shared_memory.size == self.total_bytes_of_buffer)
+                except FileNotFoundError:
+                    # we might deserialize the object in a different node
+                    # in this case, this object is not used,
+                    # and we should suppress the error
+                    pass
 
     def __reduce__(self):
         return (
@@ -338,8 +345,8 @@ class MessageQueue:
                     time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
-                    if time.monotonic(
-                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                    if (time.monotonic() - start_time >
+                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.warning(
                             "No available block found in %s second. ",
                             VLLM_RINGBUFFER_WARNING_INTERVAL)
@@ -392,8 +399,8 @@ class MessageQueue:
                     time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
-                    if time.monotonic(
-                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                    if (time.monotonic() - start_time >
+                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.warning(
                             "No available block found in %s second. ",
                             VLLM_RINGBUFFER_WARNING_INTERVAL)
