@@ -321,7 +321,7 @@ def np_cache_weights_iterator(
 
     Will dump the model weights to numpy files if they are not already dumped.
     """
-    enable_tqdm = not torch.dist.is_initialized(
+    enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
     # Convert the model weights from torch tensors to numpy arrays for
     # faster loading.
@@ -359,7 +359,7 @@ def safetensors_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    enable_tqdm = not torch.dist.is_initialized(
+    enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
     for st_file in tqdm(hf_weights_files,
                         desc="Loading safetensors checkpoint shards",
@@ -374,7 +374,7 @@ def pt_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
-    enable_tqdm = not torch.dist.is_initialized(
+    enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
     for bin_file in tqdm(hf_weights_files,
                          desc="Loading pt checkpoint shards",
