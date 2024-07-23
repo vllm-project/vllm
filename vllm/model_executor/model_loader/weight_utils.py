@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple
+from typing import Any, Generator, Iterable, List, Optional, Tuple, Union
 
 import filelock
 import huggingface_hub.constants
@@ -189,6 +189,7 @@ def download_weights_from_hf(
     cache_dir: Optional[str],
     allow_patterns: List[str],
     revision: Optional[str] = None,
+    ignore_patterns: Optional[Union[str, List[str]]] = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
 
@@ -200,6 +201,9 @@ def download_weights_from_hf(
             weight files. Files matched by any of the patterns will be
             downloaded.
         revision (Optional[str]): The revision of the model.
+        ignore_patterns (Optional[Union[str, List[str]]]): The patterns to
+            filter out the weight files. Files matched by any of the patterns
+            will be ignored.
 
     Returns:
         str: The path to the downloaded model weights.
@@ -219,10 +223,12 @@ def download_weights_from_hf(
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
+    assert ignore_patterns == ["original/**/*"]
     with get_lock(model_name_or_path, cache_dir):
         hf_folder = snapshot_download(
             model_name_or_path,
             allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
             cache_dir=cache_dir,
             tqdm_class=DisabledTqdm,
             revision=revision,
