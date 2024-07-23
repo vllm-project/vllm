@@ -258,6 +258,9 @@ def test_reshape_and_cache_flash(
         cloned_key_cache = key_cache.clone()
         cloned_value_cache = value_cache.clone()
 
+    # Using default kv_scale
+    k_scale = v_scale = 1.0
+
     # Call the reshape_and_cache kernel.
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype, k_scale, v_scale)
