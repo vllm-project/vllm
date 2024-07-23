@@ -474,6 +474,8 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        prefill_meta = attn_metadata.prefill_metadata
+
         if all([
             kv_cache is not None, # we are not in profile run
             prefill_meta is not None, # during prefill stage
@@ -521,7 +523,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
 
-        if prefill_meta := attn_metadata.prefill_metadata:
+        if prefill_meta is not None:
             # Prompt run.
             if (kv_cache is None or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
