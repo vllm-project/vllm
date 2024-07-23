@@ -1,26 +1,12 @@
 import base64
 from io import BytesIO
-from typing import Optional, Union
-from urllib.parse import urlparse
+from typing import Union
 
-import aiohttp
-import requests
 from PIL import Image
 
+from vllm.connections import global_http_connection
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.base import MultiModalDataDict
-from vllm.version import __version__ as VLLM_VERSION
-
-
-def _validate_remote_url(url: str, *, name: str):
-    parsed_url = urlparse(url)
-    if parsed_url.scheme not in ["http", "https"]:
-        raise ValueError(f"Invalid '{name}': A valid '{name}' "
-                         "must have scheme 'http' or 'https'.")
-
-
-def _get_request_headers():
-    return {"User-Agent": f"vLLM/{VLLM_VERSION}"}
 
 
 def _load_image_from_bytes(b: bytes):
@@ -42,13 +28,8 @@ def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
     By default, the image is converted into RGB format.
     """
     if image_url.startswith('http'):
-        _validate_remote_url(image_url, name="image_url")
-
-        headers = _get_request_headers()
-
-        with requests.get(url=image_url, headers=headers) as response:
-            response.raise_for_status()
-            image_raw = response.content
+        image_raw = global_http_connection.get_bytes(
+            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -60,55 +41,30 @@ def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
     return image.convert(image_mode)
 
 
-class ImageFetchAiohttp:
-    aiohttp_client: Optional[aiohttp.ClientSession] = None
+async def async_fetch_image(image_url: str,
+                            *,
+                            image_mode: str = "RGB") -> Image.Image:
+    """
+    Asynchronously load a PIL image from a HTTP or base64 data URL.
 
-    @classmethod
-    def get_aiohttp_client(cls) -> aiohttp.ClientSession:
-        if cls.aiohttp_client is None:
-            timeout = aiohttp.ClientTimeout(total=VLLM_IMAGE_FETCH_TIMEOUT)
-            connector = aiohttp.TCPConnector()
-            cls.aiohttp_client = aiohttp.ClientSession(timeout=timeout,
-                                                       connector=connector)
+    By default, the image is converted into RGB format.
+    """
+    if image_url.startswith('http'):
+        image_raw = await global_http_connection.async_get_bytes(
+            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+        image = _load_image_from_bytes(image_raw)
 
-        return cls.aiohttp_client
+    elif image_url.startswith('data:image'):
+        image = _load_image_from_data_url(image_url)
+    else:
+        raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
+                         "with either 'data:image' or 'http'.")
 
-    @classmethod
-    async def fetch_image(
-        cls,
-        image_url: str,
-        *,
-        image_mode: str = "RGB",
-    ) -> Image.Image:
-        """
-        Asynchronously load a PIL image from a HTTP or base64 data URL.
-
-        By default, the image is converted into RGB format.
-        """
-
-        if image_url.startswith('http'):
-            _validate_remote_url(image_url, name="image_url")
-
-            client = cls.get_aiohttp_client()
-            headers = _get_request_headers()
-
-            async with client.get(url=image_url, headers=headers) as response:
-                response.raise_for_status()
-                image_raw = await response.read()
-            image = _load_image_from_bytes(image_raw)
-
-        elif image_url.startswith('data:image'):
-            image = _load_image_from_data_url(image_url)
-        else:
-            raise ValueError(
-                "Invalid 'image_url': A valid 'image_url' must start "
-                "with either 'data:image' or 'http'.")
-
-        return image.convert(image_mode)
+    return image.convert(image_mode)
 
 
 async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
-    image = await ImageFetchAiohttp.fetch_image(image_url)
+    image = await async_fetch_image(image_url)
     return {"image": image}
 
 
