@@ -470,8 +470,8 @@ class LLMEngine:
         return self.tokenizer
 
     def get_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest] = None
+        self,
+        lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 

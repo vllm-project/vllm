@@ -49,16 +49,16 @@ class BaseTokenizerGroup(ABC):
 
     @abstractmethod
     def get_lora_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest] = None
+        self,
+        lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
         pass
 
     @abstractmethod
     async def get_lora_tokenizer_async(
-            self,
-            lora_request: Optional[LoRARequest] = None
+        self,
+        lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
         pass

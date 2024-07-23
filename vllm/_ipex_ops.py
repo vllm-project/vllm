@@ -84,11 +84,19 @@ class ipex_ops:
         ).view(num_kv_heads,
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v1(out, query.contiguous(),  # type: ignore
-                                     key_cache.view_as(value_cache),
-                                     value_cache, head_mapping, scale,
-                                     block_tables, context_lens, block_size,
-                                     max_context_len, alibi_slopes)
+        torch.xpu.paged_attention_v1(  # type: ignore
+            out,
+            query.contiguous(),
+            key_cache.view_as(value_cache),
+            value_cache,
+            head_mapping,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
 
     @staticmethod
     def paged_attention_v2(
@@ -126,12 +134,22 @@ class ipex_ops:
         ).view(num_kv_heads,
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v2(out, exp_sum, max_logits, tmp_out,  # type: ignore
-                                     query.contiguous(),
-                                     key_cache.view_as(value_cache),
-                                     value_cache, head_mapping, block_tables,
-                                     context_lens, scale, block_size,
-                                     max_context_len, alibi_slopes)
+        torch.xpu.paged_attention_v2(  # type: ignore
+            out,
+            exp_sum,
+            max_logits,
+            tmp_out,
+            query.contiguous(),
+            key_cache.view_as(value_cache),
+            value_cache,
+            head_mapping,
+            block_tables,
+            context_lens,
+            scale,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
 
     @staticmethod
     def rotary_embedding(
@@ -253,7 +271,11 @@ class ipex_ops:
     def copy_blocks(key_caches: List[torch.Tensor],
                     value_caches: List[torch.Tensor],
                     block_mapping: torch.Tensor) -> None:
-        torch.xpu.copy_blocks(key_caches, value_caches, block_mapping)  # type: ignore
+        torch.xpu.copy_blocks(  # type: ignore
+            key_caches,
+            value_caches,
+            block_mapping,
+        )
 
     @staticmethod
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,

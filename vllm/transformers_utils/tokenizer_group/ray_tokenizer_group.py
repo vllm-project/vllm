@@ -81,8 +81,10 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         return len(self.tokenizer_actors)
 
     def ping(self):
-        return ray.get(
-            [actor.ping.remote() for actor in self.tokenizer_actors])  # type: ignore
+        return ray.get([
+            actor.ping.remote()  # type: ignore
+            for actor in self.tokenizer_actors
+        ])
 
     def _ensure_queue_initialized(self):
         if self._idle_actors is None:
@@ -206,14 +208,14 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         return self._local_tokenizer_group.get_max_input_len(lora_request)
 
     def get_lora_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest] = None
+        self,
+        lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         return self._local_tokenizer_group.get_lora_tokenizer(lora_request)
 
     async def get_lora_tokenizer_async(
-            self,
-            lora_request: Optional[LoRARequest] = None
+        self,
+        lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         return await self._local_tokenizer_group.get_lora_tokenizer_async(
             lora_request)
