@@ -95,6 +95,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
+    ignore_patterns: Optional[Union[str, List[str]]] = None
     preemption_mode: Optional[str] = None
 
     scheduler_delay_factor: float = 0.0
@@ -620,6 +621,14 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
         parser.add_argument(
+            '--ignore-patterns',
+            action="append",
+            type=str,
+            default=[],
+            help="The pattern(s) to ignore when loading the model."
+            "Default to 'original/**/*' to avoid repeated loading of llama's "
+            "checkpoints.")
+        parser.add_argument(
             '--preemption-mode',
             type=str,
             default=None,
@@ -824,6 +833,7 @@ class EngineArgs:
             load_format=self.load_format,
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
+            ignore_patterns=self.ignore_patterns,
         )
 
         prompt_adapter_config = PromptAdapterConfig(
