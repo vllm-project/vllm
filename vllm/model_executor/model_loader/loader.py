@@ -161,6 +161,7 @@ class DefaultModelLoader(BaseModelLoader):
                     cache_dir=self.load_config.download_dir,
                     local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                     revision=revision,
+                    ignore_patterns=self.load_config.ignore_patterns,
                 )
             else:
                 model_path = model
@@ -196,9 +197,13 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns += ["*.pt"]
 
         if not is_local:
-            hf_folder = download_weights_from_hf(model_name_or_path,
-                                                 self.load_config.download_dir,
-                                                 allow_patterns, revision)
+            hf_folder = download_weights_from_hf(
+                model_name_or_path,
+                self.load_config.download_dir,
+                allow_patterns,
+                revision,
+                ignore_patterns=self.load_config.ignore_patterns,
+            )
         else:
             hf_folder = model_name_or_path
 
@@ -489,9 +494,13 @@ class ShardedStateLoader(BaseModelLoader):
             return model_name_or_path
         else:
             allow_patterns = ["*.safetensors"]
-            return download_weights_from_hf(model_name_or_path,
-                                            self.load_config.download_dir,
-                                            allow_patterns, revision)
+            return download_weights_from_hf(
+                model_name_or_path,
+                self.load_config.download_dir,
+                allow_patterns,
+                revision,
+                ignore_patterns=self.load_config.ignore_patterns,
+            )
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -663,8 +672,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 matching_files = fnmatch.filter(repo_files, pattern)
                 if matching_files:
                     hf_folder = download_weights_from_hf(
-                        model_name_or_path, self.load_config.download_dir,
-                        [pattern], revision)
+                        model_name_or_path,
+                        self.load_config.download_dir,
+                        [pattern],
+                        revision,
+                        ignore_patterns=self.load_config.ignore_patterns,
+                    )
                     return glob.glob(os.path.join(hf_folder, pattern)), pattern
 
         raise RuntimeError(
