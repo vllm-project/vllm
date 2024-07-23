@@ -182,10 +182,6 @@ Vision Language Models
     - Models
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
-  * - :code:`ChameleonForConditionalGeneration`
-    - Chameleon
-    - :code:`facebook/chameleon-7b` etc.
-    - 
   * - :code:`FuyuForCausalLM`
     - Fuyu
     - :code:`adept/fuyu-8b` etc.

@@ -7,7 +7,9 @@ from vllm.multimodal.utils import rescale_image_size
 
 from ..conftest import IMAGE_ASSETS, VllmRunner, _ImageAssets
 
-pytestmark = pytest.mark.vlm
+# TODO (ywang96): RE-enable this test when chameleon is available 
+# on transformers.
+#pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
