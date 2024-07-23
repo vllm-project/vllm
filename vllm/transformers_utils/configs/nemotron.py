@@ -152,6 +152,7 @@ class NemotronConfig(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
+        head_dim = head_dim or kwargs.get("kv_channels", None)
         self.head_dim = head_dim if head_dim is not None else (
             hidden_size // num_attention_heads)
 
@@ -166,7 +167,8 @@ class NemotronConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
-        self.rope_percent = rope_percent or kwargs.get("rope_percentage", None)
+        rope_percent = rope_percent or kwargs.get("rope_percentage", None)
+        self.rope_percent = rope_percent
         self._rope_scaling_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
