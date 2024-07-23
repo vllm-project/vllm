@@ -146,9 +146,13 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
         if prefill_meta := attn_metadata.prefill_metadata:
             block_indices = prefill_meta.block_indices
             block_offsets = prefill_meta.block_offsets
+            key = key.unflatten(0, (block_indices.size(0), -1))
+            value = value.unflatten(0, (block_indices.size(0), -1))
+
         if decode_meta := attn_metadata.decode_metadata:
             block_indices = decode_meta.block_indices
             block_offsets = decode_meta.block_offsets
+
         if kv_cache is not None:
             key_cache, value_cache = HabanaPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
