@@ -62,27 +62,3 @@ with override_backend_env_var_context_manager(STR_XFORMERS_ATTN_VAL):
         print(f"Encoder prompt: {encoder_prompt!r}, "
               f"Decoder prompt: {prompt!r}, "
               f"Generated text: {generated_text!r}")
-
-model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn")
-tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-cnn")
-
-ARTICLE_TO_SUMMARIZE = encoder_prompts[0]
-inputs = tokenizer([ARTICLE_TO_SUMMARIZE],
-                   max_length=1024,
-                   return_tensors="pt")
-
-# decoder_inputs = tokenizer([''],
-#                    max_length=1024,
-#                    return_tensors="pt")
-
-# Generate Summary
-summary_ids = model.generate(
-    inputs["input_ids"],
-    #  decoder_input_ids=decoder_inputs["input_ids"],
-    min_length=0,
-    max_length=20,
-)
-print(
-    tokenizer.batch_decode(summary_ids,
-                           skip_special_tokens=True,
-                           clean_up_tokenization_spaces=False), )
