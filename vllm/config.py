@@ -1483,8 +1483,6 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    # The correct one should be "longrope", kept "su" here
-    # to be backward compatible
     if rope_scaling is not None:
         if "type" in rope_scaling:
             rope_type = rope_scaling["type"]
@@ -1494,6 +1492,8 @@ def _get_and_verify_max_len(
             raise ValueError(
                 "rope_scaling must have a 'type' or 'rope_type' key.")
 
+        # The correct one should be "longrope", kept "su" here
+        # to be backward compatible
         if rope_type not in ("su", "longrope", "llama3"):
             if disable_sliding_window:
                 # TODO(robertgshaw): Find a model that supports rope_scaling
