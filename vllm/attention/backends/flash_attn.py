@@ -482,6 +482,8 @@ class FlashAttentionImpl(AttentionImpl):
             envs.VLLM_DISAGG_PREFILL_ROLE is not None, # disagg prefill enabled
         ]):
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
+                key = key.contiguous()
+                value = value.contiguous()
                 print("Sending key & value, ", key.shape, key.dtype, value.shape, value.dtype)
                 get_disagg_group().send(key)
                 get_disagg_group().send(value)
@@ -567,7 +569,7 @@ class FlashAttentionImpl(AttentionImpl):
                         alibi_slopes=self.alibi_slopes,
                         block_table=prefill_meta.block_tables,
                     )
-                    output.view(num_tokens, hidden_size)
+                    output = output.view(num_tokens, hidden_size).contiguous()
 
                 if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
                     # communication for disaggregated prefill.
