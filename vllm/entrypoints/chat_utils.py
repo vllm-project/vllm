@@ -105,7 +105,8 @@ def _image_token_str(model_config: ModelConfig,
         return None
     if model_type.startswith("llava"):
         return tokenizer.decode(model_config.hf_config.image_token_index)
-
+    if model_type == "chameleon":
+        return "<image>"
     raise TypeError("Unknown model type: {model_type}")
 
 
