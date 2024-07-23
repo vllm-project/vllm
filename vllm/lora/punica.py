@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 
 
 def _check_punica_support():
+    return 
     if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
         return
 
