@@ -101,7 +101,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && export SCCACHE_BUCKET=vllm-build-sccache \
+        && if [ "$CUDA_VERSION" = "11.8.0" ]; then \
+            export SCCACHE_BUCKET=vllm-build-sccache-2; \
+           else \
+            export SCCACHE_BUCKET=vllm-build-sccache; \
+           fi \
         && export SCCACHE_REGION=us-west-2 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
@@ -166,7 +170,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && python3 --version
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git curl libibverbs-dev
+    && apt-get install -y python3-pip git vim curl libibverbs-dev
 
 # Install pip s.t. it will be compatible with our PYTHON_VERSION
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
