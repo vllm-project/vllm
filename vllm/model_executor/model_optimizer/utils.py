@@ -690,16 +690,6 @@ class SubGraph:
         return tabulate(node_specs, headers=headers)
 
 
-def contains_constant(arg: torch.fx.node.Argument):
-    # TODO: tuple isn't right unless its composed of constants????
-    if isinstance(arg, tuple):
-        return True
-    elif isinstance(arg, (str, int, float, bool)):
-        return True
-    else:
-        return False
-
-
 # This takes in an fx node that has at least one const argument.
 # Count should be incremented by the caller. Once for each const argument
 def generate_const_name(node: torch.fx.node, count):
@@ -714,13 +704,30 @@ def extract_constant_vals(arg: torch.fx.node.Argument):
         return val
     if isinstance(arg, slice):
         if arg.stop:
-            assert arg.start == None
+            assert arg.start is None
             return (arg.stop, )
         else:
             assert arg.start is not None
-            assert arg.stop == None
+            assert arg.stop is None
             return (arg.start, )
     elif isinstance(arg, (str, int, float, bool)):
         return (arg, )
     else:
         return ()
+
+
+def arg_swap(arg: torch.fx.node.Argument,
+             inputs: Dict[str, torch.fx.node.Argument]) -> str:
+    try:
+        # if this arg is in the list of external args and it's constant,
+        # substitute it in. Otherwise just stringify the value
+        # TODO: This is a little strange for duplicated values. It will
+        # work, but will end up using the first instance of that value
+        # in the argument list.
+        key = list(inputs.keys())[list(inputs.values()).index(arg)]
+        if "const" in key:
+            return key
+        else:
+            return str(arg)
+    except ValueError:
+        return str(arg)

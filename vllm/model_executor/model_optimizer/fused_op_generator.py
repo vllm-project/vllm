@@ -5,6 +5,7 @@
 ###############################################################################
 
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from typing import Callable, Dict, List
 
 import torch
@@ -27,7 +28,8 @@ class FusedOpGenerator(ABC):
 
     @abstractmethod
     def make_fused_op(
-            self, op_name: str, inputs: List[torch.fx.Node],
+            self, op_name: str, inputs: OrderedDict[str,
+                                                    torch.fx.node.Argument],
             outputs: List[torch.fx.Node], nodes: List[torch.fx.Node],
             kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
         raise FusionFail("no generator")

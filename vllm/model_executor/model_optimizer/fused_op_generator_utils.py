@@ -92,18 +92,15 @@ def arg_schema_type(n: torch.fx.node.Argument,
     return ty if not add_prefix else f"torch::{ty}"
 
 
-# TODO: maybe pass in the full dicitonary here for naming purposes?
 def generate_op_schema(
         inputs: Dict[str, torch.fx.node.Argument],
         outputs: List[torch.fx.Node], nodes: List[torch.fx.Node],
         kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> str:
     sep = "("
     arg_sig = ""
-    for name in inputs.keys():
+    for name in inputs:
         arg_type = arg_schema_type(inputs[name]).replace(".", "::")
-        # arg_name = arg_schema_name(n)
-        #TODO is this right? Shouldn't we still use arg_schema_name for the tensors?
-        arg_name = name
+        arg_name = name.replace(".", "_")
         arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
         sep = ", "
 
@@ -125,10 +122,7 @@ def generate_op_schema(
     return arg_sig
 
 
-def generate_meta_function(
-        inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
+def generate_meta_function(nodes: List[torch.fx.Node]) -> Callable:
     """
     Generate a meta function for a fused op by composing the individual
     operations.
