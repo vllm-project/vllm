@@ -517,8 +517,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                               device=self.runner.device)
 
         # Sequence and query lengths.
-        self.seq_lens.extend([1] * cuda_graph_pad_size)
-        self.query_lens.extend([1] * cuda_graph_pad_size)
+        seq_lens.extend([1] * cuda_graph_pad_size)
+        query_lens.extend([1] * cuda_graph_pad_size)
 
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
@@ -899,7 +899,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return
 
     def remove_all_loras(self):
-        if not selsf.lora_manager:
+        if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
