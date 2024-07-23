@@ -24,6 +24,43 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
 #endif
 }
 
+static inline __device__ int32_t float_to_int32_rn(float x) {
+#ifdef USE_ROCM
+  static const float i32_min =
+      static_cast<float>(std::numeric_limits<int32_t>::min());
+  static const float i32_max =
+      static_cast<float>(std::numeric_limits<int32_t>::max());
+  // round
+  float dst = std::nearbyint(x);
+  // saturate
+  dst = std::clamp(dst, i32_min, i32_max);
+  return static_cast<int32_t>(dst);
+#else
+  // CUDA path
+  uint32_t dst;
+  asm volatile("cvt.rni.sat.s32.f32 %0, %1;" : "=r"(dst) : "f"(x));
+  return reinterpret_cast<const int32_t&>(dst);
+#endif
+}
+
+static inline __device__ int8_t int32_to_int8(int32_t x) {
+#ifdef USE_ROCM
+  static const float i8_min =
+      static_cast<int32_t>(std::numeric_limits<int8_t>::min());
+  static const float i8_max =
+      static_cast<int32_t>(std::numeric_limits<int8_t>::max());
+
+  // saturate
+  int32_t dst = std::clamp(x, i8_min, i8_max);
+  return static_cast<int8_t>(dst);
+#else
+  // CUDA path
+  uint32_t dst;
+  asm volatile("cvt.sat.s8.s32 %0, %1;" : "=r"(dst) : "r"(x));
+  return reinterpret_cast<const int8_t&>(dst);
+#endif
+}
+
 namespace vllm {
 
 template <typename scalar_t, typename scale_type>
@@ -113,8 +150,9 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
 
   // Quantize the values
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    auto val = static_cast<float>(input[token_idx * hidden_size + i]);
-    auto quant_val = static_cast<int8_t>(roundf(val / scale_val) - azp_val);
+    auto const val = static_cast<float>(input[token_idx * hidden_size + i]);
+    auto const quant_val =
+        int32_to_int8(float_to_int32_rn(val / scale_val) - azp_val);
     out[token_idx * hidden_size + i] = quant_val;
   }
 }

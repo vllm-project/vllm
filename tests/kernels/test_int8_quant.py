@@ -64,9 +64,8 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     if (not torch.allclose(scales_out, scales)):
         print(torch.argmax(torch.abs(scales_out - scales)))
     assert torch.allclose(scales_out, scales)
-    assert torch.allclose(azp_out, azps)
-    assert torch.allclose(torch_out, ops_out,
-                          atol=1)  # big atol to account for rounding errors
+    assert torch.allclose(azp_out, azps, atol=1)  # azp rounding error
+    assert torch.allclose(torch_out, ops_out, atol=1)  # azp rounding error
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
