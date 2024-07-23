@@ -3,9 +3,10 @@ import argparse
 import os
 import signal
 import sys
-from typing import Optional
+from typing import List, Optional
 
 from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
@@ -62,15 +63,14 @@ def complete(model_name: str, client: OpenAI) -> None:
 
 def chat(system_prompt: Optional[str], model_name: str,
          client: OpenAI) -> None:
-    conversation = []
+    conversation: List[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
 
     print("Please enter a message for the chat model:")
     while True:
         input_message = input("> ")
-        message = {"role": "user", "content": input_message}
-        conversation.append(message)
+        conversation.append({"role": "user", "content": input_message})
 
         chat_completion = client.chat.completions.create(model=model_name,
                                                          messages=conversation)
@@ -78,7 +78,7 @@ def chat(system_prompt: Optional[str], model_name: str,
         response_message = chat_completion.choices[0].message
         output = response_message.content
 
-        conversation.append(response_message)
+        conversation.append(response_message)  # type: ignore
         print(output)
 
 

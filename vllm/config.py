@@ -714,7 +714,7 @@ class ParallelConfig:
                         backend)
 
         self._verify_args()
-        self.rank = 0
+        self.rank: int = 0
 
     @property
     def use_ray(self) -> bool:
@@ -838,6 +838,7 @@ class SchedulerConfig:
 
 
 class DeviceConfig:
+    device: Optional[torch.device]
 
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":

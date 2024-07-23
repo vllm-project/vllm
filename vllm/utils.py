@@ -600,8 +600,8 @@ class CudaMemoryProfiler:
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)
-            mem = torch.xpu.max_memory_allocated(self.device)
+            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):

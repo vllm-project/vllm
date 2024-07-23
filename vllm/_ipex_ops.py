@@ -25,27 +25,33 @@ class ipex_ops:
         x2 = x2.reshape(num, d)
         return x1, x2
 
+    @staticmethod
     def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
         x1, x2 = ipex_ops._reshape_activation_tensor(x)
         ipex.llm.functional.silu_mul(x1, x2, out)
 
+    @staticmethod
     def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
         x1, x2 = ipex_ops._reshape_activation_tensor(x)
         ipex.llm.functional.gelu_mul(x1, x2, out, "none")
 
+    @staticmethod
     def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
         x1, x2 = ipex_ops._reshape_activation_tensor(x)
         ipex.llm.functional.gelu_mul(x1, x2, out, "tanh")
 
+    @staticmethod
     def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
         out.copy_(torch.nn.functional.gelu(x))
 
+    @staticmethod
     def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
         out.copy_(torch.nn.functional.gelu(x))
 
     # TODO add implementation of gelu_quick here
     # def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
 
+    @staticmethod
     def paged_attention_v1(
         out: torch.Tensor,
         query: torch.Tensor,
@@ -78,12 +84,13 @@ class ipex_ops:
         ).view(num_kv_heads,
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v1(out, query.contiguous(),
+        torch.xpu.paged_attention_v1(out, query.contiguous(),  # type: ignore
                                      key_cache.view_as(value_cache),
                                      value_cache, head_mapping, scale,
                                      block_tables, context_lens, block_size,
                                      max_context_len, alibi_slopes)
 
+    @staticmethod
     def paged_attention_v2(
         out: torch.Tensor,
         exp_sum: torch.Tensor,
@@ -119,13 +126,14 @@ class ipex_ops:
         ).view(num_kv_heads,
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v2(out, exp_sum, max_logits, tmp_out,
+        torch.xpu.paged_attention_v2(out, exp_sum, max_logits, tmp_out,  # type: ignore
                                      query.contiguous(),
                                      key_cache.view_as(value_cache),
                                      value_cache, head_mapping, block_tables,
                                      context_lens, scale, block_size,
                                      max_context_len, alibi_slopes)
 
+    @staticmethod
     def rotary_embedding(
         positions: torch.Tensor,  # [batch_size, seq_len]
         query: torch.Tensor,  # [batch_size, seq_len, num_heads*head_size]
@@ -158,6 +166,7 @@ class ipex_ops:
         ipex.llm.functional.rotary_embedding(query_rot, key_rot, sin, cos,
                                              rotary_dim, is_neox, positions)
 
+    @staticmethod
     def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                                  key: torch.Tensor, head_size: int,
                                  cos_sin_cache: torch.Tensor, is_neox: bool,
@@ -189,17 +198,20 @@ class ipex_ops:
         ipex.llm.functional.rotary_embedding(query_rot, key_rot, sin, cos,
                                              rotary_dim, is_neox, positions)
 
+    @staticmethod
     def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
                  epsilon: float) -> None:
         tmp = ipex.llm.functional.rms_norm(input, weight, epsilon)
         out.copy_(tmp)
 
+    @staticmethod
     def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                            weight: torch.Tensor, epsilon: float) -> None:
         tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
                                                epsilon, True)
         input.copy_(tmp)
 
+    @staticmethod
     def varlen_attention(
         query: torch.Tensor,
         key: torch.Tensor,
@@ -222,6 +234,7 @@ class ipex_ops:
                                              softmax_scale, zero_tensors,
                                              is_causal, return_softmax, gen_)
 
+    @staticmethod
     def reshape_and_cache(
         key: torch.Tensor,
         value: torch.Tensor,
@@ -240,8 +253,9 @@ class ipex_ops:
     def copy_blocks(key_caches: List[torch.Tensor],
                     value_caches: List[torch.Tensor],
                     block_mapping: torch.Tensor) -> None:
-        torch.xpu.copy_blocks(key_caches, value_caches, block_mapping)
+        torch.xpu.copy_blocks(key_caches, value_caches, block_mapping)  # type: ignore
 
+    @staticmethod
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                     block_mapping: torch.Tensor) -> None:
-        torch.xpu.swap_blocks(src, dst, block_mapping)
+        torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
