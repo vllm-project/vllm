@@ -505,15 +505,19 @@ class FlashAttentionImpl(AttentionImpl):
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
-
-        if prefill_meta := attn_metadata.prefill_metadata:
+        
+        prefill_meta = attn_metadata.prefill_metadata
+        if (prefill_meta is not None) and (
+            (envs.VLLM_DISAGG_PREFILL_ROLE is None)
+            or
+            (envs.VLLM_DISAGG_PREFILL_ROLE == "prefill")
+        ): # during prefilling, and this instance is not disagg decode instance
             # Prompt run.
             if (kv_cache is None or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                print("profile run ", end="")
                 out = flash_attn_varlen_func(
                     q=query,
                     k=key,
@@ -533,38 +537,33 @@ class FlashAttentionImpl(AttentionImpl):
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                print("non promt_run")
 
-                if not all([
-                    envs.VLLM_DISAGG_PREFILL_ROLE is not None,
-                    envs.VLLM_DISAGG_PREFILL_ROLE == "decode",
-                ]): # Only skip prefill for disagg decode instance
-                    logger.debug("Do prefill")
-                    output[:num_prefill_tokens] = flash_attn_varlen_func(
-                        q=query,
-                        k=key_cache,
-                        v=value_cache,
-                        cu_seqlens_q=prefill_meta.query_start_loc,
-                        max_seqlen_q=prefill_meta.max_query_len,
-                        cu_seqlens_k=prefill_meta.seq_start_loc,
-                        max_seqlen_k=max_seq_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        alibi_slopes=self.alibi_slopes,
-                        block_table=prefill_meta.block_tables,
-                    )
-                    output = output.view(num_tokens, hidden_size).contiguous()
+                output[:num_prefill_tokens] = flash_attn_varlen_func(
+                    q=query,
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=prefill_meta.query_start_loc,
+                    max_seqlen_q=prefill_meta.max_query_len,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_k=max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    block_table=prefill_meta.block_tables,
+                )
 
-                if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-                    # communication for disaggregated prefill.
-                    if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
-                        print("Sending output, " , output.shape, output.dtype)
-                        get_disagg_group().send(output)
-                    else:
-                        print("Recv output, " , output.shape, output.dtype)
-                        # Kuntai: This assume that output has the same dtype as key
-                        # Is this assumption true?
-                        output = get_disagg_group().recv([num_tokens, hidden_size], key.dtype)
+        if (prefill_meta is not None) and \
+            (envs.VLLM_DISAGG_PREFILL_ROLE is not None):
+            # communication for disaggregated prefill.
+            if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
+                output = output.view(num_tokens, hidden_size).contiguous()
+                print("Sending output, " , output.shape, output.dtype)
+                get_disagg_group().send(output)
+            else:
+                print("Recv output, " , output.shape, output.dtype)
+                # Kuntai: This assume that output has the same dtype as key
+                # Is this assumption true?
+                output = get_disagg_group().recv([num_tokens, hidden_size], key.dtype)
                         
 
         if decode_meta := attn_metadata.decode_metadata:
