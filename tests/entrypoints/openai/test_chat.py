@@ -329,14 +329,15 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
     async for chunk in stream:
         assert chunk.usage is None
 
-    # Test stream=True, stream_options={"include_usage": True}
+    # Test stream=True, stream_options={"include_usage": True,
+    #                    "continuous_usage_stats": False}
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
         max_tokens=10,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": True},
+        stream_options={"include_usage": True, "continuous_usage_stats": False},
     )
 
     async for chunk in stream:
@@ -375,7 +376,7 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
             stream_options={"include_usage": True},
         )
 
-    # Test stream=True, stream_options={"include_usage": False,
+    # Test stream=True, stream_options={"include_usage": True,
     #                           "continuous_usage_stats": True}
     stream = await client.chat.completions.create(
         model=model_name,
@@ -384,7 +385,7 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
         stream_options={
-            "include_usage": False,
+            "include_usage": True,
             "continuous_usage_stats": True
         },
     )
