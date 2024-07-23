@@ -16,6 +16,7 @@ from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
+from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
@@ -72,6 +73,13 @@ class _ImageAssets(_ImageAssetsBase):
 
 IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
+
+
+@pytest.fixture(autouse=True)
+def init_test_http_connection():
+    # pytest_asyncio may use a different event loop per test
+    # so we need to make sure the async client is created anew
+    global_http_connection.reuse_client = False
 
 
 def cleanup():
