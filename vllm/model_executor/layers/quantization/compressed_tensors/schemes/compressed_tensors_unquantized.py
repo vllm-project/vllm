@@ -18,6 +18,10 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
     in a linear transformation.
     """
 
+    def get_min_capability(self) -> int:
+        # volta and up
+        return 70
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
@@ -29,7 +33,6 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
-                                       device="cuda",
                                        dtype=params_dtype),
                            requires_grad=False)
 

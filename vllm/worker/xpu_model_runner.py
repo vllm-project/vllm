@@ -335,11 +335,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                                        dtype=torch.int,
                                        device=self.device)
 
-        max_block_table_len = max(
-            len(block_table) for block_table in block_tables)
         block_tables = make_tensor_with_pad(
             block_tables,
-            max_len=max_block_table_len,
             pad=0,
             dtype=torch.int,
             device=self.device,
