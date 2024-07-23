@@ -1,5 +1,6 @@
 import logging
 import math
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
 
 import torch
@@ -97,9 +98,22 @@ class PromptAdapterModel(AdapterModel):
                 f'num_virtual_tokens ({num_virtual_tokens}) should be <= '
                 f'max_prompt_adapter_token({config.max_prompt_adapter_token})')
 
-        adapters_weights = load_peft_weights(adapter_model_path, device)
-        prompt_embedding = adapters_weights["prompt_embeddings"].to(
-            config.prompt_adapter_dtype)
+        peft_config_path = Path(adapter_model_path) / "adapter_config.json"
+        decoder_pt_path = Path(adapter_model_path) / "decoder.pt"
+
+        if Path(peft_config_path).exists():
+            adapters_weights = load_peft_weights(adapter_model_path, device)
+            prompt_embedding = adapters_weights["prompt_embeddings"].to(
+                config.prompt_adapter_dtype)
+        elif Path(decoder_pt_path).exists():
+            # if no PEFT adapter found, try to load *.pt style adapter from path
+            prompt_embedding = torch.load(decoder_pt_path,
+                                          weights_only=True,
+                                          map_location=device).half()
+        else:
+            raise ValueError(f"No supported adapter format \
+                found at path {adapter_model_path}")
+        num_virtual_tokens = prompt_embedding.shape[0]
 
         return cls(prompt_adapter_id, num_virtual_tokens, prompt_embedding)
 
