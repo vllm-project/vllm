@@ -14,63 +14,37 @@ def print_outputs(outputs):
 
 print("=" * 80)
 
-# In this script, we demonstrate two ways to pass input to the chat method of the LLM class:
+# In this script, we demonstrate two ways to pass input to the chat method:
 
 # Conversation with a list of dictionaries
 conversation = [
+    {"role": "system", "content": "You are a helpful assistant"},
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hello! How can I assist you today?"},
     {
-        'role': 'system',
-        'content': "You are a helpful assistant"
-    },
-    {
-        'role': 'user',
-        'content': "Hello"
-    },
-    {
-        'role': 'assistant',
-        'content': "Hello! How can I assist you today?"
-    },
-    {
-        'role': 'user',
-        'content': "Write an essay about the importance of higher education."
+        "role": "user",
+        "content": "Write an essay about the importance of higher education.",
     },
 ]
-outputs = llm.chat(conversation,
-                   sampling_params=sampling_params,
-                   use_tqdm=False)
+outputs = llm.chat(
+    conversation, sampling_params=sampling_params, use_tqdm=False
+)
 print_outputs(outputs)
 
-# Multiple conversations 
+# Multiple conversations
 conversations = [
     [
-        {
-            'role': 'system',
-            'content': "You are a helpful assistant"
-        },
-        {
-            'role': 'user',
-            'content': "What is dark matter?"
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "What is dark matter?"},
     ],
     [
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "How are you?"},
         {
-            'role': 'system',
-            'content': "You are a helpful assistant"
+            "role": "assistant",
+            "content": "I'm an AI without feelings, but I'm here to help!",
         },
-        {
-            'role': 'user',
-            'content': "How are you?"
-        },
-        {
-            'role':
-            'assistant',
-            'content':
-            "I'm an AI, so I don't have feelings, but I'm here to help you!"
-        },
-        {
-            'role': 'user',
-            'content': "Tell me a joke."
-        },
+        {"role": "user", "content": "Tell me a joke."},
     ],
 ]
 

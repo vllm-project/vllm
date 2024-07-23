@@ -141,6 +141,7 @@ def test_multiple_sampling_params(llm: LLM):
     outputs = llm.generate(PROMPTS, sampling_params=None)
     assert len(PROMPTS) == len(outputs)
 
+
 def test_chat():
 
     llm = LLM(model=MODEL_NAME)
@@ -160,7 +161,7 @@ def test_chat():
     assert len(outputs) == 1
 
     prompt2 = "Describe Bangkok in 150 words."
-    messages = [messages] + [[
+    multiple_messages = [messages] + [[
         {
             "role": "system",
             "content": "You are a helpful assistant"
@@ -170,8 +171,8 @@ def test_chat():
             "content": prompt2
         },
     ]]
-    outputs = llm.chat(messages)
-    assert len(outputs) == len(messages)
+    outputs = llm.chat(multiple_messages)
+    assert len(outputs) == len(multiple_messages)
 
     sampling_params = [
         SamplingParams(temperature=0.01, top_p=0.95),
