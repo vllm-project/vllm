@@ -514,9 +514,8 @@ def dispatch_bgmv(
     layer_idx: int,
     scale: float,
 ) -> None:
-    # torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
-    #                                   scale)
-    pass
+    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
+                                      scale)
 
 
 def dispatch_bgmv_low_level(
@@ -530,18 +529,17 @@ def dispatch_bgmv_low_level(
     h_out: int,
     y_offset: int,
 ) -> None:
-    # torch.ops._punica_C.dispatch_bgmv_low_level(
-    #     y,
-    #     x,
-    #     w_t_all,
-    #     indicies,
-    #     layer_idx,
-    #     scale,
-    #     h_in,
-    #     h_out,
-    #     y_offset,
-    # )
-    pass
+    torch.ops._punica_C.dispatch_bgmv_low_level(
+        y,
+        x,
+        w_t_all,
+        indicies,
+        layer_idx,
+        scale,
+        h_in,
+        h_out,
+        y_offset,
+    )
 
 
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456

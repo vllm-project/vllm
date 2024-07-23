@@ -103,12 +103,11 @@ def initialize_engine() -> LLMEngine:
     #   numbers will cause higher memory usage. If you know that all LoRAs will
     #   use the same rank, it is recommended to set this as low as possible.
     # max_cpu_loras: controls the size of the CPU LoRA cache.
-    engine_args = EngineArgs(model="NousResearch/Llama-2-7b-hf",
+    engine_args = EngineArgs(model="meta-llama/Llama-2-7b-hf",
                              enable_lora=True,
                              max_loras=1,
                              max_lora_rank=8,
                              max_cpu_loras=2,
-                            #  dtype="half",
                              max_num_seqs=256)
     return LLMEngine.from_engine_args(engine_args)
 
