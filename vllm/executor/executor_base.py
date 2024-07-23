@@ -18,6 +18,8 @@ class ExecutorBase(ABC):
     that can execute the model on multiple devices.
     """
 
+    uses_ray: bool  # whether the executor uses Ray for orchestration.
+
     def __init__(
         self,
         model_config: ModelConfig,

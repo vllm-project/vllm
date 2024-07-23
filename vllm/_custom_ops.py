@@ -276,14 +276,22 @@ def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                                            num_bits)
 
 
+# gptq_marlin
+def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
+                      num_bits: int) -> torch.Tensor:
+    return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+
+
 def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                     b_scales: torch.Tensor, g_idx: torch.Tensor,
-                     perm: torch.Tensor, workspace: torch.Tensor,
-                     num_bits: int, size_m: int, size_n: int, size_k: int,
-                     is_k_full: bool) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
-                                         workspace, num_bits, size_m, size_n,
-                                         size_k, is_k_full)
+                     b_scales: torch.Tensor, b_zeros: torch.Tensor,
+                     g_idx: torch.Tensor, perm: torch.Tensor,
+                     workspace: torch.Tensor, num_bits: int, size_m: int,
+                     size_n: int, size_k: int, is_k_full: bool,
+                     has_zp: bool) -> torch.Tensor:
+    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
+                                         g_idx, perm, workspace, num_bits,
+                                         size_m, size_n, size_k, is_k_full,
+                                         has_zp)
 
 
 # fp8 marlin
@@ -300,6 +308,7 @@ def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
+    scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -314,6 +323,8 @@ def scaled_fp8_quant(
     Args:
         input: The input tensor to be quantized to FP8
         scale: Optional scaling factor for the FP8 quantization
+        scale_ub: Optional upper bound for scaling factor in dynamic 
+            per token case
         batch_dim_padding: If specified, pad the first dimension
             of the output to at least this value.
         use_per_token_if_dynamic: Whether to do per_tensor or per_token 
@@ -336,7 +347,7 @@ def scaled_fp8_quant(
                                 device=input.device,
                                 dtype=torch.float32)
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale)
+                output, input, scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)

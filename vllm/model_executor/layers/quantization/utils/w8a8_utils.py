@@ -104,7 +104,8 @@ def apply_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    input_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     cutlass_fp8_supported: bool = True,
     use_per_token_if_dynamic: bool = False,
@@ -118,6 +119,7 @@ def apply_fp8_linear(
         qinput, x_scale = ops.scaled_fp8_quant(
             input,
             input_scale,
+            scale_ub=input_scale_ub,
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         # Fused GEMM_DQ
@@ -190,7 +192,7 @@ def apply_int8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    input_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
 ):
     # ops.scaled_int8_quant supports both dynamic and static quant.
