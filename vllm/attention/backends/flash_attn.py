@@ -474,25 +474,6 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        prefill_meta = attn_metadata.prefill_metadata
-
-        if all([
-            kv_cache is not None, # we are not in profile run
-            prefill_meta is not None, # during prefill stage
-            envs.VLLM_DISAGG_PREFILL_ROLE is not None, # disagg prefill enabled
-        ]):
-            if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
-                key = key.contiguous()
-                value = value.contiguous()
-                print("Sending key & value, ", key.shape, key.dtype, value.shape, value.dtype)
-                get_disagg_group().send(key)
-                get_disagg_group().send(value)
-            else:
-                print("Recving key & value, ", key.shape, key.dtype, value.shape, value.dtype)
-                key = get_disagg_group().recv(key.shape, key.dtype)
-                value = get_disagg_group().recv(value.shape, value.dtype)
-
-
         if kv_cache is not None:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
@@ -525,7 +506,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
 
-        if prefill_meta is not None:
+        if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if (kv_cache is None or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
@@ -556,6 +537,7 @@ class FlashAttentionImpl(AttentionImpl):
                     envs.VLLM_DISAGG_PREFILL_ROLE is not None,
                     envs.VLLM_DISAGG_PREFILL_ROLE == "decode",
                 ]): # Only skip prefill for disagg decode instance
+                    logger.debug("Do prefill")
                     output[:num_prefill_tokens] = flash_attn_varlen_func(
                         q=query,
                         k=key_cache,
