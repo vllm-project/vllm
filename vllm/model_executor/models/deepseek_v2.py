@@ -21,7 +21,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only DeepseekV2 model."""
-import functools
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -429,7 +428,10 @@ class DeepseekV2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV2DecoderLayer(
-                config, prefix, cache_config=cache_config, quant_config=quant_config,
+                config,
+                prefix,
+                cache_config=cache_config,
+                quant_config=quant_config,
             ),
             prefix=f"{prefix}.layers")
 
