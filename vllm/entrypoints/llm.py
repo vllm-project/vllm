@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
+from typing import ClassVar, Dict, List, Optional, Sequence, Union, cast, overload
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -315,6 +315,59 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
+    
+    def chat(
+        self,
+        messages: Union[List[Dict[str, str]], List[List[Dict[str, str]]]],
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        chat_template: Optional[str] = None,
+    ) -> List[RequestOutput]:
+        """
+        Generates responses for chat messages.
+        Converts the messages to prompts using the tokenizer and calls 
+        the `generate` method to generate the responses.
+        Args:
+            messages: A list of messages to generate responses for. Each 
+                message is a list of dictionaries with 'role' and 'content' 
+                keys.
+            sampling_params: The sampling parameters for text generation. 
+                If None, we use the default sampling parameters. When it 
+                is a single value, it is applied to every prompt. When it 
+                is a list, the list must have the same length as the 
+                prompts and it is paired one by one with the prompt.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+            chat_template: The template to use for structuring the chat.
+              If not provided, the model's default chat template will be used.
+        Returns:
+            A list of `RequestOutput` objects containing the generated 
+            responses in the same order as the input messages.
+        """
+
+        tokenizer = self.get_tokenizer()
+
+        if isinstance(messages[0], dict):
+            # Apply chat templates for chat inputs.
+            prompts = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_template=True)
+            
+        elif isinstance(messages[0], list):
+            tokenizer = self.get_tokenizer()
+            prompts = [
+                tokenizer.apply_chat_template(message,
+                                              tokenize=False,
+                                              add_generation_template=True)
+                for message in messages
+            ]
+
+        return self.generate(prompts,
+                             sampling_params,
+                             use_tqdm=use_tqdm,
+                             lora_request=lora_request,
+                             chat_template=chat_template)
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
