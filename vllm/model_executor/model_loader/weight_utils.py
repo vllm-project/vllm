@@ -223,7 +223,6 @@ def download_weights_from_hf(
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
-    assert ignore_patterns == ["original/**/*"]
     with get_lock(model_name_or_path, cache_dir):
         hf_folder = snapshot_download(
             model_name_or_path,
