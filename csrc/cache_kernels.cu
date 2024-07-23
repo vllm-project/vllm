@@ -310,10 +310,6 @@ void reshape_and_cache_flash(
     torch::Tensor& slot_mapping,  // [num_tokens]
     const std::string& kv_cache_dtype, const double k_scale,
     const double v_scale) {
-  // FIXME: only support auto datatype, does not support fp8
-  if (kv_cache_dtype != "auto") {
-    TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
-  }
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
