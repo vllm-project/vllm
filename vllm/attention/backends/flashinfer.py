@@ -20,19 +20,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.sequence import SequenceGroupMetadata
+from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.utils import get_kv_cache_torch_dtype, make_tensor_with_pad
 
-# This group is used for KV cache transfer in disaggregated prefilling
-from vllm.distributed import get_disagg_group
-
-# To identify if the VLLM_DISAGG_PREFILL_ROLE is set or no
-import vllm.envs as envs
-
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import (GPUModelRunnerBase,
-                                          ModelInputForGPUBuilder)
-
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 class FlashInferBackend(AttentionBackend):
@@ -68,14 +60,14 @@ class FlashInferBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        raise NotImplementedError
+        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        raise NotImplementedError
+        PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -222,6 +214,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
         self.use_v2_block_manager = (
@@ -244,26 +239,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # paged_kv_last_page_len is the length of the last page of each request
         self.paged_kv_last_page_len: List[int] = []
 
-    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
-                      token_lens: List[int], seq_lens: List[int],
-                      curr_seq_lens: List[int], query_lens: List[int],
-                      context_lens: List[int],
-                      curr_sliding_window_blocks: List[int],
-                      prefix_cache_hit: bool, chunked_prefill_enabled: bool):
+    def _add_seq_group(
+            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+            chunked_prefill_enabled: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         2. block table.
         3. slot mapping.
         """
-        is_prompt = seq_group_metadata.is_prompt
-        block_tables = seq_group_metadata.block_tables
-        computed_block_nums = seq_group_metadata.computed_block_nums
+        is_prompt = inter_data.is_prompt
+        block_tables = inter_data.block_tables
+        computed_block_nums = inter_data.computed_block_nums
 
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
-                 seq_group_metadata.seq_data.keys(), token_lens, seq_lens,
-                 curr_seq_lens, query_lens, context_lens,
-                 curr_sliding_window_blocks):
+                 inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
+                 inter_data.orig_seq_lens, inter_data.seq_lens,
+                 inter_data.query_lens, inter_data.context_lens,
+                 inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
                 self.num_prefills += 1
@@ -281,7 +274,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
-            if prefix_cache_hit:
+            if inter_data.prefix_cache_hit:
                 block_table = computed_block_nums
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
@@ -296,8 +289,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.use_v2_block_manager)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size,
-                                 seq_group_metadata.block_tables)
+                                 self.block_size, inter_data.block_tables)
 
             # It is not necessary to add paged_kv_indices, paged_kv_indptr,
             # and paged_kv_last_page_len for profile run because we will
@@ -323,9 +315,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 last_page_len = self.block_size
             self.paged_kv_last_page_len.append(last_page_len)
 
-    def build(self, runner: "GPUModelRunnerBase", seq_lens, query_lens,
+    def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
-        device = runner.device
+        for inter_data in self.input_builder.inter_data_list:
+            self._add_seq_group(inter_data,
+                                self.input_builder.chunked_prefill_enabled)
+
+        device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
 
         max_query_len = max(query_lens)
@@ -339,7 +335,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
-            input_block_tables = runner.graph_block_tables[:batch_size]
+            input_block_tables = self.runner.graph_block_tables[:batch_size]
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
@@ -350,11 +346,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                         cuda_graph_pad_size)
             self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
         else:
-            max_block_table_len = max(
-                len(block_table) for block_table in self.block_tables)
             block_tables = make_tensor_with_pad(
                 self.block_tables,
-                max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
                 device=device,
@@ -386,7 +379,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                            dtype=torch.long,
                                            device=device)
 
-        logits_soft_cap = getattr(runner.model_config.hf_config,
+        logits_soft_cap = getattr(self.runner.model_config.hf_config,
                                   "attn_logit_softcapping", None)
 
         if len(self.paged_kv_indptr) > 0:
@@ -403,8 +396,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indptr_tensor = None
             paged_kv_last_page_len_tensor = None
 
-        kv_cache_dtype = get_kv_cache_torch_dtype(runner.kv_cache_dtype,
-                                                  runner.model_config.dtype)
+        kv_cache_dtype = get_kv_cache_torch_dtype(
+            self.runner.kv_cache_dtype, self.runner.model_config.dtype)
         return FlashInferMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -415,11 +408,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indptr=paged_kv_indptr_tensor,
             paged_kv_indices=paged_kv_indices_tensor,
             paged_kv_last_page_len=paged_kv_last_page_len_tensor,
-            num_qo_heads=runner.model_config.get_num_attention_heads(
-                runner.parallel_config),
-            num_kv_heads=runner.model_config.get_num_kv_heads(
-                runner.parallel_config),
-            head_dim=runner.model_config.get_head_size(),
+            num_qo_heads=self.runner.model_config.get_num_attention_heads(
+                self.runner.parallel_config),
+            num_kv_heads=self.runner.model_config.get_num_kv_heads(
+                self.runner.parallel_config),
+            head_dim=self.runner.model_config.get_head_size(),
             page_size=self.block_size,
             seq_start_loc=seq_start_loc,
             query_start_loc=query_start_loc,
@@ -486,20 +479,6 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.num_decode_tokens > 0:
             assert attn_metadata.num_prefill_tokens == 0, (
                 "Chunked prefill is not supported with flashinfer yet.")
-            
-        prefill_meta = attn_metadata.prefill_metadata
-        
-        if all([
-            kv_cache is not None, # we are not in profile run
-            prefill_meta is not None, # during prefill stage
-            envs.VLLM_DISAGG_PREFILL_ROLE is not None, # disagg prefill enabled
-        ]):
-            if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
-                get_disagg_group().send(key)
-                get_disagg_group().send(value)
-            else:
-                key = get_disagg_group().recv(key.shape, key.dtype)
-                value = get_disagg_group().recv(value.shape, value.dtype)
 
         if kv_cache is not None:
             # Use the same reshape and cache kernel as flash attention.
@@ -514,7 +493,7 @@ class FlashInferImpl(AttentionImpl):
 
         query = query.contiguous(
         )  # Flashinfer requires query to be contiguous
-        if prefill_meta is not None:
+        if prefill_meta := attn_metadata.prefill_metadata:
             # We will use flash attention for prefill
             # when kv_cache is not provided.
             # This happens when vllm runs the profiling to
@@ -536,26 +515,11 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert prefill_meta is not None
                 assert prefill_meta.prefill_wrapper is not None
-                
-                if not all([
-                    envs.VLLM_DISAGG_PREFILL_ROLE is not None,
-                    envs.VLLM_DISAGG_PREFILL_ROLE == "decode",
-                ]): # Only skip prefill for disagg decode instance
-                    output = prefill_meta.prefill_wrapper.forward(
-                        query,
-                        kv_cache,
-                        logits_soft_cap=attn_metadata.logits_soft_cap,
-                        causal=True)
-                    output = output.view(num_tokens, hidden_size)
-                    
-                if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-                    # communication for disaggregated prefill.
-                    if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
-                        get_disagg_group().send(output)
-                    else:
-                        # Kuntai: This assume that output has the same dtype as key
-                        # Is this assumption true?
-                        output = get_disagg_group().recv([num_tokens, hidden_size], key.dtype)
+                output = prefill_meta.prefill_wrapper.forward(
+                    query,
+                    kv_cache,
+                    logits_soft_cap=attn_metadata.logits_soft_cap,
+                    causal=True)
         else:
             assert attn_metadata.decode_metadata is not None
             assert attn_metadata.decode_metadata.decode_wrapper is not None
@@ -564,9 +528,4 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache,
                 sm_scale=self.scale,
                 logits_soft_cap=attn_metadata.logits_soft_cap)
-            output = output.view(num_tokens, hidden_size)
-            
-        
-        
-        
-        return output
+        return output.view(num_tokens, hidden_size)
