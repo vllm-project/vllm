@@ -726,8 +726,6 @@ class ChameleonVQVAEEncoder(nn.Module):
 
 # Adapted from transformers.models.chameleon.modeling_chameleon.ChameleonVQVAE #noqa
 class ChameleonVQVAE(nn.Module):
-    config_class = ChameleonVQVAEConfig
-    _no_split_modules = ["ChameleonVQVAEVectorQuantizer"]
 
     def __init__(self, config: ChameleonVQVAEConfig):
         super().__init__()
@@ -739,7 +737,9 @@ class ChameleonVQVAE(nn.Module):
                                                config.latent_channels, 1)
         self.eval()  # Chameleon's VQ model is frozen
 
-    def encode(self, pixel_values: torch.Tensor):
+    def encode(
+        self, pixel_values: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_states = self.encoder(pixel_values)
         hidden_states = self.quant_conv(hidden_states)
         quant, emb_loss, indices = self.quantize(hidden_states)
@@ -835,7 +835,7 @@ class ChameleonModel(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    def get_image_tokens(self, pixel_values: torch.Tensor):
+    def get_image_tokens(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """
         Tokenizes images into discrete tokens with VQGAN module. Converts
         obtained image tokens into BPE tokens and wraps with "boi" and "eoi"
