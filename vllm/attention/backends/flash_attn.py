@@ -554,14 +554,17 @@ class FlashAttentionImpl(AttentionImpl):
 
         if (prefill_meta is not None) and (kv_cache is not None) and \
             (envs.VLLM_DISAGG_PREFILL_ROLE is not None):
-            # communication for disaggregated prefill.
+            # transfer the output if
+            #   1). during prefilling
+            #   2). disaggregated prefill enabled
+            #   3). not in the profile run (kv_cache is not None)
+            # no need to transfer kv cache, as it is already the input of this function
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
                 out = output[:num_prefill_tokens].contiguous()
-                print("Sending out, " , out.shape, out.dtype, out.device)
+                logger.debug("Send output, " , out.shape, out.dtype, out.device)
                 get_disagg_group().send(out)
             else:
-
-                print("Recv out, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
+                logger.debug("Recv output, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
                 output[:num_prefill_tokens] = get_disagg_group().recv(output[:num_prefill_tokens].shape, output.dtype)
                 
         if decode_meta := attn_metadata.decode_metadata:
