@@ -513,6 +513,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
+                print("profile run ", end="")
                 out = flash_attn_varlen_func(
                     q=query,
                     k=key,
@@ -532,6 +533,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
+                print("non promt_run")
 
                 if not all([
                     envs.VLLM_DISAGG_PREFILL_ROLE is not None,
