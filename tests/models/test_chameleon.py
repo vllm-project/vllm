@@ -19,6 +19,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 models = ["facebook/chameleon-7b"]
 
 
+#TODO (ywang96): Add correctness test when chameleon is
+# available on transformers.
 def run_test(
     vllm_runner: Type[VllmRunner],
     image_assets: _ImageAssets,
@@ -30,14 +32,9 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
-    """Inference result should be the same between hf and vllm.
+    """Test if the model can generate text given 
+    a batch of images and prompts.
 
-    All the image fixtures for the test is under tests/images.
-    For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
-    Note, the text input is also adjusted to abide by vllm contract.
-    The text output is sanitized to be able to compare with hf.
     """
     images = [asset.pil_image for asset in image_assets]
 
