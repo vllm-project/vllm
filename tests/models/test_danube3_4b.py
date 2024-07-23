@@ -10,7 +10,7 @@ from .utils import check_outputs_equal
 
 MODELS = ["h2oai/h2o-danube3-4b-base"]
 
-target_dtype = "bfloat16"
+target_dtype = "half"
 
 
 @pytest.mark.parametrize("model", MODELS)

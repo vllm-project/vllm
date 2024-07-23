@@ -52,6 +52,8 @@ def test_copy_blocks(
     kv_cache_dtype: str,
     device: str,
 ) -> None:
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -124,6 +126,8 @@ def test_reshape_and_cache(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -298,6 +302,8 @@ def test_swap_blocks(
     kv_cache_dtype: str,
 ) -> None:
     if kv_cache_dtype == "fp8" and "cpu" in direction:
+        pytest.skip()
+    if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
