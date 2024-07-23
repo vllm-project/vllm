@@ -95,7 +95,7 @@ Decoder-only Language Models
     - ✅︎
   * - :code:`LlamaForCausalLM`
     - Llama 3.1, Llama 3, Llama 2, LLaMA, Yi
-    - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
+    - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3.1-70B`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
