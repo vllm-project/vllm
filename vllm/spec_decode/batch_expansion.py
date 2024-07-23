@@ -292,12 +292,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         for data in new_seq_data_dict.values():
             data.update_num_computed_tokens(data.get_len() - 1)
 
-        generator = seq_group_metadata.generator
-        if generator is not None:
-            orig_generator = generator
-            generator = torch.Generator(device=orig_generator.device)
-            generator.set_state(orig_generator.get_state())
-
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
             is_prompt=seq_group_metadata.is_prompt,
@@ -308,7 +302,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             },
             lora_request=None,
             token_chunk_size=1,
-            generator=generator,
         )
 
     def _split_scoring_output(

@@ -172,8 +172,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     """
     is_driver_worker: bool
     model_runner: ModelRunnerBase
-    # Map of request_id -> generator used for seeded random sampling
-    generators: Dict[str, torch.Generator] = {}
 
     @property
     @abstractmethod
@@ -231,9 +229,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     # notify all other workers to stop their execution loop.
                     broadcast_tensor_dict({}, src=0)
                 return None
-
-            self._update_sequence_group_metadata_with_generators(
-                execute_model_req)
 
             worker_input: WorkerInput = self.prepare_worker_input(
                 execute_model_req=execute_model_req)
@@ -313,26 +308,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         return self.model_runner.execute_model(
             model_input, self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None)
-
-    def _update_sequence_group_metadata_with_generators(
-            self, execute_model_req: ExecuteModelRequest):
-        # This only needs to be done in the last PP rank, where the sampling
-        # is done
-        if get_pp_group().is_last_rank:
-            # Clean up generators from completed requests
-            for request_id in execute_model_req.finished_requests_ids:
-                self.generators.pop(request_id, None)
-
-            # Set generator in SequenceGroupMetadata from worker state
-            for sgm in execute_model_req.seq_group_metadata_list:
-                if sgm.sampling_params.seed is not None:
-                    if sgm.is_prompt:
-                        sgm.generator = torch.Generator(
-                            device=self.model_runner.device).manual_seed(
-                                sgm.sampling_params.seed)
-                        self.generators[sgm.request_id] = sgm.generator
-                    else:
-                        sgm.generator = self.generators.get(sgm.request_id)
 
 
 class WorkerWrapperBase:

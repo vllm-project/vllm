@@ -591,13 +591,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
         # Sampler arguments
-        sampler_extra_kwargs = {}
+        sampler_extra_kwargs: Dict[str, Any] = {}
         if isinstance(self.spec_decode_sampler,
                       SpecDecodeStochasticBaseSampler):
             # Get sequence group state
-            sampler_extra_kwargs["generators"] = [
-                sgm.generator for sgm in seq_group_metadata_list
-            ]
+            sampler_extra_kwargs["generators"] = []  #TODO
 
         accepted_token_ids = self.spec_decode_sampler(
             target_probs=proposal_verifier_probs,
