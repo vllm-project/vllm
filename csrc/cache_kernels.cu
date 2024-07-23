@@ -203,17 +203,21 @@ __global__ void reshape_and_cache_kernel(
   }
 }
 
-template <typename scalar_t>
+template<typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_flash_kernel(
-    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
-    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
-    scalar_t* __restrict__ k_cache,      // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    scalar_t* __restrict__ v_cache,      // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride, const int key_stride, const int value_stride,
-    const int num_heads, const int head_size, const int block_size) {
+  const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
+  const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
+  cache_t* __restrict__ key_cache,            // [num_blocks, block_size, num_heads, head_size]
+  cache_t* __restrict__ value_cache,          // [num_blocks, block_size, num_heads, head_size]
+  const int64_t* __restrict__ slot_mapping,   // [num_tokens]
+  const int block_stride,
+  const int key_stride,
+  const int value_stride,
+  const int num_heads,
+  const int head_size,
+  const int block_size,
+  const float k_scale,
+  const float v_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   // NOTE: slot_idx can be -1 if the token is padded
@@ -228,11 +232,19 @@ __global__ void reshape_and_cache_flash_kernel(
     const int64_t src_value_idx = token_idx * value_stride + i;
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
-    const int64_t tgt_value_idx = block_idx * block_stride +
-                                  block_offset * num_heads * head_size +
-                                  head_idx * head_size + head_offset;
-    k_cache[tgt_value_idx] = key[src_key_idx];
-    v_cache[tgt_value_idx] = value[src_value_idx];
+    const int64_t tgt_key_value_idx = block_idx * block_stride
+                              + block_offset * num_heads * head_size
+                              + head_idx * head_size
+                              + head_offset;
+    scalar_t tgt_key = key[src_key_idx];
+    scalar_t tgt_value = value[src_value_idx];
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      key_cache[tgt_key_value_idx] = tgt_key;
+      value_cache[tgt_key_value_idx] = tgt_value;
+    } else {
+      key_cache[tgt_key_value_idx] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, k_scale);
+      value_cache[tgt_key_value_idx] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, v_scale);
+    }
   }
 }
 }  // namespace vllm
@@ -278,13 +290,35 @@ void reshape_and_cache(
                              CALL_RESHAPE_AND_CACHE)
 }
 
+// KV_T is the stored data type of kv-cache.
+// CACHE_T is the data type of key and value tensors.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)                                 \
+  vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE><<<grid, block, 0, stream>>>(  \
+    reinterpret_cast<KV_T*>(key.data_ptr()),                                                  \
+    reinterpret_cast<KV_T*>(value.data_ptr()),                                                \
+    reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                         \
+    reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                                       \
+    slot_mapping.data_ptr<int64_t>(),                                                         \
+    block_stride,                                                                             \
+    key_stride,                                                                               \
+    value_stride,                                                                             \
+    num_heads,                                                                                \
+    head_size,                                                                                \
+    block_size,                                                                               \
+    k_scale,                                                                                  \
+    v_scale);
+
 void reshape_and_cache_flash(
-    torch::Tensor& key,      // [num_tokens, num_heads, head_size]
-    torch::Tensor& value,    // [num_tokens, num_heads, head_size]
-    torch::Tensor& k_cache,  // [num_blocks, block_size, num_heads, head_size]
-    torch::Tensor& v_cache,  // [num_blocks, block_size, num_heads, head_size]
-    torch::Tensor& slot_mapping,  // [num_tokens]
-    const std::string& kv_cache_dtype) {
+  torch::Tensor& key,           // [num_tokens, num_heads, head_size]
+  torch::Tensor& value,         // [num_tokens, num_heads, head_size]
+  torch::Tensor& key_cache,       // [num_blocks, block_size, num_heads, head_size]
+  torch::Tensor& value_cache,       // [num_blocks, block_size, num_heads, head_size]
+  torch::Tensor& slot_mapping,  // [num_tokens]
+  const std::string& kv_cache_dtype,
+  const double k_scale,
+  const double v_scale)
+{
   // FIXME: only support auto datatype, does not support fp8
   if (kv_cache_dtype != "auto") {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
@@ -292,26 +326,19 @@ void reshape_and_cache_flash(
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
-  int block_size = k_cache.size(1);
+  int block_size = key_cache.size(1);
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
-  int block_stride = k_cache.stride(0);
-  TORCH_CHECK(k_cache.stride(0) == v_cache.stride(0));
+  int block_stride = key_cache.stride(0);
+  TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
-      key.scalar_type(), "reshape_and_cache_flash", [&] {
-        vllm::reshape_and_cache_flash_kernel<scalar_t>
-            <<<grid, block, 0, stream>>>(
-                key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                k_cache.data_ptr<scalar_t>(), v_cache.data_ptr<scalar_t>(),
-                slot_mapping.data_ptr<int64_t>(), block_stride, key_stride,
-                value_stride, num_heads, head_size, block_size);
-      });
+
+  DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE_FLASH);
 }
 
 namespace vllm {
