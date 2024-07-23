@@ -6,7 +6,7 @@ numpy < 2.0.0
 requests
 tqdm
 py-cpuinfo
-transformers >= 4.43.0  # Required for Chameleon.
+transformers >= 4.43.1  # Required for Chameleon and Llama 3.1 hotfox.
 tokenizers >= 0.19.1  # Required for Llama 3.
 fastapi
 aiohttp
