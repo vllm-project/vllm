@@ -133,7 +133,6 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
         $ # Build vLLM for MI210/MI250/MI300.
         $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-        $ python3 setup.py clean --all
         $ python3 setup.py develop
 
 
