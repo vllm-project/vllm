@@ -661,7 +661,7 @@ class ParallelConfig:
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
 
-        self.world_size = pipeline_parallel_size * tensor_parallel_size
+        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
