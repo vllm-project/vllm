@@ -222,18 +222,11 @@ class OpenAIServingChat(OpenAIServing):
                             model=model_name)
                         if (request.stream_options
                                 and request.stream_options.include_usage):
-                            if (request.stream_options.continuous_usage_stats
-                                    or res.outputs[i].finish_reason
-                                    is not None):
+                            if (request.stream_options.continuous_usage_stats):
                                 prompt_tokens = len(res.prompt_token_ids)
-                                completion_tokens = 0
-                                usage = UsageInfo(
-                                    prompt_tokens=prompt_tokens,
-                                    completion_tokens=completion_tokens,
-                                    total_tokens=prompt_tokens +
-                                    completion_tokens,
-                                )
-                            if request.stream_options.continuous_usage_stats:
+                                usage = UsageInfo(prompt_tokens=prompt_tokens,
+                                                  completion_tokens=0,
+                                                  total_tokens=prompt_tokens)
                                 chunk.usage = usage
                             else:
                                 chunk.usage = None
@@ -268,21 +261,13 @@ class OpenAIServingChat(OpenAIServing):
                                 if (request.stream_options and
                                         request.stream_options.include_usage):
                                     if (request.stream_options.
-                                            continuous_usage_stats
-                                            or res.outputs[i].finish_reason
-                                            is not None):
+                                            continuous_usage_stats):
                                         prompt_tokens = len(
                                             res.prompt_token_ids)
-                                        completion_tokens = len(
-                                            res.outputs[i].token_ids)
                                         usage = UsageInfo(
                                             prompt_tokens=prompt_tokens,
-                                            completion_tokens=completion_tokens,
-                                            total_tokens=prompt_tokens +
-                                            completion_tokens,
-                                        )
-                                    if (request.stream_options.
-                                            continuous_usage_stats):
+                                            completion_tokens=0,
+                                            total_tokens=prompt_tokens)
                                         chunk.usage = usage
                                     else:
                                         chunk.usage = None
@@ -354,7 +339,6 @@ class OpenAIServingChat(OpenAIServing):
                                     total_tokens=prompt_tokens +
                                     completion_tokens,
                                 )
-                            if request.stream_options.continuous_usage_stats:
                                 chunk.usage = usage
                             else:
                                 chunk.usage = None
@@ -387,11 +371,9 @@ class OpenAIServingChat(OpenAIServing):
                                     total_tokens=prompt_tokens +
                                     completion_tokens,
                                 )
-                            if request.stream_options.continuous_usage_stats:
                                 chunk.usage = usage
                             else:
                                 chunk.usage = None
-
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
