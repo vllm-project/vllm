@@ -42,7 +42,7 @@ struct sm89_config_default {
     using FallbackGemm =
         typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm;
 
-    uint32_t const n = a.size(1);
+    uint32_t const n = out.size(1);
     uint32_t const np2 = next_pow_2(n);
 
     if (np2 <= 4096) {
@@ -91,7 +91,7 @@ struct sm89_config_M256 {
     using FallbackGemm =
         typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm;
 
-    uint32_t const n = a.size(1);
+    uint32_t const n = out.size(1);
     uint32_t const np2 = next_pow_2(n);
 
     if (np2 <= 4096) {
@@ -131,7 +131,7 @@ struct sm89_config_M128 {
     using FallbackGemm =
         typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm;
 
-    uint32_t const n = a.size(1);
+    uint32_t const n = out.size(1);
     uint32_t const np2 = next_pow_2(n);
 
     if (np2 <= 8192) {
@@ -178,7 +178,7 @@ struct sm89_config_M64 {
     using FallbackGemm =
         typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm;
 
-    uint32_t const n = a.size(1);
+    uint32_t const n = out.size(1);
     uint32_t const np2 = next_pow_2(n);
 
     if (np2 <= 8196) {
@@ -231,7 +231,7 @@ struct sm89_config_M32 {
     using FallbackGemm =
         typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm;
 
-    uint32_t const n = a.size(1);
+    uint32_t const n = out.size(1);
     uint32_t const np2 = next_pow_2(n);
 
     if (np2 <= 8192) {
@@ -283,7 +283,7 @@ struct sm89_config_M16 {
     using FallbackGemm =
         typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm;
 
-    uint32_t const n = a.size(1);
+    uint32_t const n = out.size(1);
     uint32_t const np2 = next_pow_2(n);
 
     if (np2 <= 8192) {
