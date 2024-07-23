@@ -529,3 +529,4 @@ class FlashInferImpl(AttentionImpl):
                 sm_scale=self.scale,
                 logits_soft_cap=attn_metadata.logits_soft_cap)
         return output.view(num_tokens, hidden_size)
+        
