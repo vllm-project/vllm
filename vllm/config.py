@@ -1494,16 +1494,15 @@ def _get_and_verify_max_len(
             raise ValueError(
                 "rope_scaling must have a 'type' or 'rope_type' key.")
 
-        if rope_type not in ("su", "longrope",
-                             "llama3") and disable_sliding_window:
-            # TODO(robertgshaw): Find a model that supports rope_scaling
-            # with sliding window to see if this case should be allowed.
-            raise NotImplementedError(
-                "Disabling sliding window is not supported for models "
-                "with rope_scaling. Please raise an issue so we can "
-                "investigate.")
+        if rope_type not in ("su", "longrope", "llama3"):
+            if disable_sliding_window:
+                # TODO(robertgshaw): Find a model that supports rope_scaling
+                # with sliding window to see if this case should be allowed.
+                raise NotImplementedError(
+                    "Disabling sliding window is not supported for models "
+                    "with rope_scaling. Please raise an issue so we can "
+                    "investigate.")
 
-        if rope_type != "llama3":
             assert "factor" in rope_scaling
             scaling_factor = rope_scaling["factor"]
 
