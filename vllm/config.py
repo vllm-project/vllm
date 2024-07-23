@@ -31,6 +31,7 @@ _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _PP_SUPPORTED_MODELS = [
     "AquilaModel",
     "AquilaForCausalLM",
+    "DeepseekV2ForCausalLM",
     "InternLMForCausalLM",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
