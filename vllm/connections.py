@@ -19,15 +19,15 @@ class HTTPConnection:
         self._sync_client: Optional[requests.Session] = None
         self._async_client: Optional[aiohttp.ClientSession] = None
 
-    @property
-    def sync_client(self) -> requests.Session:
+    def get_sync_client(self) -> requests.Session:
         if self._sync_client is None or not self.reuse_client:
             self._sync_client = requests.Session()
 
         return self._sync_client
 
-    @property
-    def async_client(self) -> aiohttp.ClientSession:
+    # NOTE: We intentionally use an async function even though it is not
+    # required, so that the client is only accessible inside async event loop
+    async def get_async_client(self) -> aiohttp.ClientSession:
         if self._async_client is None or not self.reuse_client:
             self._async_client = aiohttp.ClientSession()
 
@@ -49,25 +49,33 @@ class HTTPConnection:
         *,
         stream: bool = False,
         timeout: Optional[float] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ):
         self._validate_http_url(url)
 
-        return self.sync_client.get(url,
-                                    headers=self._headers(),
-                                    stream=stream,
-                                    timeout=timeout)
+        client = self.get_sync_client()
+        extra_headers = extra_headers or {}
 
-    def get_async_response(
+        return client.get(url,
+                          headers=self._headers(**extra_headers),
+                          stream=stream,
+                          timeout=timeout)
+
+    async def get_async_response(
         self,
         url: str,
         *,
         timeout: Optional[float] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ):
         self._validate_http_url(url)
 
-        return self.async_client.get(url,
-                                     headers=self._headers(),
-                                     timeout=timeout)
+        client = await self.get_async_client()
+        extra_headers = extra_headers or {}
+
+        return client.get(url,
+                          headers=self._headers(**extra_headers),
+                          timeout=timeout)
 
     def get_bytes(self, url: str, *, timeout: Optional[float] = None) -> bytes:
         with self.get_response(url, timeout=timeout) as r:
@@ -81,7 +89,7 @@ class HTTPConnection:
         *,
         timeout: Optional[float] = None,
     ) -> bytes:
-        async with self.get_async_response(url, timeout=timeout) as r:
+        async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return await r.read()
@@ -98,7 +106,7 @@ class HTTPConnection:
         *,
         timeout: Optional[float] = None,
     ) -> str:
-        async with self.get_async_response(url, timeout=timeout) as r:
+        async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return await r.text()
@@ -115,7 +123,7 @@ class HTTPConnection:
         *,
         timeout: Optional[float] = None,
     ) -> str:
-        async with self.get_async_response(url, timeout=timeout) as r:
+        async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             return await r.json()
@@ -145,7 +153,7 @@ class HTTPConnection:
         timeout: Optional[float] = None,
         chunk_size: int = 128,
     ) -> Path:
-        async with self.get_async_response(url, timeout=timeout) as r:
+        async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
             with save_path.open("wb") as f:
