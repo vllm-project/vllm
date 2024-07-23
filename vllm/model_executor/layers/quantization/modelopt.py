@@ -19,7 +19,7 @@ ACTIVATION_SCHEMES = ["static"]
 
 
 class ModelOptFp8Config(QuantizationConfig):
-    """Config class for FP8."""
+    """Config class for ModelOpt FP8."""
 
     def __init__(self,
                  is_checkpoint_fp8_serialized: bool = False,
@@ -60,9 +60,15 @@ class ModelOptFp8Config(QuantizationConfig):
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention  # Avoid circular import
+        from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+        from vllm.model_executor.layers.quantization.fp8 import Fp8KVCacheMethod # Avoid circular import
         if isinstance(layer, LinearBase):
             return ModelOptFp8LinearMethod(self)
-
+        elif isinstance(layer, Attention):
+            return Fp8KVCacheMethod(self)
+        elif isinstance(layer, ParallelLMHead):
+            return None 
         else:
             raise ValueError("Unsupported quant method for ModelOpt weights")
 
@@ -202,11 +208,11 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        result = apply_fp8_linear(
+        return apply_fp8_linear(
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
             input_scale=layer.input_scale,
             bias=bias,
             cutlass_fp8_supported=self.cutlass_fp8_supported)
-        return result
+        

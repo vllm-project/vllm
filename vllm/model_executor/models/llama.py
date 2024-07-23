@@ -54,7 +54,6 @@ from vllm.utils import is_hip
 from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
-
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -481,6 +480,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                                         default_weight_loader)
                 loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
+                continue
+            #To Do: Remove when ModelOpt fixes the quantized model. 
+            if ("output_quantizer._amax") in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:

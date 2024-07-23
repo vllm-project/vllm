@@ -1,6 +1,6 @@
 ### Quantizer Utilities
-`quantize.py`: NVIDIA Quantization utilities using AMMO, ported from TensorRT-LLM:
-`https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/quantization/quantize.py`
+`quantize.py`: NVIDIA Quantization utilities using TensorRT-Model-Optimizer, ported
+from TensorRT-LLM: [`examples/quantization/quantize.py`](https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/quantization/quantize.py)
 
 ### Prerequisite
 
