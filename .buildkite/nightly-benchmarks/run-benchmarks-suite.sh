@@ -34,6 +34,15 @@ check_hf_token() {
   fi
 }
 
+ensure_sharegpt_downloaded() {
+  local FILE=ShareGPT_V3_unfiltered_cleaned_split.json
+  if [ ! -f "$FILE" ]; then
+      wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
+  else
+      echo "$FILE already exists."
+  fi
+}
+
 json2args() {
   # transforms the JSON string to command line args, and '_' is replaced to '-'
   # example:
@@ -340,6 +349,8 @@ run_serving_tests() {
   done
 }
 
+
+
 main() {
   check_gpus
   check_hf_token
@@ -355,7 +366,7 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+  ensure_sharegpt_downloaded
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
