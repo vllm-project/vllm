@@ -41,7 +41,6 @@ class PyNcclCommunicator:
         self.rank = dist.get_rank(group)
         self.world_size = dist.get_world_size(group)
 
-
         # if world_size == 1, no need to create communicator
         if self.world_size == 1:
             self.available = False
