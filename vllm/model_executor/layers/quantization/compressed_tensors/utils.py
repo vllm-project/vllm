@@ -5,6 +5,9 @@ from typing import Any, Dict, Iterable, Optional
 from pydantic import BaseModel, Field
 from torch.nn import Module
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FUSED_LAYER_NAME_MAPPING)
+
 
 class CompressionFormat(Enum):
     dense = "dense"
@@ -86,13 +89,6 @@ def is_activation_quantization_format(format: str) -> bool:
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 
 
-# fused_name: List[shard_name]
-_FUSED_LAYER_NAME_MAPPING = {
-    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    "gate_up_proj": ["gate_proj", "up_proj"]
-}
-
-
 def should_ignore_layer(layer_name: Optional[str],
                         ignore: Iterable[str]) -> bool:
     if layer_name is None:
@@ -106,8 +102,8 @@ def should_ignore_layer(layer_name: Optional[str],
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in _FUSED_LAYER_NAME_MAPPING:
-        shard_proj_names = _FUSED_LAYER_NAME_MAPPING[proj_name]
+    if proj_name in FUSED_LAYER_NAME_MAPPING:
+        shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
 
         # Convert fused_name --> [shard_names]
         shard_names = [
@@ -206,6 +202,23 @@ def _find_first_match(value: str,
                                     target,
                                     check_contains=check_contains):
             return target
+    return None
+
+
+def get_compressed_tensors_cache_scale(name: str) -> Optional[str]:
+    """
+    Check whether the param name matches the format for k/v cache scales
+    in compressed-tensors. If this is the case, return its equivalent
+    param name expected by vLLM
+
+    :param name: param name
+    :return: matching param name for KV cache scale in vLLM
+    """
+    if name.endswith(".output_scale") and ".k_proj" in name:
+        return name.replace(".k_proj.output_scale", ".attn.k_scale")
+    if name.endswith(".output_scale") and ".v_proj" in name:
+        return name.replace(".v_proj.output_scale", ".attn.v_scale")
+    # If no matches, return None
     return None
 
 
