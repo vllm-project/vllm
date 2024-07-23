@@ -9,4 +9,4 @@ except Exception as e:
                   stacklevel=2)
     __commit__ = "COMMIT_HASH_PLACEHOLDER"
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
