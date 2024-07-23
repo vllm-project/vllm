@@ -9,8 +9,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear, cutlass_fp8_supported, requantize_with_max_scale)
-from vllm.model_executor.parameter import (BasevLLMParameter,
-                                           ChannelQuantScaleParameter,
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 
@@ -77,6 +76,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
+        # TODO: update create_xxx_parameter functions to return
+        # the newly added parameters
         if self.strategy == QuantizationStrategy.CHANNEL:
             weight_scale = ChannelQuantScaleParameter(
                 data=torch.empty((sum(output_partition_sizes), 1),
@@ -88,13 +89,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight_scale = PerTensorScaleParameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
+
+        weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            input_scale = BasevLLMParameter(data=torch.empty(
-                1, dtype=torch.float32),
-                                            weight_loader=weight_loader)
+            input_scale = PerTensorScaleParameter(data=torch.empty(
+                len(output_partition_sizes), dtype=torch.float32),
+                                                  weight_loader=weight_loader)
+            input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self,
