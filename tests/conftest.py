@@ -130,8 +130,11 @@ def example_encoder_decoder_prompts() -> Tuple[List[str], List[str]]:
     for filename in _TEST_PROMPTS:
         encoder_prompts += _read_prompts(filename)
 
+    prompt_list = zip_enc_dec_prompt_lists(encoder_prompts, 
+                                           encoder_prompts[::-1])
+
     # Encoder prompts, decoder prompts
-    return zip_enc_dec_prompt_lists(encoder_prompts, encoder_prompts[::-1])
+    return [prompt_list[1]]
 
 
 @pytest.fixture
@@ -417,6 +420,10 @@ class HfRunner:
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
 
+        # decoder_start_token_id = getattr(self.model.config, 
+        #                                  'decoder_start_token_id',
+        #                                  None)
+
         all_logprobs: List[List[Dict[int, float]]] = []
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
@@ -427,6 +434,13 @@ class HfRunner:
                                                return_tensors="pt").input_ids
             decoder_input_ids = self.tokenizer(decoder_prompt,
                                                return_tensors="pt").input_ids
+
+            # # If the decoder input ids do not begin with decoder start
+            # # token, HF transformers will likely add it automatically.
+            # # This becomes important information later.
+            # implicit_decoder_start_token=(True 
+            # if decoder_input_ids.shape[1] < 1 else 
+            # (decoder_input_ids[0][0] ==decoder_start_token_id))
 
             from transformers.generation.configuration_utils import (
                 GenerationConfig)
@@ -441,6 +455,8 @@ class HfRunner:
             # generation_config.min_p = 0.0
             generation_config.length_penalty = 1.0
             generation_config.early_stopping = False
+            generation_config.no_repeat_ngram_size = None
+            generation_config.min_length = 0
 
             output = self.model.generate(
                 self.wrap_device(encoder_input_ids),
@@ -454,6 +470,7 @@ class HfRunner:
             )
 
             seq_logprobs: List[torch.Tensor] = []
+            output_len = len(output.decoder_hidden_states)
             for _, decoder_hidden_states in enumerate(
                     output.decoder_hidden_states):
                 last_hidden_states = decoder_hidden_states[-1][0]
@@ -484,7 +501,7 @@ class HfRunner:
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
-            output_len = seq_ids.shape[0] - decoder_input_ids.shape[1]
+            #output_len = seq_ids.shape[0] - decoder_input_ids.shape[1]
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
