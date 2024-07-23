@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import Field
 from typing_extensions import Annotated
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor, NoBadWordsLogitsProcessor
 
@@ -185,18 +184,6 @@ class SamplingParams:
 
         self._verify_args()
         if self.use_beam_search:
-            # Lazy import to avoid circular imports.
-            from vllm.usage.usage_lib import set_runtime_usage_data
-            set_runtime_usage_data("use_beam_search", True)
-
-            if not envs.VLLM_NO_DEPRECATION_WARNING:
-                logger.warning(
-                    "[IMPORTANT] We plan to discontinue the support for beam "
-                    "search in the next major release. Please refer to "
-                    "https://github.com/vllm-project/vllm/issues/6226 for "
-                    "more information. Set VLLM_NO_DEPRECATION_WARNING=1 to "
-                    "suppress this warning.")
-
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
