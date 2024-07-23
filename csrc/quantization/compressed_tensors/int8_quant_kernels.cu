@@ -95,21 +95,10 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
 
   // Compute the scale and zero point and store them, only on the first thread
   if (threadIdx.x == 0) {
-    float scale_val = (max_val - min_val) / 255.0f;
+    float const scale_val = (max_val - min_val) / 255.0f;
     // Use rounding to even (same as torch.round)
     auto const azp_float = std::nearbyint(min_val / scale_val + 128.0f);
     auto const azp_val = static_cast<azp_type>(azp_float);
-
-    // Azp was rounded, which may cause the range to be slightly off.
-    // Expand the range to make sure all values are representable.
-    auto const min_nozp = static_cast<float>(azp_val - 128);
-    auto const max_nozp = static_cast<float>(azp_val + 127);
-    auto no_div_0 = [&](float num, float div) {
-      return div == 0.0f ? scale_val : num / div;
-    };
-
-    // TODO don't adjust scale?
-    scale_val = fmaxf(no_div_0(max_val, max_nozp), no_div_0(min_val, min_nozp));
 
     // Store the scale and azp into shared and global
     scale[token_idx] = scale_sh = scale_val;
