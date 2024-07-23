@@ -473,6 +473,7 @@ class FlashAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
+            print("I am in flash attn")
             ops.reshape_and_cache_flash(
                 key,
                 value,
