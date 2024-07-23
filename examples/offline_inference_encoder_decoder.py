@@ -1,4 +1,3 @@
-from transformers import AutoTokenizer, BartForConditionalGeneration
 from utils import override_backend_env_var_context_manager
 
 from vllm import LLM, SamplingParams
