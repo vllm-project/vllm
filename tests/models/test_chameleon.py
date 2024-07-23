@@ -1,6 +1,6 @@
+import re
 from typing import List, Optional, Type
 
-import re
 import pytest
 
 from vllm.multimodal.utils import rescale_image_size
@@ -17,6 +17,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 models = ["facebook/chameleon-7b"]
+
 
 def run_test(
     vllm_runner: Type[VllmRunner],
@@ -53,17 +54,27 @@ def run_test(
                      enforce_eager=True) as vllm_model:
 
         for prompts, images in inputs_per_image:
-            vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)
+            vllm_outputs = vllm_model.generate_greedy(prompts,
+                                                      max_tokens,
+                                                      images=images)
             for i in range(len(vllm_outputs)):
 
                 # format prompt back to original
-                replacement = {"<racm3:break>":"", "<eoss>":"", "<reserved08706>":""}
-                pattern = '|'.join(replacement.keys())
-                vllm_result = re.sub(pattern, lambda match: replacement[match.group(0)], vllm_outputs[i][1])
+                replacements = {
+                    "<racm3:break>": "",
+                    "<eoss>": "",
+                    "<reserved08706>": ""
+                }
+                pattern = '|'.join(replacements.keys())
+                vllm_result = re.sub(
+                    pattern,
+                    lambda match: replacements[match.group(0)],  #noqa B023
+                    vllm_outputs[i][1])
                 vllm_result = vllm_result.replace("<image>", "", 1023)
                 assert vllm_result[:len(prompts[i])] == prompts[i]
 
-                # assert at least 10 new characters are generated (to take stop token into account)
+                # assert at least 10 new characters are generated
+                # (to take stop token into account)
                 assert len(vllm_outputs[i][1]) - len(prompts[i]) > 10
 
 
@@ -81,8 +92,8 @@ def run_test(
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_models(vllm_runner, image_assets, model, size_factors,
-                dtype: str, max_tokens: int) -> None:
+def test_models(vllm_runner, image_assets, model, size_factors, dtype: str,
+                max_tokens: int) -> None:
     run_test(
         vllm_runner,
         image_assets,
