@@ -666,8 +666,6 @@ class GroupCoordinator:
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
-
-        logger.debug("Sending tensor: ", tensor.shape, tensor.dtype, dst)
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
 
@@ -683,8 +681,6 @@ class GroupCoordinator:
              src: Optional[int] = None) -> torch.Tensor:
         """Receives a tensor from the src rank."""
         """NOTE: `src` is the local rank of the destination rank."""
-
-        logger.debug("Recving tensor: ", size, dtype, src)
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 
