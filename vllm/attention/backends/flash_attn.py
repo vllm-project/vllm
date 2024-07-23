@@ -20,12 +20,9 @@ from vllm.distributed import get_disagg_group
 
 # To identify if the VLLM_DISAGG_PREFILL_ROLE is set or no
 import vllm.envs as envs
-from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
-
-logger = init_logger(__name__)
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -559,10 +556,10 @@ class FlashAttentionImpl(AttentionImpl):
             # no need to transfer kv cache, as it is already the input of this function
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
                 out = output[:num_prefill_tokens].contiguous()
-                logger.debug("Send output, " , out.shape, out.dtype, out.device)
+                print("Send output, " , out.shape, out.dtype, out.device)
                 get_disagg_group().send(out)
             else:
-                logger.debug("Recv output, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
+                print("Recv output, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
                 output[:num_prefill_tokens] = get_disagg_group().recv(output[:num_prefill_tokens].shape, output.dtype)
                 
         if decode_meta := attn_metadata.decode_metadata:
