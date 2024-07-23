@@ -427,7 +427,7 @@ class LoggingStatLogger(StatLoggerBase):
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
-            self.sepc_decode_metrics = None
+            self.spec_decode_metrics = None
 
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
