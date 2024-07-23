@@ -14,7 +14,7 @@ template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
 struct sm89_fallback_gemm {
   // Shared Memory required by this Gemm - 61440 bytes
-  static_assert(std::is_same<InType, int8_t>());
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using TileShape = typename cutlass::gemm::GemmShape<64, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
@@ -31,7 +31,6 @@ struct sm89_config_default {
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
-  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -42,6 +41,9 @@ struct sm89_config_default {
                        EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+
+    using FallbackGemm = typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm; 
+
     uint32_t const n = a.size(1);
     uint32_t const np2 = next_pow_2(n);
 
@@ -80,7 +82,6 @@ struct sm89_config_M256 {
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
-  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -91,6 +92,9 @@ struct sm89_config_M256 {
                        EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+
+    using FallbackGemm = typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm; 
+
     uint32_t const n = a.size(1);
     uint32_t const np2 = next_pow_2(n);
 
@@ -120,7 +124,6 @@ struct sm89_config_M128 {
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
-  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -131,6 +134,9 @@ struct sm89_config_M128 {
                        EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+
+    using FallbackGemm = typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm; 
+
     uint32_t const n = a.size(1);
     uint32_t const np2 = next_pow_2(n);
 
@@ -168,7 +174,6 @@ struct sm89_config_M64 {
 
   // M in (32, 64]
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
-  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -179,6 +184,9 @@ struct sm89_config_M64 {
                        EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+
+    using FallbackGemm = typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm; 
+
     uint32_t const n = a.size(1);
     uint32_t const np2 = next_pow_2(n);
 
@@ -222,7 +230,6 @@ struct sm89_config_M32 {
   // M in (16, 32]
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
-  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
@@ -233,6 +240,9 @@ struct sm89_config_M32 {
                        EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+
+    using FallbackGemm = typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm; 
+
     uint32_t const n = a.size(1);
     uint32_t const np2 = next_pow_2(n);
 
@@ -273,7 +283,6 @@ struct sm89_config_M16 {
   using WarpShape = typename cutlass::gemm::GemmShape<16, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
   using FP8MathOperator = typename cutlass::arch::OpMultiplyAddFastAccum;
-  using FallbackGemm = sm89_fallback_gemm::Cutlass2xGemm; 
   static const int32_t MainLoopStages = 5; 
 
   template <typename InType, typename OutType,
@@ -285,6 +294,9 @@ struct sm89_config_M16 {
                        EpilogueArgs&&... args) {
     static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+
+    using FallbackGemm = typename sm89_fallback_gemm<InType, OutType, Epilogue>::Cutlass2xGemm; 
+
     uint32_t const n = a.size(1);
     uint32_t const np2 = next_pow_2(n);
 
