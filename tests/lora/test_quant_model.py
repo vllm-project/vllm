@@ -71,7 +71,7 @@ def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
         max_loras=4,
         max_model_len=400,
         tensor_parallel_size=tp_size,
-        gpu_memory_utilization=0.4,  #avoid OOM
+        gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True)
 
@@ -164,7 +164,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.4,  #avoid OOM
+        gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True)
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
@@ -178,7 +178,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=2,
-        gpu_memory_utilization=0.4,  #avoid OOM
+        gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization)
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 
