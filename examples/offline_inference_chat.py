@@ -14,7 +14,7 @@ def print_outputs(outputs):
 
 print("=" * 80)
 
-# In this script, we demonstrate four different ways to pass input to the chat method of the LLM class:
+# In this script, we demonstrate two ways to pass input to the chat method of the LLM class:
 
 # Conversation with a list of dictionaries
 conversation = [
@@ -40,7 +40,7 @@ outputs = llm.chat(conversation,
                    use_tqdm=False)
 print_outputs(outputs)
 
-# Multiple conversations
+# Multiple conversations 
 conversations = [
     [
         {

@@ -324,6 +324,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
+        add_generation_template: bool = True,
     ) -> List[RequestOutput]:
         """
         Generates responses for chat messages.
@@ -342,6 +343,7 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
+            add_generation_template: If True, adds a generation template to each message.
         Returns:
             A list of `RequestOutput` objects containing the generated 
             responses in the same order as the input messages.
@@ -352,22 +354,25 @@ class LLM:
         if isinstance(messages[0], dict):
             # Apply chat templates for chat inputs.
             prompts = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_template=True)
+                messages, tokenize=False, 
+                add_generation_template=add_generation_template,
+                chat_template=chat_template)
             
         elif isinstance(messages[0], list):
             tokenizer = self.get_tokenizer()
             prompts = [
                 tokenizer.apply_chat_template(message,
                                               tokenize=False,
-                                              add_generation_template=True)
+                                              add_generation_template=add_generation_template,
+                                              chat_template=chat_template)
                 for message in messages
             ]
 
         return self.generate(prompts,
                              sampling_params,
                              use_tqdm=use_tqdm,
-                             lora_request=lora_request,
-                             chat_template=chat_template)
+                             lora_request=lora_request
+                             )
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
