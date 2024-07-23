@@ -11,6 +11,10 @@ from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
 from vllm.utils import cdiv
 
+import vllm.envs as envs
+from vllm.distributed import get_disagg_group
+
+
 PrefixHash = int
 
 # By default, we init our block access time as _DEFAULT_LAST_ACCESSED_TIME
@@ -163,6 +167,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No cached block => Allocate a new block
         block = self.allocate_mutable_block(prev_block)
         block.append_token_ids(token_ids)
+
         return block
 
     def allocate_immutable_blocks(

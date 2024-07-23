@@ -137,7 +137,7 @@ class LlamaAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.rotary_emb = get_rope(
+        self.rotry_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
