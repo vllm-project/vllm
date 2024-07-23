@@ -712,7 +712,7 @@ class HabanaModelRunner:
         block_usage = [[self.block_size] * (bu - 1) + [lb] for bu, lb in zip(blocks_used, last_block)]
         block_usage = list(itertools.chain(*block_usage))
 
-        block_bucket_size = self.decode_block_bucket_cfg[1]
+        block_bucket_size = find_bucket(len(block_list), self.decode_block_bucket_cfg)
         block_list = pad_list(block_list, block_bucket_size, _PAD_SLOT_ID)
         block_mapping = pad_list(block_mapping, block_bucket_size, 0)
         block_usage = pad_list(block_usage, block_bucket_size, 0)
