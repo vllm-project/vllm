@@ -418,15 +418,16 @@ class LoggingStatLogger(StatLoggerBase):
                 stats.cpu_cache_usage_sys * 100,
             )
 
-            # Reset tracked stats for next interval.
-            self.num_prompt_tokens = []
-            self.num_generation_tokens = []
-            self.last_local_log = stats.now
-
             if self.spec_decode_metrics is not None:
                 logger.info(
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
+
+            # Reset tracked stats for next interval.
+            self.num_prompt_tokens = []
+            self.num_generation_tokens = []
+            self.last_local_log = stats.now
+            self.sepc_decode_metrics = None
 
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
@@ -563,11 +564,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 prompt_throughput=prompt_throughput,
                 generation_throughput=generation_throughput)
 
-            # Reset tracked stats for next interval.
-            self.num_prompt_tokens = []
-            self.num_generation_tokens = []
-            self.last_local_log = stats.now
-
             if self.spec_decode_metrics is not None:
                 self._log_gauge(
                     self.metrics.gauge_spec_decode_draft_acceptance_rate,
@@ -583,6 +579,12 @@ class PrometheusStatLogger(StatLoggerBase):
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_emitted_tokens,
                     self.spec_decode_metrics.emitted_tokens)
+
+            # Reset tracked stats for next interval.
+            self.num_prompt_tokens = []
+            self.num_generation_tokens = []
+            self.last_local_log = stats.now
+            self.spec_decode_metrics = None
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
