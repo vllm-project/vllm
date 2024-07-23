@@ -9,6 +9,7 @@ import torch
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
 from vllm.utils import (enable_trace_function_call_for_thread,
@@ -53,7 +54,7 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
-    @torch.inference_mode()
+    @current_platform.inference_mode()
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.
 
