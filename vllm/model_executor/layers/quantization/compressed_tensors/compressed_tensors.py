@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme, CompressedTensorsUnquantized,
@@ -15,18 +15,23 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
 
 
 class CompressedTensorsConfig(QuantizationConfig):
 
-    def __init__(self, target_scheme_map: Dict[str, Any], ignore: List[str],
-                 quant_format: str):
+    def __init__(self,
+                 target_scheme_map: Dict[str, Any],
+                 ignore: List[str],
+                 quant_format: str,
+                 kv_cache_scheme: Optional[Dict[str, Any]] = None):
 
         self.ignore = ignore
         self.quant_format = quant_format
         # Map from [target -> scheme]
         self.target_scheme_map = target_scheme_map
+        self.kv_cache_scheme = kv_cache_scheme
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -50,9 +55,12 @@ class CompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional["CompressedTensorsLinearMethod"]:
+    ) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
             return CompressedTensorsLinearMethod(self)
+        if isinstance(layer, Attention):
+            return CompressedTensorsKVCacheMethod(self)
         return None
 
     @classmethod
@@ -85,7 +93,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         return cls(target_scheme_map=target_scheme_map,
                    ignore=ignore,
-                   quant_format=quant_format)
+                   quant_format=quant_format,
+                   kv_cache_scheme=config.get("kv_cache_scheme"))
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -309,3 +318,47 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
         return scheme.apply_weights(layer, x, bias=bias)
+
+
+class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from compressed-tensors
+    checkpoints.
+    """
+
+    def __init__(self, quant_config: CompressedTensorsConfig):
+        self.validate_kv_cache_scheme(quant_config.kv_cache_scheme)
+        super().__init__(quant_config)
+
+    @staticmethod
+    def validate_kv_cache_scheme(kv_cache_scheme: Optional[Dict[str, Any]]):
+        """
+        Validator for the kv cache scheme. Useful for controlling the
+        kv cache quantization schemes, that are being supported in vLLM
+        :param kv_cache_scheme: the compressed-tensors kv cache scheme
+        """
+        if kv_cache_scheme is None:
+            return
+
+        type_ = kv_cache_scheme.get("type")
+        num_bits = kv_cache_scheme.get("num_bits")
+
+        if type_ != "float" and num_bits != 8:
+            raise NotImplementedError(
+                "Currently supported kv cache quantization is "
+                "num_bits=8, type=float, however "
+                f"received num_bits={num_bits}, type={type_}")
+
+        strategy = kv_cache_scheme.get("strategy")
+        if strategy != "tensor":
+            raise NotImplementedError(
+                "Only support per-tensor scaling factor "
+                "for compressed-tensors KV cache. "
+                f"Expected strategy: tensor, found strategy: {strategy}")
+
+        is_symmetric = kv_cache_scheme.get("symmetric")
+        if not is_symmetric:
+            raise NotImplementedError(
+                "Only support symmetric scaling factor "
+                "for compressed-tensors KV cache. "
+                f"However found symmetric: {is_symmetric}")
