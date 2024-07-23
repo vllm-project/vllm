@@ -1,11 +1,11 @@
 
 #ifndef _data_types_cuh
 #define _data_types_cuh
-#include "gptq_marlin.cuh"
+#include "marlin.cuh"
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-namespace gptq_marlin {
+namespace marlin {
 
 template <typename scalar_t>
 class ScalarType {};
@@ -23,6 +23,7 @@ class ScalarType<half> {
   using FragB = Vec<half2, 2>;
   using FragC = Vec<float, 4>;
   using FragS = Vec<half2, 1>;
+  using FragZP = Vec<half2, 4>;
 
   static __device__ float inline num2float(const half x) {
     return __half2float(x);
@@ -51,6 +52,7 @@ class ScalarType<nv_bfloat16> {
   using FragB = Vec<nv_bfloat162, 2>;
   using FragC = Vec<float, 4>;
   using FragS = Vec<nv_bfloat162, 1>;
+  using FragZP = Vec<nv_bfloat162, 4>;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   static __device__ float inline num2float(const nv_bfloat16 x) {
@@ -72,6 +74,6 @@ class ScalarType<nv_bfloat16> {
 #endif
 };
 
-}  // namespace gptq_marlin
+}  // namespace marlin
 
 #endif
