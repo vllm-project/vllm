@@ -677,6 +677,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             int(self.cache_config.cpu_offload_gb * 1024**3))
 
     def load_model(self) -> None:
+        logger.info("Starting to load model %s...", self.model_config.model)
         with CudaMemoryProfiler() as m:
             self.model = get_model(model_config=self.model_config,
                                    device_config=self.device_config,
