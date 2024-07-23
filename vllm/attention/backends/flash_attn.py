@@ -557,14 +557,15 @@ class FlashAttentionImpl(AttentionImpl):
             # communication for disaggregated prefill.
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
                 output = output.view(num_tokens, hidden_size).contiguous()
-                print("Sending output, " , output.shape, output.dtype)
+                print("Sending output, " , output.shape, output.dtype, output.device)
                 get_disagg_group().send(output)
             else:
-                print("Recv output, " , output.shape, output.dtype)
+                print("Recv output, " , output.shape, output.dtype, output.device)
                 # Kuntai: This assume that output has the same dtype as key
                 # Is this assumption true?
                 output = get_disagg_group().recv([num_tokens, hidden_size], key.dtype)
-                        
+            import time
+            time.sleep(10)
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
