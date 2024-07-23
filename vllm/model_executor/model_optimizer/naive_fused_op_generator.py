@@ -182,10 +182,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         stop = self.convert_getitem_arg(args[idx].stop)
         step = f", {self.convert_getitem_arg(args[idx].step)}" if args[
             idx].step is not None else ""
-        # if args[idx].start is not None:
-        #     start = arg_swap(args[idx].start, inputs)
-        # elif args[idx].stop is not None:
-        #     stop = arg_swap(args[idx].stop, inputs)
+        if args[idx].start is not None:
+            start = arg_swap(args[idx].start, inputs)
+        elif args[idx].stop is not None:
+            stop = arg_swap(args[idx].stop, inputs)
         return f"{idx}, {start}, {stop}{step}"
 
     def is_simple_slice(self, arg: torch.fx.node.Argument) -> bool:
@@ -255,13 +255,13 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 user_to_last_uses.setdefault(user, []).append(n)
 
         for node in reversed(nodes):
-            # if isinstance(node, torch.fx.Node):
-            torch.fx.node.map_arg(
-                node.args,
-                lambda n, node=node: register_last_uses(n, node))
-            torch.fx.node.map_arg(
-                node.kwargs,
-                lambda n, node=node: register_last_uses(n, node))
+            if isinstance(node, torch.fx.Node):
+                torch.fx.node.map_arg(
+                    node.args,
+                    lambda n, node=node: register_last_uses(n, node))
+                torch.fx.node.map_arg(
+                    node.kwargs,
+                    lambda n, node=node: register_last_uses(n, node))
 
         return user_to_last_uses
 

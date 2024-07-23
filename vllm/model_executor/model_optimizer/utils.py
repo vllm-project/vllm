@@ -186,7 +186,7 @@ def argument_type_str(arg: torch.fx.node.Argument,
         raise RuntimeError(f"unsupported argument type {arg}")
 
 
-def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
+def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_", include_constants = True) -> str:
     """
     Generate a mangled name from a list of call_function nodes.
     The mangled name includes the names of all the operators and their types.
@@ -196,7 +196,7 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
     for n in nodes:
         fn = node_function_target(n)
         types = [
-            argument_type_str(arg).replace("torch.", "") for arg in n.args
+            argument_type_str(arg, include_constants).replace("torch.", "") for arg in n.args
         ]
         ktypes = [
             f"K_{name}_{argument_type_str(kwarg, True).replace('torch.', '')}"
