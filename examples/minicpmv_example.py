@@ -6,7 +6,8 @@ from vllm.assets.image import ImageAsset
 # 2.0
 # MODEL_NAME = "HwwwH/MiniCPM-V-2"
 # 2.5
-MODEL_NAME = "HwwwH/MiniCPM-Llama3-V-2_5"
+# MODEL_NAME = "HwwwH/MiniCPM-Llama3-V-2_5"
+MODEL_NAME = "openbmb/MiniCPM-Llama3-V-2_5"
 
 image = ImageAsset("stop_sign").pil_image.convert("RGB")
 
