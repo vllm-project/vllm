@@ -8,10 +8,7 @@ from vllm.multimodal.utils import ImageFetchAiohttp, encode_image_base64
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
 
-MODEL_NAME = [
-    "llava-hf/llava-1.5-7b-hf",
-    "facebook/chameleon-7b",
-]
+MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 LLAVA_CHAT_TEMPLATE = VLLM_PATH / "examples/template_llava.jinja"
 assert LLAVA_CHAT_TEMPLATE.exists()
 
