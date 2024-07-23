@@ -140,7 +140,7 @@ class NemotronConfig(PretrainedConfig):
         tie_word_embeddings=False,
         rope_theta=10000.0,
         rope_scaling=None,
-        rope_percentage=0.5,
+        rope_percent=0.5,
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
@@ -166,7 +166,7 @@ class NemotronConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
-        self.rope_percentage = rope_percentage
+        self.rope_percent = rope_percent
         self._rope_scaling_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
