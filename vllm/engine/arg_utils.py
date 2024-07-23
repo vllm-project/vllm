@@ -10,12 +10,15 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+
+logger = init_logger(__name__)
 
 
 def nullable_str(val: str):
@@ -92,10 +95,11 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
+    ignore_patterns: Optional[Union[str, List[str]]] = None
     preemption_mode: Optional[str] = None
 
     scheduler_delay_factor: float = 0.0
-    enable_chunked_prefill: bool = False
+    enable_chunked_prefill: Optional[bool] = None
 
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
@@ -508,7 +512,10 @@ class EngineArgs:
             'prompt latency) before scheduling next prompt.')
         parser.add_argument(
             '--enable-chunked-prefill',
-            action='store_true',
+            action=StoreBoolean,
+            default=EngineArgs.enable_chunked_prefill,
+            nargs="?",
+            const="True",
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
 
@@ -613,6 +620,14 @@ class EngineArgs:
                             'corresponding to the chosen load_format. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
+        parser.add_argument(
+            '--ignore-patterns',
+            action="append",
+            type=str,
+            default=[],
+            help="The pattern(s) to ignore when loading the model."
+            "Default to 'original/**/*' to avoid repeated loading of llama's "
+            "checkpoints.")
         parser.add_argument(
             '--preemption-mode',
             type=str,
@@ -728,6 +743,38 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend)
 
+        max_model_len = model_config.max_model_len
+        use_long_context = max_model_len > 32768
+        if self.enable_chunked_prefill is None:
+            # If not explicitly set, enable chunked prefill by default for
+            # long context (> 32K) models. This is to avoid OOM errors in the
+            # initial memory profiling phase.
+            if use_long_context:
+                is_gpu = device_config.device_type == "cuda"
+                use_sliding_window = (model_config.get_sliding_window()
+                                      is not None)
+                use_spec_decode = self.speculative_model is not None
+                if (is_gpu and not use_sliding_window and not use_spec_decode
+                        and not self.enable_lora
+                        and not self.enable_prompt_adapter
+                        and not self.enable_prefix_caching):
+                    self.enable_chunked_prefill = True
+                    logger.warning(
+                        "Chunked prefill is enabled by default for models with "
+                        "max_model_len > 32K. Currently, chunked prefill might "
+                        "not work with some features or models. If you "
+                        "encounter any issues, please disable chunked prefill "
+                        "by setting --enable-chunked-prefill=False.")
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = False
+
+        if not self.enable_chunked_prefill and use_long_context:
+            logger.warning(
+                "The model has a long context length (%s). This may cause OOM "
+                "errors during the initial memory profiling phase, or result "
+                "in low performance due to small KV cache space. Consider "
+                "setting --max-model-len to a smaller value.", max_model_len)
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -786,6 +833,7 @@ class EngineArgs:
             load_format=self.load_format,
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
+            ignore_patterns=self.ignore_patterns,
         )
 
         prompt_adapter_config = PromptAdapterConfig(
@@ -841,6 +889,18 @@ class AsyncEngineArgs(EngineArgs):
                             action='store_true',
                             help='Disable logging requests.')
         return parser
+
+
+class StoreBoolean(argparse.Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values.lower() == "true":
+            setattr(namespace, self.dest, True)
+        elif values.lower() == "false":
+            setattr(namespace, self.dest, False)
+        else:
+            raise ValueError(f"Invalid boolean value: {values}. "
+                             "Expected 'true' or 'false'.")
 
 
 # These functions are used by sphinx to build the documentation
