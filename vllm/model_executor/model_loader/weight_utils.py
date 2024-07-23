@@ -331,6 +331,7 @@ def np_cache_weights_iterator(
     with get_lock(model_name_or_path, cache_dir):
         if not os.path.exists(weight_names_file):
             weight_names: List[str] = []
+            hf_weights_files = tqdm(hf_weights_files,desc="Loading np_cache checkpoint shards")
             for bin_file in hf_weights_files:
                 state = torch.load(bin_file, map_location="cpu")
                 for name, param in state.items():
@@ -355,6 +356,7 @@ def safetensors_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    hf_weights_files = tqdm(hf_weights_files,desc="Loading safetensors checkpoint shards")
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
@@ -366,6 +368,7 @@ def pt_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
+    hf_weights_files = tqdm(hf_weights_files,desc="Loading pt checkpoint shards")
     for bin_file in hf_weights_files:
         state = torch.load(bin_file, map_location="cpu")
         for name, param in state.items():

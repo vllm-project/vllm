@@ -8,7 +8,6 @@ from functools import partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
-from tqdm import auto as tqdm_lib
 from typing import Dict, Optional
 
 import vllm.envs as envs
@@ -153,15 +152,3 @@ def enable_trace_function_call(log_file_path: str,
         # by default, this is the vllm root directory
         root_dir = os.path.dirname(os.path.dirname(__file__))
     sys.settrace(partial(_trace_calls, log_file_path, root_dir))
-class _tqdm_cls:
-    def __call__(self, *args, **kwargs):
-        return tqdm_lib.tqdm(*args, **kwargs)
-
-    def set_lock(self, *args, **kwargs):
-        self._lock = None
-        return tqdm_lib.tqdm.set_lock(*args, **kwargs)
-
-    def get_lock(self):
-        return tqdm_lib.tqdm.get_lock()
-
-tqdm = _tqdm_cls()
