@@ -482,11 +482,11 @@ class FlashAttentionImpl(AttentionImpl):
             envs.VLLM_DISAGG_PREFILL_ROLE is not None, # disagg prefill enabled
         ]):
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
-                logger.debug("Sending key & value, ", key.shape, key.dtype, value.shape, value.dtype)
+                print("Sending key & value, ", key.shape, key.dtype, value.shape, value.dtype)
                 get_disagg_group().send(key)
                 get_disagg_group().send(value)
             else:
-                logger.debug("Recving key & value, ", key.shape, key.dtype, value.shape, value.dtype)
+                print("Recving key & value, ", key.shape, key.dtype, value.shape, value.dtype)
                 key = get_disagg_group().recv(key.shape, key.dtype)
                 value = get_disagg_group().recv(value.shape, value.dtype)
 
@@ -572,10 +572,10 @@ class FlashAttentionImpl(AttentionImpl):
                 if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
                     # communication for disaggregated prefill.
                     if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
-                        logger.info("Sending output, " , output.shape, output.dtype)
+                        print("Sending output, " , output.shape, output.dtype)
                         get_disagg_group().send(output)
                     else:
-                        logger.info("Recv output, " , output.shape, output.dtype)
+                        print("Recv output, " , output.shape, output.dtype)
                         # Kuntai: This assume that output has the same dtype as key
                         # Is this assumption true?
                         output = get_disagg_group().recv([num_tokens, hidden_size], key.dtype)
