@@ -335,7 +335,8 @@ async def test_chat_completion_stream_options(
             stream_options={"include_usage": True},
         )
 
-    # Test stream=True, stream_options={"include_usage": False, "continuous_usage_stats": True}
+    # Test stream=True, stream_options={"include_usage": False,
+    #                           "continuous_usage_stats": True}
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
@@ -375,7 +376,8 @@ async def test_guided_choice_chat(
         {"role": "system", "content": "you are a helpful assistant"},
         {
             "role": "user",
-            "content": "The best language for type-safe systems programming is ",
+            "content": 
+            "The best language for type-safe systems programming is ",
         },
     ]
     chat_completion = await client.chat.completions.create(
@@ -470,7 +472,8 @@ async def test_guided_regex_chat(
         {"role": "system", "content": "you are a helpful assistant"},
         {
             "role": "user",
-            "content": f"Give an example IP address with this regex: {sample_regex}",
+            "content": 
+                f"Give an example IP address with this regex: {sample_regex}",
         },
     ]
     chat_completion = await client.chat.completions.create(
@@ -509,7 +512,8 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
         {"role": "system", "content": "you are a helpful assistant"},
         {
             "role": "user",
-            "content": "The best language for type-safe systems programming is ",
+            "content":
+            "The best language for type-safe systems programming is ",
         },
     ]
 
@@ -534,7 +538,8 @@ async def test_guided_choice_chat_logprobs(
         {"role": "system", "content": "you are a helpful assistant"},
         {
             "role": "user",
-            "content": "The best language for type-safe systems programming is ",
+            "content":
+                "The best language for type-safe systems programming is ",
         },
     ]
     chat_completion = await client.chat.completions.create(
@@ -802,7 +807,9 @@ async def test_complex_message_content(client: openai.AsyncOpenAI):
                 "content": [
                     {
                         "type": "text",
-                        "text": "what is 1+1? please provide the result without any other text.",
+                        "text":
+                        ("what is 1+1"
+                         "please provide the result without any other text."),
                     }
                 ],
             }
