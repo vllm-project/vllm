@@ -31,6 +31,7 @@ _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _PP_SUPPORTED_MODELS = [
     "AquilaModel",
     "AquilaForCausalLM",
+    "DeepseekV2ForCausalLM",
     "InternLMForCausalLM",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
@@ -153,15 +154,6 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
-
-        if (getattr(self.hf_config, "max_position_embeddings", 0) == 131072
-                and getattr(self.hf_config, "rope_scaling", None) is None):
-            # Note(simon): this is a special case for a model that doesn't
-            # supply rope_scaling. We should remove this once the model is
-            # updated.
-            self.hf_config.update({"rope_scaling": {
-                "type": "extended",
-            }})
 
         if (not self.disable_sliding_window
                 and self.hf_text_config.model_type == "gemma2"
@@ -599,12 +591,16 @@ class LoadConfig:
                 mainly for profiling.
             "tensorizer" will use CoreWeave's tensorizer library for
                 fast weight loading.
+        ignore_patterns: The list of patterns to ignore when loading the model.
+            Default to "original/**/*" to avoid repeated loading of llama's 
+            checkpoints.
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
     download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
+    ignore_patterns: Optional[Union[List[str], str]] = None
 
     def __post_init__(self):
         model_loader_extra_config = self.model_loader_extra_config or {}
@@ -612,6 +608,13 @@ class LoadConfig:
             self.model_loader_extra_config = json.loads(
                 model_loader_extra_config)
         self._verify_load_format()
+
+        if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
+            logger.info(
+                "Ignoring the following patterns when downloading weights: %s",
+                self.ignore_patterns)
+        else:
+            self.ignore_patterns = ["original/**/*"]
 
     def _verify_load_format(self) -> None:
         if not isinstance(self.load_format, str):
@@ -801,7 +804,9 @@ class SchedulerConfig:
                 # for higher throughput.
                 self.max_num_batched_tokens = max(max_model_len, 2048)
         if enable_chunked_prefill:
-            logger.info("Chunked prefill is enabled (EXPERIMENTAL).")
+            logger.info(
+                "Chunked prefill is enabled with max_num_batched_tokens=%d.",
+                self.max_num_batched_tokens)
 
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
@@ -1479,24 +1484,32 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    # The correct one should be "longrope", kept "su" here
-    # to be backward compatible
-    if rope_scaling is not None and rope_scaling["type"] not in {
-            "su", "longrope", "extended"
-    }:
-        if disable_sliding_window:
-            # TODO(robertgshaw): Find a model that supports rope_scaling
-            # with sliding window to see if this case should be allowed.
-            raise NotImplementedError(
-                "Disabling sliding window is not supported for models "
-                "with rope_scaling. Please raise an issue so we can "
-                "investigate.")
-        assert "factor" in rope_scaling
-        scaling_factor = rope_scaling["factor"]
-        if rope_scaling["type"] == "yarn":
-            derived_max_model_len = rope_scaling[
-                "original_max_position_embeddings"]
-        derived_max_model_len *= scaling_factor
+    if rope_scaling is not None:
+        if "type" in rope_scaling:
+            rope_type = rope_scaling["type"]
+        elif "rope_type" in rope_scaling:
+            rope_type = rope_scaling["rope_type"]
+        else:
+            raise ValueError(
+                "rope_scaling must have a 'type' or 'rope_type' key.")
+
+        # The correct one should be "longrope", kept "su" here
+        # to be backward compatible
+        if rope_type not in ("su", "longrope", "llama3"):
+            if disable_sliding_window:
+                # TODO(robertgshaw): Find a model that supports rope_scaling
+                # with sliding window to see if this case should be allowed.
+                raise NotImplementedError(
+                    "Disabling sliding window is not supported for models "
+                    "with rope_scaling. Please raise an issue so we can "
+                    "investigate.")
+
+            assert "factor" in rope_scaling
+            scaling_factor = rope_scaling["factor"]
+            if rope_type == "yarn":
+                derived_max_model_len = rope_scaling[
+                    "original_max_position_embeddings"]
+            derived_max_model_len *= scaling_factor
 
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
