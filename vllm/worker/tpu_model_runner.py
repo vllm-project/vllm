@@ -481,6 +481,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             tensor_dict, attn_backend=self.attn_backend)
         return model_input
 
+    @torch.no_grad()
     def execute_model(
         self,
         model_input: ModelInputForTPU,
