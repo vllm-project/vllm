@@ -734,15 +734,16 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend)
 
+        max_model_len = model_config.max_model_len
+        use_long_context = max_model_len > 32768
         if self.enable_chunked_prefill is None:
             # If not explicitly set, enable chunked prefill by default for
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
-            max_model_len = model_config.max_model_len
-            if max_model_len > 32768:
+            if use_long_context:
                 is_gpu = device_config.device_type == "cuda"
-                use_sliding_window = model_config.get_sliding_window(
-                ) is not None
+                use_sliding_window = (model_config.get_sliding_window()
+                                      is not None)
                 use_spec_decode = self.speculative_model is not None
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
@@ -755,14 +756,15 @@ class EngineArgs:
                         "not work with some features or models. If you "
                         "encounter any issues, please disable chunked prefill "
                         "by setting --enable-chunked-prefill=False.")
-                else:
-                    self.enable_chunked_prefill = False
-                    logger.warning(
-                        "The model has a long context length (%s). "
-                        "This may cause OOM errors during the initial memory "
-                        "profiling phase, or result in low performance due to "
-                        "small KV cache space. Consider setting "
-                        "--max-model-len to a smaller value.", max_model_len)
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = False
+
+        if not self.enable_chunked_prefill and use_long_context:
+            logger.warning(
+                "The model has a long context length (%s). This may cause OOM "
+                "errors during the initial memory profiling phase, or result "
+                "in low performance due to small KV cache space. Consider "
+                "setting --max-model-len to a smaller value.", max_model_len)
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
