@@ -40,7 +40,7 @@ VLLM_TP_bench:
 	 VLLM_CPU_KVCACHE_SPACE=100 \
 	 TORCH_LOGS="recompiles" \
 	 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 \
-	 python3 benchmark_throughput.py --backend=vllm --dataset=./ShareGPT_V3_unfiltered_cleaned_split.json --model=lmsys/vicuna-7b-v1.5 --n=1 --num-prompts=1000 --dtype=bfloat16 --trust-remote-code --device=cpu
+	 numactl -C 0-47 --membind 0 python3 benchmark_throughput.py --backend=vllm --dataset=./ShareGPT_V3_unfiltered_cleaned_split.json --model=nm-testing/tinyllama-oneshot-w8a8-static-v3 -q=compressed-tensors --n=1 --num-prompts=1000 --dtype=bfloat16 --trust-remote-code --device=cpu
 
 VLLM_TP_bench_slm:
 	cd benchmarks && \
