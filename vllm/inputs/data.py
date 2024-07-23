@@ -92,35 +92,13 @@ class TokensPrompt(TypedDict):
     """
 
 
-class TextTokensPrompt(TypedDict):
-    """It is assumed that :attr:`prompt` is consistent with
-    :attr:`prompt_token_ids`. This is currently used in
-    :class:`AsyncLLMEngine` for logging both the text and token IDs."""
-
-    prompt: str
-    """The prompt text."""
-
-    prompt_token_ids: List[int]
-    """The token IDs of the prompt."""
-
-    multi_modal_data: NotRequired["MultiModalDataDict"]
-    """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
-    """
-
-
-PromptStrictInputs = Union[str, TextPrompt, TokensPrompt]
+PromptInputs = Union[str, TextPrompt, TokensPrompt]
 """
 The inputs to the LLM, which can take one of the following forms:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
 """
-
-PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
-"""Same as :const:`PromptStrictInputs` but additionally accepts
-:class:`TextTokensPrompt`."""
 
 
 class LLMInputs(TypedDict):
