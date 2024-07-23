@@ -94,6 +94,9 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 ARG buildkite_commit
 ENV BUILDKITE_COMMIT=${buildkite_commit}
 
+ARG cmake_build_type=Release
+ENV CMAKE_BUILD_TYPE=${cmake_build_type}
+
 ARG USE_SCCACHE
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -109,7 +112,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
             export SCCACHE_BUCKET=vllm-build-sccache; \
            fi \
         && export SCCACHE_REGION=us-west-2 \
-        && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
