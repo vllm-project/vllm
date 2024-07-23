@@ -552,7 +552,7 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table=prefill_meta.block_tables,
                 )
 
-        if (prefill_meta is not None) and \
+        if (prefill_meta is not None) and (kv_cache is not None) and \
             (envs.VLLM_DISAGG_PREFILL_ROLE is not None):
             # communication for disaggregated prefill.
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
