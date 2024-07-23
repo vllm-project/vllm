@@ -297,7 +297,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
 
     # Specify the role of current vllm instance
-    # Value can be "prefill", "decode" or None.
+    # Value can be "prefill", "decode".
     "VLLM_DISAGG_PREFILL_ROLE":
     lambda: os.getenv("VLLM_DISAGG_PREFILL_ROLE", None),
 

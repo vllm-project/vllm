@@ -764,7 +764,11 @@ def get_pp_group() -> GroupCoordinator:
         "pipeline model parallel group is not initialized")
     return _PP
 
-    
+
+# kept for backward compatibility
+get_pipeline_model_parallel_group = get_pp_group
+
+
 _DISAGG: Optional[GroupCoordinator] = None
 
 def get_disagg_group() -> GroupCoordinator:
@@ -772,9 +776,6 @@ def get_disagg_group() -> GroupCoordinator:
         "disaggregated prefill parallel group is not initialized")
     return _DISAGG
 
-
-# kept for backward compatibility
-get_pipeline_model_parallel_group = get_pp_group
 
 
 @contextmanager
@@ -992,7 +993,6 @@ def initialize_model_parallel(
                                     backend,
                                     use_message_queue_broadcaster=True)
     logger.debug("_TP initialized for rank %d", torch.distributed.get_rank())
-    time.sleep(5)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size // 
@@ -1011,7 +1011,6 @@ def initialize_model_parallel(
                                     backend,
                                     use_custom_allreduce=False)
     logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
-    time.sleep(5)
     
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
         global _DISAGG
@@ -1028,7 +1027,6 @@ def initialize_model_parallel(
             backend,
             use_custom_allreduce=False)
         logger.debug("_DISAGG initialized for rank %d", torch.distributed.get_rank())
-        time.sleep(5)
 
 
 def ensure_model_parallel_initialized(
