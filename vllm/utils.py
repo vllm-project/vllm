@@ -27,6 +27,95 @@ from vllm.logger import enable_trace_function_call, init_logger
 T = TypeVar("T")
 logger = init_logger(__name__)
 
+ENABLE_TRACING_RPD=bool(int(os.getenv("ENABLE_TRACING_RPD", 0)))
+ENABLE_TRACING_RPD_VERBOSE=bool(int(os.getenv("ENABLE_TRACING_RPD_VERBOSE", 0)))
+
+class rpd_trace():
+    def __init__(self, name="", args=None, skip=False):
+        self.skip = skip
+        if ENABLE_TRACING_RPD and not self.skip:
+            from rpdTracerControl import rpdTracerControl
+            rpdTracerControl.skipCreate()
+            self.rpd = rpdTracerControl()
+            self.name = name
+            self.args = args if args else ""
+
+    def _recreate_cm(self):
+        return self
+
+    def __call__(self, func):
+        if ENABLE_TRACING_RPD and not self.skip:
+            if self.name:
+                self.name += f":{func.__name__}"
+            else:
+                self.name = f"{func.__qualname__}"
+            @wraps(func)
+            def inner(*args, **kwds):
+                with self._recreate_cm():
+                    return func(*args, **kwds)
+            return inner
+        return func
+
+    def __enter__(self):
+        if ENABLE_TRACING_RPD and not self.skip:
+            self.rpd.start()
+            self.rpd.rangePush("python", f"{self.name}", f"{self.args}")
+        return self
+    
+    def __exit__(self, *exc):
+        if ENABLE_TRACING_RPD and not self.skip:
+            self.rpd.rangePop()
+            self.rpd.stop()
+        return False
+
+class async_rpd_trace():
+    def __init__(self, name="", args=None, is_iterator=False, skip=False):
+        self.skip = skip
+        if ENABLE_TRACING_RPD and not self.skip:
+            from rpdTracerControl import rpdTracerControl
+            rpdTracerControl.skipCreate()
+            self.rpd = rpdTracerControl()
+            self.rpd.setPythonTrace(True)
+            self.name = name
+            self.args = args if args else ""
+            self.is_iterator = is_iterator
+
+    def _recreate_cm(self):
+        return self
+
+    def __call__(self, func):
+        if ENABLE_TRACING_RPD and not self.skip:
+            if self.name:
+                self.name += f":{func.__name__}"
+            else:
+                self.name = f"{func.__qualname__}"
+            if self.is_iterator:
+                @wraps(func)
+                async def iterate(*args, **kwds):
+                    async with self._recreate_cm():
+                        async for res in func(*args, **kwds):
+                            yield res
+                return iterate
+            else:
+                @wraps(func)
+                async def inner(*args, **kwds):
+                    async with self._recreate_cm():
+                        return await func(*args, **kwds)
+                return inner
+        return func
+
+    async def __aenter__(self):
+        if ENABLE_TRACING_RPD and not self.skip:
+            self.rpd.start()
+            self.rpd.rangePush("python", f"{self.name}", f"{self.args}")
+        return self
+
+    async def __aexit__(self, *exc):
+        if ENABLE_TRACING_RPD and not self.skip:
+            self.rpd.rangePop()
+            self.rpd.stop()
+        return False
+
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,

@@ -137,6 +137,14 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     else:
         return JSONResponse(content=generator.model_dump())
 
+@app.get("/flush")
+async def flush():
+    from rpdTracerControl import rpdTracerControl
+    rpd = rpdTracerControl()
+    rpd.stop()
+    rpd.flush()
+    ver = {"res": "OK"}
+    return JSONResponse(content=ver)
 
 if __name__ == "__main__":
     args = parse_args()
@@ -148,6 +156,11 @@ if __name__ == "__main__":
         allow_methods=args.allowed_methods,
         allow_headers=args.allowed_headers,
     )
+
+    #from rpdTracerControl import rpdTracerControl
+    #rpd = rpdTracerControl()
+    #rpd.setPythonTrace(True)
+    #rpd.start()
 
     if token := envs.VLLM_API_KEY or args.api_key:
 
