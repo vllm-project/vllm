@@ -272,6 +272,7 @@ def run_server(args, llm_engine=None):
         served_model_names,
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
+        request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_embedding = OpenAIServingEmbedding(
