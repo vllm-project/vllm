@@ -362,5 +362,3 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 "Only support symmetric scaling factor "
                 "for compressed-tensors KV cache. "
                 f"However found symmetric: {is_symmetric}")
-
-        return

@@ -220,7 +220,7 @@ def get_compressed_tensors_cache_scale(name: str) -> Optional[str]:
     """
     if name.endswith(".output_scale") and ".k_proj" in name:
         return name.replace(".k_proj.output_scale", ".attn.k_scale")
-    elif name.endswith(".output_scale") and ".v_proj" in name:
+    if name.endswith(".output_scale") and ".v_proj" in name:
         return name.replace(".v_proj.output_scale", ".attn.v_scale")
     # If no matches, return None
     return None
