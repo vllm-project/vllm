@@ -6,18 +6,16 @@ try:
     from ray.exceptions import ActorDiedError
 except ImportError:
     # For older versions of Ray
-    from ray.exceptions import RayActorError as ActorDiedError
+    from ray.exceptions import RayActorError as ActorDiedError  # type: ignore
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from transformers import PreTrainedTokenizer
 
 from vllm.config import TokenizerPoolConfig
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-    BaseTokenizerGroup)
-from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
-    TokenizerGroup)
+
+from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
+from .tokenizer_group import TokenizerGroup
 
 logger = init_logger(__name__)
 
@@ -67,7 +65,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             **self._tokenizer_config, )
 
         self._ray_tokenizer_group_cls = ray.remote(
-            self._worker_cls).options(**ray_actor_options)
+            self._worker_cls).options(**ray_actor_options)  # type: ignore
         self.tokenizer_actors = [self._init_actor() for _ in range(num_actors)]
         self._idle_actors: Optional[asyncio.Queue] = None
 
@@ -84,7 +82,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
 
     def ping(self):
         return ray.get(
-            [actor.ping.remote() for actor in self.tokenizer_actors])
+            [actor.ping.remote() for actor in self.tokenizer_actors])  # type: ignore
 
     def _ensure_queue_initialized(self):
         if self._idle_actors is None:
@@ -210,13 +208,13 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     def get_lora_tokenizer(
             self,
             lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+    ) -> AnyTokenizer:
         return self._local_tokenizer_group.get_lora_tokenizer(lora_request)
 
     async def get_lora_tokenizer_async(
             self,
             lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+    ) -> AnyTokenizer:
         return await self._local_tokenizer_group.get_lora_tokenizer_async(
             lora_request)
 

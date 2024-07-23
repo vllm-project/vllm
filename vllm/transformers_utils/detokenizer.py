@@ -37,6 +37,8 @@ class Detokenizer:
             The prompt logprobs with the decoded tokens.
         """
         prms = seq_group.sampling_params
+        assert prms is not None
+
         # We can pick any sequence for the prompt.
         seq = next(iter(seq_group.seqs_dict.values()))
         # Only prompt, without the generated token.

@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Union
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
+
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 
 class BaseTokenizerGroup(ABC):
@@ -49,7 +51,7 @@ class BaseTokenizerGroup(ABC):
     def get_lora_tokenizer(
             self,
             lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+    ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
         pass
 
@@ -57,7 +59,7 @@ class BaseTokenizerGroup(ABC):
     async def get_lora_tokenizer_async(
             self,
             lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+    ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
         pass
 

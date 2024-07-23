@@ -114,8 +114,8 @@ mypy vllm/multimodal --config-file pyproject.toml --follow-imports silent
 mypy vllm/platforms --config-file pyproject.toml --follow-imports silent
 mypy vllm/prompt_adapter --config-file pyproject.toml
 mypy vllm/spec_decode --config-file pyproject.toml
-mypy vllm/transformers_utils --config-file pyproject.toml
-mypy vllm/triton_utils --config-file pyproject.toml
+mypy vllm/transformers_utils --config-file pyproject.toml --follow-imports silent
+mypy vllm/triton_utils --config-file pyproject.toml --follow-imports silent
 mypy vllm/usage --config-file pyproject.toml --follow-imports silent
 mypy vllm/worker --config-file pyproject.toml
 
