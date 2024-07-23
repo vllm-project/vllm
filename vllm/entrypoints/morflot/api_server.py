@@ -302,9 +302,7 @@ async def completion_generator(model, result_queue, choices, created_time):
 
 @app.post("/v1/completions")
 async def completions(request: CompletionRequest, raw_request: Request):
-    sampling_params = SamplingParams(temperature=request.temperature,
-                                     top_p=request.top_p,
-                                     max_tokens=request.max_tokens)
+    sampling_params = request.to_sampling_params()
     ids, result_queue = await runner.add_request(request.prompt,
                                                  sampling_params)
     res = CompletionResponse(model=request.model,
