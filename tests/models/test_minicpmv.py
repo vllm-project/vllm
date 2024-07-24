@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
+import torch
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -88,7 +89,11 @@ def run_test(
                                                 stop_token_ids=stop_token_ids)
             for prompts, vllm_images in inputs_per_image
         ]
-    with hf_runner(model, dtype=dtype) as hf_model:
+
+    with hf_runner(model, dtype=dtype) as hf_model, torch.no_grad():
+        hf_processor = hf_model.processor
+        hf_model.processor = lambda **kw: {"model_inputs": hf_processor(**kw)}
+
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
