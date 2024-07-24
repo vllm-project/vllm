@@ -524,14 +524,13 @@ class OpenAIServingChat(OpenAIServing):
             self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
             tokenizer: PreTrainedTokenizer) -> List[ChatCompletionLogProb]:
         return [
-            ChatCompletionLogProb(token=(token := self._get_decoded_token(
-                p[1],
-                p[0],
-                tokenizer,
-                return_as_token_id=self.return_tokens_as_token_ids)),
-                                  logprob=max(p[1].logprob, -9999.0),
-                                  bytes=list(
-                                      token.encode("utf-8", errors="replace")))
+            ChatCompletionLogProb(
+                token=(token := self._get_decoded_token(
+                    p[1], p[0], tokenizer,
+                    return_as_token_id=self.return_tokens_as_token_ids)),
+                logprob=max(p[1].logprob, -9999.0),
+                bytes=list(
+                    token.encode("utf-8", errors="replace")))
             for i, p in enumerate(logprobs.items())
             if top_logprobs and i < top_logprobs
         ]
