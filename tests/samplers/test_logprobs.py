@@ -63,6 +63,8 @@ def test_get_prompt_logprobs(
         assert result.outputs[0].logprobs is not None
         assert len(result.outputs[0].logprobs) == max_tokens
         for logprobs in result.outputs[0].logprobs:
+            # If the output token is not included in the top X
+            # logprob, it can return 1 more data
             assert (len(logprobs) == num_top_logprobs
                     or len(logprobs) == num_top_logprobs + 1)
         output_text = result.outputs[0].text
