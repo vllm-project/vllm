@@ -69,7 +69,8 @@ class AWQMarlinConfig(QuantizationConfig):
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
-        is_valid_user_quant = (user_quant is None or user_quant == "marlin")
+        is_valid_user_quant = (user_quant is None or user_quant == "marlin"
+                               or user_quant == "awq_marlin")
 
         if can_convert and is_valid_user_quant:
             msg = ("The model is convertible to {} during runtime."
