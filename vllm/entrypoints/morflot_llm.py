@@ -214,7 +214,7 @@ class MorflotLLM:
                 output_len = len(output.outputs[0].text)
                 result_queue = self.result_queues[output.request_id]
                 stats = None
-                if output_len > 0 and (output.request_id not in request_stats):
+                if output_len >= 0 and (output.request_id not in request_stats):
                     request_stats[output.request_id] = output_len
                     result = output.outputs[0].text
                 else:
