@@ -121,7 +121,7 @@ class GroupCoordinator:
     device_group: ProcessGroup  # group for device communication
     use_pynccl: bool  # a hint of whether to use PyNccl
     use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
-    use_scatter_gather: bool    # a hint of whether to use send-gather for pp
+    use_scatter_gather: bool  # a hint of whether to use send-gather for pp
     # communicators are only created for world size > 1
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
@@ -648,9 +648,8 @@ class GroupCoordinator:
                     _update_nested_dict(tensor_dict, key, tensor)
                     continue
 
-                maybe_use_scatter_gather = (
-                    self.use_scatter_gather and tensor.numel() % tp_size == 0
-                )
+                maybe_use_scatter_gather = (self.use_scatter_gather
+                                            and tensor.numel() % tp_size == 0)
 
                 # send-allgather: send only a slice, then do allgather.
                 if maybe_use_scatter_gather:
