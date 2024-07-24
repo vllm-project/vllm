@@ -44,3 +44,13 @@ def test_seeded_consistency(baseline_llm_generator, test_llm_generator,
                                   temperature=temperature,
                                   seeded=True,
                                   force_output_len=True)
+
+    # Ensure this same test does fail if we _don't_ include per-request seeds
+    with pytest.raises(AssertionError):
+        run_equality_correctness_test(baseline_llm_generator,
+                                      test_llm_generator,
+                                      batch_size,
+                                      max_output_len=output_len,
+                                      temperature=temperature,
+                                      seeded=False,
+                                      force_output_len=True)
