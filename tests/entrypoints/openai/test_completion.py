@@ -55,8 +55,8 @@ def zephyr_pa_files():
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
-    args = [
+def default_server_args():
+    return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -85,7 +85,17 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
         "128",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+
+@pytest.fixture(scope="module")
+def server(default_server_args, zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def server_with_return_tokens_as_token_ids_flag(default_server_args, zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
+    default_server_args.append("--return-tokens-as-token-ids")
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
 
@@ -682,3 +692,30 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=sample_regex,
                             guided_json=sample_json_schema))
+
+
+@pytest.mark.asyncio
+async def test_return_tokens_as_token_ids_completion(server_with_return_tokens_as_token_ids_flag):
+    client = server_with_return_tokens_as_token_ids_flag.get_async_client()
+
+    completion = await client.completions.create(
+            model=MODEL_NAME,
+            # Include Unicode characters to test for dividing a single
+            # character across multiple tokens: 🎉 is [28705, 31862] for the
+            # Zephyr tokenizer
+            prompt="Say 'Hello, world! 🎉'",
+            echo=True,
+            temperature=0,
+            max_tokens=10,
+            logprobs=1)
+
+    text = completion.choices[0].text
+    token_strs = completion.choices[0].logprobs.tokens
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    # Check that the token representations are consistent between raw tokens
+    # and top_logprobs
+    assert token_strs == list(completion.choices[0].logprobs.top_logprobs.keys())
+
+    # Check that decoding the tokens gives the expected text
+    tokens = [int(token.removeprefix("token_id:")) for token in token_strs]
+    assert text == tokenizer.decode(tokens)
