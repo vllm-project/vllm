@@ -55,7 +55,8 @@ def zephyr_pa_files():
 
 
 @pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
+def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
+                        zephyr_pa_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -695,26 +696,28 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_return_tokens_as_token_ids_completion(server_with_return_tokens_as_token_ids_flag):
+async def test_return_tokens_as_token_ids_completion(
+        server_with_return_tokens_as_token_ids_flag):
     client = server_with_return_tokens_as_token_ids_flag.get_async_client()
 
     completion = await client.completions.create(
-            model=MODEL_NAME,
-            # Include Unicode characters to test for dividing a single
-            # character across multiple tokens: 🎉 is [28705, 31862] for the
-            # Zephyr tokenizer
-            prompt="Say 'Hello, world! 🎉'",
-            echo=True,
-            temperature=0,
-            max_tokens=10,
-            logprobs=1)
+        model=MODEL_NAME,
+        # Include Unicode characters to test for dividing a single
+        # character across multiple tokens: 🎉 is [28705, 31862] for the
+        # Zephyr tokenizer
+        prompt="Say 'Hello, world! 🎉'",
+        echo=True,
+        temperature=0,
+        max_tokens=10,
+        logprobs=1)
 
     text = completion.choices[0].text
     token_strs = completion.choices[0].logprobs.tokens
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     # Check that the token representations are consistent between raw tokens
     # and top_logprobs
-    assert token_strs == list(completion.choices[0].logprobs.top_logprobs.keys())
+    assert token_strs == list(
+        completion.choices[0].logprobs.top_logprobs.keys())
 
     # Check that decoding the tokens gives the expected text
     tokens = [int(token.removeprefix("token_id:")) for token in token_strs]
