@@ -134,7 +134,7 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   if (threadIdx.x == 0) {
     float const scale_val = (max_val - min_val) / 255.0f;
     // Use rounding to even (same as torch.round)
-    auto const azp_float = std::nearbyint(min_val / scale_val + 128.0f);
+    auto const azp_float = std::nearbyint(-128.0f - min_val / scale_val);
     auto const azp_val = static_cast<azp_type>(azp_float);
 
     // Store the scale and azp into shared and global
@@ -152,7 +152,7 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     auto const val = static_cast<float>(input[token_idx * hidden_size + i]);
     auto const quant_val =
-        int32_to_int8(float_to_int32_rn(val / scale_val) - azp_val);
+        int32_to_int8(float_to_int32_rn(val / scale_val) + azp_val);
     out[token_idx * hidden_size + i] = quant_val;
   }
 }
