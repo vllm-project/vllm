@@ -867,10 +867,10 @@ async def test_return_tokens_as_token_ids_completion(
         # Zephyr tokenizer
         messages=[{
             "role": "system",
-            "content": "You like to say 'Hello, world! 🎉'"
+            "content": "You like to respond in only emojis, like 🎉"
         }, {
             "role": "user",
-            "content": "Say the things you like to say, please."
+            "content": "Please write some emojis: 🐱🐶🎉"
         }],
         temperature=0,
         max_tokens=10,
