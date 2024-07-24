@@ -835,9 +835,6 @@ def include_decoding_groups_if_disagg_enabled(
     """
 
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-        # dirty fix: temporarily lift up NCCL buffer size to 1GB
-        # import os
-        # os.environ["NCCL_BUFFSIZE"] = "1073741824"
         assert envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"], (
             "VLLM_DISAGG_PREFILL_ROLE should be either prefill or decode")
         new_groups = []
@@ -1016,6 +1013,9 @@ def initialize_model_parallel(
     logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
     
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
+        # dirty fix: temporarily lift up NCCL buffer size to 1GB
+        import os
+        os.environ["NCCL_BUFFSIZE"] = "1073741824"
         global _DISAGG
         logger.debug("Disaggregated prefill enabled, create _DISAGG group")
         group_ranks = []
