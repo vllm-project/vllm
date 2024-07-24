@@ -10,7 +10,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme, CompressedTensorsUnquantized,
     CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
-    CompressedTensorsW8A8Int8, CompressedTensorsWNA16)
+    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_matched_target, is_activation_quantization_format,
@@ -100,14 +101,18 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
-    def _check_scheme_supported(self, min_capability: int):
+    def _check_scheme_supported(self,
+                                min_capability: int,
+                                error: bool = True) -> bool:
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        if capability < min_capability:
+        supported = capability >= min_capability
+        if error and not supported:
             raise RuntimeError(
                 "Quantization scheme is not supported for ",
                 f"the current GPU. Min capability: {min_capability}. ",
                 f"Current capability: {capability}.")
+        return supported
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -170,6 +175,29 @@ class CompressedTensorsConfig(QuantizationConfig):
         # All conditions satisfied.
         return True
 
+    def _is_fp8_w8a16(self, weight_quant: BaseModel,
+                      input_quant: BaseModel) -> bool:
+        # Confirm weights quantized.
+        if weight_quant is None:
+            return False
+
+        # Confirm we have floating points.
+        if weight_quant.type != QuantizationType.FLOAT:
+            return False
+
+        # Confirm weight scheme is supported.
+        is_symmetric_weight = weight_quant.symmetric
+        is_static_weight = not weight_quant.dynamic
+        is_per_tensor_or_channel_weight = (weight_quant.strategy in [
+            QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
+        ])
+        if not (is_symmetric_weight and is_static_weight
+                and is_per_tensor_or_channel_weight):
+            return False
+
+        # All conditions satisfied.
+        return True
+
     def _is_wNa16_group_channel(self, weight_quant: BaseModel,
                                 input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
@@ -204,7 +232,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Detect If Activation Quantization.
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8Fp8(
+                is_fp8_w8a8_supported = self._check_scheme_supported(
+                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False)
+                if is_fp8_w8a8_supported:
+                    return CompressedTensorsW8A8Fp8(
+                        strategy=weight_quant.strategy,
+                        is_static_input_scheme=(not input_quant.dynamic))
+                else:
+                    return CompressedTensorsW8A16Fp8(
+                        strategy=weight_quant.strategy,
+                        is_static_input_scheme=(not input_quant.dynamic))
+
+            if self._is_fp8_w8a16(weight_quant, input_quant):
+                return CompressedTensorsW8A16Fp8(
                     strategy=weight_quant.strategy,
                     is_static_input_scheme=(not input_quant.dynamic))
 
@@ -257,11 +297,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             targets=self.target_scheme_map.keys())
 
         # Find the quant_scheme
-        scheme = self.target_scheme_map[matched_target]
-
-        return self._get_scheme_from_parts(
-            weight_quant=scheme["weights"],
-            input_quant=scheme["input_activations"])
+        scheme_dict = self.target_scheme_map[matched_target]
+        scheme = self._get_scheme_from_parts(
+            weight_quant=scheme_dict["weights"],
+            input_quant=scheme_dict["input_activations"])
 
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)

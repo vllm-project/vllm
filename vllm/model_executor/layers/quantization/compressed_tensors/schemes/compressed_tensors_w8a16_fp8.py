@@ -18,10 +18,12 @@ __all__ = ["CompressedTensorsW8A16Fp8"]
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
-    def __init__(self, strategy: str):
+    def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
+        self.is_static_input_scheme = is_static_input_scheme
 
-    def get_min_capability(self):
+    @classmethod
+    def get_min_capability(cls) -> int:
         # ampere and up
         return 80
 
@@ -35,20 +37,22 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             layer.weight_scale = torch.nn.Parameter(ws_channelwise,
                                                     requires_grad=False)
 
+        layer.weight = torch.nn.Parameter(layer.weight.t(),
+                                          requires_grad=False)
+
         prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
-    def create_weights(self, layer: torch.nn.Module,
+    def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
 
-        del params_dtype
-
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         # WEIGHT
         weight = torch.nn.Parameter(torch.empty(output_size_per_partition,
@@ -63,14 +67,21 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         })
 
         # WEIGHT SCALE
+        layer_kwargs = {"weight_loader": weight_loader}
         if self.strategy == QuantizationStrategy.CHANNEL:
             weight_scale = create_per_channel_scale_param(
-                output_partition_sizes, weight_loader=weight_loader)
+                output_partition_sizes, **layer_kwargs)
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
             weight_scale = create_per_tensor_scale_param(
-                output_partition_sizes, weight_loader=weight_loader)
+                output_partition_sizes, **layer_kwargs)
         layer.register_parameter("weight_scale", weight_scale)
+
+        # INPUT SCALE (to deal with converted checkpoints)
+        if self.is_static_input_scheme:
+            input_scale = create_per_tensor_scale_param(
+                output_partition_sizes, **layer_kwargs)
+            layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self,
                       layer: torch.nn.Module,

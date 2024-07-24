@@ -29,7 +29,8 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
             raise ValueError(
                 "group_size must be given when using strategy group")
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         # ampere + up
         return 80
 
