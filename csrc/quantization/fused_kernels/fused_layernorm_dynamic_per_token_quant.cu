@@ -90,8 +90,9 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   const float min_scaling_factor =
-      out.dtype() == torch::kInt8 ? std::numeric_limits<float>::epsilon()
-                                    : 1.0f / (std::numeric_limits<c10::Float8_e4m3fn>::max() * 512.f);
+      out.dtype() == torch::kInt8
+          ? std::numeric_limits<float>::epsilon()
+          : 1.0f / (std::numeric_limits<c10::Float8_e4m3fn>::max() * 512.f);
 
   if (residual.has_value()) {
     VLLM_DISPATCH_QUANT_TYPES(

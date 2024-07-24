@@ -95,7 +95,8 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     // Norm
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     // Quant
-    output[token_offset + i] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale);
+    output[token_offset + i] =
+        ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale);
   }
 }
 
@@ -173,7 +174,6 @@ __device__ void compute_dynamic_per_token_scales(
     float const rms, float const* __restrict__ scale_ub,
     float const min_scaling_factor, int const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
-
   int const token_offset = blockIdx.x * hidden_size;
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
@@ -211,14 +211,14 @@ __device__ void compute_dynamic_per_token_scales(
       x.w += static_cast<float>(r.w);
     }
 
-    block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.x * rms) * w.x));
-    block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.y * rms) * w.y));
-    block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.z * rms) * w.z));
-    block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.w * rms) * w.w));
+    block_absmax_val_maybe = fmaxf(
+        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.x * rms) * w.x));
+    block_absmax_val_maybe = fmaxf(
+        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.y * rms) * w.y));
+    block_absmax_val_maybe = fmaxf(
+        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.z * rms) * w.z));
+    block_absmax_val_maybe = fmaxf(
+        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.w * rms) * w.w));
   }
 
   for (int i = num_vec_elems * 4 + tid; i < hidden_size; i += blockDim.x) {
@@ -227,7 +227,8 @@ __device__ void compute_dynamic_per_token_scales(
       x += static_cast<float>(residual[token_offset + i]);
     }
     block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, fabs((static_cast<scalar_t>(x * rms) * weight[i])));
+        fmaxf(block_absmax_val_maybe,
+              fabs((static_cast<scalar_t>(x * rms) * weight[i])));
   }
 
   block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);

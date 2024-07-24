@@ -23,6 +23,7 @@ EPS = 1e-6
 
 ## Helpers
 
+
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
     return torch.as_tensor(x, dtype=torch.float32, device='cuda')
 
@@ -53,10 +54,10 @@ def ref_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
     torch_out, residual = ref_rms_norm(rms_norm_layer, x, residual)
 
     # Quant
-    if  quant_dtype == torch.float8_e4m3fn:
+    if quant_dtype == torch.float8_e4m3fn:
         torch_out, scales = ops.scaled_fp8_quant(torch_out,
-                                            scale_ub = scale_ub,
-                                            use_per_token_if_dynamic = True) 
+                                                 scale_ub=scale_ub,
+                                                 use_per_token_if_dynamic=True)
     else:
         assert quant_dtype == torch.int8
         torch_out, scales = ops.scaled_int8_quant(torch_out)
@@ -69,8 +70,8 @@ def ref_impl(rms_norm_layer: RMSNorm,
              residual: Optional[torch.Tensor],
              scale_ub: Optional[torch.Tensor]) \
            -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    return ref_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype, residual,
-                                    scale_ub)
+    return ref_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype,
+                                       residual, scale_ub)
 
 def ops_dynamic_per_token_quant(weight: torch.Tensor,
                             x: torch.Tensor,
@@ -85,8 +86,8 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
 
     if residual is not None:
         residual = residual.clone()
-    ops.rms_norm_dynamic_per_token_quant(
-            out, x, weight, scales, EPS, scale_ub, residual)
+    ops.rms_norm_dynamic_per_token_quant(out, x, weight, scales, EPS, scale_ub,
+                                         residual)
 
     return out, scales, residual
 
@@ -96,8 +97,9 @@ def ops_impl(weight: torch.Tensor,
              residual: Optional[torch.Tensor],
              scale_ub: Optional[torch.Tensor]) \
                 -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    return ops_dynamic_per_token_quant(weight, x, quant_dtype,
-            residual, scale_ub)
+    return ops_dynamic_per_token_quant(weight, x, quant_dtype, residual,
+                                       scale_ub)
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
@@ -137,7 +139,7 @@ def test_rms_norm(
     x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
     residual = torch.randn_like(x) * scale if add_residual else None
     if scale_ub is not None:
-        rms_x, _ = ref_rms_norm(layer, x, residual) 
+        rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device='cuda')
 
     ref_out, ref_scales, ref_residual = \
@@ -146,7 +148,7 @@ def test_rms_norm(
             ops_impl(layer.weight, x, quant_dtype, residual, scale_ub)
 
     assert ref_out.dtype == quant_dtype
-    assert ops_out.dtype == quant_dtype 
+    assert ops_out.dtype == quant_dtype
     assert torch.allclose(ref_scales, ops_scales)
     if quant_dtype == torch.int8:
         # big atol to account,
