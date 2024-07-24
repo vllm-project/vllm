@@ -19,9 +19,9 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   float ss = 0.0f;
 
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    float x = (float)input[token_offset + i];
+    float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
-      x += (float)residual[token_offset + i];
+      x += static_cast<float>(residual[token_offset + i]);
     }
 
     ss += x * x;
@@ -53,7 +53,7 @@ __device__ void compute_dynamic_per_token_scales(
       x += (float)residual[token_offset + i];
     }
 
-    x = x * rms * (float)(weight[i]);
+    x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
   }
   block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
@@ -87,17 +87,15 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
   int const token_offset = blockIdx.x * hidden_size;
 
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    float const w = (float)weight[i];
-    float x = (float)input[token_offset + i];
+    float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
-      x += (float)residual[token_offset + i];
+      x += static_cast<float>(residual[token_offset + i]);
       residual[token_offset + i] = static_cast<scalar_t>(x);
     }
     // Norm
-    x = x * rms * w;
+    x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     // Quant
-    output[i] =
-        ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale);
+    output[token_offset + i] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale);
   }
 }
 
@@ -137,9 +135,9 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
     if constexpr (has_residual) {
       vec4_t<scalar_t> r = vec_residual[i];
       x.x += static_cast<float>(r.x);
-      x.y += static_cast<float>(r.x);
-      x.z += static_cast<float>(r.x);
-      x.w += static_cast<float>(r.x);
+      x.y += static_cast<float>(r.y);
+      x.z += static_cast<float>(r.z);
+      x.w += static_cast<float>(r.w);
     }
 
     ss += x.x * x.x;
@@ -175,6 +173,7 @@ __device__ void compute_dynamic_per_token_scales(
     float const rms, float const* __restrict__ scale_ub,
     float const min_scaling_factor, int const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
+
   int const token_offset = blockIdx.x * hidden_size;
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
@@ -213,13 +212,13 @@ __device__ void compute_dynamic_per_token_scales(
     }
 
     block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, x.x * rms * (float)(w.x));
+        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.x * rms) * w.x));
     block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, x.y * rms * (float)(w.y));
+        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.y * rms) * w.y));
     block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, x.z * rms * (float)(w.z));
+        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.z * rms) * w.z));
     block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, x.w * rms * (float)(w.w));
+        fmaxf(block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.w * rms) * w.w));
   }
 
   for (int i = num_vec_elems * 4 + tid; i < hidden_size; i += blockDim.x) {
@@ -228,7 +227,7 @@ __device__ void compute_dynamic_per_token_scales(
       x += static_cast<float>(residual[token_offset + i]);
     }
     block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe, x * rms * (float)(weight[i]));
+        fmaxf(block_absmax_val_maybe, fabs((static_cast<scalar_t>(x * rms) * weight[i])));
   }
 
   block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
@@ -302,13 +301,13 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 
     q8x4_t<scalar_out_t> out;
     out.x = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        x.x * rms * w.x, scale);
+        static_cast<scalar_t>(x.x * rms) * w.x, scale);
     out.y = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        x.y * rms * w.y, scale);
+        static_cast<scalar_t>(x.y * rms) * w.y, scale);
     out.z = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        x.z * rms * w.z, scale);
+        static_cast<scalar_t>(x.z * rms) * w.z, scale);
     out.w = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        x.w * rms * w.w, scale);
+        static_cast<scalar_t>(x.w * rms) * w.w, scale);
     vec_output[i] = out;
   }
 
@@ -319,7 +318,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
       residual[token_offset + i] = static_cast<scalar_t>(x);
     }
     output[i] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        x * rms * weight[i], scale);
+        static_cast<scalar_t>(x * rms) * weight[i], scale);
   }
 }
 

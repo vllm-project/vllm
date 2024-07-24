@@ -89,9 +89,9 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  static const float min_scaling_factor =
-      input.dtype() == torch::kInt8 ? std::numeric_limits<float>::epsilon()
-                                    : 1.0f / (FP8_E4M3_MAX * 512.f);
+  const float min_scaling_factor =
+      out.dtype() == torch::kInt8 ? std::numeric_limits<float>::epsilon()
+                                    : 1.0f / (std::numeric_limits<c10::Float8_e4m3fn>::max() * 512.f);
 
   if (residual.has_value()) {
     VLLM_DISPATCH_QUANT_TYPES(
@@ -127,11 +127,11 @@ void rms_norm_dynamic_per_token_quant(
     torch::Tensor& scales,        // [num_tokens]
     double const var_epsilon,     // Variance epsilon used in norm calculation
     std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
-  TORCH_CHECK(input.dtype() == torch::kFloat8_e4m3fn ||
-              input.dtype() == torch::kInt8);
+  TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn ||
+              out.dtype() == torch::kInt8);
 
   if (scale_ub.has_value()) {
-    TORCH_CHECK(input.dtype() == torch::kFloat8_e4m3fn);
+    TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn);
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(
