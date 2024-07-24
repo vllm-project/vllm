@@ -8,7 +8,7 @@ MODELS = ["ai21labs/Jamba-tiny-random"]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [20])
 def test_models(
     hf_runner,
@@ -65,7 +65,7 @@ def test_batching(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [15])
 def test_n_lt_1(
     vllm_runner,
@@ -81,13 +81,13 @@ def test_n_lt_1(
         for_loop_outputs = []
         for _ in range(10):
             for_loop_outputs.append(
-                vllm_model.generate_greedy([example_prompts[0]],
+                vllm_model.generate_greedy([example_prompts[1]],
                                            max_tokens)[0])
         sampling_params = SamplingParams(n=10,
                                          temperature=0.001,
                                          seed=0,
                                          max_tokens=max_tokens)
-        n_lt_1_outputs = vllm_model.generate([example_prompts[0]],
+        n_lt_1_outputs = vllm_model.generate([example_prompts[1]],
                                              sampling_params)
     token_ids, texts = n_lt_1_outputs[0]
     n_lt_1_outputs = [(token_id, text)
@@ -128,8 +128,8 @@ def test_mamba_cache_cg_padding(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [96])
 def test_models_preemption_recompute(
     hf_runner,
     vllm_runner,
