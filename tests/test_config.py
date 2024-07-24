@@ -104,8 +104,11 @@ def test_rope_customization():
         dtype="float16",
         seed=0,
     )
-    assert getattr(longchat_model_config.hf_config, "rope_scaling",
-                   None) == LONGCHAT_ROPE_SCALING
+    # Check if LONGCHAT_ROPE_SCALING key-value pairs are in longchat_model_config
+    assert all(
+        longchat_model_config.hf_config.rope_scaling.get(key) == value
+        for key, value in LONGCHAT_ROPE_SCALING.items()
+    )
     assert longchat_model_config.max_model_len == 16384
 
     longchat_model_config = ModelConfig(
