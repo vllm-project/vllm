@@ -85,7 +85,42 @@ __global__ void residual_add_rms_norm_dynamic_per_token_quant_kernel(
 }
 }  // namespace vllm
 
+// TODO (varun) Make residual optional
+
 // RMS norm + dynamic per token
+
+template<typename scalar_in_t>
+void rms_norm_dynamic_per_token_quant_dispatch(
+    torch::Tensor& out,     // [..., hidden_size]
+    torch::Tensor& tmp,     // [..., hidden_size]
+    torch::Tensor& input,   // [..., hidden_size]
+    torch::Tensor& weight,  // [hidden_size]
+    torch::Tensor& scales,  // [num_tokens]
+    double const epsilon) {
+
+  int hidden_size = input.size(-1);
+  int num_tokens = input.numel() / hidden_size;
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(hidden_size, 1024));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  VLLM_DISPATCH_QUANT_TYPES(
+      out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel",
+      [&] {
+        vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_t,
+                                                      scalar_in_t>
+            <<<grid, block, 0, stream>>>(
+              out.data_ptr<scalar_t>(),
+              scales.data_ptr<float>(),
+              tmp.data_ptr<float>(),
+              input.data_ptr<scalar_in_t>(),
+              weight.data_ptr<scalar_in_t>(),
+              epsilon,
+              hidden_size);
+      });
+}
 
 void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,     // [..., hidden_size]
@@ -94,9 +129,26 @@ void rms_norm_dynamic_per_token_quant(
     torch::Tensor& weight,  // [hidden_size]
     torch::Tensor& scales,  // [num_tokens]
     double const epsilon) {
-  TORCH_CHECK(out.dtype() == torch::kInt8);
 
-  // TODO (varun) Make quant dispatch
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
+        rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
+            out, tmp, input, weight, scales, epsilon);
+      });
+}
+
+// Residual add + RMS norm + dynamic per token
+
+template <typename scalar_in_t>
+void residual_add_rms_norm_dynamic_per_token_quant_dispatch(
+    torch::Tensor& out,       // [..., hidden_size]
+    torch::Tensor& tmp,       // [..., hidden_size]
+    torch::Tensor& input,     // [..., hidden_size]
+    torch::Tensor& residual,  // [..., hidden_size]
+    torch::Tensor& weight,    // [hidden_size]
+    torch::Tensor& scales,    // [num_tokens]
+    double const epsilon) {
+
 
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -106,18 +158,25 @@ void rms_norm_dynamic_per_token_quant(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
-        vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_t>
+  VLLM_DISPATCH_QUANT_TYPES(
+      out.scalar_type(), "residual_add_rms_norm_dynamic_per_token_quant_kernel",
+      [&] {
+        vllm::residual_add_rms_norm_dynamic_per_token_quant_kernel<scalar_t,
+                                                                   scalar_in_t>
             <<<grid, block, 0, stream>>>(
-                out.data_ptr<int8_t>(), scales.data_ptr<float>(),
-                tmp.data_ptr<float>(), input.data_ptr<scalar_t>(),
-                weight.data_ptr<scalar_t>(), epsilon, hidden_size);
+              out.data_ptr<scalar_t>(),
+              scales.data_ptr<float>(),
+              tmp.data_ptr<float>(),
+              input.data_ptr<scalar_in_t>(),
+              residual.data_ptr<scalar_in_t>(),
+              weight.data_ptr<scalar_in_t>(),
+              epsilon,
+              hidden_size);
       });
+
 }
 
-// Residual add + RMS norm + dynamic per token
-
+// TODO (varun) : Remove temp
 void residual_add_rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,       // [..., hidden_size]
     torch::Tensor& tmp,       // [..., hidden_size]
@@ -126,26 +185,11 @@ void residual_add_rms_norm_dynamic_per_token_quant(
     torch::Tensor& weight,    // [hidden_size]
     torch::Tensor& scales,    // [num_tokens]
     double const epsilon) {
-  TORCH_CHECK(out.dtype() == torch::kInt8);
-
-  // TODO (varun) Make quant dispatch
-
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
-
-  dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(),
-      "residual_add_rms_norm_dynamic_per_token_quant_kernel", [&] {
-        vllm::residual_add_rms_norm_dynamic_per_token_quant_kernel<
-            scalar_t><<<grid, block, 0, stream>>>(
-            out.data_ptr<int8_t>(), scales.data_ptr<float>(),
-            tmp.data_ptr<float>(), input.data_ptr<scalar_t>(),
-            residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), epsilon,
-            hidden_size);
+      "residual_add_rms_norm_dynamic_per_token_quant_dispatch", [&] {
+        residual_add_rms_norm_dynamic_per_token_quant_dispatch<
+            scalar_t>(out, tmp, input, residual, weight, scales, epsilon);
       });
 }
