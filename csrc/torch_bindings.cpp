@@ -141,6 +141,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_marlin_repack", &gptq_marlin_repack);
   ops.impl("gptq_marlin_repack", torch::kCUDA, &gptq_marlin_repack);
 
+  // awq_marlin repack from AWQ.
+  ops.def("awq_marlin_repack", &awq_marlin_repack);
+  ops.impl("awq_marlin_repack", torch::kCUDA, &awq_marlin_repack);
+
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def("fp8_marlin_gemm", &fp8_marlin_gemm);
   ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
@@ -179,11 +183,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
-  // Compute FP8 quantized tensor and scaling factor.
+  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
   ops.def(
       "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
+
+  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! "
+      "scale, Tensor? scale_ub) -> "
+      "()");
+  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
+           &dynamic_per_token_scaled_fp8_quant);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
