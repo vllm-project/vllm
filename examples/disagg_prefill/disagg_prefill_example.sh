@@ -60,5 +60,3 @@ curl http://localhost:8200/v1/completions \
 "temperature": 0
 }'
 
-# gracefully kill all vllm instances
-ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
