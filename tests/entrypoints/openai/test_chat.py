@@ -9,6 +9,8 @@ import pytest
 import torch
 from openai import BadRequestError
 
+from vllm.transformers_utils.tokenizer import get_tokenizer
+
 from ...utils import RemoteOpenAIServer
 from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
 from .test_completion import zephyr_lora_files  # noqa: F401
@@ -873,7 +875,8 @@ async def test_return_tokens_as_token_ids_completion(
         logprobs=True)
 
     text = response.choices[0].message.content
-    print(response)
-    print(response.choices[0].logprobs.content)
-    print(text)
-    assert False
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    token_ids = []
+    for logprob_content in response.choices[0].logprobs.content:
+        token_ids.append(int(logprob_content.token.removeprefix("token_id:")))
+    assert tokenizer.decode(token_ids, skip_special_tokens=True) == text
