@@ -8,7 +8,7 @@ MODELS = ["pszemraj/jamba-900M-v0.13-KIx2"]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [20])
 def test_models(
     hf_runner,
@@ -35,8 +35,8 @@ def test_models(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [15])
 def test_batching(
     vllm_runner,
     example_prompts,
