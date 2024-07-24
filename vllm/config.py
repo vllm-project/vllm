@@ -427,16 +427,16 @@ class CacheConfig:
     """
 
     def __init__(
-            self,
-            block_size: int,
-            gpu_memory_utilization: float,
-            swap_space: int,
-            cache_dtype: str,
-            num_gpu_blocks_override: Optional[int] = None,
-            sliding_window: Optional[int] = None,
-            enable_prefix_caching: bool = False,
-            use_vmm: bool = False,  # new add for vmm
-            block_bytes_size: int = 2 * _MB,
+        self,
+        block_size: int,
+        gpu_memory_utilization: float,
+        swap_space: int,
+        cache_dtype: str,
+        num_gpu_blocks_override: Optional[int] = None,
+        sliding_window: Optional[int] = None,
+        enable_prefix_caching: bool = False,
+        use_vmm: bool = False,  # new add for vmm
+        block_bytes_size: int = 2 * _MB,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization

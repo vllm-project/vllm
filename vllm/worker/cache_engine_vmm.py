@@ -11,16 +11,21 @@ from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, TORCH_DTYPE_TO_STR_DTYPE,
                         get_dtype_size, is_pin_memory_available)
 
+_MB = 1 << 20
 logger = init_logger(__name__)
 
 
-# TODO: maybe we need a base class for CacheEngineVMM and CacheEngine
 class CacheEngineVMM:
-    """Manages the KV cache.
+    """Manages the KV cache use VMM cuda api.
 
     This class is responsible for initializing and managing the GPU and CPU KV
     caches. It also provides methods for performing KV cache operations, such
     as swapping and copying.
+    Assign B: batch size, S: sequence length, L: num_layers,
+           H: num_kv_heads, D: head_size
+    For key/value cache, all layers will be packed in one cache space.
+    Specifically, it will reserve 2 cache spaces, the size of each is
+    B * S * L * H * D * dtype_size
     """
 
     def __init__(
@@ -70,7 +75,8 @@ class CacheEngineVMM:
         self.sequence_buffer_size = self.max_seq_len * self.token_size
         self.sequence_buffer_bytes_size = (self.sequence_buffer_size *
                                            self.dtype_size)
-        self.cache_space_size = self.max_batch_size * self.sequence_buffer_size
+
+        self.cache_space_size = self.num_layers * self.sequence_buffer_size
         self.cache_sapce_bytes_size = self.cache_space_size * self.dtype_size
 
         assert self.cache_sapce_bytes_size % self.block_bytes_size == 0, \
@@ -92,6 +98,11 @@ class CacheEngineVMM:
             self.cache_space_page_num)
 
         self.device_cache_allocator = vmm.CacheAllocator()
+
+        page_size = self.block_bytes_size // (2 * _MB)
+        if page_size > 1:
+            logger.info("VMM: Set page size to %d MB", page_size * 2)
+            self.device_cache_allocator.set_page_size(page_size)
         # record the allocated handles for each buffer in a cache space
         self.allocated_block_counts = [0 for _ in range(self.max_batch_size)]
 
@@ -105,6 +116,7 @@ class CacheEngineVMM:
             cache_config.cache_dtype,
             self.block_size,
         )
+        assert self.attn_backend.get_name() == "flash-attn"
 
         # Initialize the cache.
         self.gpu_cache_ptr = self._reserve_gpu_kv_cache()
@@ -113,45 +125,45 @@ class CacheEngineVMM:
         # TODO: Implement CPU cache and swap
         # self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
-    def _reserve_gpu_kv_cache(self) -> List[List[vmm.CacheDevicePtr]]:
-        kv_cache_ptrs = []
-        for i in range(self.num_layers):
-            key_ptr = vmm.CacheDevicePtr()
-            value_ptr = vmm.CacheDevicePtr()
+    def _reserve_gpu_kv_cache(self) -> List[vmm.CacheDevicePtr]:
+        key_ptr = vmm.CacheDevicePtr()
+        value_ptr = vmm.CacheDevicePtr()
+        if ((self.device_cache_allocator.reserve_cache_ptr(
+                key_ptr, self.max_batch_size * self.cache_space_page_num) == 0)
+                and (self.device_cache_allocator.reserve_cache_ptr(
+                    value_ptr, self.max_batch_size * self.cache_space_page_num)
+                     == 0)):
+            # kv_cache_ptrs.append([key_ptr, value_ptr])
+            pass
+        else:
+            raise RuntimeError("Failed to reserve cache ptr.")
 
-            if ((self.device_cache_allocator.reserve_cache_ptr(
-                    key_ptr, self.cache_space_page_num) == 0)
-                    and (self.device_cache_allocator.reserve_cache_ptr(
-                        value_ptr, self.cache_space_page_num) == 0)):
-                kv_cache_ptrs.append([key_ptr, value_ptr])
-            else:
-                raise RuntimeError("Failed to reserve cache ptr.")
-
-        return kv_cache_ptrs
+        return [key_ptr, value_ptr]
 
     def _init_gpu_kv_cache_tensor(self) -> List[List[torch.Tensor]]:
-        kv_cache: List[List[torch.Tensor]] = []
         # We have to allocate one block for each ptr, otherwise wrap to tensor
         # will fail, here we allocate one block for each CacheDevicePtr
         alloc_dict = {}
-        alloc_dict[0] = 1
-        self.alloc_seqs(alloc_dict)
+        for i in range(self.max_batch_size):
+            alloc_dict[i] = 1
+        # alloc_dict[0] = 1
+        self.alloc_seqs(alloc_dict, is_init=True)
 
-        for i in range(self.num_layers):
-            _key_cache_ptr = self.gpu_cache_ptr[i][0]
-            _value_cache_ptr = self.gpu_cache_ptr[i][1]
+        _key_cache_ptr = self.gpu_cache_ptr[0]
+        _value_cache_ptr = self.gpu_cache_ptr[1]
 
-            shape = (self.max_batch_size, self.max_seq_len, self.num_kv_heads,
-                     self.head_size)
-            dtype = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
-            key_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
-                _key_cache_ptr, dtype, shape)
-            value_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
-                _value_cache_ptr, dtype, shape)
+        shape = (self.max_batch_size, self.max_seq_len, self.num_layers,
+                 self.num_kv_heads, self.head_size)
+        dtype = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
+        key_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
+            _key_cache_ptr, dtype, shape)
+        value_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
+            _value_cache_ptr, dtype, shape)
 
-            kv_cache.append([key_cache_tensor, value_cache_tensor])
-
-        return kv_cache
+        kv_cache_views = [[
+            key_cache_tensor[:, :, i, :, :], value_cache_tensor[:, :, i, :, :]
+        ] for i in range(self.num_layers)]
+        return kv_cache_views
 
     def _allocate_kv_cache(
         self,
@@ -188,22 +200,28 @@ class CacheEngineVMM:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
-        # single block bytes size * layer num * 2 (key and value)
-        return (cache_config.block_bytes_size *
-                model_config.get_num_layers(parallel_config) * 2)
+        # single block bytes size * 2 (key and value)
+        return (cache_config.block_bytes_size * 2)
 
-    def alloc_seqs(self, allocated_block_counts: Dict[int, int]):
+    def alloc_seqs(self,
+                   allocated_block_counts: Dict[int, int],
+                   is_init=False):
         """Allocate cache handles for the given number of blocks."""
         for buffer_id, num_blocks in allocated_block_counts.items():
             allocated_blocks = self.allocated_block_counts[buffer_id]
 
             num_blocks -= allocated_blocks
-            start_offset = buffer_id * self.sequence_buffer_bytes_size
+            start_offset = buffer_id * self.cache_sapce_bytes_size
             if num_blocks > 0:
                 allocated_blocks = self.allocated_block_counts[buffer_id]
                 offset = (start_offset +
                           allocated_blocks * self.block_bytes_size)
                 self.alloc_one_seq(buffer_id, num_blocks, offset)
+                if not is_init:
+                    logger.info(
+                        "VMM Alloc: buffer_id: %d, num_blocks: %d, "
+                        "allocated_block_counts: %s", buffer_id, num_blocks,
+                        str(self.allocated_block_counts))
 
             # But now, frequent frees are an overhead, so we don't do it.
             # TODO: Reduced overhead or asynchronous free
@@ -217,20 +235,19 @@ class CacheEngineVMM:
                       num_blocks: int = 1,
                       offset: int = 0):
         """Allocate cache handles for the given number of blocks."""
-        for i in range(self.num_layers):
-            _key_cache_ptr = self.gpu_cache_ptr[i][0]
-            _value_cache_ptr = self.gpu_cache_ptr[i][1]
+        _key_cache_ptr = self.gpu_cache_ptr[0]
+        _value_cache_ptr = self.gpu_cache_ptr[1]
 
-            status1 = self.device_cache_allocator.alloc_cache_ptr(
-                _key_cache_ptr, num_blocks, offset)
-            status2 = self.device_cache_allocator.alloc_cache_ptr(
-                _value_cache_ptr, num_blocks, offset)
-            if status1 != 0 or status2 != 0:
-                logger.error(
-                    "VMM Alloc: buffer_id: %d, num_blocks: %d, offset: %d",
-                    buffer_id, num_blocks, offset)
-                raise RuntimeError(f"Failed to allocate cache handles. "
-                                   f"status1: {status1}, status2: {status2}")
+        status1 = self.device_cache_allocator.alloc_cache_ptr(
+            _key_cache_ptr, num_blocks, offset)
+        status2 = self.device_cache_allocator.alloc_cache_ptr(
+            _value_cache_ptr, num_blocks, offset)
+        if status1 != 0 or status2 != 0:
+            logger.error(
+                "VMM Alloc: buffer_id: %d, num_blocks: %d, offset: %d",
+                buffer_id, num_blocks, offset)
+            raise RuntimeError(f"Failed to allocate cache handles. "
+                               f"status1: {status1}, status2: {status2}")
 
         self.allocated_block_counts[buffer_id] += num_blocks
 
@@ -238,7 +255,7 @@ class CacheEngineVMM:
         """Free cache handles for the given buffer ids."""
         for buffer_id in free_buffer_ids:
             num_blocks = self.allocated_block_counts[buffer_id]
-            offset = buffer_id * self.sequence_buffer_bytes_size
+            offset = buffer_id * self.cache_sapce_bytes_size
             self.free_one_seq(buffer_id, num_blocks, offset)
 
     def free_one_seq(self,
@@ -246,19 +263,17 @@ class CacheEngineVMM:
                      num_blocks: int = 0,
                      offset: int = 0):
         """Free cache handles for the given buffer id."""
-        for i in range(self.num_layers):
-            _key_cache_ptr = self.gpu_cache_ptr[i][0]
-            _value_cache_ptr = self.gpu_cache_ptr[i][1]
+        _key_cache_ptr = self.gpu_cache_ptr[0]
+        _value_cache_ptr = self.gpu_cache_ptr[1]
 
-            status1 = self.device_cache_allocator.release_cache_ptr(
-                _key_cache_ptr, num_blocks, offset)
-            status2 = self.device_cache_allocator.release_cache_ptr(
-                _value_cache_ptr, num_blocks, offset)
-            if status1 != 0 or status2 != 0:
-                logger.error(
-                    "VMM Free: buffer_id: %d, num_blocks: %d, offset: %d",
-                    buffer_id, num_blocks, offset)
-                raise RuntimeError(f"Failed to free cache handles. "
-                                   f"status1: {status1}, status2: {status2}")
+        status1 = self.device_cache_allocator.release_cache_ptr(
+            _key_cache_ptr, num_blocks, offset)
+        status2 = self.device_cache_allocator.release_cache_ptr(
+            _value_cache_ptr, num_blocks, offset)
+        if status1 != 0 or status2 != 0:
+            logger.error("VMM Free: buffer_id: %d, num_blocks: %d, offset: %d",
+                         buffer_id, num_blocks, offset)
+            raise RuntimeError(f"Failed to free cache handles. "
+                               f"status1: {status1}, status2: {status2}")
 
         self.allocated_block_counts[buffer_id] -= num_blocks

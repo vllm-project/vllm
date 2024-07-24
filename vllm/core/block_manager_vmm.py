@@ -68,7 +68,9 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         # Mapping from cache buffer ID to the number of allocated blocks.
-        self.allocated_block_counts: Dict[int, int] = {}
+        self.allocated_block_counts: List[int] = [
+            0 for _ in range(num_cache_buffers)
+        ]
         self.modified_block_counts: Dict[int, int] = {}
         self.waiting_free_buffers: List[Tuple[int, int]] = []
         self.waiting_free_blocks: int = 0
@@ -80,16 +82,38 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
 
     def init_alloc(self) -> None:
         # we init alloc one block for warp in cache_engine_vmm
-        self.allocated_block_counts[0] = 1
-        self.num_free_gpu_blocks -= 1
+        # and add this init buffers to waiting_free_buffers
+        for _ in range(self.num_cache_buffers):
+            buffer_id = self.gpu_allocator.allocate()
+            self.allocated_block_counts[buffer_id] = 1
+            self.num_free_gpu_blocks -= 1
+
+            self.waiting_free_buffers.append((buffer_id, 0))
+            self.waiting_free_blocks += 1
+        assert self.num_free_gpu_blocks > 0
+
+        # self.allocated_block_counts[0] = 1
+        # self.num_free_gpu_blocks -= 1
 
     def predict_gen_len(self, seq: Sequence) -> int:
         # TODO:this function is used to predict the generated content length,
-        # which can used to pre allocate the memory handles
-        return 1
+        # which can used to pre-alloc the memory handles during prefill. And
+        # the predicted length should be smaller than the real generated length
+        # to avoid too much memory pre-allocation
+        # now we simply set predict_gen_len = 512
+        return 512
 
     def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
-        return 0 if seq is None else seq.n_blocks
+        if seq is None:
+            return 0
+        else:
+            n = seq.n_blocks
+            remain_slots = n * self.block_size - seq.get_len()
+            predict_gen_len = self.predict_gen_len(seq)
+            if predict_gen_len > remain_slots:
+                n += (predict_gen_len - remain_slots + self.block_size -
+                      1) // self.block_size
+            return n
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -99,7 +123,6 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = self._get_seq_num_required_blocks(seq)
-        num_required_blocks += self.predict_gen_len(seq)
 
         # If the sequence is not allocated yet, its cache_buffer_id must be -1.
         assert seq.cache_buffer_id == -1
@@ -127,7 +150,6 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         need_blocks_num = self._get_seq_num_required_blocks(seq)
-        need_blocks_num += self.predict_gen_len(seq)
 
         buffer_id, allocated_num = self._allocate_buffer(need_blocks_num)
 
@@ -150,7 +172,6 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         buffer_id, _ = self.waiting_free_buffers.pop(0)
         allocated_num = self.allocated_block_counts[buffer_id]
         self.waiting_free_blocks -= allocated_num
-
         if allocated_num < need_blocks_num:
             self._allocate_extra_blocks(need_blocks_num - allocated_num)
             allocated_num = need_blocks_num
@@ -246,8 +267,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
     def free(self, seq: Sequence) -> None:
         # Here, we just append free seq to waiting_free_buffers.
         waiting_free_id = seq.cache_buffer_id
-        if waiting_free_id not in self.allocated_block_counts or \
-            self.allocated_block_counts[waiting_free_id] == 0:
+        if self.allocated_block_counts[waiting_free_id] == 0:
             # Already freed or haven't been scheduled yet.
             return
 
@@ -258,7 +278,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
 
     def reset(self) -> None:
         # Free decoder block tables
-        self.allocated_block_counts.clear()
+        self.allocated_block_counts = []
         self.num_free_gpu_blocks = self.num_total_gpu_blocks
         self.num_free_cpu_blocks = self.num_total_cpu_blocks
         self.waiting_free_buffers = []
@@ -302,6 +322,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
             self.num_free_gpu_blocks += free_blocks
             self.free_buffer_ids.append(free_id)
             self.allocated_block_counts[free_id] = 0
+            self.gpu_allocator.free(free_id)
 
     def step(self) -> Tuple[Dict[int, int], List[int]]:
         iter = next(self.iter_counter)

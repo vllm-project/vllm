@@ -250,8 +250,9 @@ __global__ void reshape_and_cache_vmm_kernel(
     const int32_t* __restrict__ cache_col_mapping,  // [num_tokens]  record
                                                     // key/value write to which
                                                     // token col in cache
-    const int cache_batch_stride, const int key_stride, const int value_stride,
-    const int num_heads, const int head_size) {
+    const int64_t cache_batch_stride, const int64_t cache_token_stride,
+    const int64_t key_stride, const int64_t value_stride, const int num_heads,
+    const int head_size) {
   const int64_t token_idx = blockIdx.x;
   // // NOTE: cache_cow_idx or cache_col_idx can be -1 if the token is padded
   const int64_t cache_cow_idx = cache_cow_mapping[token_idx];
@@ -265,14 +266,8 @@ __global__ void reshape_and_cache_vmm_kernel(
     const int64_t src_key_idx = token_idx * key_stride + i;
     const int64_t src_value_idx = token_idx * value_stride + i;
 
-    const int64_t tgt_idx =
-        cache_cow_idx * cache_batch_stride + cache_col_idx * n + i;
-    // const int head_idx = i / head_size;
-    // const int head_offset = i % head_size;
-
-    // const int64_t tgt_idx = cache_cow_idx * cache_batch_stride +
-    // cache_col_idx * num_heads * head_size + head_idx * head_size +
-    // head_offset;
+    const int64_t tgt_idx = (cache_cow_idx * cache_batch_stride +
+                             cache_col_idx * cache_token_stride + i);
 
     k_cache[tgt_idx] = key[src_key_idx];
     v_cache[tgt_idx] = value[src_value_idx];
@@ -375,10 +370,12 @@ void reshape_and_cache_vmm(
   int num_heads = key.size(1);
   int head_size = key.size(2);
 
-  int key_stride = key.stride(0);
-  int value_stride = value.stride(0);
-  int cache_batch_stride = k_cache.stride(0);
+  int64_t key_stride = key.stride(0);
+  int64_t value_stride = value.stride(0);
+  int64_t cache_batch_stride = k_cache.stride(0);
+  int64_t cache_token_stride = k_cache.stride(1);
   TORCH_CHECK(k_cache.stride(0) == v_cache.stride(0));
+  TORCH_CHECK(k_cache.stride(1) == v_cache.stride(1));
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
@@ -393,7 +390,8 @@ void reshape_and_cache_vmm(
                 k_cache.data_ptr<scalar_t>(), v_cache.data_ptr<scalar_t>(),
                 cache_cow_mapping.data_ptr<int32_t>(),
                 cache_col_mapping.data_ptr<int32_t>(), cache_batch_stride,
-                key_stride, value_stride, num_heads, head_size);
+                cache_token_stride, key_stride, value_stride, num_heads,
+                head_size);
       });
 }
 

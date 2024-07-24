@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import json
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -682,16 +683,21 @@ class EngineArgs:
 
             head_size = model_config.get_head_size()
             num_heads = model_config.get_num_kv_heads(parallel_config)
+            num_layers = model_config.get_num_layers(parallel_config)
 
             single_token_bytes_size = head_size * num_heads * dtype_size
-
-            if self.block_bytes_size % single_token_bytes_size != 0:
-                raise ValueError(
-                    f"block_bytes_size ({self.block_bytes_size}) % "
-                    f"single_token_bytes_size ({single_token_bytes_size}) != 0"
-                )
+            # We can divide a block equally among all layers, which reduces
+            # the number of vmm memory operations.
+            single_token_bytes_size *= num_layers
+            # vmm only support flash-attn now, which need block_size % 16 == 0
+            min_block_size = single_token_bytes_size * 16
+            self.block_bytes_size = math.lcm(  # type: ignore[attr-defined]
+                self.block_bytes_size, min_block_size)
             self.block_size = self.block_bytes_size // single_token_bytes_size
-            logger.info("use vmm 2MB block size: %d", self.block_size)
+
+            logger.info("use vmm %dMB block size: %d",
+                        self.block_bytes_size // _MB, self.block_size)
+
             # TODO: support swap preemption mode for vmm
             self.preemption_mode = "recompute"
             logger.warning("Preemption only support recompute for vmm now.")
@@ -700,7 +706,6 @@ class EngineArgs:
 
         cache_config = CacheConfig(
             block_size=self.block_size,
-
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
@@ -709,7 +714,8 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             # new add for vmm
             use_vmm=self.use_vmm,
-            block_bytes_size=self.block_bytes_size,)
+            block_bytes_size=self.block_bytes_size,
+        )
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
