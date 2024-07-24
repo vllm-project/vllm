@@ -9,8 +9,6 @@ import pytest
 import torch
 from openai import BadRequestError
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
-
 from ...utils import RemoteOpenAIServer
 from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
 from .test_completion import zephyr_lora_files  # noqa: F401
@@ -23,10 +21,8 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
-def default_server_args(
-        zephyr_lora_files,  # noqa: F811
-        zephyr_lora_added_tokens_files):  # noqa: F811
-    return [
+def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
+    args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -46,17 +42,7 @@ def default_server_args(
         "128",
     ]
 
-
-@pytest.fixture(scope="module")
-def server(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
-
-
-@pytest.fixture(scope="module")
-def server_with_return_tokens_as_token_ids_flag(default_server_args):
-    args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
-    with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -854,31 +840,3 @@ async def test_long_seed(client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
-
-
-@pytest.mark.asyncio
-async def test_return_tokens_as_token_ids_completion(
-        server_with_return_tokens_as_token_ids_flag):
-    client = server_with_return_tokens_as_token_ids_flag.get_async_client()
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        # Include Unicode characters to test for dividing a single
-        # character across multiple tokens: 🎉 is [28705, 31862] for the
-        # Zephyr tokenizer
-        messages=[{
-            "role": "system",
-            "content": "You like to respond in only emojis, like 🎉"
-        }, {
-            "role": "user",
-            "content": "Please write some emojis: 🐱🐶🎉"
-        }],
-        temperature=0,
-        max_tokens=8,
-        logprobs=True)
-
-    text = response.choices[0].message.content
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
-    token_ids = []
-    for logprob_content in response.choices[0].logprobs.content:
-        token_ids.append(int(logprob_content.token.removeprefix("token_id:")))
-    assert tokenizer.decode(token_ids, skip_special_tokens=True) == text
