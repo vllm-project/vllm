@@ -23,7 +23,8 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
+def default_server_args(zephyr_lora_files,
+                        zephyr_lora_added_tokens_files):  # noqa: F811
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
