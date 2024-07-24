@@ -31,11 +31,13 @@ void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
 void rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out, torch::Tensor const& input,
-    torch::Tensor const& weight, torch::Tensor& scales,
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
     double const epsilon,
-    std::optional<torch::Tensor> const& scale_ub,
-    std::optional<torch::Tensor>& residual);
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       torch::Tensor& key, int64_t head_size,

@@ -28,37 +28,34 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   bool const can_vectorize = hidden_size % 4 == 0;
 
   // Compute RMS
-  __shared__ float s_rms;
-  __shared__ float s_token_scale;
+  float rms = 0.0f;
+  float token_scale = 0.0f;
   if (can_vectorize) {
-
-    vllm::vectorized::compute_rms<scalar_t, has_residual>(&s_rms, input, hidden_size, var_epsilon, residual);
-
+    vllm::vectorized::compute_rms<scalar_t, has_residual>(&rms, input, hidden_size, var_epsilon, residual);
     vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
-      &s_token_scale, scales, input, weight, s_rms, scale_ub, min_scaling_factor, hidden_size, residual);
+      &token_scale, scales, input, weight, rms, scale_ub, min_scaling_factor, hidden_size, residual);
 
     if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
       vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
-        out, input, weight, s_rms, 1.0f / s_token_scale, hidden_size, residual);
+        out, input, weight, rms, 1.0f / token_scale, hidden_size, residual);
     } else {
       // FP8 - Do not invert s_token_scale for exact match with FBGemm
       vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
-        out, input, weight, s_rms, s_token_scale, hidden_size, residual);
+        out, input, weight, rms, token_scale, hidden_size, residual);
     }
 
   } else {
-    vllm::compute_rms<scalar_t, has_residual>(&s_rms, input, hidden_size, var_epsilon, residual);
-
-    vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
-      &s_token_scale, scales, &s_rms, input, weight, scale_ub, min_scaling_factor, hidden_size, residual);
+    vllm::compute_rms<scalar_t, has_residual>(&rms, input, hidden_size, var_epsilon, residual);
+    vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+      &token_scale, scales, input, weight, rms, scale_ub, min_scaling_factor, hidden_size, residual);
 
     if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
       vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
-        out, input, weight, s_rms, 1.0f / s_token_scale, hidden_size, residual);
+        out, input, weight, rms, 1.0f / token_scale, hidden_size, residual);
     } else {
       // FP8 - Do not invert s_token_scale for exact match with FBGemm
       vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
-        out, input, weight, s_rms, s_token_scale, hidden_size, residual);
+        out, input, weight, rms, token_scale, hidden_size, residual);
     }
   }
 }
@@ -137,8 +134,8 @@ void rms_norm_dynamic_per_token_quant(
     torch::Tensor const& weight,// [hidden_size]
     torch::Tensor& scales,    // [num_tokens]
     double const var_epsilon,     // Variance epsilon used in norm calculation 
-    std::optional<at::Tensor> const& scale_ub,
-    std::optional<at::Tensor>& residual) {
+    std::optional<at::Tensor> scale_ub,
+    std::optional<at::Tensor> residual) {
 
   TORCH_CHECK(input.dtype() == torch::kFloat8_e4m3fn ||
               input.dtype() == torch::kInt8);

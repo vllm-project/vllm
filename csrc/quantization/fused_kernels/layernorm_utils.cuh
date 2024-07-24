@@ -11,7 +11,7 @@ namespace vllm {
 
 // has_residual must be true, if residual is not a nullptr
 template <typename scalar_t, bool has_residual = false>
-__device__ void compute_rms(__shared__ float* s_rms,
+__device__ void compute_rms(float* rms,
                             scalar_t const* __restrict__ input,
                             int const hidden_size, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
@@ -29,15 +29,18 @@ __device__ void compute_rms(__shared__ float* s_rms,
     ss += x * x;
   }
   ss = blockReduceSum<float>(ss);
+  __shared__ float s_rms; 
   if (threadIdx.x == 0) {
-    *s_rms = rsqrtf(ss / hidden_size + epsilon);
+    s_rms = rsqrtf(ss / hidden_size + epsilon);
   }
   __syncthreads();
+
+  *rms = s_rms;
 }
 
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_scales(
-    __shared__ float* __restrict__ s_token_scale,
+    float* __restrict__ token_scale,
     float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input,
     scalar_t const* __restrict__ weight,
@@ -62,19 +65,22 @@ __device__ void compute_dynamic_per_token_scales(
   }
   block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
 
-  float token_scale = 0.0f;
+  __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
+    float scale = 0.0f;
     if (scale_ub)  {
-      token_scale = min(block_absmax_val_maybe, *scale_ub);
+      scale = min(block_absmax_val_maybe, *scale_ub);
     } else {
-      token_scale = block_absmax_val_maybe;
+      scale = block_absmax_val_maybe;
     }
     // token scale computation
-    token_scale = max(token_scale / qmax, min_scaling_factor)
-    *s_token_scale = token_scale; // Shared memory store
-    all_token_scales[blockIdx.x] = token_scale; // Global output store
+    scale = max(scale / qmax, min_scaling_factor);
+    s_token_scale = scale; // Shared memory store
+    all_token_scales[blockIdx.x] = scale; // Global output store
   }
   __syncthreads();
+
+  *token_scale = s_token_scale;
 }
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted, bool has_residual = false>
@@ -107,7 +113,7 @@ namespace vectorized {
 
 // Compute 1.0/rms(input)
 template <typename scalar_t, bool has_residual = false>
-__device__ void compute_rms(__shared__ float* s_rms,
+__device__ void compute_rms(float* rms,
                             scalar_t const* __restrict__ input,
                             int const hidden_size,
                             float const epsilon,
@@ -163,16 +169,19 @@ __device__ void compute_rms(__shared__ float* s_rms,
   }
 
   ss = blockReduceSum<float>(ss);
+  __shared__ float s_rms;
   if (threadIdx.x == 0) {
-    *s_rms = rsqrtf(ss / hidden_size + epsilon);
+    s_rms = rsqrtf(ss / hidden_size + epsilon);
   }
   __syncthreads();
+
+  *rms = s_rms;
 }
 
 // Vectorized version of vllm::compute_dynamic_per_token_scales
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_scales(
-    __shared__ float* __restrict__ s_token_scale,
+    float* __restrict__ token_scale,
     float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input,
     scalar_t const* __restrict__ weight,
@@ -240,19 +249,22 @@ __device__ void compute_dynamic_per_token_scales(
 
   block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
 
-  float token_scale = 0.0f;
+  __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
+    float scale = 0.0f;
     if (scale_ub)  {
-      token_scale = min(block_absmax_val_maybe, *scale_ub);
+      scale = min(block_absmax_val_maybe, *scale_ub);
     } else {
-      token_scale = block_absmax_val_maybe;
+      scale = block_absmax_val_maybe;
     }
     // token scale computation
-    token_scale = max(token_scale / qmax, min_scaling_factor);
-    *s_token_scale = token_scale; // shared memory store
-    all_token_scales[blockIdx.x] = token_scale; // global output store
+    scale = max(scale / qmax, min_scaling_factor);
+    s_token_scale = scale ; // shared memory store
+    all_token_scales[blockIdx.x] = scale; // global output store
   }
   __syncthreads();
+
+  *token_scale = s_token_scale;
 }
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted, bool has_residual = false>
@@ -272,11 +284,11 @@ __device__ void norm_and_quant(
       reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_offset]);
   vec4_t<scalar_t> const* vec_weight =
       reinterpret_cast<vec4_t<scalar_t> const*>(weight);
-  q8x4_t<scalar_out_t> const* vec_output =  
-      reinterpret_cast<q8x4_t<scalar_out_t> const*>(&output[token_offset]);
+  q8x4_t<scalar_out_t>* vec_output =  
+      reinterpret_cast<q8x4_t<scalar_out_t>*>(&output[token_offset]);
   vec4_t<scalar_t>* vec_residual = nullptr;
   if constexpr (has_residual) {
-    vec_residual = reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
+    vec_residual = reinterpret_cast<vec4_t<scalar_t>*>(&residual[token_offset]);
   }
 
   int const tid = threadIdx.x;
