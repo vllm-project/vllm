@@ -33,34 +33,34 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                c10::optional<torch::Tensor> const& bias,
+                                torch::Tensor const& azp_adj,
                                 c10::optional<torch::Tensor> const& azp,
-                                torch::Tensor const& azp_adj);
+                                c10::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_azp_sm80(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                c10::optional<torch::Tensor> const& bias,
+                                torch::Tensor const& azp_adj,
                                 c10::optional<torch::Tensor> const& azp,
-                                torch::Tensor const& azp_adj);
+                                c10::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_azp_sm89(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                c10::optional<torch::Tensor> const& bias,
+                                torch::Tensor const& azp_adj,
                                 c10::optional<torch::Tensor> const& azp,
-                                torch::Tensor const& azp_adj);
+                                c10::optional<torch::Tensor> const& bias);
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
 void cutlass_scaled_mm_azp_sm90(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                c10::optional<torch::Tensor> const& bias,
+                                torch::Tensor const& azp_adj,
                                 c10::optional<torch::Tensor> const& azp,
-                                torch::Tensor const& azp_adj);
+                                c10::optional<torch::Tensor> const& bias);
 #endif
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
@@ -146,9 +146,9 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,
                            torch::Tensor const& b_scales,
-                           c10::optional<torch::Tensor> const& bias,
+                           torch::Tensor const& azp_adj,
                            c10::optional<torch::Tensor> const& azp,
-                           torch::Tensor const& azp_adj) {
+                           c10::optional<torch::Tensor> const& bias) {
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
@@ -180,19 +180,19 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
 
     // Guard against compilation issues for sm90 kernels
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
-    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
+    cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
 #else
-    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
+    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
 #endif
   } else if (version_num == 89) {
     // Ada Lovelace
-    cutlass_scaled_mm_azp_sm89(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
+    cutlass_scaled_mm_azp_sm89(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
   } else if (version_num >= 80) {
     // Ampere
-    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
+    cutlass_scaled_mm_azp_sm80(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
   } else {
     // Turing
     TORCH_CHECK(version_num >= 75);
-    cutlass_scaled_mm_azp_sm75(c, a, b, a_scales, b_scales, bias, azp, azp_adj);
+    cutlass_scaled_mm_azp_sm75(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
   }
 }

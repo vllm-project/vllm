@@ -248,8 +248,8 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
                           scale_a: torch.Tensor,
                           scale_b: torch.Tensor,
                           out_dtype: Type[torch.dtype],
-                          azp: Optional[torch.Tensor],
                           azp_adj: torch.Tensor,
+                          azp: Optional[torch.Tensor] = None,
                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
@@ -260,9 +260,8 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, bias, azp,
-                                       azp_adj)
-
+    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
+                                       azp, bias)
     return out
 
 

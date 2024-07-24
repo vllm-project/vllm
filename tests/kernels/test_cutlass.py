@@ -338,12 +338,12 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
 
     if azp_per_token:
         out = ops.cutlass_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b,
-                                        out_dtype, azp_i32, azp_adj_i32,
+                                        out_dtype, azp_adj_i32, azp_i32,
                                         func_bias)
     else:
         azp_with_adj_i32 = azp_i32 * azp_adj_i32
         out = ops.cutlass_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b,
-                                        out_dtype, None, azp_with_adj_i32,
+                                        out_dtype, azp_with_adj_i32, None,
                                         func_bias)
 
     # bfloat16 precision is 7-bit mantissa -> 2^-8 ~ 0.4%

@@ -262,8 +262,8 @@ struct ScaledEpilogueBiasAzp
 
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
-                                   c10::optional<torch::Tensor> const& bias,
-                                   torch::Tensor const& azp_adj) {
+                                   torch::Tensor const& azp_adj,
+                                   c10::optional<torch::Tensor> const& bias) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
@@ -329,9 +329,9 @@ struct ScaledEpilogueBiasAzpToken
 
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
-                                   c10::optional<torch::Tensor> const& bias,
+                                   torch::Tensor const& azp_adj,
                                    torch::Tensor const& azp,
-                                   torch::Tensor const& azp_adj) {
+                                   c10::optional<torch::Tensor> const& bias) {
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
@@ -721,9 +721,9 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
-                                c10::optional<torch::Tensor> const& bias,
+                                torch::Tensor const& azp_adj,
                                 c10::optional<torch::Tensor> const& azp,
-                                torch::Tensor const& azp_adj) {
+                                c10::optional<torch::Tensor> const& bias) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(!bias || bias->dtype() == out.dtype(),
@@ -733,10 +733,10 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
   if (azp) {
     TORCH_CHECK(azp->dtype() == torch::kInt32);
     return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBiasAzpToken>(
-        out, a, b, a_scales, b_scales, bias, *azp, azp_adj);
+        out, a, b, a_scales, b_scales, azp_adj, *azp, bias);
   } else {
     return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBiasAzp>(
-        out, a, b, a_scales, b_scales, bias, azp_adj);
+        out, a, b, a_scales, b_scales, azp_adj, bias);
   }
 }
 
