@@ -121,11 +121,14 @@ PromptInputs = Union[DecoderOnlyPromptInputs, ExplicitEncoderDecoderPrompt]
 :class:`TextTokensPrompt`."""
 
 
-def get_prompt_type(prompt: PromptInputs, ) -> str:
+def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
     """
     Get the type-name of the prompt argument instance, given that
     isinstance() cannot apply to TypedDict subclasses directly.
     """
+
+    if prompt is None:
+        return 'None'
 
     required_keys_dict = {
         'TextPrompt': ['prompt'],

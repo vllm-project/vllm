@@ -1,32 +1,68 @@
+'''
+Demonstrate prompting of text-to-text
+encoder/decoder models, specifically BART
+'''
 from utils import override_backend_env_var_context_manager
 
 from vllm import LLM, SamplingParams
+from vllm.inputs import (TextPrompt, 
+                         TokensPrompt, 
+                         ExplicitEncoderDecoderPrompt)
 from vllm.utils import STR_XFORMERS_ATTN_VAL, zip_enc_dec_prompt_lists
 
 dtype = "float"
 
-# Sample prompts.
-# - Encoder prompts
-encoder_prompts = [
-    "PG&E stated it scheduled the blackouts in "
-    "response to forecasts for high winds "
-    "amid dry conditions. The aim is to reduce "
-    "the risk of wildfires. Nearly 800 thousand customers were "
-    "scheduled to be affected by the shutoffs which "
-    "were expected to last through at least midday tomorrow.",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
-# - Decoder prompts
-decoder_prompts = [
-    encoder_prompts[0],
-    "",
-    "",
-    "",
-]
-# - Unified encoder/decoder prompts
-prompts = zip_enc_dec_prompt_lists(encoder_prompts, decoder_prompts)
+# Create a BART encoder/decoder model instance
+llm = LLM(
+    model="facebook/bart-large-cnn",
+    enforce_eager=True,
+    dtype=dtype,
+    # tensor_parallel_size=4,
+)
+
+# Get BART tokenizer
+tokenizer=llm.llm_engine.get_tokenizer_group()
+
+# Test prompts
+# - Helpers for building prompts
+text_prompt_raw = "Hello, my name is"
+text_prompt = TextPrompt(prompt="The president of the United States is")
+tokens_prompt = TokensPrompt(prompt_token_ids=tokenizer.encode(
+                                            prompt="The capital of France is",
+                                            )
+)
+# - Pass a single prompt to encoder/decoder model (implicitly encoder input prompt);
+#   decoder input prompt is assumed to be None
+single_text_prompt_raw = text_prompt_raw
+single_text_prompt = text_prompt
+single_tokens_prompt = tokens_prompt
+# - Pass explicit encoder and decoder input prompts within a single data structure.
+#   Encoder and decoder prompts can both independently be text or tokens, with
+#   no requirement that they be the same prompt type. Some example prompt-type
+#   combinations are shown below.
+enc_dec_prompt1 = ExplicitEncoderDecoderPrompt(
+    encoder_prompt=single_text_prompt_raw,
+    decoder_prompt=single_tokens_prompt,
+)
+enc_dec_prompt2 = ExplicitEncoderDecoderPrompt(
+    encoder_prompt=single_text_prompt,
+    decoder_prompt=single_text_prompt_raw,
+)
+enc_dec_prompt3 = ExplicitEncoderDecoderPrompt(
+    encoder_prompt=single_tokens_prompt,
+    decoder_prompt=single_text_prompt,
+)
+# - Build prompt list
+prompts = [single_text_prompt_raw,
+           single_text_prompt,
+           single_tokens_prompt,
+           enc_dec_prompt1,
+           enc_dec_prompt2,
+           enc_dec_prompt3
+           ]
+
+# # - Unified encoder/decoder prompts
+# prompts = zip_enc_dec_prompt_lists(encoder_prompts, decoder_prompts)
 
 print(prompts)
 
@@ -42,13 +78,6 @@ with override_backend_env_var_context_manager(STR_XFORMERS_ATTN_VAL):
         max_tokens=20,
     )
 
-    # Create an LLM.
-    llm = LLM(
-        model="facebook/bart-large-cnn",
-        enforce_eager=True,
-        dtype=dtype,
-        # tensor_parallel_size=4,
-    )
     # Generate texts from the prompts. The output is a list of
     # RequestOutput objects that contain the prompt, generated
     # text, and other information.
