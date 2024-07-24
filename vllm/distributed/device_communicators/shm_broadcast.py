@@ -187,6 +187,9 @@ class MessageQueue:
             self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes,
                                         max_chunks)
 
+            # XPUB is very similar to PUB,
+            # except that it can receive subscription messages
+            # to confirm the number of subscribers
             self.local_socket = context.socket(XPUB)
             # set the verbose option so that we can receive every subscription
             # message. otherwise, we will only receive the first subscription
