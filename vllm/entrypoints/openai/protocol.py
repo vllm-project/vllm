@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Literal, Optional, Union
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer
-# pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam

@@ -8,7 +8,7 @@ from vllm.sampling_params import LogitsProcessor
 
 
 class AllowedTokenIdsLogitsProcessor:
-    """Logits processor for constraining generatedtokens to a
+    """Logits processor for constraining generated tokens to a
     specific set of token ids."""
 
     def __init__(self, allowed_ids: Iterable[int]):
@@ -18,8 +18,7 @@ class AllowedTokenIdsLogitsProcessor:
     def __call__(self, token_ids: List[int],
                  logits: torch.Tensor) -> torch.Tensor:
         if self.mask is None:
-            self.mask = torch.full((logits.shape[-1], ),
-                                   True,
+            self.mask = torch.ones((logits.shape[-1], ),
                                    dtype=torch.bool,
                                    device=logits.device)
             self.mask[self.allowed_ids] = False
