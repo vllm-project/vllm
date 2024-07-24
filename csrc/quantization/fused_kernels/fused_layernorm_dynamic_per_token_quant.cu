@@ -19,7 +19,6 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
     float const* scale_ub, float const var_epsilon,
     float const min_scaling_factor, int const hidden_size,
     scalar_t* __restrict__ residual = nullptr) {
-
   // Compute RMS
   float rms = 0.0f;
   float token_scale = 0.0f;
@@ -47,7 +46,6 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
   }
 }
 
-
 // RMS norm + quant kernel
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __global__ void rms_norm_dynamic_per_token_quant_kernel(
@@ -63,8 +61,10 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   bool const can_vectorize = hidden_size % 4 == 0;
 
   if (can_vectorize) {
-    return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t, has_residual>(
-      out, scales, input, weight, scale_ub, var_epsilon, min_scaling_factor, hidden_size, residual);
+    return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t,
+                                                has_residual>(
+        out, scales, input, weight, scale_ub, var_epsilon, min_scaling_factor,
+        hidden_size, residual);
   }
 
   float rms = 0.0f;
@@ -74,8 +74,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   vllm::compute_rms<scalar_t, has_residual>(&rms, input, hidden_size,
                                             var_epsilon, residual);
   // Compute Scale
-  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
-                                         has_residual>(
+  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
       &token_scale, scales, input, weight, rms, scale_ub, min_scaling_factor,
       hidden_size, residual);
 
@@ -101,7 +100,6 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     double const var_epsilon,     // Variance epsilon used in norm calculation
     std::optional<at::Tensor> const& scale_ub,
     std::optional<at::Tensor>& residual) {
-
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
