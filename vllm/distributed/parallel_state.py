@@ -575,6 +575,9 @@ class GroupCoordinator:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
 
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
         group = self.device_group
         metadata_group = self.cpu_group
 
@@ -597,9 +600,7 @@ class GroupCoordinator:
                 continue
 
             # send-allgather: send only a slice, then do allgather.
-            tp_size = get_tensor_model_parallel_world_size()
             if self.use_scatter_gather and tensor.numel() % tp_size == 0:
-                tp_rank = get_tensor_model_parallel_rank()
                 tensor = tensor.reshape(tp_size, -1)[tp_rank]
 
             if tensor.is_cpu:
@@ -625,6 +626,9 @@ class GroupCoordinator:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None
 
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
         group = self.device_group
         metadata_group = self.cpu_group
 
@@ -644,14 +648,14 @@ class GroupCoordinator:
                     _update_nested_dict(tensor_dict, key, tensor)
                     continue
 
+                maybe_use_scatter_gather = (
+                    self.use_scatter_gather and tensor.numel() % tp_size == 0
+                )
+
                 # send-allgather: send only a slice, then do allgather.
-                tp_size = get_tensor_model_parallel_world_size()
-                if self.use_scatter_gather and tensor.numel() % tp_size == 0:
-                    orig_tensor = tensor
-                    tp_rank = get_tensor_model_parallel_rank()
-                    tensor = orig_tensor.reshape(tp_size, -1)[tp_rank]
-                else:
-                    orig_tensor = None
+                if maybe_use_scatter_gather:
+                    orig_shape = tensor.shape
+                    tensor = tensor.reshape(tp_size, -1)[tp_rank]
 
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
@@ -663,10 +667,10 @@ class GroupCoordinator:
                     torch.distributed.recv(tensor,
                                            src=self.ranks[src],
                                            group=group)
-                if self.use_scatter_gather and orig_tensor.numel() % tp_size == 0:
+                if maybe_use_scatter_gather:
                     # do the allgather
-                    gathered_tensor = get_tp_group().all_gather(tensor, dim=0)
-                    tensor = gathered_tensor.reshape(orig_tensor.shape)
+                    tensor = get_tp_group().all_gather(tensor, dim=0)
+                    tensor = tensor.reshape(orig_shape)
 
                 _update_nested_dict(tensor_dict, key, tensor)
             else:

@@ -1074,4 +1074,3 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     next_prompt_tokens = prompt_tokens[
         next_token_index_start:next_token_index_end]
     return next_prompt_tokens
-
