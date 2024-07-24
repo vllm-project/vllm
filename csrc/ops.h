@@ -30,11 +30,11 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
-void rms_norm_dynamic_per_token_int8_quant(
+void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out, torch::Tensor& tmp, torch::Tensor& input,
     torch::Tensor& weight, torch::Tensor& scales, double const epsilon);
 
-void residual_add_rms_norm_dynamic_per_token_int8_quant(
+void residual_add_rms_norm_dynamic_per_token_quant(
     torch::Tensor& out, torch::Tensor& tmp, torch::Tensor& input,
     torch::Tensor& residual, torch::Tensor& weight, torch::Tensor& scales,
     double const epsilon);

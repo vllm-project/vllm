@@ -178,7 +178,7 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
                                      block_tables)
 
 # fused quant layer norm ops
-def rms_norm_dynamic_per_token_int8_quant(out: torch.Tensor, tmp: torch.Tensor,
+def rms_norm_dynamic_per_token_quant(out: torch.Tensor, tmp: torch.Tensor,
                                           input: torch.Tensor,
                                           weight: torch.Tensor,
                                           scales: torch.Tensor,
@@ -187,7 +187,7 @@ def rms_norm_dynamic_per_token_int8_quant(out: torch.Tensor, tmp: torch.Tensor,
                                                        scales, epsilon)
 
 
-def residual_add_rms_norm_dynamic_per_token_int8_quant(out: torch.Tensor,
+def residual_add_rms_norm_dynamic_per_token_quant(out: torch.Tensor,
                                                        tmp: torch.Tensor,
                                                        input: torch.Tensor,
                                                        residual: torch.Tensor,

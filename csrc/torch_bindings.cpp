@@ -104,11 +104,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Fused Layernorm + Quant kernels
   ops.def(
-      "rms_norm_dynamic_per_token_int8_quant(Tensor! out, Tensor tmp, Tensor "
+      "rms_norm_dynamic_per_token_quant(Tensor! out, Tensor tmp, Tensor "
       "input, "
       "Tensor weight, Tensor scales, float epsilon) -> ()");
-  ops.impl("rms_norm_dynamic_per_token_int8_quant", torch::kCUDA,
-           &rms_norm_dynamic_per_token_int8_quant);
+  ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
+           &rms_norm_dynamic_per_token_quant);
 
   ops.def(
       "residual_add_rms_norm_dynamic_per_token_int8_quant(Tensor! out, Tensor "
