@@ -1,5 +1,4 @@
 import pytest
-from torch.cuda import temperature
 
 from tests.models.utils import check_outputs_equal
 from vllm.sampling_params import SamplingParams
