@@ -3,7 +3,11 @@
 # at the same time on a single node will OOM.
 
 import pytest
+from ...utils import RemoteOpenAIServer
 from .test_completion import default_server_args  # noqa: F401
+from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
+from .test_completion import zephyr_lora_files  # noqa: F401
+from .test_completion import zephyr_pa_files  # noqa: F401
 from .test_completion import MODEL_NAME
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
