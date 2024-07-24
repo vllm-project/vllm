@@ -347,9 +347,13 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
 
     model_config = ctx.model_config
 
-    prompt = llm_inputs.get("prompt")
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
+
+    prompt = llm_inputs.get("prompt")
+    if prompt is None:
+        token_ids = llm_inputs.get("prompt_token_ids")
+        prompt = tokenizer.decode(token_ids)
     image_processor = cached_get_image_processor(model_config.tokenizer)
 
     pattern = "(<image>./</image>)"
