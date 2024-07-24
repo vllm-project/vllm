@@ -8,11 +8,15 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   fused_moe)
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, create_per_tensor_scale_param,
     cutlass_fp8_supported, per_tensor_dequantize, requantize_with_max_scale)
@@ -32,6 +36,7 @@ class Fp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
+        ignored_layers: Optional[List[str]] = None,
     ) -> None:
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
@@ -41,6 +46,7 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
+        self.ignored_layers = ignored_layers or []
 
     @classmethod
     def get_name(cls) -> str:
@@ -63,14 +69,18 @@ class Fp8Config(QuantizationConfig):
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-                   activation_scheme=activation_scheme)
+                   activation_scheme=activation_scheme,
+                   ignored_layers=ignored_layers)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix, self.ignored_layers):
+                return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
             return Fp8MoEMethod(self)
@@ -214,7 +224,8 @@ class Fp8LinearMethod(LinearMethodBase):
             weight_scale=layer.weight_scale,
             input_scale=layer.input_scale,
             bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported)
+            cutlass_fp8_supported=self.cutlass_fp8_supported,
+            use_per_token_if_dynamic=False)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -399,39 +410,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                          topk_group=topk_group)
 
 
-class Fp8KVCacheMethod(QuantizeMethodBase):
-    """Supports loading kv-cache scaling factors from FP8 checkpoints.
+class Fp8KVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
     def __init__(self, quant_config: Fp8Config):
-        self.quant_config = quant_config
-
-    def create_weights(self, layer: torch.nn.Module):
-        """Create "weight" (aka kv_scale) for an attention layer.
-
-        Args:
-            layer: The layer that is using the QuantizeMethodBase factory.
-        """
-        # Initialize the KV cache scale to 1.0 as the default value.
-        # If the kv_scale appears in the checkpoint, it will be
-        # overwritten when loading weights.
-        layer.kv_scale = Parameter(torch.tensor(1.0), requires_grad=False)
-
-    def apply(self, layer: torch.nn.Module) -> torch.Tensor:
-        raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        # If the kv-cache dtype is auto, we enforce the kv-scale to be 1.0
-        # regardless whether the kv-scale is available in the checkpoint.
-        if layer.kv_cache_dtype != "auto":
-            kv_scale = layer.kv_scale.to("cpu").tolist()
-            if not isinstance(kv_scale, float):
-                raise ValueError("Only support per-tensor scaling factor "
-                                 "for fp8 KV cache")
-            layer._kv_scale = kv_scale
-            if layer._kv_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
-                print_warning_once(
-                    "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
-                    "cause accuracy issues. Please make sure kv-cache scaling "
-                    "factor is available in the fp8 checkpoint.")
-        del layer.kv_scale
+        super().__init__(quant_config)

@@ -1,6 +1,8 @@
 # imports for guided decoding tests
 import json
 import re
+import shutil
+from tempfile import TemporaryDirectory
 from typing import List
 
 import jsonschema
@@ -9,6 +11,7 @@ import pytest
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
+from transformers import AutoTokenizer
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -31,42 +34,58 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="module")
+def zephyr_lora_added_tokens_files(zephyr_lora_files):
+    tmp_dir = TemporaryDirectory()
+    tmp_model_dir = f"{tmp_dir.name}/zephyr"
+    shutil.copytree(zephyr_lora_files, tmp_model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # Copy tokenizer to adapter and add some unique tokens
+    # 32000, 32001, 32002
+    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
+                                 special_tokens=True)
+    assert added == 3
+    tokenizer.save_pretrained(tmp_model_dir)
+    yield tmp_model_dir
+    tmp_dir.cleanup()
+
+
+@pytest.fixture(scope="module")
 def zephyr_pa_files():
     return snapshot_download(repo_id=PA_NAME)
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files, zephyr_pa_files):
-    with RemoteOpenAIServer([
-            "--model",
-            MODEL_NAME,
-            # use half precision for speed and memory savings in CI environment
-            "--dtype",
-            "bfloat16",
-            "--max-model-len",
-            "8192",
-            "--max-num-seqs",
-            "128",
-            "--enforce-eager",
-            # lora config
-            "--enable-lora",
-            "--lora-modules",
-            f"zephyr-lora={zephyr_lora_files}",
-            f"zephyr-lora2={zephyr_lora_files}",
-            "--max-lora-rank",
-            "64",
-            "--max-cpu-loras",
-            "2",
-            # pa config
-            "--enable-prompt-adapter",
-            "--prompt-adapters",
-            f"zephyr-pa={zephyr_pa_files}",
-            f"zephyr-pa2={zephyr_pa_files}",
-            "--max-prompt-adapters",
-            "2",
-            "--max-prompt-adapter-token",
-            "128",
-    ]) as remote_server:
+def server(zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "128",
+        "--enforce-eager",
+        # lora config
+        "--enable-lora",
+        "--lora-modules",
+        f"zephyr-lora={zephyr_lora_files}",
+        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
+        "--max-lora-rank",
+        "64",
+        "--max-cpu-loras",
+        "2",
+        # pa config
+        "--enable-prompt-adapter",
+        "--prompt-adapters",
+        f"zephyr-pa={zephyr_pa_files}",
+        f"zephyr-pa2={zephyr_pa_files}",
+        "--max-prompt-adapters",
+        "2",
+        "--max-prompt-adapter-token",
+        "128",
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -109,6 +128,34 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
         temperature=0.0,
     )
     assert len(completion.choices[0].text) >= 1
+
+
+@pytest.mark.asyncio
+async def test_added_lora_tokens(client: openai.AsyncOpenAI):
+    # test using token IDs
+    completion = await client.completions.create(
+        model="zephyr-lora2",
+        prompt=[0, 0, 32000, 32001, 32002],
+        echo=True,
+        max_tokens=5,
+        temperature=0.0,
+    )
+    # Added tokens should appear in tokenized prompt
+    assert completion.choices[0].text.startswith("<unk><unk>vllm1vllm2vllm3")
+
+
+@pytest.mark.asyncio
+async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 32000, 32001, 32002],
+        echo=True,
+        max_tokens=5,
+        temperature=0.0,
+    )
+    # Added tokens should not appear in tokenized prompt
+    assert "vllm" not in completion.choices[0].text
 
 
 @pytest.mark.asyncio
