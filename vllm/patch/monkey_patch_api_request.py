@@ -90,13 +90,13 @@ async def patch_check_model(request) -> Optional[JSONResponse]:
 
 origin_make_arg_parser = cli_args.make_arg_parser
 
-def patch_make_arg_parser():
-    parser = origin_make_arg_parser()
+def patch_make_arg_parser(*args):
+    parser = origin_make_arg_parser(*args)
     parser.add_argument("--default-model-template",
                         type=str,
                         default=None,
                         help="model template")
-    return parser.parse_args()
+    return parser
     
 async def origin_serving_self_check_model(self, request):
     # if request.model == self.served_model:
