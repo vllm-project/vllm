@@ -49,7 +49,41 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 import intel_extension_for_pytorch as ipex
+from vllm import _custom_ops as ops
 
+@torch.library.impl("myops::_fused_add_rms_norm", "cpu")
+def _fused_add_rms_norm(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
+    ops.fused_add_rms_norm(
+        x,
+        residual,
+        weight.data,
+        variance_epsilon,
+    )
+    return x, residual
+
+torch.library.define(
+    "myops::_fused_add_rms_norm",
+    "(Tensor x,Tensor residual,Tensor weight,float variance_epsilon) -> (Tensor, Tensor)",
+)
+
+
+@torch.library.impl("myops::_rms_norm", "cpu")
+def _rms_norm(
+    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
+    out = torch.empty_like(x)
+    ops.rms_norm(
+        out,
+        x,
+        weight.data,
+        variance_epsilon,
+    )
+    return out
+
+torch.library.define(
+    "myops::_rms_norm",
+    "(Tensor x,Tensor residual,float variance_epsilon) -> Tensor",
+)
 class MixtralMLP(nn.Module):
 
     def __init__(
@@ -297,8 +331,17 @@ class MixtralDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            if self.self_attn.o_proj.tp_size > 1:
+                hidden_states = hidden_states + residual
+                residual = hidden_states
+                hidden_states = torch.ops.myops._rms_norm(
+                    hidden_states,
+                    self.input_layernorm.weight.data,
+                    self.input_layernorm.variance_epsilon,
+                )
+            else:
+                hidden_states, residual = self.input_layernorm(
+                    hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -325,8 +368,17 @@ class MixtralDecoderLayer(nn.Module):
                 hidden_states)
         else:
             hidden_states, _ = self.self_attn.o_proj(hidden_states)
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual)
+            if self.self_attn.o_proj.tp_size > 1:
+                hidden_states = hidden_states + residual
+                residual = hidden_states
+                hidden_states = torch.ops.myops._rms_norm(
+                    hidden_states,
+                    self.post_attention_layernorm.weight.data,
+                    self.post_attention_layernorm.variance_epsilon,
+                )
+            else:
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual)
         hidden_states = self.block_sparse_moe(hidden_states)
         return hidden_states, residual
 
@@ -388,7 +440,16 @@ class MixtralModel(nn.Module):
                                             seq_lens_tensor,
                                             max_decode_seq_len,
                                             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.layers[0].self_attn.o_proj.tp_size > 1:
+            hidden_states = hidden_states + residual
+            residual = hidden_states
+            hidden_states = torch.ops.myops._rms_norm(
+                hidden_states,
+                self.norm.weight.data,
+                self.norm.variance_epsilon,
+            )
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
