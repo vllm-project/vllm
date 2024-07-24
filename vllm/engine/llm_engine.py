@@ -682,11 +682,11 @@ class LLMEngine:
         tokenizer = self.get_tokenizer_group("prompts must be None if "
                                              "skip_tokenizer_init is True")
 
-        if is_enc_dec_decoder and prompt == "":
-            # Scenario: enc/dec model, decoder input prompt is ""
-            # => Treat it as None (no decoder input prompt provided)
-            # & obtain default decoder input prompt
-            return self._prepare_decoder_input_ids_for_generation()
+        # if is_enc_dec_decoder and prompt == "":
+        #     # Scenario: enc/dec model, decoder input prompt is ""
+        #     # => Treat it as None (no decoder input prompt provided)
+        #     # & obtain default decoder input prompt
+        #     return self._prepare_decoder_input_ids_for_generation()
 
         # Scenario:
         # * Any decoder-only input prompt

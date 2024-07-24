@@ -857,9 +857,6 @@ class BartForConditionalGeneration(nn.Module):
 
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
-        # self.lm_head = BartScaledWordEmbedding(config.vocab_size,
-        #                                        config.d_model,
-        #                                        embed_scale=embed_scale)
 
         self.lm_head = BartParallelLMHead(config.vocab_size,
                                           config.d_model,
