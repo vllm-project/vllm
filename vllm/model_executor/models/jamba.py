@@ -706,18 +706,16 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             self, request_ids_to_seq_ids: Dict[str, list[int]],
             batch_size: int, finished_requests_ids: List[str]):
         running_indices = []
-        dest_index = 0
-        for (request_id, seqs_id) in request_ids_to_seq_ids.items():
+        for dest_index, (request_id,
+                         seqs_id) in enumerate(request_ids_to_seq_ids.items()):
             if request_id in finished_requests_ids:
                 # Do not allocate cache index for requests that run
                 # and finish right after
-                dest_index += 1
                 continue
             for seq_id in seqs_id:
                 self._assign_seq_id_to_mamba_cache_in_specific_dest(
                     request_id, seq_id, dest_index)
                 running_indices.append(dest_index)
-                dest_index += 1
 
         self._clean_up_first_bs_blocks(batch_size, running_indices)
         conv_state = self.mamba_cache[0][:, :batch_size]
