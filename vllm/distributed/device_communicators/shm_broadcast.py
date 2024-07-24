@@ -188,6 +188,9 @@ class MessageQueue:
                                         max_chunks)
 
             self.local_socket = context.socket(XPUB)
+            # set the verbose option so that we can receive every subscription
+            # message. otherwise, we will only receive the first subscription
+            # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
             self.local_socket.setsockopt(XPUB_VERBOSE, True)
             local_subscribe_port = get_open_port()
             self.local_socket.bind(f"tcp://*:{local_subscribe_port}")
@@ -204,9 +207,6 @@ class MessageQueue:
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
             self.remote_socket = context.socket(XPUB)
-            # set the verbose option so that we can receive every subscription
-            # message. otherwise, we will only receive the first subscription
-            # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
             self.remote_socket.bind(f"tcp://*:{remote_subscribe_port}")
