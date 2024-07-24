@@ -556,10 +556,12 @@ class FlashAttentionImpl(AttentionImpl):
             # no need to transfer kv cache, as it is already the input of this function
             if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
                 out = output[:num_prefill_tokens].contiguous()
-                print("Send output, " , out.shape, out.dtype, out.device)
+                if torch.distributed.get_rank() % 4 == 0:
+                    print("Send output, " , out.shape, out.dtype, out.device)
                 get_disagg_group().send(out)
             else:
-                print("Recv output, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
+                if torch.distributed.get_rank() % 4 == 0:
+                    print("Recv output, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
                 output[:num_prefill_tokens] = get_disagg_group().recv(output[:num_prefill_tokens].shape, output.dtype)
                 
         if decode_meta := attn_metadata.decode_metadata:
