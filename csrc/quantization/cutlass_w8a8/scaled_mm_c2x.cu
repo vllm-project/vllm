@@ -246,13 +246,13 @@ struct ScaledEpilogueBiasAzp
   // This is the full AZP term, azp * J @ B, shape (1,n)
   using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
 
-  // Compute (accum + azp_adj), resulting in a float
+  // Compute (accum - azp_adj), resulting in a float
   using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
-      cutlass::plus, float, int32_t,
+      cutlass::minus, float, int32_t,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using EVTComputeAzp =
-      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, AzpWithAdj, Accum>;
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, Accum, AzpWithAdj>;
 
   using ComputeScaleB = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiplies, float, float,
@@ -283,7 +283,7 @@ struct ScaledEpilogueBiasAzp
     auto azp_adj_args =
         SUPER::template args_from_tensor<AzpWithAdj, int32_t>(azp_adj);
 
-    typename EVTComputeAzp::Arguments evt_azp_args{azp_adj_args};
+    typename EVTComputeAzp::Arguments evt_azp_args{{}, azp_adj_args};
     typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_azp_args};
     return ArgumentType{a_args, evt_scale_b_args, bias_args};
   }
@@ -315,13 +315,21 @@ struct ScaledEpilogueBiasAzpToken
   // This is the AZP adjustment term, J @ B, shape (1,n)
   using AzpAdj = typename SUPER::template RowLoad<int32_t>;
 
-  // Compute (accum + azp * azp_adj), resulting in a float
+  // Compute azp * azp_adj
   using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
-      cutlass::multiply_add, float, int32_t,
+      cutlass::multiplies, int32_t, int32_t,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using EVTComputeAzp =
-      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, Azp, AzpAdj, Accum>;
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, Azp, AzpAdj>;
+
+  // Compute (accum - azp * azp_adj), resulting in a float
+  using ComputeAcc = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::minus, float, int32_t,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeAcc =
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeAcc, Accum, EVTComputeAzp>;
 
   using ComputeScaleB = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiplies, float, float,
@@ -329,7 +337,7 @@ struct ScaledEpilogueBiasAzpToken
 
   using EVTComputeScaleB =
       cutlass::epilogue::threadblock::Sm80EVT<ComputeScaleB, ScaleB,
-                                              EVTComputeAzp>;
+                                              EVTComputeAcc>;
 
   using ComputeScaleBiasA = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiply_add, ElementD, float,
@@ -355,7 +363,8 @@ struct ScaledEpilogueBiasAzpToken
         SUPER::template args_from_tensor<AzpAdj, int32_t>(azp_adj);
 
     typename EVTComputeAzp::Arguments evt_azp_args{azp_args, azp_adj_args};
-    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_azp_args};
+    typename EVTComputeAcc::Arguments evt_acc_args{{}, evt_azp_args};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_acc_args};
     return ArgumentType{a_args, evt_scale_b_args, bias_args};
   }
 };

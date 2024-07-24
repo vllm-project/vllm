@@ -312,12 +312,11 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
 
     azp_a = torch.rand(
         (m_azp, 1), device="cuda", dtype=torch.float32) * 10 + 1.5
-    azp_aq_i8 = (azp_a / scale_a).to(
-        dtype=torch.int8)  # TODO should this be i8 or i32?
+    azp_aq_i8 = (azp_a / scale_a).to(dtype=torch.int8)
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
-    a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
-    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a, rtol=1e-4, atol=1e-3)
+    a_dq = scale_a * (aq_i32 - azp_aq_i8).to(dtype=torch.float32)
+    assert torch.allclose(a_dq, scale_a * aq_f32 - azp_a, rtol=1e-4, atol=1e-3)
 
     if use_bias:
         bias = torch.rand((1, n), device="cuda", dtype=out_dtype) * 10 + 2.5
@@ -327,7 +326,7 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
     baseline_dq = (torch.mm(a_dq, b_dq) + bias).to(out_dtype)
 
     # int32 mm not supported on CUDA
-    a_noazp_i32_cpu = (aq_i32 + azp_aq_i8).to(device='cpu')
+    a_noazp_i32_cpu = (aq_i32 - azp_aq_i8).to(device='cpu')
     cq = (a_noazp_i32_cpu @ bq_i32.to(device='cpu')).to(device='cuda')
     baseline_q = (scale_a * scale_b * cq + bias).to(dtype=out_dtype)
 
