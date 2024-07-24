@@ -21,7 +21,7 @@ from .conftest import get_output_from_llm_generator
     },
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_xfail_chunked_prefill(test_llm_generator):
     """Verify that speculative decoding with chunked prefill fails.
     """
@@ -74,7 +74,7 @@ def test_spec_decode_xfail_chunked_prefill(test_llm_generator):
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
     """Verify that speculative decoding validates speculative_max_model_len.
     """
@@ -103,7 +103,7 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
 }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_xfail_block_manager_v1(test_llm_generator):
     """Verify that speculative decoding with block manager v1 fails.
     """

@@ -22,6 +22,7 @@ from .conftest import run_equality_correctness_test
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1, 8, 32])
 @pytest.mark.parametrize("temperature", [0.1, 1.0])
 @pytest.mark.parametrize(
@@ -30,13 +31,14 @@ from .conftest import run_equality_correctness_test
         # Use smaller output len for fast test.
         10,
     ])
-@pytest.mark.parametrize("seed", [1])
-def test_seeded_consistency(baseline_llm_generator, batch_size: int,
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [2])
+def test_seeded_consistency(baseline_llm_generator, test_llm_generator, batch_size: int,
                             temperature: float, output_len: int):
     """Verify outputs are consistent across multiple runs with same seed
     """
     run_equality_correctness_test(baseline_llm_generator,
-                                  baseline_llm_generator,
+                                  test_llm_generator,
                                   batch_size,
                                   max_output_len=output_len,
                                   temperature=temperature,

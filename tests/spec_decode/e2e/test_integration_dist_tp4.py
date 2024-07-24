@@ -47,7 +47,8 @@ from .conftest import run_greedy_equality_correctness_test
         },
     ])
 @pytest.mark.parametrize("batch_size", [2])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
                                             baseline_llm_generator,
                                             batch_size: int):
@@ -104,7 +105,8 @@ def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
         # ensure fast test.
         64,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_skip_speculation(baseline_llm_generator, test_llm_generator,
                           batch_size: int, output_len: int):
     """Verify job failure with RuntimeError when all sequences skip speculation.

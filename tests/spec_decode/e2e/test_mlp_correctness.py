@@ -66,7 +66,8 @@ PRECISION = "float32"
     128,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
                                     batch_size: int, output_len: int):
     """Verify greedy equality with different batch size."""
@@ -111,7 +112,8 @@ def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
         128,
     ])
 @pytest.mark.parametrize("batch_size", [4])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
                                                     test_llm_generator,
                                                     batch_size: int,
@@ -160,7 +162,8 @@ def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
                          batch_size: int, output_len: int):
     """Verify that mlp speculative decoding produces exact equality
@@ -202,7 +205,8 @@ def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_mlp_disable_queue(baseline_llm_generator, test_llm_generator,
                            batch_size: int, output_len: int):
     """Verify that mlp speculative decoding produces exact equality

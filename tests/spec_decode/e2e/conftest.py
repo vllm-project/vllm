@@ -140,18 +140,18 @@ class AsyncLLM:
 @pytest.fixture
 def baseline_llm_generator(request, common_llm_kwargs,
                            per_test_common_llm_kwargs, baseline_llm_kwargs,
-                           seed):
+                           baseline_seed):
     return create_llm_generator("baseline", request, common_llm_kwargs,
                                 per_test_common_llm_kwargs,
-                                baseline_llm_kwargs, seed)
+                                baseline_llm_kwargs, baseline_seed)
 
 
 @pytest.fixture
 def test_llm_generator(request, common_llm_kwargs, per_test_common_llm_kwargs,
-                       test_llm_kwargs, seed):
+                       test_llm_kwargs, test_seed):
     return create_llm_generator("test", request, common_llm_kwargs,
                                 per_test_common_llm_kwargs, test_llm_kwargs,
-                                seed)
+                                test_seed)
 
 
 def create_llm_generator(baseline_or_test, request, common_llm_kwargs,

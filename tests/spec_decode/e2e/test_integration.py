@@ -30,7 +30,8 @@ from .conftest import run_greedy_equality_correctness_test
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [32])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_cuda_graph(baseline_llm_generator, test_llm_generator,
                                 batch_size, output_len):
     """Verify spec decode equality when cuda graphs are enabled.

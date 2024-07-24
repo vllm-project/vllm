@@ -51,7 +51,8 @@ from .conftest import run_greedy_equality_correctness_test
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
                               batch_size: int, output_len: int):
     """Verify greedy equality when tensor parallelism is used.
@@ -113,7 +114,8 @@ def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
         })
     ])
 @pytest.mark.parametrize("batch_size", [2])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_draft_model_tp_lt_target_model_tp2(test_llm_generator,
                                             baseline_llm_generator,
                                             batch_size: int):

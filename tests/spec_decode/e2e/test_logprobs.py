@@ -35,7 +35,8 @@ from .conftest import get_logprobs_from_llm_generator
         # Use smaller output len for fast test.
         7,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_logprobs_equality(baseline_llm_generator, test_llm_generator,
                            batch_size: int, output_len: int):
     """Verify output logprobs are equal with and without speculative decoding.
@@ -75,7 +76,8 @@ def test_logprobs_equality(baseline_llm_generator, test_llm_generator,
         # Use smaller output len for fast test.
         7,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_diff_num_logprobs(baseline_llm_generator, test_llm_generator,
                            batch_size: int, output_len: int,
                            num_logprobs: int):
@@ -120,7 +122,8 @@ def test_diff_num_logprobs(baseline_llm_generator, test_llm_generator,
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_logprobs_different_k(baseline_llm_generator, test_llm_generator,
                               batch_size: int, output_len: int):
     """Veriy logprob greedy equality with different speculation lens.
@@ -163,7 +166,8 @@ def test_logprobs_different_k(baseline_llm_generator, test_llm_generator,
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_logprobs_when_skip_speculation(baseline_llm_generator,
                                         test_llm_generator, batch_size: int,
                                         output_len: int):
@@ -202,7 +206,8 @@ def test_logprobs_when_skip_speculation(baseline_llm_generator,
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_logprobs_temp_1(baseline_llm_generator, test_llm_generator,
                          batch_size: int, output_len: int):
     """Verify at least one logprob result has num_logprobs+1, which tests the
