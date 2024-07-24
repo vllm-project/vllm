@@ -204,6 +204,9 @@ class MessageQueue:
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
             self.remote_socket = context.socket(XPUB)
+            # set the verbose option so that we can receive every subscription
+            # message. otherwise, we will only receive the first subscription
+            # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
             self.remote_socket.bind(f"tcp://*:{remote_subscribe_port}")
@@ -278,19 +281,27 @@ class MessageQueue:
 
             # local readers
             for i in range(self.n_local_reader):
+                # wait for subscription messages from all local readers
                 self.local_socket.recv()
             if self.n_local_reader > 0:
+                # send a message to all local readers
+                # to make sure the publish channel is working
                 self.local_socket.send(b"READY")
 
             # remote readers
             for i in range(self.n_remote_reader):
+                # wait for subscription messages from all remote readers
                 self.remote_socket.recv()
             if self.n_remote_reader > 0:
+                # send a message to all remote readers
+                # to make sure the publish channel is working
                 self.remote_socket.send(b"READY")
         elif self._is_local_reader:
+            # wait for the writer to send a message
             recv = self.local_socket.recv()
             assert recv == b"READY"
         elif self._is_remote_reader:
+            # wait for the writer to send a message
             recv = self.remote_socket.recv()
             assert recv == b"READY"
 
