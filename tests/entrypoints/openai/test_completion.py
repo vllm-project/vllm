@@ -716,8 +716,7 @@ async def test_return_tokens_as_token_ids_completion(
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     # Check that the token representations are consistent between raw tokens
     # and top_logprobs
-    assert token_strs == list(
-        completion.choices[0].logprobs.top_logprobs.keys())
+    assert token_strs == completion.choices[0].logprobs.top_logprobs
 
     # Check that decoding the tokens gives the expected text
     tokens = [int(token.removeprefix("token_id:")) for token in token_strs]
