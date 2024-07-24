@@ -145,7 +145,7 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
 
 .. tip::
-    - For MI300x (gfx942) users, to achieve optimal performance, please refer to `MI300x tuning guide <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html>`_ for performance optimzation and tuning tips on system and workflow level. 
-      For vLLM, please refer to `vLLM performance optimzation <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization>`_.
+    - For MI300x (gfx942) users, to achieve optimal performance, please refer to `MI300x tuning guide <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html>`_ for performance optimization and tuning tips on system and workflow level.
+      For vLLM, please refer to `vLLM performance optimization <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization>`_.
 
 
