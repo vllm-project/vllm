@@ -76,7 +76,7 @@ async def init_app(prefill_port, decode_port):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Async Proxy server")
     parser.add_argument('prefill_port', type=int, help='Port to forward the first request to (with max_tokens=1)')
-    parser.add_argument 'decode_port', type=int, help='Port to forward the second request to')
+    parser.add_argument('decode_port', type=int, help='Port to forward the second request to')
     args = parser.parse_args()
 
     app = asyncio.run(init_app(args.prefill_port, args.decode_port))
