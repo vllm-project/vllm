@@ -241,12 +241,14 @@ class CompressedTensorsConfig(QuantizationConfig):
                 else:
                     return CompressedTensorsW8A16Fp8(
                         strategy=weight_quant.strategy,
-                        is_static_input_scheme=(not input_quant.dynamic))
+                        is_static_input_scheme=(input_quant
+                                                and not input_quant.dynamic))
 
             if self._is_fp8_w8a16(weight_quant, input_quant):
                 return CompressedTensorsW8A16Fp8(
                     strategy=weight_quant.strategy,
-                    is_static_input_scheme=(not input_quant.dynamic))
+                    is_static_input_scheme=(input_quant
+                                            and not input_quant.dynamic))
 
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Int8(

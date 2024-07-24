@@ -15,6 +15,10 @@ from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW8A16Fp8"]
 
+SUPPORTED_STRATEGIES = [
+    QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR
+]
+
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
@@ -28,8 +32,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         return 80
 
     # W8A8-Fp8 kernels support only per-tensor and per-channel cases.
-    # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
-    # scales being passed to the kernel), we requantize with a single scale.
+    # So if we have a fused module (QKV, MLP) with per tensor scales,
+    # we expand each scale to its shard's channels.
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             ws_channelwise = convert_to_channelwise(layer.weight_scale,
@@ -37,6 +41,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             layer.weight_scale = torch.nn.Parameter(ws_channelwise,
                                                     requires_grad=False)
 
+        # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(),
                                           requires_grad=False)
 
@@ -71,10 +76,13 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         if self.strategy == QuantizationStrategy.CHANNEL:
             weight_scale = create_per_channel_scale_param(
                 output_partition_sizes, **layer_kwargs)
-        else:
-            assert self.strategy == QuantizationStrategy.TENSOR
+        elif self.strategy == QuantizationStrategy.TENSOR:
             weight_scale = create_per_tensor_scale_param(
                 output_partition_sizes, **layer_kwargs)
+        else:
+            raise ValueError(
+                f"Unsupported weight strategy={self.strategy}, "
+                f"supported strategies are {SUPPORTED_STRATEGIES}")
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE (to deal with converted checkpoints)
