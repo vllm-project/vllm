@@ -873,7 +873,7 @@ async def test_return_tokens_as_token_ids_completion(
             "content": "Please write some emojis: 🐱🐶🎉"
         }],
         temperature=0,
-        max_tokens=10,
+        max_tokens=8,
         logprobs=True)
 
     text = response.choices[0].message.content
