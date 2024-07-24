@@ -713,7 +713,7 @@ class LLMEngine:
         lora_request: Optional[LoRARequest],
         is_encoder_prompt: bool = False,
         is_enc_dec_model: bool = False,
-    ) -> Tuple[str, List[int], Optional["MultiModalDataDict"]]:
+    ) -> Tuple[Optional[str], List[int], Optional["MultiModalDataDict"]]:
         '''
         Extract prompt & prompt_token_ids from any single
         encoder or decoder input prompt. For encoder input prompts
