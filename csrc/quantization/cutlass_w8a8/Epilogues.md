@@ -21,54 +21,58 @@ That induces a redundant addition operation (and runtime check), but the perform
 
 More details available in the [Activation Quantization RFC](https://github.com/vllm-project/vllm/issues/3975).
 
-If \\( \widehat X \\) is the quantized \\( X \\), our matrices become the following
+If $` \widehat X `$ is the quantized $` X `$, our matrices become the following
 
-\\[
+```math
 A = s_a (\widehat A - J_a z_a)
 B = s_b \widehat B
 D = A B + C
 D = s_a s_b \widehat D + C
-\\]
+```
 
 Here, D is the output of the GEMM, and C is the bias.
 A is the activations and supports asymmetric quantization,
 and B is the weights and only supports symmetric quantization.
 Additional epilogues would be required to support asymmetric quantization for weights.
 
-Expanding further, we can calculate \\( \widehat D \\) as follows:
+Expanding further, we can calculate $` \widehat D `$ as follows:
 
-\\[
+```math
 A B = s_a ( \widehat A - J_a z_a ) s_b \widehat B = s_a s_b \left \widehat A \widehat B - J_a z_a \widehat B \right
 \widehat D = \widehat A \widehat B - z_a J_a \widehat B
-\\]
+```
 
-Note that \\( \widehat A \widehat B \\) is the raw output of the GEMM,
-and \\( J_a \widehat B \\) is known ahead of time.
-Each row of it is equal to \\(  \mathbf 1 \widehat B \\), which is a row-vector of column sums of \\( \widehat B \\).
+Note that $` \widehat A \widehat B `$ is the raw output of the GEMM,
+and $` J_a \widehat B `$ is known ahead of time.
+Each row of it is equal to $` \mathbf 1 \widehat B `$, which is a row-vector of column sums of $` \widehat B `$.
 
 ## Epilogues
 
 ### ScaledEpilogue
-This epilogue computes the symmetric quantization for activations without bias, meaning \\( C = 0 \\) and \\( z_a = 0 \\).
+This epilogue computes the symmetric quantization for activations without bias, meaning $` C = 0 `$ and $` z_a = 0 `$.
 The output of the GEMM is:
 
-\\[
+```math
+
 \widehat D = \widehat A \widehat B
 D = s_a s_b \widehat D = s_a s_b \widehat A \widehat B
-\\]
+
+```
 
 Epilogue parameters:
 - `scale_a` is the scale for activations, can be per-tensor (scalar) or per-token (column-vector).
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
 
 ### ScaledEpilogueBias
-This epilogue computes the symmetric quantization for activations with bias, meaning \\( z_a = 0 \\).
+This epilogue computes the symmetric quantization for activations with bias, meaning $` z_a = 0 `$.
 The output of the GEMM is:
 
-\\[
+```math
+
 \widehat D = \widehat A \widehat B
 D = s_a s_b \widehat D + C = s_a s_b \widehat A \widehat B + C
-\\]
+
+```
 
 
 Epilogue parameters:
@@ -80,32 +84,32 @@ Epilogue parameters:
 This epilogue computes the asymmetric per-tensor quantization for activations with bias.
 The output of the GEMM is:
 
-\\[
+```math
 \widehat D = \widehat A \widehat B - z_a J_a \widehat B
 D = s_a s_b \widehat D + C = s_a s_b \left( \widehat A \widehat B - z_a J_a \widehat B \right) + C
-\\]
+```
 
-Because \\( z_a \\) is a scalar, the zero-point term \\(z_a J_a \widehat B\\) has every row equal to \\(z_a \mathbf 1 B\\). 
+Because $` z_a `$ is a scalar, the zero-point term $` z_a J_a \widehat B `$ has every row equal to $` z_a \mathbf 1 B `$. 
 That is precomputed and stored in `azp_with_adj` as a row-vector.
 
 Epilogue parameters:
 - `scale_a` is the scale for activations, can be per-tensor (scalar) or per-token (column-vector).
   - Generally this will be per-tensor as the zero-points are per-tensor.
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
-- `azp_with_adj` is the precomputed zero-point term (\\( z_a J_a \widehat B \\)), is per-channel (row-vector).
+- `azp_with_adj` is the precomputed zero-point term ($` z_a J_a \widehat B `$), is per-channel (row-vector).
 - `bias` is the bias, is always per-channel (row-vector).
 
 ### ScaledEpilogueAzpPerToken
 This epilogue computes the asymmetric per-token quantization for activations with bias.
 
-The output of the GEMM is the same as above, but the \\( z_a \\) is a column-vector.
-That means the zero-point term \\(z_a J_a \widehat B\\) becomes an outer product of \\(z_a\\) and \\(\mathbf 1 \widehat B\\).
+The output of the GEMM is the same as above, but the $` z_a `$ is a column-vector.
+That means the zero-point term $` z_a J_a \widehat B `$ becomes an outer product of $` z_a `$ and $` \mathbf 1 \widehat B `$.
 
 Epilogue parameters:
 - `scale_a` is the scale for activations, can be per-tensor (scalar) or per-token (column-vector).
   - Generally this will be per-token as the zero-points are per-token.
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
-- `azp_adj` is the precomputed zero-point adjustment term (\\( \mathbf 1 \widehat B \\)), is per-channel (row-vector).
+- `azp_adj` is the precomputed zero-point adjustment term ($` \mathbf 1 \widehat B `$), is per-channel (row-vector).
 - `azp` is the zero-point (`z_a`), is per-token (column-vector).
 - `bias` is the bias, is always per-channel (row-vector).
 
