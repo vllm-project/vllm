@@ -125,7 +125,8 @@ def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
 
     # Appending sep token for chat mode to follow default processor
     # behavior
-    new_prompt += tokenizer.sep_token
+    if new_prompt is not None:
+        new_prompt += tokenizer.sep_token
     new_token_ids += [CHAMELEON_SEP_TOKEN_ID]
 
     # NOTE: Create a defensive copy of the original inputs
