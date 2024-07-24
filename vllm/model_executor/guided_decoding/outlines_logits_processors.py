@@ -22,7 +22,7 @@ from typing import Callable, DefaultDict, Dict, List, Union
 
 import torch
 from outlines.caching import cache
-from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
+from outlines.fsm.guide import CFGGuide, Guide, RegexGuide
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
