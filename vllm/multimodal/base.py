@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 BatchedTensors = Union[torch.Tensor, List[torch.Tensor]]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor]]
 """
 If each input tensor in the batch has the same size, this is a single batched
 tensor; otherwise, this is a list of tensors with one element per batch.
@@ -45,13 +46,9 @@ class MultiModalInputs(_MultiModalInputsBase):
     ) -> BatchedTensors:
         # may be list rather than tensors
         if isinstance(tensors[0], list):
-            return [
-                [
-                    t.to(device=device) for t in tensor[0]
-                ]
-                for tensor in tensors
-            ]
-        
+            return [[t.to(device=device) for t in tensor[0]]
+                    for tensor in tensors]
+
         unbatched_shape = tensors[0].shape[1:]
 
         for tensor in tensors:

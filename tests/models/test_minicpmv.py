@@ -22,15 +22,14 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
         "<|start_header_id|>assistant<|end_header_id|>\n\n"
 })
 
-models = ["openbmb/MiniCPM-Llama3-V-2_5"]
+models = ["HwwwH/MiniCPM-Llama3-V-2_5"]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
-                                         Optional[SampleLogprobs]],
-                      model: str):
-    """Sanitize vllm output to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
+def trunc_hf_output(hf_output: Tuple[List[int], str,
+                                     Optional[SampleLogprobs]]):
+    output_ids, output_str, out_logprobs = hf_output
+    if output_str.endswith("<|eot_id|>"):
+        output_str = output_str.split("<|eot_id|>")[0]
     return output_ids, output_str, out_logprobs
 
 
@@ -79,32 +78,32 @@ def run_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
+        tokenizer = vllm_model.model.get_tokenizer()
+        stop_token_ids = [tokenizer.eos_id, tokenizer.eot_id]
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=vllm_images)
+                                                images=vllm_images,
+                                                stop_token_ids=stop_token_ids)
             for prompts, vllm_images in inputs_per_image
         ]
     with hf_runner(model, dtype=dtype) as hf_model:
-        eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images,
-                                                    eos_token_id=eos_token_id)
+                                                    images=hf_images)
             for prompts, hf_images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
         check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=[
-                vllm_to_hf_output(vllm_output, model)
-                for vllm_output in vllm_outputs
+            outputs_0_lst=[
+                trunc_hf_output(hf_output) for hf_output in hf_outputs
             ],
+            outputs_1_lst=vllm_outputs,
             name_0="hf",
             name_1="vllm",
         )

@@ -386,7 +386,7 @@ class MiniCPMV(nn.Module, SupportsVision):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.version = self.config.version
+        self.version = float(self.config.version)
         self.llm = self.init_llm(config, cache_config, quant_config)
         self.vpm = self.init_vision_module()
         param_dtype = torch.get_default_dtype()

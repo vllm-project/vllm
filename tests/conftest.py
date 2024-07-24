@@ -340,7 +340,6 @@ class HfRunner:
 
             inputs = self.processor(**processor_kwargs)
             if "MiniCPM-Llama3-V-2_5" in self.model_name:
-                kwargs.pop("eos_token_id", None)
                 with torch.no_grad():
                     output = self.model.generate(
                         self.wrap_device(inputs),
@@ -525,10 +524,12 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         images: Optional[List[Image.Image]] = None,
+        stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
                                                 max_tokens=max_tokens,
-                                                logprobs=num_logprobs)
+                                                logprobs=num_logprobs,
+                                                stop_token_ids=stop_token_ids)
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images)
