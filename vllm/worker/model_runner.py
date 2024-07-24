@@ -171,7 +171,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
 class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     """Build ModelInputForGPU from SequenceGroupMetadata."""
 
-    @dataclass(kw_only=True)
+    @dataclass(kw_only=True)  # type: ignore
     class InterDataForSeqGroup:
         """Intermediate data for the current sequence group."""
         # From sequence group metadata.
@@ -457,11 +457,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         for per_seq_group_fn in self.per_seq_group_compute_fns:
             per_seq_group_fn(inter_data, seq_group_metadata)
 
-    def _use_captured_graph(self, batch_size: int, max_decode_seq_len: int) -> bool:
-        return (
-            self.decode_only and not self.runner.model_config.enforce_eager
-            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-            and max_decode_seq_len <= self.runner.max_seq_len_to_capture)
+    def _use_captured_graph(self, batch_size: int,
+                            max_decode_seq_len: int) -> bool:
+        return (self.decode_only and not self.runner.model_config.enforce_eager
+                and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                and max_decode_seq_len <= self.runner.max_seq_len_to_capture)
 
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
@@ -497,9 +497,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         }
 
         batch_size = len(input_tokens)
-        use_captured_graph = self._use_captured_graph(
-            batch_size, max_decode_seq_len
-        )
+        use_captured_graph = self._use_captured_graph(batch_size,
+                                                      max_decode_seq_len)
 
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
@@ -800,8 +799,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        builder = self._builder_cls(weakref.proxy(self),
-                                          finished_requests_ids)
+        builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
         for seq_group_metadata in seq_group_metadata_list:
             builder.add_seq_group(seq_group_metadata)
         return builder.build()  # type: ignore
