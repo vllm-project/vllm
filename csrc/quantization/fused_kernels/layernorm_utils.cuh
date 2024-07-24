@@ -50,7 +50,7 @@ __device__ void compute_dynamic_per_token_scales(
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
-      x += static_cast<float>residual[token_offset + i];
+      x += static_cast<float>(residual[token_offset + i]);
     }
 
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
@@ -103,6 +103,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 namespace vectorized {
 
 // Compute 1.0/rms(input)
+// hidden_size must be a multiple of 4
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int const hidden_size, float const epsilon,
@@ -147,15 +148,6 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
     ss += x.w * x.w;
   }
 
-  // Handle the remaining elements if num_elems is not divisible by 4
-  for (int i = num_vec_elems * 4 + tid; i < hidden_size; i += blockDim.x) {
-    float x = static_cast<float>(input[token_offset + i]);
-    if constexpr (has_residual) {
-      x += static_cast<float>(residual[token_offset + i]);
-    }
-    ss += x * x;
-  }
-
   ss = blockReduceSum<float>(ss);
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
@@ -167,6 +159,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 }
 
 // Vectorized version of vllm::compute_dynamic_per_token_scales
+// hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
@@ -221,16 +214,6 @@ __device__ void compute_dynamic_per_token_scales(
         block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.w * rms) * w.w));
   }
 
-  for (int i = num_vec_elems * 4 + tid; i < hidden_size; i += blockDim.x) {
-    float x = static_cast<float>(input[token_offset + i]);
-    if constexpr (has_residual) {
-      x += static_cast<float>(residual[token_offset + i]);
-    }
-    block_absmax_val_maybe =
-        fmaxf(block_absmax_val_maybe,
-              fabs((static_cast<scalar_t>(x * rms) * weight[i])));
-  }
-
   block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
 
   __shared__ float s_token_scale;
@@ -251,6 +234,7 @@ __device__ void compute_dynamic_per_token_scales(
   *token_scale = s_token_scale;
 }
 
+// hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
@@ -310,16 +294,6 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     out.w = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
         static_cast<scalar_t>(x.w * rms) * w.w, scale);
     vec_output[i] = out;
-  }
-
-  for (int i = num_vec_elems * 4 + tid; i < hidden_size; i += blockDim.x) {
-    float x = static_cast<float>(input[token_offset + i]);
-    if constexpr (has_residual) {
-      x += static_cast<float>(residual[token_offset + i]);
-      residual[token_offset + i] = static_cast<scalar_t>(x);
-    }
-    output[i] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        static_cast<scalar_t>(x * rms) * weight[i], scale);
   }
 }
 
