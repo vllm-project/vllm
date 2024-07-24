@@ -66,8 +66,8 @@ Pick a node as the head node, and run the following command:
     $ bash run_cluster.sh \
     $                   vllm/vllm-openai \
     $                   ip_of_head_node \
-    $                   /path/to/the/huggingface/home/in/this/node \
-    $                   --head
+    $                   --head \
+    $                   /path/to/the/huggingface/home/in/this/node
 
 On the rest of the worker nodes, run the following command:
 
@@ -76,8 +76,8 @@ On the rest of the worker nodes, run the following command:
     $ bash run_cluster.sh \
     $                   vllm/vllm-openai \
     $                   ip_of_head_node \
-    $                   /path/to/the/huggingface/home/in/this/node \
-    $                   --worker
+    $                   --worker \
+    $                   /path/to/the/huggingface/home/in/this/node
 
 Then you get a ray cluster of containers. Note that you need to keep the shells running these commands alive to hold the cluster. Any shell disconnect will terminate the cluster.
 
