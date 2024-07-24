@@ -292,7 +292,7 @@ class LLM:
         """
         if self.llm_engine.model_config.embedding_mode:
             raise ValueError(
-                "LLM.generate() is only supported for (conditional)generation "
+                "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).")
 
         if prompt_token_ids is not None:

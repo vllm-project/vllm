@@ -95,11 +95,21 @@ class TokensPrompt(TypedDict):
 
 
 DecoderOnlyPromptInputs = Union[str, TextPrompt, TokensPrompt]
+"""
+Set of possible schemas for a single LLM input:
 
+- A text prompt (:class:`str` or :class:`TextPrompt`)
+- A tokenized prompt (:class:`TokensPrompt`)
+"""
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
     """Represents an encoder/decoder model input prompt,
     comprising an encoder prompt and a decoder prompt.
+
+    The encoder and decoder prompts, respectively,
+    may formatted according to any of the
+    DecoderOnlyPromptInputs schemas, and are not
+    required to have the same schema.
 
     Only the encoder prompt may have multi-modal data.
     """
@@ -108,23 +118,31 @@ class ExplicitEncoderDecoderPrompt(TypedDict):
 
     decoder_prompt: DecoderOnlyPromptInputs
 
-
+PromptInputs = Union[DecoderOnlyPromptInputs, ExplicitEncoderDecoderPrompt]
 """
-The inputs to the LLM, which can take one of the following forms:
+Set of possible schemas for an LLM input, including
+both decoder-only and encoder/decoder input types:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- A single data structure containing both an encoder and a decoder prompt
+  (:class:`ExplicitEncoderDecoderPrompt`)
 """
-
-PromptInputs = Union[DecoderOnlyPromptInputs, ExplicitEncoderDecoderPrompt]
-"""Same as :const:`PromptStrictInputs` but additionally accepts
-:class:`TextTokensPrompt`."""
 
 
 def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
     """
     Get the type-name of the prompt argument instance, given that
     isinstance() cannot apply to TypedDict subclasses directly.
+    If the prompt is None, return 'None' as the type name.
+
+    Arguments:
+
+    * prompt: LLM input prompt or None
+
+    Returns:
+
+    * String representation of prompt type
     """
 
     if prompt is None:
@@ -152,30 +170,6 @@ def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
         return "str"
 
     raise ValueError(f"Invalid prompt {prompt}")
-
-
-def is_valid_encoder_decoder_prompt(prompt: PromptInputs, ) -> bool:
-    """
-    Return True if prompt has the correct structure for an encoder/decoder
-    prompt.
-    """
-    # Ignore type checking in the conditional below because type checker
-    # does not understand that
-    # get_single_prompt_type(prompt) == 'ExplicitEncoderDecoder' narrows
-    # down the possible types
-    if (get_prompt_type(prompt) == 'ExplicitEncoderDecoder' and
-        (prompt['encoder_prompt'] is None  # type: ignore
-         or prompt['decoder_prompt']['multi_modal_data']  # type: ignore
-         is not None)):
-        # For explicit encoder/decoder prompts, encoder prompt
-        # must be non-None and decoder prompt must be free of
-        # multi-modal data (which should instead be passed to
-        # the encoder.)
-        return False
-
-    # Any valid prompt type other than an explicit encoder/decoder
-    # prompt is a guaranteed-valid prompt
-    return True
 
 
 class LLMInputs(TypedDict):
