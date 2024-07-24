@@ -867,7 +867,7 @@ async def test_return_tokens_as_token_ids_completion(
         }, {
             "role": "user",
             "content": "Say the things you like to say, please."
-        }]
+        }],
         echo=True,
         temperature=0,
         max_tokens=10,
