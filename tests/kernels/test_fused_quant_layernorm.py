@@ -151,9 +151,7 @@ def test_rms_norm(
     assert ops_out.dtype == quant_dtype
     assert torch.allclose(ref_scales, ops_scales)
     if quant_dtype == torch.int8:
-        # big atol to account,
-        # 1. rms-norm errors due to order of reduction.
-        # 2. quant round-off errors.
+        # big atol to account for round-off errors.
         assert torch.allclose(ref_out, ops_out, atol=1)
     else:
         assert torch.allclose(ref_out.to(dtype=torch.float32),
