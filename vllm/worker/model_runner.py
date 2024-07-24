@@ -1266,7 +1266,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
             # Sampling metadata is only required for the final pp group
-            generators = self._get_generators(finished_requests_ids)
+            generators = self.get_generators(finished_requests_ids)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, model_input.seq_lens,
                 model_input.query_lens, self.device, self.pin_memory,

@@ -213,6 +213,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
+        scorer_runner = getattr(self.scorer_worker, "model_runner", None)
+        self.generators = scorer_runner.get_generators(
+        ) if scorer_runner else None
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
         self.spec_decode_sampler = spec_decode_sampler
         self._allow_zero_draft_token_step = allow_zero_draft_token_step
@@ -592,10 +595,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Sampler arguments
         sampler_extra_kwargs: Dict[str, Any] = {}
-        if isinstance(self.spec_decode_sampler,
-                      SpecDecodeStochasticBaseSampler):
-            # Get sequence group state
-            sampler_extra_kwargs["generators"] = []  #TODO
+        if self.generators and isinstance(self.spec_decode_sampler,
+                                          SpecDecodeStochasticBaseSampler):
+            sampler_extra_kwargs["seeded_seqs"] = {
+                idx: self.generators[sgm.request_id]
+                for idx, sgm in enumerate(seq_group_metadata_list)
+                if sgm.sampling_params.seed is not None
+            }
 
         accepted_token_ids = self.spec_decode_sampler(
             target_probs=proposal_verifier_probs,

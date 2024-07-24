@@ -180,8 +180,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    def _get_generators(self,
-                        finished_request_ids: Optional[List[str]] = None):
+    def get_generators(self, finished_request_ids: Optional[List[str]] = None):
         """
         Return dict of per-request generators used for random sampling.
         """

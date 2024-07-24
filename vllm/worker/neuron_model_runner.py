@@ -220,7 +220,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             seq_lens,
             self.device,
             self.pin_memory,
-            generators=self._get_generators(finished_requests_ids))
+            generators=self.get_generators(finished_requests_ids))
 
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,
