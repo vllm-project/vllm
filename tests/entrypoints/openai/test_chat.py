@@ -23,7 +23,7 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
+def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -46,7 +46,7 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
 
 
 @pytest.fixture(scope="module")
-def server(default_server_args):  # noqa: F811
+def server(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
