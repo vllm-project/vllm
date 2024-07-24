@@ -9,7 +9,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
-from zmq import PUB, REP, REQ, SUB, SUBSCRIBE, Context  # type: ignore
+from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -153,9 +153,7 @@ class Handle:
 
     buffer: Optional[ShmRingBuffer] = None
     local_subscribe_port: Optional[int] = None
-    local_sync_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
-    remote_sync_port: Optional[int] = None
 
 
 class MessageQueue:
@@ -189,38 +187,30 @@ class MessageQueue:
             self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes,
                                         max_chunks)
 
-            self.local_socket = context.socket(PUB)
+            self.local_socket = context.socket(XPUB)
+            self.local_socket.setsockopt(XPUB_VERBOSE, True)
             local_subscribe_port = get_open_port()
             self.local_socket.bind(f"tcp://*:{local_subscribe_port}")
 
-            self.local_sync_socket = context.socket(REP)
-            local_sync_port = get_open_port()
-            self.local_sync_socket.bind(f"tcp://*:{local_sync_port}")
             self.current_idx = 0
 
         else:
             self.buffer = None  # type: ignore
             local_subscribe_port = None
-            local_sync_port = None
             self.local_socket = None
-            self.local_sync_socket = None
             self.current_idx = -1
 
         if n_remote_reader > 0:
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
-            self.remote_socket = context.socket(PUB)
+            self.remote_socket = context.socket(XPUB)
+            self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
             self.remote_socket.bind(f"tcp://*:{remote_subscribe_port}")
 
-            self.remote_sync_socket = context.socket(REP)
-            remote_sync_port = get_open_port()
-            self.remote_sync_socket.bind(f"tcp://*:{remote_sync_port}")
         else:
             remote_subscribe_port = None
-            remote_sync_port = None
             self.remote_socket = None
-            self.remote_sync_socket = None
 
         self._is_writer = True
         self._is_local_reader = False
@@ -233,9 +223,7 @@ class MessageQueue:
             local_reader_ranks=local_reader_ranks,
             buffer=self.buffer,
             local_subscribe_port=local_subscribe_port,
-            local_sync_port=local_sync_port,
             remote_subscribe_port=remote_subscribe_port,
-            remote_sync_port=remote_sync_port,
         )
 
         logger.info("vLLM message queue communication handle: %s", self.handle)
@@ -264,12 +252,7 @@ class MessageQueue:
             self.local_socket.connect(
                 f"tcp://{handle.connect_ip}:{handle.local_subscribe_port}")
 
-            self.local_sync_socket = context.socket(REQ)
-            self.local_sync_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.local_sync_port}")
-
             self.remote_socket = None
-            self.remote_sync_socket = None
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -278,16 +261,11 @@ class MessageQueue:
             self._is_remote_reader = True
 
             self.local_socket = None
-            self.local_sync_socket = None
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
             self.remote_socket.connect(
                 f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}")
-
-            self.remote_sync_socket = context.socket(REQ)
-            self.remote_sync_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.remote_sync_port}")
 
         return self
 
@@ -300,29 +278,19 @@ class MessageQueue:
 
             # local readers
             for i in range(self.n_local_reader):
-                recv = self.local_sync_socket.recv()
-                assert recv == b"READY"
-                self.local_sync_socket.send(b"READY")
+                self.local_socket.recv()
             if self.n_local_reader > 0:
                 self.local_socket.send(b"READY")
 
             # remote readers
             for i in range(self.n_remote_reader):
-                recv = self.remote_sync_socket.recv()
-                assert recv == b"READY"
-                self.remote_sync_socket.send(b"READY")
+                self.remote_socket.recv()
             if self.n_remote_reader > 0:
                 self.remote_socket.send(b"READY")
         elif self._is_local_reader:
-            self.local_sync_socket.send(b"READY")
-            recv = self.local_sync_socket.recv()
-            assert recv == b"READY"
             recv = self.local_socket.recv()
             assert recv == b"READY"
         elif self._is_remote_reader:
-            self.remote_sync_socket.send(b"READY")
-            recv = self.remote_sync_socket.recv()
-            assert recv == b"READY"
             recv = self.remote_socket.recv()
             assert recv == b"READY"
 
