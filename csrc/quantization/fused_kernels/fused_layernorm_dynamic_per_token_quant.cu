@@ -5,98 +5,80 @@
 
 #include "../../dispatch_utils.h"
 #include "../../reduction_utils.cuh"
-#include "common.cuh"
+#include "layernorm_utils.cuh"
+#include "quant_conversions.cuh"
 
 namespace vllm {
 
-
-// Dynamic per token quant helper. Norm the input and compute per-token 
-// scales
-template <typename scalar_t>
-__device__ void norm_and_compute_dynamic_per_token_scales(
-    float* __restrict__ out,  // TODO(varun) : Ignore tmp if you can!
-    float* __restrict__ token_scale, float* __restrict__ all_token_scales,
-    scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
-    __shared__ float* s_rms, int const hidden_size) {
-  __shared__ float s_amax;
-  float amax_val = 0.0f;
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)input[blockIdx.x * hidden_size + idx];
-    x = x * (*s_rms) * (float)(weight[idx]);
-    // TODO (varun) : Try to avoid intermediate storage.
-    out[blockIdx.x * hidden_size + idx] = x;
-    amax_val = fmaxf(amax_val, fabsf(x));
-  }
-  amax_val = blockReduceMax(amax_val);
-  if (threadIdx.x == 0) {
-    s_amax = amax_val;
-    all_token_scales[blockIdx.x] = amax_val / 127.0f;
-  }
-  __syncthreads();
-
-  *token_scale = 127.0f / s_amax;
-}
-
 // RMS norm + quant kernel
-
-template <typename scalar_t, typename scalar_out_t>
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __global__ void rms_norm_dynamic_per_token_quant_kernel(
     scalar_out_t* __restrict__ out,             // [..., hidden_size]
     float* __restrict__ scales,           // [num_tokens]
-    float* __restrict__ tmp,              // [..., hidden_size]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
-    float const epsilon, int const hidden_size) {
+    float const* scale_ub,
+    float const var_epsilon,
+    float const min_scaling_factor,
+    int const hidden_size,
+    scalar_t* __restrict__ residual = nullptr) {
+
+  // For vectorization, token_input and token_output pointers need to be
+  // aligned at 8-byte and 4-byte addresses respectively.
+  bool const can_vectorize = hidden_size % 4 == 0;
+
+  // Compute RMS
   __shared__ float s_rms;
-  compute_rms<scalar_t>(&s_rms, input, hidden_size, epsilon);
+  __shared__ float s_token_scale;
+  if (can_vectorize) {
 
-  float token_scale = 0.0f;
-  norm_and_compute_dynamic_per_token_scales<scalar_t>(
-      tmp, &token_scale, scales, input, weight, &s_rms, hidden_size);
+    vllm::vectorized::compute_rms<scalar_t, has_residual>(&s_rms, input, hidden_size, var_epsilon, residual);
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    out[blockIdx.x * hidden_size + idx] = ScaledQuant<scalar_out_t>::quant_fn(
-        tmp[blockIdx.x * hidden_size + idx], token_scale);
-  }
-}
+    vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+      &s_token_scale, scales, input, weight, s_rms, scale_ub, min_scaling_factor, hidden_size, residual);
 
-// Residual add + RMS norm + quant kernel
+    if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+      vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
+        out, input, weight, s_rms, 1.0f / s_token_scale, hidden_size, residual);
+    } else {
+      // FP8 - Do not invert s_token_scale for exact match with FBGemm
+      vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
+        out, input, weight, s_rms, s_token_scale, hidden_size, residual);
+    }
 
-template <typename scalar_t, typename scalar_out_t>
-__global__ void residual_add_rms_norm_dynamic_per_token_quant_kernel(
-    scalar_out_t* __restrict__ out,      // [..., hidden_size]
-    float* __restrict__ scales,    // [num_tokens]
-    float* __restrict__ tmp,       // [..., hidden_size]
-    scalar_t* __restrict__ input,  // [..., hidden_size]
-    scalar_t* __restrict__ residual,
-    scalar_t const* __restrict__ weight,  // [hidden_size]
-    float const epsilon, int const hidden_size) {
-  __shared__ float s_rms;
-  compute_rms<scalar_t>(&s_rms, input, residual, hidden_size, epsilon);
+  } else {
+    vllm::compute_rms<scalar_t, has_residual>(&s_rms, input, hidden_size, var_epsilon, residual);
 
-  float token_scale = 0.0f;
-  norm_and_compute_dynamic_per_token_scales<scalar_t>(
-      tmp, &token_scale, scales, residual, weight, &s_rms, hidden_size);
+    vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+      &s_token_scale, scales, &s_rms, input, weight, scale_ub, min_scaling_factor, hidden_size, residual);
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    out[blockIdx.x * hidden_size + idx] = ScaledQuant<scalar_out_t>::quant_fn(
-        tmp[blockIdx.x * hidden_size + idx], token_scale);
+    if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+      vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
+        out, input, weight, s_rms, 1.0f / s_token_scale, hidden_size, residual);
+    } else {
+      // FP8 - Do not invert s_token_scale for exact match with FBGemm
+      vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
+        out, input, weight, s_rms, s_token_scale, hidden_size, residual);
+    }
   }
 }
 }  // namespace vllm
 
-// TODO (varun) Make residual optional
-
-// RMS norm + dynamic per token
-
-template<typename scalar_in_t>
+// Residual add + RMS norm + dynamic per token
+template <typename scalar_in_t>
 void rms_norm_dynamic_per_token_quant_dispatch(
-    torch::Tensor& out,     // [..., hidden_size]
-    torch::Tensor& tmp,     // [..., hidden_size]
-    torch::Tensor& input,   // [..., hidden_size]
-    torch::Tensor& weight,  // [hidden_size]
-    torch::Tensor& scales,  // [num_tokens]
-    double const epsilon) {
+    torch::Tensor& out,       // [..., hidden_size]
+    torch::Tensor const& input, // [..., hidden_size]
+    torch::Tensor const& weight,// [hidden_size]
+    torch::Tensor& scales,    // [num_tokens]
+    double const var_epsilon,     // Variance epsilon used in norm calculation 
+    std::optional<at::Tensor> const& scale_ub,
+    std::optional<at::Tensor>& residual) {
+
+#if 0
+ - this is int8 scales = torch.clamp(scales, min=torch.finfo(torch.float32).eps)
+ - this is fp8 scales = float const min_scaling_factor = 1.0f / (FP8_E4M3_MAX * 512.f);
+#endif
 
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -106,90 +88,70 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  VLLM_DISPATCH_QUANT_TYPES(
-      out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel",
-      [&] {
-        vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_t,
-                                                      scalar_in_t>
-            <<<grid, block, 0, stream>>>(
-              out.data_ptr<scalar_t>(),
-              scales.data_ptr<float>(),
-              tmp.data_ptr<float>(),
-              input.data_ptr<scalar_in_t>(),
-              weight.data_ptr<scalar_in_t>(),
-              epsilon,
-              hidden_size);
-      });
+  static const float min_scaling_factor = input.dtype() == torch::kInt8  ? 
+    std::numeric_limits<float>::epsilon() :
+    1.0f / (FP8_E4M3_MAX * 512.f);
+
+  if (residual.has_value()) {
+      VLLM_DISPATCH_QUANT_TYPES(
+          out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel",
+          [&] {
+            vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
+                                                                       true>
+                <<<grid, block, 0, stream>>>(
+                  out.data_ptr<scalar_t>(),
+                  scales.data_ptr<float>(),
+                  input.data_ptr<scalar_in_t>(),
+                  weight.data_ptr<scalar_in_t>(),
+                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
+                  var_epsilon,
+                  min_scaling_factor,
+                  hidden_size,
+                  residual->data_ptr<scalar_in_t>());
+          });
+
+  } else {
+
+      VLLM_DISPATCH_QUANT_TYPES(
+          out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel",
+          [&] {
+            vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
+                                                          false>
+                <<<grid, block, 0, stream>>>(
+                  out.data_ptr<scalar_t>(),
+                  scales.data_ptr<float>(),
+                  input.data_ptr<scalar_in_t>(),
+                  weight.data_ptr<scalar_in_t>(),
+                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
+                  var_epsilon,
+                  min_scaling_factor,
+                  hidden_size,
+                  nullptr);
+          });
+  }
 }
 
 void rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out,     // [..., hidden_size]
-    torch::Tensor& tmp,     // [..., hidden_size]
-    torch::Tensor& input,   // [..., hidden_size]
-    torch::Tensor& weight,  // [hidden_size]
-    torch::Tensor& scales,  // [num_tokens]
-    double const epsilon) {
-
-  VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
-        rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
-            out, tmp, input, weight, scales, epsilon);
-      });
-}
-
-// Residual add + RMS norm + dynamic per token
-
-template <typename scalar_in_t>
-void residual_add_rms_norm_dynamic_per_token_quant_dispatch(
     torch::Tensor& out,       // [..., hidden_size]
-    torch::Tensor& tmp,       // [..., hidden_size]
-    torch::Tensor& input,     // [..., hidden_size]
-    torch::Tensor& residual,  // [..., hidden_size]
-    torch::Tensor& weight,    // [hidden_size]
+    torch::Tensor const& input, // [..., hidden_size]
+    torch::Tensor const& weight,// [hidden_size]
     torch::Tensor& scales,    // [num_tokens]
-    double const epsilon) {
+    double const var_epsilon,     // Variance epsilon used in norm calculation 
+    std::optional<at::Tensor> const& scale_ub,
+    std::optional<at::Tensor>& residual) {
 
+  TORCH_CHECK(input.dtype() == torch::kFloat8_e4m3fn ||
+              input.dtype() == torch::kInt8);
 
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
-
-  dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  VLLM_DISPATCH_QUANT_TYPES(
-      out.scalar_type(), "residual_add_rms_norm_dynamic_per_token_quant_kernel",
-      [&] {
-        vllm::residual_add_rms_norm_dynamic_per_token_quant_kernel<scalar_t,
-                                                                   scalar_in_t>
-            <<<grid, block, 0, stream>>>(
-              out.data_ptr<scalar_t>(),
-              scales.data_ptr<float>(),
-              tmp.data_ptr<float>(),
-              input.data_ptr<scalar_in_t>(),
-              residual.data_ptr<scalar_in_t>(),
-              weight.data_ptr<scalar_in_t>(),
-              epsilon,
-              hidden_size);
-      });
-
-}
-
-// TODO (varun) : Remove temp
-void residual_add_rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out,       // [..., hidden_size]
-    torch::Tensor& tmp,       // [..., hidden_size]
-    torch::Tensor& input,     // [..., hidden_size]
-    torch::Tensor& residual,  // [..., hidden_size]
-    torch::Tensor& weight,    // [hidden_size]
-    torch::Tensor& scales,    // [num_tokens]
-    double const epsilon) {
+  if (scale_ub.has_value()) {
+    TORCH_CHECK(input.dtype() == torch::kFloat8_e4m3fn);
+  }
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(),
-      "residual_add_rms_norm_dynamic_per_token_quant_dispatch", [&] {
-        residual_add_rms_norm_dynamic_per_token_quant_dispatch<
-            scalar_t>(out, tmp, input, residual, weight, scales, epsilon);
+      "rms_norm_dynamic_per_token_quant_dispatch", [&] {
+        rms_norm_dynamic_per_token_quant_dispatch<
+            scalar_t>(out, input, weight, scales, var_epsilon, scale_ub, residual);
       });
 }
+

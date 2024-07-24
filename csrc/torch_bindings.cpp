@@ -89,33 +89,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
-#if 0
-  // Fused Quant + Layernorm
-  ops.def(
-      "rms_norm_quant(Tensor! out, Tensor input, Tensor tmp, Tensor weight, "
-      "Tensor scale, float epsilon) -> ()");
-  ops.impl("rms_norm_quant", torch::kCUDA, &rms_norm_quant);
-
-  ops.def(
-      "fused_add_rms_norm_quant(Tensor! out, Tensor input, Tensor! residual, "
-      "Tensor tmp, Tensor weight, Tensor scale, float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm_quant", torch::kCUDA, &fused_add_rms_norm_quant);
-#endif
-
   // Fused Layernorm + Quant kernels
   ops.def(
-      "rms_norm_dynamic_per_token_quant(Tensor! out, Tensor tmp, Tensor "
-      "input, "
-      "Tensor weight, Tensor scales, float epsilon) -> ()");
+      "rms_norm_dynamic_per_token_quant(Tensor! out, Tensor input, "
+      "Tensor weight, Tensor! scales, float epsilon, "
+      "Tensor scale_ub, Tensor!? residual) -> ()");
   ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
            &rms_norm_dynamic_per_token_quant);
-
-  ops.def(
-      "residual_add_rms_norm_dynamic_per_token_int8_quant(Tensor! out, Tensor "
-      "tmp, Tensor input, "
-      "Tensor! residual, Tensor weight, Tensor scales, float epsilon) -> ()");
-  ops.impl("residual_add_rms_norm_dynamic_per_token_int8_quant", torch::kCUDA,
-           &residual_add_rms_norm_dynamic_per_token_int8_quant);
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.

@@ -4,6 +4,8 @@
  * __device__ helper functions to deal with float -> quant datatype conversion
  */
 
+#include "vectorization.cuh"
+
 namespace vllm {
 
 static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
@@ -32,88 +34,82 @@ static __device__ __forceinline__ c10::Float8_e4m3fn float_to_fp8(
   return static_cast<c10::Float8_e4m3fn>(r);
 }
 
-template <typename quant_type_t, typename enable = void>
+template <typename quant_type_t, bool is_scale_inverted, typename enable = void>
 struct ScaledQuant;
 
-template <typename quant_type_t>
-struct ScaledQuant<quant_type_t, typename std::enable_if_t<
+template <typename quant_type_t, bool is_scale_inverted>
+struct ScaledQuant<quant_type_t, is_scale_inverted, typename std::enable_if_t<
                                      std::is_same_v<quant_type_t, int8_t>>> {
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
-                                                          float const iscale) {
-    return float_to_int8_rn(x * iscale);
+                                                          float const scale) {
+    if constexpr (is_scale_inverted) {
+      return float_to_int8_rn(x * scale);
+    } else {
+      return float_to_int8_rn(x / scale);
+    }
   }
 };
 
-template <typename quant_type_t>
-struct ScaledQuant<quant_type_t, typename std::enable_if_t<std::is_same_v<
+template <typename quant_type_t, bool is_scale_inverted>
+struct ScaledQuant<quant_type_t, is_scale_inverted, typename std::enable_if_t<std::is_same_v<
                                      quant_type_t, c10::Float8_e4m3fn>>> {
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
-                                                          float const iscale) {
-    return float_to_fp8(x * iscale);
+                                                          float const scale) {
+    if constexpr (is_scale_inverted) {
+      return float_to_fp8(x * scale);
+    } else {
+      return float_to_fp8(x / scale);
+    }
   }
 };
 
-template <typename scalar_t, typename quant_type_t>
+template <typename scalar_t, typename quant_type_t, bool is_scale_inverted>
 __device__ void scaled_quant_conversion(quant_type_t* __restrict__ output,
                                         scalar_t const* __restrict__ input,
-                                        float const inverted_scale,
+                                        float const scale,
                                         int const tid,
                                         int const num_elements,
                                         int const step) {
 
   for (int i = tid; i < num_elements; i += step) {
-    output[i] = ScaledQuant<quant_type_t>(input[i], inverted_scale);
+    output[i] = ScaledQuant<quant_type_t, is_scale_inverted>(input[i], scale);
   }
 }
 
 namespace vectorized {
 
 // Vectorized version of scaled_quant_conversion
-template <typename scalar_t, typename quant_type_t>
+template <typename scalar_t, typename quant_type_t, bool is_scale_inverted>
 __device__ void scaled_quant_conversion(quant_type_t* __restrict__ out,
                                         scalar_t const* __restrict__ input,
-                                        float const inverted_scale,
+                                        float const scale,
                                         int const tid,
-                                        int const num_elements,
+                                        int const num_elems,
                                         int const step) {
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vectorized_in =
       reinterpret_cast<vec4_t<scalar_t> const*>(input);
-  float8x4_t* vectorized_out = reinterpret_cast<float8x4_t*>(out);
+  q8x4_t<quant_type_t>* vectorized_out = reinterpret_cast<q8x4_t<quant_type_t>*>(out);
 
   int const num_vec_elems = num_elems >> 2;
 
 #pragma unroll 4
   for (int i = tid; i < num_vec_elems; i += step) {
     vec4_t<scalar_t> in_vec = vectorized_in[i];
-    float8x4_t out_vec;
+    q8x4_t<quant_type_t> out_vec;
 
-    out_vec.x = scaled_fp8_conversion(in_vec.x, inverted_scale);
-    out_vec.y = scaled_fp8_conversion(in_vec.y, inverted_scale);
-    out_vec.z = scaled_fp8_conversion(in_vec.z, inverted_scale);
-    out_vec.w = scaled_fp8_conversion(in_vec.w, inverted_scale);
+    out_vec.x = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.x, scale);
+    out_vec.y = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.y, scale);
+    out_vec.z = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.z, scale);
+    out_vec.w = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.w, scale);
     vectorized_out[i] = out_vec;
   }
 
   // Handle the remaining elements if num_elems is not divisible by 4
   for (int i = num_vec_elems * 4 + tid; i < num_elems; i += step) {
-    out[i] = scaled_fp8_conversion(input[i], inverted_scale);
+    out[i] = ScaledQuant<quant_type_t, is_scale_inverted>(input[i], scale);
   }
 }
-
-template <typename scalar_t, typename quant_type_t>
-__device__ void scaled_quant_conversion(scalar_t const* __restrict__ input,
-                                        quant_type_t* __restrict__ output,
-                                        float const inverted_scale,
-                                        int const tid,
-                                        int const num_elements,
-                                        int const step) {
-
-  for (int i = tid; i < num_elements; i += step) {
-    output[i] = ScaledQuant<quant_type_t>(input[i], inverted_scale);
-  }
-}
-
 
 } // namespace vectorized
 

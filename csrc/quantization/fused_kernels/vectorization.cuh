@@ -22,6 +22,6 @@ struct __align__(4) q8x4_t {
   quant_type_t y;
   quant_type_t z;
   quant_type_t w;
-}
+};
 
 } // vllm
