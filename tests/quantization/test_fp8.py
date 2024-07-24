@@ -62,7 +62,9 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_load_fp16_model(vllm_runner, kv_cache_dtype: str) -> None:
-    with vllm_runner("facebook/opt-125m", quantization="fp8", kv_cache_dtype=kv_cache_dtype) as llm:
+    with vllm_runner("facebook/opt-125m",
+                     quantization="fp8",
+                     kv_cache_dtype=kv_cache_dtype) as llm:
 
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         fc1 = model.model.decoder.layers[0].fc1
