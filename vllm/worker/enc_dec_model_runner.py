@@ -122,7 +122,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         num_steps: int = 1,
     ) -> Optional[List[PoolerOutput]]:
         if num_steps > 1:
-            raise ValueError("num_steps > 1 is not supported in ModelRunner")
+            raise ValueError("num_steps > 1 is not supported in "
+                             "EncoderDecoderModelRunner")
 
         if self.lora_config:
             assert model_input.lora_requests is not None
