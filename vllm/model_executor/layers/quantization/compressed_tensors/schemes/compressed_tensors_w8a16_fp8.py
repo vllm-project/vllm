@@ -6,11 +6,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    create_per_tensor_scale_param, create_per_channel_scale_param,
-    convert_to_channelwise)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    convert_to_channelwise, create_per_channel_scale_param,
+    create_per_tensor_scale_param)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW8A16Fp8"]

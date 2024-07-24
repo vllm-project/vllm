@@ -4,9 +4,9 @@ from .compressed_tensors_w4a16_24 import (W4A16SPARSE24_SUPPORTED_BITS,
                                           CompressedTensorsW4A16Sparse24)
 from .compressed_tensors_w8a8_fp8 import CompressedTensorsW8A8Fp8
 from .compressed_tensors_w8a8_int8 import CompressedTensorsW8A8Int8
+from .compressed_tensors_w8a16_fp8 import CompressedTensorsW8A16Fp8
 from .compressed_tensors_wNa16 import (WNA16_SUPPORTED_BITS,
                                        CompressedTensorsWNA16)
-from .compressed_tensors_w8a16_fp8 import CompressedTensorsW8A16Fp8
 
 __all__ = [
     "CompressedTensorsScheme",
