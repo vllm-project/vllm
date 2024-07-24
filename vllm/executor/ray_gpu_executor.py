@@ -406,6 +406,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         from ray.experimental.channel.torch_tensor_type import TorchTensorType
         assert self.parallel_config.distributed_executor_backend == "ray"
 
+        logger.info(f"VLLM_USE_RAY_COMPILED_DAG_NCCL = {envs.VLLM_USE_RAY_COMPILED_DAG_NCCL}")
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501

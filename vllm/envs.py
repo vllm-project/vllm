@@ -268,18 +268,18 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # execution on all workers.
     # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
     "VLLM_USE_RAY_SPMD_WORKER":
-    lambda: bool(os.getenv("VLLM_USE_RAY_SPMD_WORKER", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
     # If the env var is set, it uses the Ray's compiled DAG API
     # which optimizes the control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
-    lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
     # If the env var is set, it uses NCCL for communication in
     # Ray's compiled DAG.
     "VLLM_USE_RAY_COMPILED_DAG_NCCL":
-    lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL", 1)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL", "1"))),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
