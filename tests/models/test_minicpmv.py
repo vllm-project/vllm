@@ -1,7 +1,10 @@
-from typing import List, Optional, Tuple, Type
+from collections import UserDict
+from typing import Dict, List, Optional, Tuple, Type
 
 import pytest
 import torch
+import torch.types
+from transformers import BatchFeature
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -91,8 +94,18 @@ def run_test(
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model, torch.no_grad():
+
+        class NestedInputs(UserDict):
+            def __init__(self, model_inputs: BatchFeature):
+                super().__init__({"model_inputs": model_inputs})
+
+                self.model_inputs = model_inputs
+
+            def to(self, device: torch.types.Device):
+                return NestedInputs(self.model_inputs.to(device))
+
         hf_processor = hf_model.processor
-        hf_model.processor = lambda **kw: {"model_inputs": hf_processor(**kw)}
+        hf_model.processor = lambda **kw: NestedInputs(hf_processor(**kw))  # type: ignore
 
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
