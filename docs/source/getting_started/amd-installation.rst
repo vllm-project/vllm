@@ -142,3 +142,10 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
     - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
     - To use CK flash-attention or PyTorch naive attention, please use this flag ``export VLLM_USE_TRITON_FLASH_ATTN=0`` to turn off triton flash attention. 
     - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
+
+
+.. tip::
+    - For MI300x (gfx942) users, to achieve optimal performance, please refer to `MI300x tuning guide <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html>`_ for performance optimzation and tuning tips on system and workflow level. 
+      For vLLM, please refer to `vLLM performance optimzation <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization>`_.
+
+
