@@ -62,7 +62,7 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     scales = (x_token_max - x_token_min) / torch.tensor(255.0)
     azps = torch.round(x_token_min / scales + 128.0).to(torch.int32)
 
-    torch_out = (x / scales - azps).round().to(torch.int8)
+    torch_out = (x / scales - azps).round().clamp(int8_traits.min, int8_traits.max).to(torch.int8)
     assert torch_out.min() >= int8_traits.min and torch_out.max() <= int8_traits.max
 
     ops_out = torch.empty_like(x, dtype=torch.int8)
