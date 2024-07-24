@@ -191,7 +191,8 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
                 and llm.llm_engine.log_stats):
             for sate_logger in llm.llm_engine.stat_loggers.values():
                 sate_logger.local_interval = 0
-        set_random_seed(seed)
+        if seed is not None:
+            set_random_seed(seed)
 
         yield llm
         del llm
