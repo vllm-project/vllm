@@ -47,6 +47,9 @@ class CodeCache:
 
         return self.cache[mangled_name]
 
+    def has_entry(self, mangled_name: str) -> bool:
+        return mangled_name in self.cache
+
     def add(self, mangled_name: str, fn: Optional[Callable]) -> bool:
         """
         Add a new entry to the cache.  Return False if an entry with the

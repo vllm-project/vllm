@@ -4,6 +4,8 @@
 #
 ###############################################################################
 
+import copy
+import functools
 import torch
 
 try:
@@ -43,7 +45,7 @@ def lazy_string(fn: Callable):
     return lazy(lambda: fn())
 
 
-def trunc(x, lim=30) -> Any:
+def trunc(x, lim=40) -> Any:
     """
     Convert x into a string while making sure that it stays under 'lim'
     characters.  If x is a tuple/list/dict, the elements will be
@@ -206,6 +208,15 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_", include_constants 
         sep = "_"
 
     return name.replace(".", rep)
+
+
+SIMPLIFIED_NAMES : Dict[str, str] = dict()
+
+def simplify_mangled_name(name: str) -> str:
+    if name not in SIMPLIFIED_NAMES:
+        simple_name = f"mangled_{len(SIMPLIFIED_NAMES)}"
+        SIMPLIFIED_NAMES[name] = simple_name
+    return SIMPLIFIED_NAMES[name]
 
 
 class ModuleInputGenerator(FakeTensorProp):
@@ -446,52 +457,84 @@ class FlowGraph:
         self.module = gm
         self.build()
 
-    def add_edge(self, src: torch.fx.GraphModule, dst: torch.fx.GraphModule):
-        if src not in self.succs:
-            self.succs[src] = set()
-        if dst not in self.preds:
-            self.preds[dst] = set()
-
-        self.succs[src].add(dst)
-        self.preds[dst].add(src)
+#    def add_edge(self, src: torch.fx.GraphModule, dst: torch.fx.GraphModule):
+#        if src not in self.succs:
+#            self.succs[src] = set()
+#        if dst not in self.preds:
+#            self.preds[dst] = set()
+#
+#        self.succs[src].add(dst)
+#        self.preds[dst].add(src)
 
     def build(self):
         """
         Construct the FlowGraph.
         """
-        self.succs = dict()
-        self.preds = dict()
         self.outputs = [n for n in self.module.graph.nodes if n.op == 'output']
         self.inputs = [
             n for n in self.module.graph.nodes if n.op == 'placeholder'
         ]
-        visited = set()
-        q = self.outputs
 
         self.all_renamed_input_nodes, self.all_renamed_node_users = (
             gather_all_input_nodes(self.module.graph.nodes, True))
 
-        self.all_input_nodes, self.all_node_users = (gather_all_input_nodes(
-            self.module.graph.nodes, False))
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
+            self.module.graph.nodes, False)
 
-        while len(q) > 0:
-            n = q.pop()
-            if n in visited:
-                continue
+        self.preds: Dict[torch.fx.Node, Set[torch.fx.Node]] = dict()
+        self.succs: Dict[torch.fx.Node, Set[torch.fx.Node]] = dict()
+        for n in self.module.graph.nodes:
+            self.succs[n] = set(self.all_renamed_node_users[n].keys())
+            self.preds[n] = set(self.all_renamed_input_nodes[n])
 
-            visited.add(n)
-            for input in self.all_renamed_input_nodes[n]:
-                self.add_edge(input, n)
-                q.append(input)
+#        visited = set()
+#        q = list(self.outputs)
+#        while len(q) > 0:
+#            n = q.pop()
+#            if n in visited:
+#                continue
+#
+#            visited.add(n)
+#            for input in self.all_renamed_input_nodes[n]:
+#                self.add_edge(input, n)
+#                q.append(input)
 
     def successors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
-        return self.succs[n] if n in self.succs else set()
+        return self.succs[n]
 
     def predecessors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
-        return self.preds[n] if n in self.preds else set()
+        return self.preds[n]
 
-    def visit(self, fn: Callable):
-        q = self.inputs
+    def dfs_visit(self, fn: Callable, start: Optional[List[torch.fx.Node]] = None, init_ctx: Optional[Any] = None):
+        assert False
+        q: deque = deque(start if start else self.inputs)
+        ctx_q = [init_ctx]*len(q)
+        visited = set()
+        while len(q) > 0:
+            n = q.pop()
+            ctx = ctx_q.pop()
+            if n in visited:
+                continue
+            visited.add(n)
+            new_ctx = fn(n, ctx)
+            q.extend(self.successors(n))
+            ctx_q.extend([new_ctx]*len(self.successors(n)))
+
+    def bfs_visit(self, fn: Callable, start: Optional[List[torch.fx.Node]] = None):
+        assert False
+        q: deque = deque(start if start else self.inputs)
+        visited = set()
+        while len(q) > 0:
+            n = q.popleft()
+            if n in visited:
+                continue
+            visited.add(n)
+            fn(n)
+            q.extendleft(self.successors(n))
+
+    def backward_dfs_visit(self, fn: Callable, start: Optional[List[torch.fx.Node]] = None):
+        assert False
+        q: deque = deque(start if start else self.outputs)
         visited = set()
         while len(q) > 0:
             n = q.pop()
@@ -499,7 +542,69 @@ class FlowGraph:
                 continue
             visited.add(n)
             fn(n)
-            q = list(self.successors(n)) + q
+            q.extend(self.predecessors(n))
+
+    def paths_to_nodes(self,
+                       starts: List[torch.fx.Node],
+                       ends: List[torch.fx.Node]) -> List[List[torch.fx.Node]]:
+        visited = set()
+        path = []
+        paths = []
+
+        def dfs(n: torch.fx.Node):
+            visited.add(n)
+            path.append(n)
+            succs = self.successors(n)
+
+            if n in ends or len(succs) == 0:
+                if len(succs) == 0:
+                    print(f"reached {n} no successors {path}")
+                    paths.append(None)
+                else:
+                    paths.append(copy.copy(path))
+            else:
+                for p in succs:
+                    if p not in visited:
+                        dfs(p)
+
+            path.pop()
+            visited.remove(n)
+
+        for n in starts:
+            dfs(n)
+
+        return paths
+
+    def to_dot(self, name: str = "my_graph", hilite: Optional[List[List[torch.fx.Node]]] = None) -> str:
+        import pydot
+
+        def make_label(n: torch.fx.Node) -> str:
+            if is_simple_call(n):
+                return f"{n.name} = {node_function_target(n)}(...)"
+            else:
+                return n.name
+
+        palette = ["red", "green", "blue", "yellow", "orange", "purple", "pink", "gray"]
+        colors = []
+        node_colors = dict()
+        hilite = [] if not hilite else hilite
+        for i, h in enumerate(hilite):
+            for n in self.module.graph.nodes:
+                if n in h:
+                    node_colors[n] = i
+            colors.append(palette[i % len(palette)])
+
+        graph = pydot.Dot(name, graph_type="digraph")
+        for n in self.module.graph.nodes:
+            color = colors[node_colors[n]] if n in node_colors else "black"
+            style = "filled" if n in node_colors else ""
+            graph.add_node(pydot.Node(n.name, shape="box", color=color, style=style, label=make_label(n)))
+
+        for n in self.module.graph.nodes:
+            for s in self.successors(n):
+                graph.add_edge(pydot.Edge(n.name, s.name))
+
+        return str(graph)
 
     def dump(self) -> str:
         res = ""
@@ -518,6 +623,7 @@ class SubGraph:
     """
 
     def __init__(self, fg: FlowGraph, nodes: List[torch.fx.Node]):
+        self.fg = fg
         self.module = fg.module
         self.inputs: List[torch.fx.Node] = []
         self.outputs: List[torch.fx.Node] = []
@@ -603,6 +709,14 @@ class SubGraph:
                 break
         return first
 
+    def last_in_subgraph(self):
+        last = None
+        for n in reversed(self.module.graph.nodes):
+            if not last and n in self.nodes:
+                last = n
+                break
+        return last
+
     def last_input(self):
         # there has to be a smarter way to do this
         first = next(iter(self.module.graph.nodes))
@@ -639,6 +753,27 @@ class SubGraph:
 
         # TODO: be smarter with updating just for deleted/new nodes
         self._refresh_def_use()
+
+    def to_dot(self, name: str = "") -> str:
+        import pydot
+        import textwrap
+
+        graph = pydot.Dot(f"sub_graph{name}", graph_type="digraph")
+        for n in self.nodes:
+            graph.add_node(pydot.Node(n.name, shape="box", label=textwrap.fill(n.format_node(), width=30)))
+
+        for n in self.nodes:
+            for p in self.fg.predecessors(n):
+                if not self.in_subgraph(p):
+                    graph.add_edge(pydot.Edge(f"EXTERNAL_{p}", n.name))
+
+            for s in self.fg.successors(n):
+                if self.in_subgraph(s):
+                    graph.add_edge(pydot.Edge(n.name, s.name))
+                else:
+                    graph.add_edge(pydot.Edge(n.name, f"EXTERNAL_{s}"))
+
+        return str(graph)
 
     def tabular(self,
                 col: Optional[str] = None,

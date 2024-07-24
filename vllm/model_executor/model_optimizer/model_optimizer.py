@@ -90,6 +90,7 @@ class backend_class:
         logger.info("Graph optimizer start")
 
         logger.debug("Original module:\n%s", gm)
+        print(f"Original module:\n{gm}")
         logger.debug(
             lazy_graph_print_tabular(gm.graph, 'users',
                                      lambda n: list(n.users.keys())))

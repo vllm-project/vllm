@@ -20,7 +20,7 @@ from .register import FUSABLE
 from .utils import (FlowGraph, SubGraph, extract_constant_vals,
                     generate_const_name, is_simple_call,
                     lazy_graph_print_tabular, mangle_name,
-                    node_function_target)
+                    node_function_target, simplify_mangled_name)
 
 logger = init_logger(__name__)
 
@@ -71,7 +71,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
 
     # Lookup or create the fused operation.
     try:
-        fn_key = f"{mangle_name(nodes_to_fuse)}_fused"
+        fn_key = simplify_mangled_name(f"{mangle_name(nodes_to_fuse)}_fused")
 
         def generate() -> Optional[Callable]:
             fgen = NaiveFusedOpGenerator()
@@ -218,6 +218,98 @@ def is_get_attr(a: torch.fx.Node) -> bool:
     return a.op == 'get_attr'
 
 
+def validate_path(path: List[torch.fx.Node], fuse_part_id: int, node_map) -> bool:
+    if path == None:
+        return False
+    saw_non_part = False
+    last_id = None
+    for p in path:
+        curr_id = node_map[p] if p in node_map else 0
+        if curr_id == fuse_part_id and saw_non_part:
+            return False
+        if curr_id != fuse_part_id:
+            saw_non_part = True
+        last_id = curr_id
+    return True
+
+
+def _valid_subgraph_partition(fg: FlowGraph,
+                             part_g: SubGraph,
+                             node_map: Dict[torch.fx.Node, int],
+                             fuse_part_id) -> bool:
+
+    input_frontier = set()
+    for inp in part_g.inputs:
+        for s in fg.successors(inp):
+            if part_g.in_subgraph(s):
+                input_frontier.add(s)
+
+    # look for paths from inputs to part_g.nodes
+    # Note: this was backwards path
+    paths = fg.paths_to_nodes(part_g.outputs, list(input_frontier))
+
+    if fuse_part_id == 3:
+        print(f"INPUTS = {part_g.inputs}")
+        print(f"INPUT FRONTIER = {input_frontier}")
+        print(f"OUTPUTS = {part_g.outputs}")
+        print(f"PATHS[{fuse_part_id}] = {paths}")
+
+    for path in paths:
+        if not validate_path(path, fuse_part_id, node_map):
+            return False
+
+    return True
+
+
+def valid_subgraph_partition(fg: FlowGraph,
+                             part_g: SubGraph,
+                             node_map: Dict[torch.fx.Node, int],
+                             fuse_part_id) -> bool:
+
+    first = [part_g.first_in_subgraph()]
+    last = [part_g.last_in_subgraph()] + part_g.outputs
+    #last = part_g.outputs
+
+    if True or fuse_part_id == 3:
+        print(part_g.to_dot(str(fuse_part_id)))
+        print(part_g.tabular())
+        print(f"INPUTS = {first}")
+        print(f"OUTPUTS = {last}")
+
+    paths = fg.paths_to_nodes(first, last)
+
+    if True or fuse_part_id == 3:
+        print(f"PATHS[{fuse_part_id}] = {paths}")
+
+    for path in paths:
+        if not validate_path(path, fuse_part_id, node_map):
+            print(f"BAD PATH: {path}")
+            return False
+
+    return True
+
+
+def valid_partition(fg: FlowGraph,
+                    n: torch.fx.Node,
+                    node_map: Dict[torch.fx.Node, int],
+                    num_compute,
+                    fuse_part_id) -> bool:
+    #fuse_part_id = node_map[n]
+    preds = fg.predecessors(n)
+
+    tmp_node_map = node_map.copy()
+    tmp_node_map[n] = fuse_part_id
+
+    for s in preds:
+        if s.op != 'placeholder' and (not is_compute(s)
+                                      or num_compute[fuse_part_id] == 0):
+            tmp_node_map[s] = fuse_part_id
+
+    part_g = SubGraph(fg, [n for n, p in tmp_node_map.items() if p == fuse_part_id])
+
+    return valid_subgraph_partition(fg, part_g, tmp_node_map, fuse_part_id)
+
+
 def pointwise_fusion(cc: CodeCache,
                      mod: torch.fx.GraphModule,
                      example_inputs: List[torch.Tensor],
@@ -229,6 +321,8 @@ def pointwise_fusion(cc: CodeCache,
     fg = FlowGraph(mod)
 
     logger.debug("FlowGraph:\n%s", fg.dump())
+    print(f"FlowGraph:\n{fg.dump()}")
+    #print(f"FlowGraph (dot):\n{fg.to_dot('orig')}")
 
     ShapeProp(mod).propagate(*example_inputs)
 
@@ -309,6 +403,15 @@ def pointwise_fusion(cc: CodeCache,
                          fuse_part_id)
             continue
 
+        # make sure that unpartitioned predecessors don't lead back
+        # into the partition
+        if False and not valid_partition(fg, n, node_map, num_compute, fuse_part_id):
+            print(f"  REJECT {n}: disjoint partition {fuse_part_id}")
+            logger.debug("  REJECT %s: disjoint partition %d", n,
+                         fuse_part_id)
+            continue
+
+        # Add predecessors to partition
         for s in fg.predecessors(n):
             if s.op != 'placeholder' and (not is_compute(s)
                                           or num_compute[fuse_part_id] == 0):
@@ -370,6 +473,12 @@ def pointwise_fusion(cc: CodeCache,
                              n, str(node_map[fuse_part]))
                 continue
 
+            if False and not valid_partition(fg, n, node_map, num_compute, fuse_part_id):
+                print(f"  COMPUTE REJECT {n}: disjoint partition {fuse_part_id}")
+                logger.debug("  REJECT %s: disjoint partition %d", n,
+                             fuse_part_id)
+                continue
+
             logger.debug("COMPUTE ACCEPT %s: partition %s, nodes=%s", n,
                          fuse_part_id, str(nodes))
 
@@ -385,27 +494,51 @@ def pointwise_fusion(cc: CodeCache,
         lazy_graph_print_tabular(mod.graph, 'part', lambda x: node_map[x]))
 
     # Create subgraph for every fusable partition.
-    subgraphs: Dict[torch.fx.Node, List[torch.fx.Node]] = dict()
+    subgraphs: Dict[int, List[torch.fx.Node]] = dict()
     for n, p in node_map.items():
         if p > 0:
             if p not in subgraphs:
                 subgraphs[p] = []
             subgraphs[p].append(n)
 
+    to_delete = []
+    for p in subgraphs:
+        sub = SubGraph(fg, subgraphs[p])  # TODO: only do this once
+        #subgraphs[p] = sub
+
+        if len([n for n in sub.nodes if non_trivial_op(n)]) <= 1:
+            logger.debug("\nReject empty/singleton/trivial subgraph:\n%s", sub.tabular())
+            to_delete.append(p)
+            continue
+
+        if node_map[sub.nodes[0]] == 3:
+            print(sub.to_dot(str(node_map[sub.nodes[0]])))
+
+        if not valid_subgraph_partition(fg, sub, node_map, node_map[sub.nodes[0]]):
+            if node_map[sub.nodes[0]] == 3:
+                print(f"\nREJECT {node_map[sub.nodes[0]]} {sub.tabular()}\n")
+            to_delete.append(p)
+            continue
+
+    for p in to_delete:
+        del subgraphs[p]
+
     logger.debug("Found %s fusable subgraphs.", len(subgraphs))
+
+    #print(f"FlowGraph (sub):\n{FlowGraph(mod).to_dot('hilite', subgraphs.values())}")
 
     # Attempt to fuse each subgraph.
     for p in subgraphs:
         sub = SubGraph(fg, subgraphs[p])
-        if len([n for n in sub.nodes if non_trivial_op(n)]) <= 1:
-            logger.debug("Reject empty/singleton subgraph:\n%s", sub.tabular())
-            continue
-        logger.debug("Fusing sub-module (last_input=%s):\n%s",
+        logger.debug("\nFusing sub-module (last_input=%s):\n%s",
                      sub.last_input(), sub.tabular())
+        print(f"fusing subgraph: {sub.to_dot(str(p))}")
         fuse_graph_nodes(cc, sub)
         logger.debug("Post fusion sub-module:\n%s", sub.tabular())
 
     logger.debug("Post fusion module:")
     logger.debug(lazy_graph_print_tabular(mod.graph))
+
+    #print(f"Final FlowGraph (dot):\n{FlowGraph(mod).to_dot('final', [[n] for n in mod.graph.nodes if cc.has_entry(n.name)])}")
 
     return mod
