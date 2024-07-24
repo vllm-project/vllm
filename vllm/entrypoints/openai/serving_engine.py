@@ -467,7 +467,8 @@ class OpenAIServing:
     async def unload_lora_adapter(
             self,
             request: UnloadLoraAdapterRequest) -> Union[ErrorResponse, str]:
-        error_check_ret = await self._check_unload_lora_adapter_request(request)
+        error_check_ret = await self._check_unload_lora_adapter_request(request
+                                                                        )
         if error_check_ret is not None:
             return error_check_ret
 
