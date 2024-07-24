@@ -95,25 +95,25 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp",
                  ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
-                 torch.bfloat16, None, azp_adj))
+                 torch.bfloat16, azp_adj))
 
     # cutlass with azp per-tensor + bias
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp_bias",
                  ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
-                 torch.bfloat16, None, azp_adj, bias))
+                 torch.bfloat16, azp_adj, None, bias))
 
     # cutlass with azp per-token
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp_pt",
                  ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
-                 torch.bfloat16, azp, azp_adj))
+                 torch.bfloat16, azp_adj, azp))
 
     # cutlass with azp per-token + bias
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_azp_pt_bias",
                  ops.cutlass_scaled_mm_azp, a, b, scale_a, scale_b,
-                 torch.bfloat16, azp, azp_adj, bias))
+                 torch.bfloat16, azp_adj, azp, bias))
 
     return timers
 
