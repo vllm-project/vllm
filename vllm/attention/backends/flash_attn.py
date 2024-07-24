@@ -134,7 +134,7 @@ class FlashAttentionMetadata(AttentionMetadata):
 
     @property
     def decode_metadata(self) -> Optional["FlashAttentionMetadata"]:
-        return self
+        return None
 
 
 class FlashAttentionMetadataBuilder(
