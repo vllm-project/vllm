@@ -13,11 +13,15 @@ SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
 
 
 def allclose_int(input, other, atol: int = 0, rtol: float = 1e-5):
-    INT_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8, torch.uint16, torch.uint32,
-                  torch.uint64]
+    INT_DTYPES = [
+        torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8,
+        torch.uint16, torch.uint32, torch.uint64
+    ]
     assert input.dtype in INT_DTYPES and other.dtype in INT_DTYPES
     diff = torch.abs(input.to(torch.int64) - other.to(torch.int64))
-    return torch.all(diff <= atol + torch.ceil(rtol * torch.abs(other).to(torch.float32)).to(torch.int64))
+    return torch.all(
+        diff <= atol +
+        torch.ceil(rtol * torch.abs(other).to(torch.float32)).to(torch.int64))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -53,7 +57,8 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     torch.cuda.manual_seed(seed)
     int8_traits = torch.iinfo(torch.int8)
 
-    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000 - 300
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype,
+                   device="cuda") * 1000 - 300
 
     x_token_max, _ = x.to(dtype=torch.float32).max(dim=1, keepdim=True)
     x_token_min, _ = x.to(dtype=torch.float32).min(dim=1, keepdim=True)
@@ -62,8 +67,10 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     scales = (x_token_max - x_token_min) / torch.tensor(255.0)
     azps = torch.round(x_token_min / scales + 128.0).to(torch.int32)
 
-    torch_out = (x / scales - azps).round().clamp(int8_traits.min, int8_traits.max).to(torch.int8)
-    assert torch_out.min() >= int8_traits.min and torch_out.max() <= int8_traits.max
+    torch_out = (x / scales - azps).round().clamp(
+        int8_traits.min, int8_traits.max).to(torch.int8)
+    assert torch_out.min() >= int8_traits.min and torch_out.max(
+    ) <= int8_traits.max
 
     ops_out = torch.empty_like(x, dtype=torch.int8)
     scales_out = torch.empty_like(scales, dtype=torch.float32)

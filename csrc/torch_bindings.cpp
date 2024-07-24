@@ -239,7 +239,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
-      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, Tensor!? azp) -> "
+      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
+      "Tensor!? azp) -> "
       "()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);

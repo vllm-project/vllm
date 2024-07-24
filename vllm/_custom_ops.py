@@ -391,10 +391,10 @@ def scaled_fp8_quant(
 
 # int8
 def scaled_int8_quant(
-        input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        azp : Optional[torch.Tensor] = None,
-        symmetric: bool = True
+    input: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+    azp: Optional[torch.Tensor] = None,
+    symmetric: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
@@ -421,7 +421,8 @@ def scaled_int8_quant(
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
                                device=input.device,
                                dtype=torch.float32)
-    input_azp = None if symmetric else torch.empty_like(input_scales, dtype=torch.int32)
+    input_azp = None if symmetric else torch.empty_like(input_scales,
+                                                        dtype=torch.int32)
     torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
     return output, input_scales, input_azp
 

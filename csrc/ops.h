@@ -149,7 +149,8 @@ void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale);
 
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
-                               torch::Tensor& scales, c10::optional<torch::Tensor> const& azp);
+                               torch::Tensor& scales,
+                               c10::optional<torch::Tensor> const& azp);
 
 void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
                      torch::Tensor lookup_table);
