@@ -450,10 +450,13 @@ class HfRunner:
 
         for (encoder_prompt,
              decoder_prompt) in to_enc_dec_tuple_list(encoder_decoder_prompts):
-            encoder_input_ids = self.tokenizer(encoder_prompt,
-                                               return_tensors="pt").input_ids
-            decoder_input_ids = self.tokenizer(decoder_prompt,
-                                               return_tensors="pt").input_ids
+            encoder_input_ids = self.wrap_device(self.tokenizer(encoder_prompt,
+                                               return_tensors="pt").input_ids)
+            decoder_input_ids = (None if decoder_prompt is None
+                                 else
+                                 self.wrap_device(self.tokenizer(decoder_prompt,
+                                               return_tensors="pt").input_ids)
+                                 )
 
             # # If the decoder input ids do not begin with decoder start
             # # token, HF transformers will likely add it automatically.
@@ -479,8 +482,8 @@ class HfRunner:
             generation_config.min_length = 0
 
             output = self.model.generate(
-                self.wrap_device(encoder_input_ids),
-                decoder_input_ids=self.wrap_device(decoder_input_ids),
+                encoder_input_ids,
+                decoder_input_ids=decoder_input_ids,
                 use_cache=True,
                 # do_sample=False,
                 max_new_tokens=max_tokens,
