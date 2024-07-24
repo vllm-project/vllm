@@ -723,4 +723,4 @@ async def test_return_tokens_as_token_ids_completion(
 
     # Check that decoding the tokens gives the expected text
     tokens = [int(token.removeprefix("token_id:")) for token in token_strs]
-    assert text == tokenizer.decode(tokens)
+    assert text == tokenizer.decode(tokens, skip_special_tokens=True)
