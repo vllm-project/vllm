@@ -3,18 +3,20 @@
 # at the same time on a single node will OOM.
 
 import pytest
+
 from ...utils import RemoteOpenAIServer
+from .test_completion import MODEL_NAME
 from .test_completion import default_server_args  # noqa: F401
 from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
 from .test_completion import zephyr_lora_files  # noqa: F401
 from .test_completion import zephyr_pa_files  # noqa: F401
-from .test_completion import MODEL_NAME
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 @pytest.fixture(scope="module")
-def server_with_return_tokens_as_token_ids_flag(default_server_args):  # noqa: F811
+def server_with_return_tokens_as_token_ids_flag(
+        default_server_args):  # noqa: F811
     args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
     with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
         yield remote_server
