@@ -55,7 +55,7 @@ def zephyr_pa_files():
 
 
 @pytest.fixture(scope="module")
-def default_server_args():
+def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -87,13 +87,13 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module")
-def server(default_server_args, zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
+def server(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
 
 @pytest.fixture(scope="module")
-def server_with_return_tokens_as_token_ids_flag(default_server_args, zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
+def server_with_return_tokens_as_token_ids_flag(default_server_args):
     default_server_args.append("--return-tokens-as-token-ids")
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
