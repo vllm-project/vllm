@@ -161,7 +161,7 @@ class DefaultModelLoader(BaseModelLoader):
                     cache_dir=self.load_config.download_dir,
                     local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                     revision=revision,
-                    ignore_patterns=self.load_config.ignore_patterns,
+                    ignore_file_pattern=self.load_config.ignore_patterns,
                 )
             else:
                 model_path = model
