@@ -551,6 +551,8 @@ class OpenAIServingChat(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
+                if self.return_tokens_as_token_ids:
+                    token = f"token_id:{token_id}"
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=token,
@@ -558,7 +560,11 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
-                        token=step_top_logprobs[token_id].decoded_token,
+                        token=self._get_decoded_token(
+                            step_top_logprobs[token_id],
+                            token_id,
+                            tokenizer,
+                            self.return_tokens_as_token_ids),
                         logprob=max(step_top_logprobs[token_id].logprob,
                                     -9999.0),
                         bytes=list(
