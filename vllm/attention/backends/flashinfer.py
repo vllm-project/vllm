@@ -317,6 +317,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
+        """Build attention metadata with on-device tensors.
+
+        Args:
+            seq_lens: The maybe padded sequence lengths of the input sequences.
+            query_lens: The query lengths of the input sequences.
+            cuda_graph_pad_size: The padding size for cuda graph.
+                                 -1 if cuda graph is not used.
+            batch_size: The maybe padded batch size.
+        """
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled)
@@ -331,7 +340,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
-            num_decode_tokens = batch_size + cuda_graph_pad_size
+            num_decode_tokens = batch_size
 
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
