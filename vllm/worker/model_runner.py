@@ -1042,7 +1042,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     if self.attn_backend.get_name() == "flashinfer":
                         _indptr_buffer = indptr_buffer[:batch_size + 1]
                         _last_page_len_buffer = last_page_len_buffer[:
-                                                                    batch_size]
+                                                                     batch_size]
 
                         num_qo_heads = (
                             self.model_config.get_num_attention_heads(
