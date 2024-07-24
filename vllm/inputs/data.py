@@ -102,6 +102,7 @@ Set of possible schemas for a single LLM input:
 - A tokenized prompt (:class:`TokensPrompt`)
 """
 
+
 class ExplicitEncoderDecoderPrompt(TypedDict):
     """Represents an encoder/decoder model input prompt,
     comprising an encoder prompt and a decoder prompt.
@@ -117,6 +118,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict):
     encoder_prompt: DecoderOnlyPromptInputs
 
     decoder_prompt: DecoderOnlyPromptInputs
+
 
 PromptInputs = Union[DecoderOnlyPromptInputs, ExplicitEncoderDecoderPrompt]
 """
