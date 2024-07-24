@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding, BatchFeature)
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -133,7 +133,7 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class HfRunner:
