@@ -6,6 +6,7 @@
 export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_PORT=12345
 # export NCCL_DEBUG=INFO
+export NCCL_BUFFSIZE=536870912
 
 # a function that waits vLLM server to start
 wait_for_server() {
