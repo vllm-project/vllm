@@ -52,13 +52,6 @@ def ref_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
     # Norm
     torch_out, residual = ref_rms_norm(rms_norm_layer, x, residual)
 
-    # Compute scales
-    #torch_out_token_max, _ = torch_out.abs().max(dim=1)
-    #torch_out_token_max = torch_out_token_max.to(dtype=torch.float32)
-    #if scale_ub is not None:
-    #    torch_out_token_max = torch_out_token_max.clamp(max=scale_ub)
-    #scales = (torch_out_token_max / qtype_max)[:, None]
-
     # Quant
     if  quant_dtype == torch.float8_e4m3fn:
         torch_out, scales = ops.scaled_fp8_quant(torch_out,
@@ -79,13 +72,12 @@ def ref_impl(rms_norm_layer: RMSNorm,
     return ref_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype, residual,
                                     scale_ub)
 
-def ops_impl(weight: torch.Tensor,
-             x: torch.Tensor,
-             quant_dtype: torch.dtype,
-             residual: Optional[torch.Tensor],
-             scale_ub: Optional[torch.Tensor]) \
+def ops_dynamic_per_token_quant(weight: torch.Tensor,
+                            x: torch.Tensor,
+                            quant_dtype: torch.dtype,
+                            residual: Optional[torch.Tensor],
+                            scale_ub: Optional[torch.Tensor]) \
                 -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-
     num_scales = int(x.numel() / x.shape[-1])
 
     out = torch.empty_like(x, dtype=quant_dtype, device="cuda")
@@ -94,22 +86,18 @@ def ops_impl(weight: torch.Tensor,
     if residual is not None:
         residual = residual.clone()
     ops.rms_norm_dynamic_per_token_quant(
-            out, x, weight, scales, 1e-6, scale_ub, residual)
+            out, x, weight, scales, EPS, scale_ub, residual)
 
     return out, scales, residual
 
-#DTYPES = [torch.bfloat16, torch.float]
-#QUANT_TYPES = [QuantType.DynamicPerTokenInt8]
-#NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
-#HIDDEN_SIZES = [768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192,
-#                8199]  # Arbitrary values for testing
-#ADD_RESIDUAL = [False, True]
-#SEEDS = [0]
-#SCALE_UBS = [True, False]
-#CUDA_DEVICES = [
-#    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-#]
-
+def ops_impl(weight: torch.Tensor,
+             x: torch.Tensor,
+             quant_dtype: torch.dtype,
+             residual: Optional[torch.Tensor],
+             scale_ub: Optional[torch.Tensor]) \
+                -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    return ops_dynamic_per_token_quant(weight, x, quant_dtype,
+            residual, scale_ub)
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
@@ -144,50 +132,22 @@ def test_rms_norm(
     # Make weights
     layer.weight.data.normal_(mean=1.0, std=0.1)
 
-    # Make inputs and residual
+    # Make inputs
     scale = 1 / (hidden_size)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
-    #orig_x = x.clone()
     residual = torch.randn_like(x) * scale if add_residual else None
-
     if scale_ub is not None:
         rms_x, _ = ref_rms_norm(layer, x, residual) 
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device='cuda')
-
-
-    #torch.set_printoptions(profile="full")
-    #print (f"x : {x}")
-    #print (f"weight : {layer.weight}")
-    #if quant_scale is not None:
-    #    print (f"quant scale : {quant_scale}")
-    #if residual is not None:
-    #    print (f"residual : {residual}")
-
-#def ops_impl(weight: torch.Tensor,
-#             x: torch.Tensor,
-#             quant_dtype: torch.dtype,
-#             residual: Optional[torch.Tensor],
-#             scale_ub: Optional[torch.Tensor]) \
 
     ref_out, ref_scales, ref_residual = \
             ref_impl(layer, x, quant_dtype, residual, scale_ub)
     ops_out, ops_scales, ops_residual = \
             ops_impl(layer.weight, x, quant_dtype, residual, scale_ub)
 
-    #print (f"ref residual {ref_residual[5]}")
-    #print (f"ops residual {ops_residual[5]}")
-    #print (f"ref scales {ref_scales[0]}")
-    #print (f"ops scales {ops_scales[0]}")
-    #print (f"ref out {ref_out[5]}")
-    #print (f"ops out {ops_out[5]}")
-    #print (f"orig_x {orig_x[5]}")
-    #print (f"weight {layer.weight[5]}")
-
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype 
-
     assert torch.allclose(ref_scales, ops_scales)
-
     if quant_dtype == torch.int8:
         # big atol to account,
         # 1. rms-norm errors due to order of reduction.
@@ -196,6 +156,5 @@ def test_rms_norm(
     else:
         assert torch.allclose(ref_out.to(dtype=torch.float32),
                               ops_out.to(dtype=torch.float32))
-
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual, atol=1e-2, rtol=1e-2)
