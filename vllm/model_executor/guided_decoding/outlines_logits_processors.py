@@ -32,6 +32,7 @@ class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide):
         self._guide: Guide = guide
+        self._mask_cache: Dict[int, torch.Tensor] = {}
         self._fsm_state: DefaultDict[int, int] = defaultdict(int)
 
     def __call__(self, input_ids: List[int],
@@ -45,23 +46,21 @@ class BaseLogitsProcessor:
             self._fsm_state[seq_id] = self._guide.get_next_state(
                 state=self._fsm_state[last_seq_id], token_id=last_token)
 
-        instruction = self._guide.get_next_instruction(
-            state=self._fsm_state[seq_id])
+        state_id = self._fsm_state[seq_id]
+        if state_id not in self._mask_cache:
+            allowed_tokens = self._guide.get_next_instruction(
+                state=self._fsm_state[seq_id]).tokens
 
-        if type(instruction) == Generate:
-            allowed_tokens = instruction.tokens
-        elif type(instruction) == Write:
-            # TODO: support fast forward tokens
-            allowed_tokens = [instruction.tokens[0]]
+            mask = torch.full((scores.shape[-1], ),
+                              -math.inf,
+                              device=scores.device)
+            mask[allowed_tokens] = 0
+            self._mask_cache[state_id] = mask
         else:
-            raise TypeError(
-                f"Unsupported instruction type {type(instruction)}")
+            mask = self._mask_cache[state_id]
 
-        mask = torch.full((scores.shape[-1], ),
-                          -math.inf,
-                          device=scores.device)
-        mask[allowed_tokens] = 0
-        scores.add_(mask)
+        scores = scores + mask
+
         return scores
 
 
@@ -91,9 +90,12 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self, schema: Union[str, Dict, BaseModel],
-                 tokenizer: PreTrainedTokenizerBase,
-                 whitespace_pattern: Union[str, None]):
+    def __init__(
+        self,
+        schema: Union[str, Dict, BaseModel],
+        tokenizer: PreTrainedTokenizerBase,
+        whitespace_pattern: Union[str, None],
+    ):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
