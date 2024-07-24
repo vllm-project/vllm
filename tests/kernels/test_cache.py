@@ -248,6 +248,8 @@ def test_reshape_and_cache_flash(
     )
     key_cache, value_cache = key_caches[0].contiguous(
     ), value_caches[0].contiguous()
+    del key_caches
+    del value_caches
 
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
