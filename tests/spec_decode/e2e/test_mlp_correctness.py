@@ -31,7 +31,7 @@ SPEC_MODEL = "ibm-fms/llama-160m-accelerator"
 
 # max. number of speculative tokens: this corresponds to
 # n_predict in the config.json of the speculator model.
-MAX_SPEC_TOKENS = 5
+MAX_SPEC_TOKENS = 3
 
 # precision
 PRECISION = "float32"
