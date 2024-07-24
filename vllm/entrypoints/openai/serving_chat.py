@@ -561,7 +561,8 @@ class OpenAIServingChat(OpenAIServing):
                     ChatCompletionLogProbsContent(
                         token=self._get_decoded_token(
                             step_top_logprobs[token_id],
-                            token_id, tokenizer, self.return_tokens_as_token_ids),
+                            token_id, tokenizer,
+                            self.return_tokens_as_token_ids),
                         logprob=max(step_top_logprobs[token_id].logprob,
                                     -9999.0),
                         bytes=list(
