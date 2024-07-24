@@ -872,7 +872,7 @@ async def test_return_tokens_as_token_ids_completion(
         max_tokens=10,
         logprobs=True)
 
-    text = response.choices[0].content
+    text = response.choices[0].message.content
     print(response.choices[0].logprobs.content)
     print(text)
     assert False
