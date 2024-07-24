@@ -5,9 +5,7 @@ encoder/decoder models, specifically BART
 from utils import override_backend_env_var_context_manager
 
 from vllm import LLM, SamplingParams
-from vllm.inputs import (TextPrompt, 
-                         TokensPrompt, 
-                         ExplicitEncoderDecoderPrompt)
+from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
 from vllm.utils import STR_XFORMERS_ATTN_VAL, zip_enc_dec_prompt_lists
 
 dtype = "float"
@@ -21,22 +19,21 @@ llm = LLM(
 )
 
 # Get BART tokenizer
-tokenizer=llm.llm_engine.get_tokenizer_group()
+tokenizer = llm.llm_engine.get_tokenizer_group()
 
 # Test prompts
 # - Helpers for building prompts
 text_prompt_raw = "Hello, my name is"
 text_prompt = TextPrompt(prompt="The president of the United States is")
-tokens_prompt = TokensPrompt(prompt_token_ids=tokenizer.encode(
-                                            prompt="The capital of France is",
-                                            )
-)
-# - Pass a single prompt to encoder/decoder model (implicitly encoder input prompt);
+tokens_prompt = TokensPrompt(
+    prompt_token_ids=tokenizer.encode(prompt="The capital of France is", ))
+# - Pass a single prompt to encoder/decoder model
+#   (implicitly encoder input prompt);
 #   decoder input prompt is assumed to be None
 single_text_prompt_raw = text_prompt_raw
 single_text_prompt = text_prompt
 single_tokens_prompt = tokens_prompt
-# - Pass explicit encoder and decoder input prompts within a single data structure.
+# - Pass explicit encoder and decoder input prompts within one data structure.
 #   Encoder and decoder prompts can both independently be text or tokens, with
 #   no requirement that they be the same prompt type. Some example prompt-type
 #   combinations are shown below.
@@ -52,14 +49,16 @@ enc_dec_prompt3 = ExplicitEncoderDecoderPrompt(
     encoder_prompt=single_tokens_prompt,
     decoder_prompt=single_text_prompt,
 )
+# - Here's a useful helper function for zipping encoder and decoder prompt lists
+#   together into a list of ExplicitEncoderDecoderPrompt instances
+zipped_prompt_list = zip_enc_dec_prompt_lists(
+    ['An encoder prompt', 'Another encoder prompt'],
+    ['A decoder prompt', 'Another decoder prompt'])
 # - Build prompt list
-prompts = [single_text_prompt_raw,
-           single_text_prompt,
-           single_tokens_prompt,
-           enc_dec_prompt1,
-           enc_dec_prompt2,
-           enc_dec_prompt3
-           ]
+prompts = [
+    single_text_prompt_raw, single_text_prompt, single_tokens_prompt,
+    enc_dec_prompt1, enc_dec_prompt2, enc_dec_prompt3
+] + zipped_prompt_list
 
 # # - Unified encoder/decoder prompts
 # prompts = zip_enc_dec_prompt_lists(encoder_prompts, decoder_prompts)

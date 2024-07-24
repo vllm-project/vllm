@@ -735,16 +735,13 @@ class LLMEngine:
         '''
 
         # Determine prompt type, if not provided
-        ptype = (
-            get_prompt_type(inputs) if ptype is None else
-            ptype
-        )
+        ptype = (get_prompt_type(inputs) if ptype is None else ptype)
 
         is_enc_dec_decoder = ((not is_encoder_prompt) and is_enc_dec_model)
 
         # Any prompt such as None, string
         # or TextPrompt that is not a dict
-        if ptype in ['None','str']:
+        if ptype in ['None', 'str']:
 
             # prompt = inputs
             # prompt_token_ids = tokenize(inputs)
@@ -758,9 +755,8 @@ class LLMEngine:
                     ), None)
 
         # Tokenize
-        prompt_token_ids = (inputs["prompt_token_ids"]
-                            if ptype == "TokensPrompt" else
-                            self._tokenize_prompt(
+        prompt_token_ids = (inputs["prompt_token_ids"] if ptype
+                            == "TokensPrompt" else self._tokenize_prompt(
                                 request_id,
                                 inputs['prompt'],
                                 lora_request,
@@ -773,8 +769,7 @@ class LLMEngine:
         if is_encoder_prompt:
             # Only care about multi-modal data associated
             # with the encoder prompt
-            return (prompt, prompt_token_ids,
-                    inputs.get("multi_modal_data"))
+            return (prompt, prompt_token_ids, inputs.get("multi_modal_data"))
         else:
             # Assume there is no decoder multi-modal data
             return (prompt, prompt_token_ids, None)
@@ -831,7 +826,7 @@ class LLMEngine:
                 request_id,
                 inputs.get('decoder_prompt'),
                 lora_request,
-                ptype = None,
+                ptype=None,
                 is_encoder_prompt=False,
                 is_enc_dec_model=True,
             )
