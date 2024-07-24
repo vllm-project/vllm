@@ -1,5 +1,6 @@
 # The CLI entrypoint to vLLM.
 import argparse
+import asyncio
 import os
 import signal
 import sys
@@ -25,7 +26,7 @@ def serve(args: argparse.Namespace) -> None:
     # EngineArgs expects the model name to be passed as --model.
     args.model = args.model_tag
 
-    run_server(args)
+    asyncio.run(run_server(args))
 
 
 def interactive_cli(args: argparse.Namespace) -> None:

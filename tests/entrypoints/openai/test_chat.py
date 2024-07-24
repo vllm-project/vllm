@@ -295,14 +295,19 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
     async for chunk in stream:
         assert chunk.usage is None
 
-    # Test stream=True, stream_options={"include_usage": True}
-    stream = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_tokens=10,
-        temperature=0.0,
-        stream=True,
-        stream_options={"include_usage": True})
+    # Test stream=True, stream_options={"include_usage": True,
+    #                                   "continuous_usage_stats": False}}
+    stream = await client.chat.completions.create(model=model_name,
+                                                  messages=messages,
+                                                  max_tokens=10,
+                                                  temperature=0.0,
+                                                  stream=True,
+                                                  stream_options={
+                                                      "include_usage":
+                                                      True,
+                                                      "continuous_usage_stats":
+                                                      False
+                                                  })
 
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
@@ -337,6 +342,25 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
             temperature=0.0,
             stream=False,
             stream_options={"include_usage": True})
+
+    # Test stream=True, stream_options={"include_usage": True,
+    #                           "continuous_usage_stats": True}
+    stream = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=10,
+        temperature=0.0,
+        stream=True,
+        stream_options={
+            "include_usage": True,
+            "continuous_usage_stats": True
+        },
+    )
+    async for chunk in stream:
+        assert chunk.usage.prompt_tokens >= 0
+        assert chunk.usage.completion_tokens >= 0
+        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                            chunk.usage.completion_tokens)
 
 
 # NOTE: Not sure why, but when I place this after `test_guided_regex_chat`
