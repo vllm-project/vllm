@@ -122,7 +122,10 @@ def generate_op_schema(
     return arg_sig
 
 
-def generate_meta_function(nodes: List[torch.fx.Node]) -> Callable:
+def generate_meta_function(
+        inputs: Dict[str, torch.fx.node.Argument],
+        outputs: List[torch.fx.Node], nodes: List[torch.fx.Node],
+        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
     """
     Generate a meta function for a fused op by composing the individual
     operations.

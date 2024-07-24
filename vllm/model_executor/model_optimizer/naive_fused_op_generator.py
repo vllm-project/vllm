@@ -15,7 +15,6 @@ from vllm.logger import init_logger
 
 from .fused_op_generator import FusedOpGenerator, FusionFail
 from .fused_op_generator_utils import (arg_schema_type, build_extension,
-                                       generate_meta_function,
                                        generate_op_schema)
 from .utils import (arg_swap, argument_type_str, extract_node_type,
                     node_function_target)
@@ -323,7 +322,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             # Don't use const refs here so inputs can be deleted when no
             # longer needed.
             if arg_types[i] == 'torch::Tensor':
-                cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {inputs[name]}"
+                cxx_arg_sig = (cxx_arg_sig + sep +
+                               f"{arg_types[i]}& {inputs[name]}")
             elif arg_types[i] == 'float':
                 cxx_arg_sig = cxx_arg_sig + sep + f"double {name}"
             elif arg_types[i] == 'int':
@@ -475,7 +475,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
              f'{oc} m.impl("{op}", &{op}); {cc}'))
 
         return self.build_op(op, f"torch.ops.fused_ops{self.N}.{op}", arg_sig,
-                             generate_meta_function(nodes))
+                             lambda x: x)
 
     def build_op(self, op: str, torch_op_name: str, sig: str,
                  meta_fn: Callable) -> Callable:
@@ -513,6 +513,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
             # TODO: there has to be a better way than eval?
             fn = eval(torch_op_name)
+
+            # Use C++ generated meta functions for now.
             #register_meta_function(op_lib, torch_op_name, meta_fn)
 
             self.reset_fused_op()
