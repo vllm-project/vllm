@@ -1016,6 +1016,8 @@ def initialize_model_parallel(
         # dirty fix: temporarily lift up NCCL buffer size to 1GB
         import os
         os.environ["NCCL_BUFFSIZE"] = "1073741824"
+        import time
+        time.sleep(20)
         global _DISAGG
         logger.debug("Disaggregated prefill enabled, create _DISAGG group")
         group_ranks = []
