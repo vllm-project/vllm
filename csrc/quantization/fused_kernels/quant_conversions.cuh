@@ -38,8 +38,9 @@ template <typename quant_type_t, bool is_scale_inverted, typename enable = void>
 struct ScaledQuant;
 
 template <typename quant_type_t, bool is_scale_inverted>
-struct ScaledQuant<quant_type_t, is_scale_inverted, typename std::enable_if_t<
-                                     std::is_same_v<quant_type_t, int8_t>>> {
+struct ScaledQuant<
+    quant_type_t, is_scale_inverted,
+    typename std::enable_if_t<std::is_same_v<quant_type_t, int8_t>>> {
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
                                                           float const scale) {
     if constexpr (is_scale_inverted) {
@@ -51,8 +52,9 @@ struct ScaledQuant<quant_type_t, is_scale_inverted, typename std::enable_if_t<
 };
 
 template <typename quant_type_t, bool is_scale_inverted>
-struct ScaledQuant<quant_type_t, is_scale_inverted, typename std::enable_if_t<std::is_same_v<
-                                     quant_type_t, c10::Float8_e4m3fn>>> {
+struct ScaledQuant<quant_type_t, is_scale_inverted,
+                   typename std::enable_if_t<
+                       std::is_same_v<quant_type_t, c10::Float8_e4m3fn>>> {
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
                                                           float const scale) {
     if constexpr (is_scale_inverted) {
@@ -66,11 +68,9 @@ struct ScaledQuant<quant_type_t, is_scale_inverted, typename std::enable_if_t<st
 template <typename scalar_t, typename quant_type_t, bool is_scale_inverted>
 __device__ void scaled_quant_conversion(quant_type_t* __restrict__ output,
                                         scalar_t const* __restrict__ input,
-                                        float const scale,
-                                        int const tid,
+                                        float const scale, int const tid,
                                         int const num_elements,
                                         int const step) {
-
   for (int i = tid; i < num_elements; i += step) {
     output[i] = ScaledQuant<quant_type_t, is_scale_inverted>(input[i], scale);
   }
@@ -82,14 +82,13 @@ namespace vectorized {
 template <typename scalar_t, typename quant_type_t, bool is_scale_inverted>
 __device__ void scaled_quant_conversion(quant_type_t* __restrict__ out,
                                         scalar_t const* __restrict__ input,
-                                        float const scale,
-                                        int const tid,
-                                        int const num_elems,
-                                        int const step) {
+                                        float const scale, int const tid,
+                                        int const num_elems, int const step) {
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vectorized_in =
       reinterpret_cast<vec4_t<scalar_t> const*>(input);
-  q8x4_t<quant_type_t>* vectorized_out = reinterpret_cast<q8x4_t<quant_type_t>*>(out);
+  q8x4_t<quant_type_t>* vectorized_out =
+      reinterpret_cast<q8x4_t<quant_type_t>*>(out);
 
   int const num_vec_elems = num_elems >> 2;
 
@@ -111,6 +110,6 @@ __device__ void scaled_quant_conversion(quant_type_t* __restrict__ out,
   }
 }
 
-} // namespace vectorized
+}  // namespace vectorized
 
-} // namespace vllm
+}  // namespace vllm

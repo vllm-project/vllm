@@ -37,5 +37,5 @@ __device__ float thread_max_vec(scalar_t const* __restrict__ input,
   return absmax_val;
 }
 
-} // namespace vectorized
-} // namespace vllm
+}  // namespace vectorized
+}  // namespace vllm

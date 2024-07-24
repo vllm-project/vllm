@@ -176,15 +176,20 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
                                      input_tokens, sampled_token_ids,
                                      input_positions, seq_lens, slot_mapping,
                                      block_tables)
+
+
 # fused quant layer norm ops
-def rms_norm_dynamic_per_token_quant(out: torch.Tensor,
-                                     input: torch.Tensor,
-                                     weight: torch.Tensor,
-                                     scales: torch.Tensor,
-                                     epsilon: float,
-                                     scale_ub: Optional[torch.Tensor] = None,
-                                     residual: Optional[torch.Tensor] = None) -> None:
-    torch.ops._C.rms_norm_dynamic_per_token_quant(out, input, weight, scales, epsilon, scale_ub, residual)
+def rms_norm_dynamic_per_token_quant(
+        out: torch.Tensor,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+        epsilon: float,
+        scale_ub: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C.rms_norm_dynamic_per_token_quant(out, input, weight, scales,
+                                                  epsilon, scale_ub, residual)
+
 
 # quantization ops
 # awq
