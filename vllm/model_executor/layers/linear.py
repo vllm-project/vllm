@@ -144,8 +144,8 @@ class QuantizationConfigOverride(QuantizationConfig):
     def __init__(self, cls: Type[LinearMethodBase]):
         self.cls = cls
 
-    def get_quant_method(self,
-                         layer: torch.nn.Module) -> Optional[LinearMethodBase]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional[LinearMethodBase]:
         return self.cls()
 
 
