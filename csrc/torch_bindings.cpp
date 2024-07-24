@@ -248,7 +248,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor! key_cache,"
       "                        Tensor! value_cache,"
       "                        Tensor slot_mapping,"
-      "                        str kv_cache_dtype) -> ()");
+      "                        str kv_cache_dtype,"
+      "                        float k_scale, float v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
 

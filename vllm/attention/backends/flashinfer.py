@@ -489,6 +489,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
+                k_scale,
+                v_scale,
             )
 
         query = query.contiguous(
