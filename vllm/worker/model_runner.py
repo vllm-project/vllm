@@ -677,6 +677,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             int(self.cache_config.cpu_offload_gb * 1024**3))
 
     def load_model(self) -> None:
+        logger.info("Starting to load model %s...", self.model_config.model)
         with CudaMemoryProfiler() as m:
             self.model = get_model(model_config=self.model_config,
                                    device_config=self.device_config,
@@ -1039,9 +1040,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.parallel_config.pipeline_parallel_size):
                 for batch_size in reversed(batch_size_capture_list):
                     if self.attn_backend.get_name() == "flashinfer":
-                        indptr_buffer = indptr_buffer[:batch_size + 1]
-                        last_page_len_buffer = last_page_len_buffer[:
-                                                                    batch_size]
+                        _indptr_buffer = indptr_buffer[:batch_size + 1]
+                        _last_page_len_buffer = last_page_len_buffer[:
+                                                                     batch_size]
 
                         num_qo_heads = (
                             self.model_config.get_num_attention_heads(
@@ -1054,8 +1055,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             use_tensor_cores = False
                         decode_wrapper = \
                             CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-                            decode_workspace_buffer, indptr_buffer,
-                            indices_buffer, last_page_len_buffer, "NHD",
+                            decode_workspace_buffer, _indptr_buffer,
+                            indices_buffer, _last_page_len_buffer, "NHD",
                             use_tensor_cores)
                         kv_cache_dtype = get_kv_cache_torch_dtype(
                             self.kv_cache_dtype, self.model_config.dtype)
@@ -1130,10 +1131,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self.model, self.attn_backend.get_name())
 
                     if self.attn_backend.get_name() == "flashinfer":
-                        graph_runner.flashinfer_indptr_buffer = indptr_buffer
+                        graph_runner.flashinfer_indptr_buffer = _indptr_buffer
                         graph_runner.flashinfer_indices_buffer = indices_buffer
                         graph_runner.flashinfer_last_page_len_buffer = \
-                            last_page_len_buffer
+                            _last_page_len_buffer
                         graph_runner.flashinfer_decode_workspace_buffer = \
                                 decode_workspace_buffer
                         graph_runner.flashinfer_decode_wrapper = \
