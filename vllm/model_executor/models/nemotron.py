@@ -48,7 +48,6 @@ from vllm.transformers_utils.configs import NemotronConfig
 
 from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
-
 """
 The architecture is pretty similar to Llama, with these changes:
 - There is no gate_proj, just up_proj
