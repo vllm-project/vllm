@@ -48,9 +48,9 @@ __device__ void compute_dynamic_per_token_scales(
 
   float block_absmax_val_maybe = 0.0f;
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    float x = (float)input[token_offset + i];
+    float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
-      x += (float)residual[token_offset + i];
+      x += static_cast<float>residual[token_offset + i];
     }
 
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
