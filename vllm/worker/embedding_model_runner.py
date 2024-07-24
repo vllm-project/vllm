@@ -11,7 +11,8 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.model_runner import GPUModelRunnerBase, ModelInputForGPU
+from vllm.worker.model_runner import (GPUModelRunnerBase, ModelInputForGPU,
+                                      ModelInputForGPUBuilder)
 
 logger = init_logger(__name__)
 
@@ -28,6 +29,7 @@ class EmbeddingModelRunner(
         GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
         ModelInputForGPUWithPoolingMetadata)
+    _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def __init__(
         self,
