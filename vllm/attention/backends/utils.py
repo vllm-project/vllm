@@ -224,7 +224,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
-            block_tables=block_tables,
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -236,5 +235,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
+            block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
