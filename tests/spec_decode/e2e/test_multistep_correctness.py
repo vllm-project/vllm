@@ -72,7 +72,7 @@ from .conftest import (get_output_from_llm_generator,
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1, 32])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_with_detokenization(test_llm_generator,
                                              batch_size: int):
     """Run generation with speculative decoding on a batch. Verify the engine
@@ -141,7 +141,8 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [2])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_with_async_engine(test_llm_generator,
                                            baseline_llm_generator,
                                            batch_size: int):
@@ -192,7 +193,8 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
         1536,
     ])
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
@@ -252,7 +254,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         256,
     ])
 @pytest.mark.parametrize("batch_size", [64])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
@@ -297,7 +300,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
     256,
 ])
 @pytest.mark.parametrize("batch_size", [32])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         max_output_len: int):
@@ -341,7 +345,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         # Use decently long output len for a high quality test.
         256,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
@@ -385,7 +390,8 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         # Use smaller output len for fast test.
         64,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
@@ -432,7 +438,8 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         256,
     ])
 @pytest.mark.parametrize("batch_size", [4])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_e2e_greedy_correctness_with_preemption(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
@@ -486,7 +493,8 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_spec_decode_different_block_size(baseline_llm_generator,
                                           test_llm_generator, batch_size: int,
                                           output_len: int):
@@ -533,7 +541,8 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
         # ensure fast test.
         64,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_skip_speculation(baseline_llm_generator, test_llm_generator,
                           batch_size: int, output_len: int):
     """Verify greedy equality when some (or all) sequences skip speculation.
@@ -570,7 +579,8 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
 ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [10])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_disable_speculation(baseline_llm_generator, test_llm_generator,
                              batch_size: int, output_len: int):
     """Verify greedy equality when all sequences disable speculation.
@@ -612,7 +622,8 @@ def test_disable_speculation(baseline_llm_generator, test_llm_generator,
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
                 output_len: int):
     """Verify that speculative decoding produces exact equality to without spec
@@ -656,7 +667,8 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         # Use smaller output len for fast test.
         32,
     ])
-@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("baseline_seed", [1])
+@pytest.mark.parametrize("test_seed", [1])
 def test_typical_acceptance_sampling(baseline_llm_generator,
                                      test_llm_generator, batch_size: int,
                                      output_len: int):
