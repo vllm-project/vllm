@@ -9,6 +9,40 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm import _custom_ops as ops
 import intel_extension_for_pytorch as ipex
 
+@torch.library.impl("myops::_fused_add_rms_norm", "cpu")
+def _fused_add_rms_norm(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
+    ops.fused_add_rms_norm(
+        x,
+        residual,
+        weight.data,
+        variance_epsilon,
+    )
+    return x, residual
+
+torch.library.define(
+    "myops::_fused_add_rms_norm",
+    "(Tensor x,Tensor residual,Tensor weight,float variance_epsilon) -> (Tensor, Tensor)",
+)
+
+
+@torch.library.impl("myops::_rms_norm", "cpu")
+def _rms_norm(
+    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
+    out = torch.empty_like(x)
+    ops.rms_norm(
+        out,
+        x,
+        weight.data,
+        variance_epsilon,
+    )
+    return out
+
+torch.library.define(
+    "myops::_rms_norm",
+    "(Tensor x,Tensor weight,float variance_epsilon) -> Tensor",
+)
+
 class RMSNorm(CustomOp):
     """Root mean square normalization.
 
@@ -20,10 +54,50 @@ class RMSNorm(CustomOp):
         self,
         hidden_size: int,
         eps: float = 1e-6,
+        tp_size:int = 1,
     ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
+        self.tp_size = tp_size
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if self.tp_size > 1 :
+
+            if residual is not None:
+                x, residual = torch.ops.myops._fused_add_rms_norm(
+                    x,
+                    residual,
+                    self.weight.data,
+                    self.variance_epsilon,
+                )
+                return x, residual
+            out = torch.ops.myops._rms_norm(
+                x,
+                self.weight.data,
+                self.variance_epsilon,
+            )
+            return out
+        else:
+            if residual is not None:
+                x = ipex.llm.functional.add_rms_norm(
+                    residual,
+                    x,
+                    self.weight.data,
+                    None,
+                    self.variance_epsilon,
+                    True
+                )
+                return x, residual
+            out = ipex.llm.functional.rms_norm(
+                x,
+                self.weight.data,
+                self.variance_epsilon,
+            )
+            return out
 
     def forward_native(
         self,
@@ -45,27 +119,6 @@ class RMSNorm(CustomOp):
         else:
             return x, residual
 
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if residual is not None:
-            x = ipex.llm.functional.add_rms_norm(
-                residual,
-                x,
-                self.weight.data,
-                None,
-                self.variance_epsilon,
-                True
-            )
-            return x, residual
-        out = ipex.llm.functional.rms_norm(
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
-        return out
 
     def forward_cpu(
         self,
