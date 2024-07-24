@@ -339,8 +339,8 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            if "MiniCPM-Llama3-V-2_5" in self.model_name:
-                with torch.no_grad():
+            with torch.no_grad():
+                if "MiniCPM-Llama3-V-2_5" in self.model_name:
                     output = self.model.generate(
                         self.wrap_device(inputs),
                         use_cache=True,
@@ -348,19 +348,18 @@ class HfRunner:
                         max_new_tokens=max_tokens,
                         output_hidden_states=True,
                         return_dict_in_generate=True,
-                        tokenizer=self.tokenizer,
                         **kwargs,
                     )
-            else:
-                output = self.model.generate(
-                    **self.wrap_device(inputs),
-                    use_cache=True,
-                    do_sample=False,
-                    max_new_tokens=max_tokens,
-                    output_hidden_states=True,
-                    return_dict_in_generate=True,
-                    **kwargs,
-                )
+                else:
+                    output = self.model.generate(
+                        **self.wrap_device(inputs),
+                        use_cache=True,
+                        do_sample=False,
+                        max_new_tokens=max_tokens,
+                        output_hidden_states=True,
+                        return_dict_in_generate=True,
+                        **kwargs,
+                    )
             seq_logprobs: List[torch.Tensor] = []
             for _, hidden_states in enumerate(output.hidden_states):
                 last_hidden_states = hidden_states[-1][0]

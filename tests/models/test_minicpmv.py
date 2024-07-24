@@ -22,7 +22,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
         "<|start_header_id|>assistant<|end_header_id|>\n\n"
 })
 
-models = ["HwwwH/MiniCPM-Llama3-V-2_5"]
+models = ["openbmb/MiniCPM-Llama3-V-2_5"]
 
 
 def trunc_hf_output(hf_output: Tuple[List[int], str,
@@ -93,7 +93,8 @@ def run_test(
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images)
+                                                    images=hf_images,
+                                                    tokenizer=tokenizer)
             for prompts, hf_images in inputs_per_image
         ]
 
