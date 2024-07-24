@@ -31,7 +31,7 @@ class BackgroundRunner:
         self.result_queue = asyncio.Queue()
         self.llm = LLM(
             '/models/llama-2-7b-chat-hf',
-            tensor_parallel_size=1,
+            tensor_parallel_size=4,
             #quantization="serenity",
             #dtype='float16',
             #enforce_eager=True,
@@ -40,7 +40,7 @@ class BackgroundRunner:
             #quantized_weights_path="/quantized/quark/llama.safetensors",
             #worker_use_ray=True,
             #trust_remote_code=True,
-            #distributed_executor_backend="mp",
+            distributed_executor_backend="mp",
             input_queue=self.input_queue,
         )
 

@@ -7,6 +7,7 @@ from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
@@ -78,6 +79,7 @@ class MorflotLLM:
         self.sampling_params = sampling_params
         self.finish = False
         self.result_queues = {}
+        self.need_restart = False
 
 
     def get_tokenizer(
@@ -178,8 +180,14 @@ class MorflotLLM:
     async def _poll_requests(self):
         while True:
             if not self.llm_engine.has_unfinished_requests():
+                #broadcast_tensor_dict({}, src=0)
                 logger.info("No unfinished requests. Waiting...")
                 (request_id, prompt, sampling_params, result_queue) = await self.input_queue.get()
+                if self.need_restart:
+                    for worker in self.llm_engine.model_executor.workers:
+                        worker.execute_method("start_worker_execution_loop")
+                    self.need_restart = False
+
             else:
                 try:
                     (request_id, prompt, sampling_params, result_queue) = self.input_queue.get_nowait()
@@ -195,8 +203,12 @@ class MorflotLLM:
         request_stats = {}
         while True:
             await self._poll_requests()
-            logger.info(f"Performing engine step. Requests: {self.llm_engine.get_num_unfinished_requests()}")
+            #logger.info(f"Performing engine step. Requests: {self.llm_engine.get_num_unfinished_requests()}")
             step_outputs = self.llm_engine.step()
+            if not self.llm_engine.has_unfinished_requests():
+                logger.info("Broadcast stop")
+                broadcast_tensor_dict({}, src=0)
+                self.need_restart = True
             for output in step_outputs:
                 assert len(output.outputs) == 1
                 output_len = len(output.outputs[0].text)
