@@ -199,11 +199,11 @@ class MorflotLLM:
     async def run_engine(
             self, *, use_tqdm: bool=False
     ):
-        total_toks = 0
+        i = 0
         request_stats = {}
         while True:
             await self._poll_requests()
-            #logger.info(f"Performing engine step. Requests: {self.llm_engine.get_num_unfinished_requests()}")
+            logger.info(f"Performing engine step. Requests: {self.llm_engine.get_num_unfinished_requests()}")
             step_outputs = self.llm_engine.step()
             if not self.llm_engine.has_unfinished_requests():
                 logger.info("Broadcast stop")
@@ -229,4 +229,6 @@ class MorflotLLM:
                 else:
                     request_stats[output.request_id] = output_len
                 result_queue.put_nowait((output.request_id, result, stats))
-            await asyncio.sleep(0)
+            i += 1
+            if i % 5 == 0:
+                await asyncio.sleep(0)
