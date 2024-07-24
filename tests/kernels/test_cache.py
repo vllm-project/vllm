@@ -246,7 +246,8 @@ def test_reshape_and_cache_flash(
         dtype,
         device=device,
     )
-    key_cache, value_cache = key_caches[0].contiguous(), value_caches[0].contiguous()
+    key_cache, value_cache = key_caches[0].contiguous(
+    ), value_caches[0].contiguous()
 
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
