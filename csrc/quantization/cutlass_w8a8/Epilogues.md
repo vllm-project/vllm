@@ -38,7 +38,7 @@ Additional epilogues would be required to support asymmetric quantization for we
 Expanding further, we can calculate $` \widehat D `$ as follows:
 
 ```math
-A B = s_a ( \widehat A - J_a z_a ) s_b \widehat B = s_a s_b \left \widehat A \widehat B - J_a z_a \widehat B \right
+A B = s_a ( \widehat A - J_a z_a ) s_b \widehat B = s_a s_b \left( \widehat A \widehat B - J_a z_a \widehat B \right)
 \widehat D = \widehat A \widehat B - z_a J_a \widehat B
 ```
 
