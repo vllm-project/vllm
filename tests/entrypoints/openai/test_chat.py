@@ -21,8 +21,8 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
-    args = [
+def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
+    return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -42,7 +42,17 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         "128",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+
+@pytest.fixture(scope="module")
+def server(default_server_args):  # noqa: F811
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def server_with_return_tokens_as_token_ids_flag(default_server_args):
+    args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
+    with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
         yield remote_server
 
 
@@ -840,3 +850,30 @@ async def test_long_seed(client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
+
+
+@pytest.mark.asyncio
+async def test_return_tokens_as_token_ids_completion(
+        server_with_return_tokens_as_token_ids_flag):
+    client = server_with_return_tokens_as_token_ids_flag.get_async_client()
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        # Include Unicode characters to test for dividing a single
+        # character across multiple tokens: 🎉 is [28705, 31862] for the
+        # Zephyr tokenizer
+        messages=[{
+            "role": "system",
+            "content": "You like to say 'Hello, world! 🎉'"
+        }, {
+            "role": "user",
+            "content": "Say the things you like to say, please."
+        }]
+        echo=True,
+        temperature=0,
+        max_tokens=10,
+        logprobs=True)
+
+    text = response.choices[0].content
+    print(response.choices[0].logprobs.content)
+    print(text)
+    assert False
