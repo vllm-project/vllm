@@ -95,7 +95,7 @@ def test_rope_customization():
                    None) == TEST_ROPE_THETA
     assert llama_model_config.max_model_len == 16384
 
-    LONGCHAT_ROPE_SCALING = {"rope_type": "linear", "factor": 8.0}
+    LONGCHAT_ROPE_SCALING = {"type": "linear", "factor": 8.0}
     longchat_model_config = ModelConfig(
         "lmsys/longchat-13b-16k",
         "lmsys/longchat-13b-16k",
