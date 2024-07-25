@@ -246,6 +246,8 @@ class FlashAttentionMetadataBuilder(
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
             block_tables = torch.tensor(input_block_tables, device=device)
+            seq_lens.extend([1] * cuda_graph_pad_size)
+            query_lens.extend([1] * cuda_graph_pad_size) 
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -255,9 +257,7 @@ class FlashAttentionMetadataBuilder(
             )
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
-        context_lens_tensor = torch.tensor(self.context_lens,
-                                           dtype=torch.int,
-                                           device=device)
+        context_lens_tensor = None
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
                                        device=device)
@@ -420,15 +420,18 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         # This is used during the profiling or prefill phase.
-        if kv_cache is None or (attn_metadata.block_tables is not None
-                                and attn_metadata.block_tables.numel()) == 0:
+        print("num_prefills", attn_metadata.num_prefills, attn_metadata.num_decode_tokens, kv_cache is None)
+        if kv_cache is None:
+            print("1-----------------")
             k = key
             v = value
             block_tables = None
         else:
+            print("2-----------------")
             k = kv_cache[0]
             v = kv_cache[1]
             block_tables = attn_metadata.block_tables
+            print(block_tables.shape, kv_cache is None, attn_metadata.slot_mapping.shape, key.shape, value.shape)
 
         max_seq_len = max(attn_metadata.seq_lens)
         output = flash_attn_varlen_func(
