@@ -229,7 +229,8 @@ class SequenceData:
         return (f"SequenceData("
                 f"prompt_token_ids={self._prompt_token_ids}, "
                 f"output_token_ids={self._output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob})")
+                f"cumulative_logprob={self.cumulative_logprob}, "
+                f"get_num_computed_tokens={self.get_num_computed_tokens()}")
 
 
 class Sequence:
@@ -741,6 +742,7 @@ class SequenceGroupMetadata:
         self.block_tables = sequence_group_metadata_decode.block_tables
         self._token_chunk_size = sequence_group_metadata_decode.token_chunk_size
         self.do_sample = sequence_group_metadata_decode.do_sample
+        self.is_prompt = False
 
 
 class SequenceOutput:

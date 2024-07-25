@@ -314,6 +314,8 @@ class Worker(LocalOrDistributedWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
+        # breakpoint()
+        # print(execute_model_req.seq_group_metadata_list[0].seq_data)
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list)
