@@ -40,6 +40,8 @@ Registry
 Base Classes
 ------------
 
+.. autodata:: vllm.multimodal.NestedTensors
+
 .. autodata:: vllm.multimodal.BatchedTensors
 
 .. autoclass:: vllm.multimodal.MultiModalDataBuiltins
