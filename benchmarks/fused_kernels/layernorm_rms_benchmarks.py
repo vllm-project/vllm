@@ -1,8 +1,8 @@
+import pickle as pkl
+import time
 from dataclasses import dataclass
 from itertools import product
 from typing import Callable, Iterable, List, Optional
-import time
-import pickle as pkl
 
 import torch
 import torch.utils.benchmark as TBenchmark
