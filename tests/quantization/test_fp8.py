@@ -60,12 +60,20 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
-def test_load_fp16_model(vllm_runner) -> None:
-    with vllm_runner("facebook/opt-125m", quantization="fp8") as llm:
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_load_fp16_model(vllm_runner, kv_cache_dtype: str) -> None:
+    with vllm_runner("facebook/opt-125m",
+                     quantization="fp8",
+                     kv_cache_dtype=kv_cache_dtype) as llm:
 
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         fc1 = model.model.decoder.layers[0].fc1
         assert isinstance(fc1.quant_method, Fp8LinearMethod)
+        if kv_cache_dtype == "fp8":
+            attn = model.model.decoder.layers[0].self_attn.attn
+            assert isinstance(attn.quant_method, Fp8KVCacheMethod)
+            assert attn._k_scale == 1.0
+            assert attn._v_scale == 1.0
 
         capability = torch.cuda.get_device_capability()
         capability = capability[0] * 10 + capability[1]
