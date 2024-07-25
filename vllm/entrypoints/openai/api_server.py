@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import inspect
 import re
+import signal
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Optional, Set
@@ -18,6 +19,7 @@ from starlette.routing import Mount
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -212,11 +214,12 @@ def build_app(args):
     return app
 
 
-def run_server(args, llm_engine=None):
+async def build_server(
+    args,
+    llm_engine: Optional[AsyncLLMEngine] = None,
+    **uvicorn_kwargs,
+) -> uvicorn.Server:
     app = build_app(args)
-
-    logger.info("vLLM API server version %s", VLLM_VERSION)
-    logger.info("args: %s", args)
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
@@ -230,38 +233,52 @@ def run_server(args, llm_engine=None):
               if llm_engine is not None else AsyncLLMEngine.from_engine_args(
                   engine_args, usage_context=UsageContext.OPENAI_API_SERVER))
 
-    event_loop: Optional[asyncio.AbstractEventLoop]
-    try:
-        event_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        event_loop = None
+    model_config = await engine.get_model_config()
 
-    if event_loop is not None and event_loop.is_running():
-        # If the current is instanced by Ray Serve,
-        # there is already a running event loop
-        model_config = event_loop.run_until_complete(engine.get_model_config())
+    if args.disable_log_requests:
+        request_logger = None
     else:
-        # When using single vLLM without engine_use_ray
-        model_config = asyncio.run(engine.get_model_config())
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     global openai_serving_chat
     global openai_serving_completion
     global openai_serving_embedding
     global openai_serving_tokenization
 
-    openai_serving_chat = OpenAIServingChat(engine, model_config,
-                                            served_model_names,
-                                            args.response_role,
-                                            args.lora_modules,
-                                            args.chat_template)
+    openai_serving_chat = OpenAIServingChat(
+        engine,
+        model_config,
+        served_model_names,
+        args.response_role,
+        lora_modules=args.lora_modules,
+        prompt_adapters=args.prompt_adapters,
+        request_logger=request_logger,
+        chat_template=args.chat_template,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+    )
     openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, args.lora_modules,
-        args.prompt_adapters)
-    openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
-                                                      served_model_names)
+        engine,
+        model_config,
+        served_model_names,
+        lora_modules=args.lora_modules,
+        prompt_adapters=args.prompt_adapters,
+        request_logger=request_logger,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+    )
+    openai_serving_embedding = OpenAIServingEmbedding(
+        engine,
+        model_config,
+        served_model_names,
+        request_logger=request_logger,
+    )
     openai_serving_tokenization = OpenAIServingTokenization(
-        engine, model_config, served_model_names, args.lora_modules,
-        args.chat_template)
+        engine,
+        model_config,
+        served_model_names,
+        lora_modules=args.lora_modules,
+        request_logger=request_logger,
+        chat_template=args.chat_template,
+    )
     app.root_path = args.root_path
 
     logger.info("Available routes are:")
@@ -271,15 +288,48 @@ def run_server(args, llm_engine=None):
         methods = ', '.join(route.methods)
         logger.info("Route: %s, Methods: %s", route.path, methods)
 
-    uvicorn.run(app,
-                host=args.host,
-                port=args.port,
-                log_level=args.uvicorn_log_level,
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-                ssl_keyfile=args.ssl_keyfile,
-                ssl_certfile=args.ssl_certfile,
-                ssl_ca_certs=args.ssl_ca_certs,
-                ssl_cert_reqs=args.ssl_cert_reqs)
+    config = uvicorn.Config(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=args.uvicorn_log_level,
+        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        ssl_ca_certs=args.ssl_ca_certs,
+        ssl_cert_reqs=args.ssl_cert_reqs,
+        **uvicorn_kwargs,
+    )
+
+    return uvicorn.Server(config)
+
+
+async def run_server(args, llm_engine=None, **uvicorn_kwargs) -> None:
+    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.info("args: %s", args)
+
+    server = await build_server(
+        args,
+        llm_engine,
+        **uvicorn_kwargs,
+    )
+
+    loop = asyncio.get_running_loop()
+
+    server_task = loop.create_task(server.serve())
+
+    def signal_handler() -> None:
+        # prevents the uvicorn signal handler to exit early
+        server_task.cancel()
+
+    loop.add_signal_handler(signal.SIGINT, signal_handler)
+    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        print("Gracefully stopping http server")
+        await server.shutdown()
 
 
 if __name__ == "__main__":
@@ -289,4 +339,4 @@ if __name__ == "__main__":
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
-    run_server(args)
+    asyncio.run(run_server(args))

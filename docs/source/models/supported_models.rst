@@ -94,8 +94,8 @@ Decoder-only Language Models
     - :code:`ai21labs/Jamba-v0.1`, etc.
     - ✅︎
   * - :code:`LlamaForCausalLM`
-    - LLaMA, Llama 2, Meta Llama 3, Vicuna, Alpaca, Yi
-    - :code:`meta-llama/Meta-Llama-3-8B-Instruct`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
+    - Llama 3.1, Llama 3, Llama 2, LLaMA, Yi
+    - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3.1-70B`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
@@ -182,6 +182,10 @@ Vision Language Models
     - Models
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
+  * - :code:`ChameleonForConditionalGeneration`
+    - Chameleon
+    - :code:`facebook/chameleon-7b` etc.
+    - 
   * - :code:`FuyuForCausalLM`
     - Fuyu
     - :code:`adept/fuyu-8b` etc.
@@ -201,6 +205,10 @@ Vision Language Models
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    -
+  * - :code:`MiniCPM-V`
+    - MiniCPM-V
+    - :code:`openbmb/MiniCPM-V-2`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
     -
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.

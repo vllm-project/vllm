@@ -1,6 +1,7 @@
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
+                    Mapping, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, TypeVar, Union
 
@@ -546,7 +547,7 @@ class LLMEngine:
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -681,7 +682,7 @@ class LLMEngine:
         tokenizer = self.get_tokenizer_group("prompts must be None if "
                                              "skip_tokenizer_init is True")
 
-        if is_enc_dec_decoder and prompt == "":
+        if is_enc_dec_decoder and prompt is None:
             # Scenario: enc/dec model, decoder input prompt is ""
             # => Treat it as None (no decoder input prompt provided)
             # & obtain default decoder input prompt
@@ -710,9 +711,10 @@ class LLMEngine:
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest],
+        ptype: Optional[str] = None,
         is_encoder_prompt: bool = False,
         is_enc_dec_model: bool = False,
-    ) -> Tuple[str, List[int], Optional["MultiModalDataDict"]]:
+    ) -> Tuple[Optional[str], List[int], Optional["MultiModalDataDict"]]:
         '''
         Extract prompt & prompt_token_ids from any single
         encoder or decoder input prompt. For encoder input prompts
@@ -721,6 +723,7 @@ class LLMEngine:
         Arguments:
 
         * request_id
+        * ptype: str representation of the input prompt type
         * inputs: single encoder or decoder input prompt
         * lora_request
         * is_encoder_prompt: True if encoder input prompt
@@ -731,9 +734,15 @@ class LLMEngine:
         * multi_modal_data (None if is_encoder_prompt)
         '''
 
+        # Determine prompt type, if not provided
+        ptype = (get_prompt_type(inputs) if ptype is None else ptype)
+
         is_enc_dec_decoder = ((not is_encoder_prompt) and is_enc_dec_model)
 
-        if isinstance(inputs, str):
+        # Any prompt such as None, string
+        # or TextPrompt that is not a dict
+        if ptype in ['None', 'str']:
+
             # prompt = inputs
             # prompt_token_ids = tokenize(inputs)
             # no multi-modal data
@@ -746,23 +755,24 @@ class LLMEngine:
                     ), None)
 
         # Tokenize
-        prompt_token_ids = (inputs["prompt_token_ids"]
-                            if inputs["prompt_token_ids"] else
-                            self._tokenize_prompt(
+        prompt_token_ids = (inputs["prompt_token_ids"] if ptype
+                            == "TokensPrompt" else self._tokenize_prompt(
                                 request_id,
-                                inputs,
+                                inputs['prompt'],
                                 lora_request,
                                 is_enc_dec_decoder=is_enc_dec_decoder,
                             ))
 
+        # None if no prompt field is present
+        prompt = inputs.get('prompt')
+
         if is_encoder_prompt:
             # Only care about multi-modal data associated
             # with the encoder prompt
-            return (inputs.get('prompt'), prompt_token_ids,
-                    inputs.get("multi_modal_data"))
+            return (prompt, prompt_token_ids, inputs.get("multi_modal_data"))
         else:
             # Assume there is no decoder multi-modal data
-            return (inputs.get('prompt'), prompt_token_ids, None)
+            return (prompt, prompt_token_ids, None)
 
     def _get_default_decoder_prompt(
         self,
@@ -782,6 +792,13 @@ class LLMEngine:
                                         lora_request: Optional[LoRARequest]):
         ptype = get_prompt_type(inputs)
 
+        if ptype == "ExplicitEncoderDecoder":
+            extracted_encoder_prompt = inputs.get('encoder_prompt')
+            encoder_ptype = None
+        else:
+            extracted_encoder_prompt = inputs
+            encoder_ptype = ptype
+
         # Obtain encoder prompt
         (
             encoder_prompt,
@@ -789,9 +806,9 @@ class LLMEngine:
             multi_modal_data,
         ) = self._extract_single_prompt(
             request_id,
-            (inputs.get('encoder_prompt') if get_prompt_type(inputs)
-             == "ExplicitEncoderDecoder" else inputs),
+            extracted_encoder_prompt,
             lora_request,
+            ptype=encoder_ptype,
             is_encoder_prompt=True,
             is_enc_dec_model=True,
         )
@@ -809,6 +826,7 @@ class LLMEngine:
                 request_id,
                 inputs.get('decoder_prompt'),
                 lora_request,
+                ptype=None,
                 is_encoder_prompt=False,
                 is_enc_dec_model=True,
             )
@@ -893,7 +911,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         """Add a request to the engine's request pool.
@@ -967,7 +985,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
     ) -> SequenceGroup:
@@ -1242,8 +1260,9 @@ class LLMEngine:
             model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
+            stats = self._get_stats(scheduler_outputs, model_output)
             for logger in self.stat_loggers.values():
-                logger.log(self._get_stats(scheduler_outputs, model_output))
+                logger.log(stats)
 
     def _get_stats(
             self,

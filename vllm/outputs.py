@@ -70,12 +70,20 @@ class RequestOutput:
     Args:
         request_id: The unique ID of the request.
         prompt: The prompt string of the request.
+                For encoder/decoder models, this is the
+                decoder input prompt.
         prompt_token_ids: The token IDs of the prompt.
+                          For encoder/decoder models, this is the
+                          decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
+        encoder_prompt: The encoder prompt string of the request; 
+                        None if decoder-only
+        encoder_prompt_token_ids: The token IDs of the encoder prompt;
+                                  None if decoder-only
     """
 
     def __init__(

@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Dict, List, Type, TypeVar, Union
 import torch
 
 from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
-from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 
 # Error string(s) for encoder/decoder
@@ -18,8 +17,7 @@ STR_NOT_IMPL_ENC_DEC_CPU = ("CPU backend is not current supported with "
 PAD_SLOT_ID = -1
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import (GPUModelRunnerBase,
-                                          ModelInputForGPUBuilder)
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 def is_block_tables_empty(block_tables: Union[None, Dict]):
@@ -98,26 +96,27 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
         self.use_v2_block_manager = (
             input_builder.scheduler_config.use_v2_block_manager)
 
-    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
-                      token_lens: List[int], seq_lens: List[int],
-                      curr_seq_lens: List[int], query_lens: List[int],
-                      context_lens: List[int],
-                      curr_sliding_window_blocks: List[int], prefix_cache_hit,
-                      chunked_prefill_enabled):
-        is_prompt = seq_group_metadata.is_prompt
-        block_tables = seq_group_metadata.block_tables
-        computed_block_nums = seq_group_metadata.computed_block_nums
+    def _add_seq_group(
+            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+            chunked_prefill_enabled: bool):
+        is_prompt = inter_data.is_prompt
+        block_tables = inter_data.block_tables
+        computed_block_nums = inter_data.computed_block_nums
 
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
-                 seq_group_metadata.seq_data.keys(), token_lens, seq_lens,
-                 curr_seq_lens, query_lens, context_lens,
-                 curr_sliding_window_blocks):
+                 inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
+                 inter_data.orig_seq_lens, inter_data.seq_lens,
+                 inter_data.query_lens, inter_data.context_lens,
+                 inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
                 self.num_prefills += 1
@@ -135,7 +134,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
-            if prefix_cache_hit:
+            if inter_data.prefix_cache_hit:
                 block_table = computed_block_nums
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
@@ -149,16 +148,27 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                 self.use_v2_block_manager)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size,
-                                 seq_group_metadata.block_tables)
+                                 self.block_size, inter_data.block_tables)
 
-    def build(self, runner: "GPUModelRunnerBase", seq_lens: List[int],
-              query_lens: List[int], cuda_graph_pad_size: int,
-              batch_size: int):
-        device = runner.device
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int):
+        """Build attention metadata with on-device tensors.
+
+        Args:
+            seq_lens: The maybe padded sequence lengths of the input sequences.
+            query_lens: The query lengths of the input sequences.
+            cuda_graph_pad_size: The padding size for cuda graph.
+                                 -1 if cuda graph is not used.
+            batch_size: The maybe padded batch size.
+        """
+        for inter_data in self.input_builder.inter_data_list:
+            self._add_seq_group(inter_data,
+                                self.input_builder.chunked_prefill_enabled)
+
+        device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
 
-        logits_soft_cap = getattr(runner.model_config.hf_config,
+        logits_soft_cap = getattr(self.runner.model_config.hf_config,
                                   "attn_logit_softcapping", None)
         if logits_soft_cap is not None:
             raise ValueError(
@@ -175,11 +185,11 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
-            num_decode_tokens = batch_size + cuda_graph_pad_size
+            num_decode_tokens = batch_size
 
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
-            input_block_tables = runner.graph_block_tables[:batch_size]
+            input_block_tables = self.runner.graph_block_tables[:batch_size]
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
@@ -223,7 +233,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
-            block_tables=block_tables,
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -235,5 +244,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
+            block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )

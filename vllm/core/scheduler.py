@@ -381,9 +381,9 @@ class Scheduler:
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
 
-                self._free_seq_group(aborted_group)
+                self._free_seq_group_cross_attn_blocks(aborted_group)
 
-    def _free_seq_group(
+    def _free_seq_group_cross_attn_blocks(
         self,
         seq_group: SequenceGroup,
     ) -> None:
@@ -1091,7 +1091,7 @@ class Scheduler:
                 if seq_group.is_finished():
                     new_finished_requests_ids += seq_group.request_id
                     # Free cross-attention block table, if it exists
-                    self._free_seq_group(seq_group)
+                    self._free_seq_group_cross_attn_blocks(seq_group)
             self._finished_requests_ids += new_finished_requests_ids
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())

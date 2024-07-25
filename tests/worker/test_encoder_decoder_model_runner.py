@@ -46,7 +46,8 @@ def _create_model_runner(model: str, *args,
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
 def test_empty_seq_group(backend_name, enforce_eager, monkeypatch):
-    """Verify prepare prompt and decode returns empty output."""
+    """Verify prepare prompt and decode returns empty output
+       for empty seq group list"""
 
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
@@ -267,7 +268,6 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
         input_positions,
     )
     # - Encoder
-    assert len(encoder_input_tokens) == sum(encoder_seq_lens)
     assert len(encoder_input_tokens) == sum(encoder_seq_lens)
     torch.testing.assert_close(
         encoder_input_tokens,

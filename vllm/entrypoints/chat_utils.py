@@ -105,8 +105,9 @@ def _image_token_str(model_config: ModelConfig,
         return None
     if model_type.startswith("llava"):
         return tokenizer.decode(model_config.hf_config.image_token_index)
-
-    raise TypeError("Unknown model type: {model_type}")
+    if model_type == "chameleon":
+        return "<image>"
+    raise TypeError(f"Unknown model type: {model_type}")
 
 
 # TODO: Let user specify how to insert image tokens into prompt

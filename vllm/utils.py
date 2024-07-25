@@ -531,7 +531,6 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -547,7 +546,13 @@ def create_kv_caches_with_random_flash(
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
                                       device=device)
-        key_value_cache.uniform_(-scale, scale)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -757,6 +762,11 @@ def merge_dicts(dict1: Dict[K, List[T]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
+    """Flatten a list of lists to a single list."""
+    return [item for sublist in lists for item in sublist]
 
 
 def init_cached_hf_modules() -> None:
