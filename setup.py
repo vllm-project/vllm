@@ -52,10 +52,9 @@ class BuildPyAndGenerateGrpc(build_py):
                     dedent(
                         f"""
                         python -m grpc_tools.protoc \
-                            --proto_path=src \
-                            --python_out=src/ \
-                            --grpc_python_out=src/ \
-                            --mypy_out=src/ \
+                            --proto_path=. \
+                            --python_out=. \
+                            --grpc_python_out=. \
                             {self.proto_source}
                       """,
                     ),
@@ -525,7 +524,7 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
     },
-    cmdclass={"build_ext": cmake_build_ext, "build_py": BuildPyAndGenerateGrpc} if _build_custom_ops() else {"build_py": BuildPyAndGenerateGrpc},
+    cmdclass={"build_py": BuildPyAndGenerateGrpc, "build_ext": cmake_build_ext,} if _build_custom_ops() else {"build_py": BuildPyAndGenerateGrpc},
     package_data=package_data,
     entry_points={
         "console_scripts": [

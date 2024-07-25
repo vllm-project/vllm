@@ -3,16 +3,13 @@ syntax = "proto3";
 package generate.v1;
 
 service TextGenerationService {
-    rpc Generate (GenerateRequest) returns (GenerateResponse); // will need a streaming version later- unary for POC
-
-    rpc Health (HealthRequest) returns (HealthResponse);
+    rpc Generate (GenerateRequest) returns (stream GenerateResponse); // will need a streaming version later- unary for POC
 }
 
 
 message GenerateRequest {
     PromptInputs prompt_inputs = 1;
-    // SamplingParams sampling_params = 2;
-    string request_id = 3;
+    string request_id = 2;
 }
 
 message PromptInputs {
@@ -20,10 +17,11 @@ message PromptInputs {
 }
 
 message GenerateResponse {
-    repeated CompletionOutput outputs = 1; // 1 per generation from a single prompt
+    repeated CompletionOutput outputs = 1;
 }
 
 message CompletionOutput {
     uint64 index = 1;
     repeated uint64 token_ids = 2;
+    string text = 3;
 }

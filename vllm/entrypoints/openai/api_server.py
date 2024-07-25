@@ -221,12 +221,14 @@ async def build_server(
 ) -> uvicorn.Server:
     app = build_app(args)
 
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
+    # if args.served_model_name is not None:
+    #     served_model_names = args.served_model_name
+    # else:
+    #     served_model_names = [args.model]
 
-    global engine, engine_args
+    served_model_names = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+    # global engine, engine_args
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = (llm_engine
