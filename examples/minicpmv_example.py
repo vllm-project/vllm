@@ -4,6 +4,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 
 # 2.0
+# For temporary using
 # MODEL_NAME = "HwwwH/MiniCPM-V-2"
 # 2.5
 MODEL_NAME = "openbmb/MiniCPM-Llama3-V-2_5"
