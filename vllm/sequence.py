@@ -236,13 +236,26 @@ class SequenceData:
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
+    The sequence is constructed from the LLMInputs instance passed
+    in through the `inputs` constructor argument.
+
+    For encoder/decoder models, LLMInputs encapsulates both a
+    decoder and encoder prompt, creating an ambiguity about which
+    prompt to construct the sequence from. The `from_decoder_prompt`
+    constructor argument signals whether to construct the Sequence
+    from the LLMInputs decoder prompt, or encoder prompt.
+
     Args:
         seq_id: The ID of the sequence.
         inputs: The inputs of the sequence.
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
+        eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
+        from_decoder_prompt: Construct Sequence from LLMInputs decoder prompt
+                             (True) or encoder prompt (False.) Must be True
+                             for decoder-only model.
 
     """
 
