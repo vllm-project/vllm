@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import Policy, PolicyFactory
@@ -1019,7 +1020,7 @@ class Scheduler:
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             is_prompt = seq_group.is_prefill()
-            if is_prompt:
+            if is_prompt or not envs.VLLM_USE_RAY_SPMD_WORKER:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1041,6 +1042,7 @@ class Scheduler:
                     prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
             else:
+                # Delta is used only for spmd workers.
                 seq_data_delta = {}
                 for id, data in seq_data.items():
                     seq_data_delta[id] = data.get_delta()
