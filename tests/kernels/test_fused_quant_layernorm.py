@@ -79,16 +79,11 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
                             residual: Optional[torch.Tensor],
                             scale_ub: Optional[torch.Tensor]) \
                 -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    num_scales = int(x.numel() / x.shape[-1])
-
-    out = torch.empty_like(x, dtype=quant_dtype, device="cuda")
-    scales = torch.empty((num_scales, 1), dtype=torch.float32, device="cuda")
 
     if residual is not None:
         residual = residual.clone()
-    ops.rms_norm_dynamic_per_token_quant(out, x, weight, scales, EPS, scale_ub,
-                                         residual)
-
+    out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
+                                        quant_dtype, scale_ub, residual)
     return out, scales, residual
 
 def ops_impl(weight: torch.Tensor,
