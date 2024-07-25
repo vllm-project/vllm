@@ -1,7 +1,6 @@
 """Sequence and its related classes."""
 import copy
 import enum
-import math
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
@@ -285,7 +284,7 @@ class Sequence:
 
     @property
     def n_blocks(self) -> int:
-        return math.ceil(self.get_len() / self.block_size)
+        return (self.get_len() + self.block_size - 1) // self.block_size
 
     @property
     def prompt(self) -> Optional[str]:
