@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from itertools import product
 from typing import Callable, Iterable, List, Optional
+import time
+import pickle as pkl
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -160,6 +162,11 @@ def main():
         timers.extend(
             bench(bp, bp.description(), "rms-norm-dynamic-per-token-quant"))
     print_timers(timers)
+
+    # pickle all the results
+    timestamp = int(time.time())
+    with open(f"rms_norm_dpt_quant-{timestamp}.pkl", "wb") as f:
+        pkl.dump(timers, f)
 
 
 if __name__ == '__main__':
