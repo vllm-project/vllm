@@ -63,11 +63,12 @@ __global__ void Marlin(
     const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
                                           // (k/groupsize)xn
     const int* __restrict__ g_idx,        // int32 group indices of shape k
-    int num_groups,  // number of scale groups per output channel
-    int prob_m,      // batch dimension m
-    int prob_n,      // output dimension n
-    int prob_k,      // reduction dimension k
-    int* locks       // extra global storage for barrier synchronization
+    int num_groups,       // number of scale groups per output channel
+    int prob_m,           // batch dimension m
+    int prob_n,           // output dimension n
+    int prob_k,           // reduction dimension k
+    int* locks,           // extra global storage for barrier synchronization
+    bool use_fp32_reduce  // whether to use fp32 global reduce
 ) {}
 
 }  // namespace gptq_marlin
@@ -539,11 +540,12 @@ __global__ void Marlin(
     const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
                                           // (k/groupsize)x(n/pack_factor)
     const int* __restrict__ g_idx,        // int32 group indices of shape k
-    int num_groups,  // number of scale groups per output channel
-    int prob_m,      // batch dimension m
-    int prob_n,      // output dimension n
-    int prob_k,      // reduction dimension k
-    int* locks       // extra global storage for barrier synchronization
+    int num_groups,       // number of scale groups per output channel
+    int prob_m,           // batch dimension m
+    int prob_n,           // output dimension n
+    int prob_k,           // reduction dimension k
+    int* locks,           // extra global storage for barrier synchronization
+    bool use_fp32_reduce  // whether to use fp32 global reduce
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
@@ -1323,9 +1325,74 @@ __global__ void Marlin(
     }
   };
 
+  // Since multiple threadblocks may process parts of the same column slice, we
+  // finally have to globally reduce over the results. As the striped
+  // partitioning minimizes the number of such reductions and our outputs are
+  // usually rather small, we perform this reduction serially in L2 cache.
+  auto global_reduce_fp16 = [&](bool first = false, bool last = false) {
+    // We are very careful here to reduce directly in the output buffer to
+    // maximize L2 cache utilization in this step. To do this, we write out
+    // results in FP16 (but still reduce with FP32 compute).
+    constexpr int active_threads = 32 * thread_n_blocks / 4;
+    if (threadIdx.x < active_threads) {
+      int c_gl_stride = prob_n / 8;
+      int c_gl_wr_delta_o = 8 * c_gl_stride;
+      int c_gl_wr_delta_i = 4 * (active_threads / 32);
+      int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) +
+                    4 * (threadIdx.x / 32) + threadIdx.x % 4;
+      c_gl_wr += (2 * thread_n_blocks) * slice_col;
+      constexpr int c_sh_wr_delta = active_threads;
+      int c_sh_wr = threadIdx.x;
+
+      int row = (threadIdx.x % 32) / 4;
+
+      if (!first) {
+  // Interestingly, doing direct global accesses here really seems to mess up
+  // the compiler and lead to slowdowns, hence we also use async-copies even
+  // though these fetches are not actually asynchronous.
+  #pragma unroll
+        for (int i = 0; i < thread_m_blocks * 4; i++) {
+          cp_async4_pred(
+              &sh[c_sh_wr + c_sh_wr_delta * i],
+              &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) +
+                 c_gl_wr_delta_i * (i % 2)],
+              i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m);
+        }
+        cp_async_fence();
+        cp_async_wait<0>();
+      }
+
+  #pragma unroll
+      for (int i = 0; i < thread_m_blocks * 4; i++) {
+        if (i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m) {
+          if (!first) {
+            int4 c_red = sh[c_sh_wr + i * c_sh_wr_delta];
+  #pragma unroll
+            for (int j = 0; j < 2 * 4; j++) {
+              reinterpret_cast<float*>(
+                  &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)] +=
+                  Dtype::num2float(reinterpret_cast<scalar_t*>(&c_red)[j]);
+            }
+          }
+          if (!last) {
+            int4 c;
+  #pragma unroll
+            for (int j = 0; j < 2 * 4; j++) {
+              reinterpret_cast<scalar_t*>(&c)[j] =
+                  Dtype::float2num(reinterpret_cast<float*>(
+                      &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)]);
+            }
+            C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)] =
+                c;
+          }
+        }
+      }
+    }
+  };
+
   // Globally reduce over threadblocks that compute the same column block.
   // We use a tmp C buffer to reduce in full fp32 precision.
-  auto global_reduce = [&](bool first = false, bool last = false) {
+  auto global_reduce_fp32 = [&](bool first = false, bool last = false) {
     constexpr int tb_m = thread_m_blocks * 16;
     constexpr int tb_n = thread_n_blocks * 16;
 
@@ -1340,32 +1407,24 @@ __global__ void Marlin(
     constexpr int num_floats = thread_m_blocks * 4 * 2 * 4;
     constexpr int th_size = num_floats * sizeof(float) / 16;
 
-    int warp_id = threadIdx.x / 32;
-    int th_id = threadIdx.x % 32;
-
-    int c_warp_offset = warp_id * th_size * 32;
-    int c_th_offset = th_id * th_size;
-
-    int c_cur_offset = par_offset + slice_offset + c_warp_offset + c_th_offset;
-    int sh_offset = c_warp_offset + c_th_offset;
+    int c_cur_offset = par_offset + slice_offset;
 
     if (!is_th_active) {
       return;
     }
 
     if (!first) {
+      float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k++) {
-        sh[sh_offset + k] = C_tmp[c_cur_offset + k];
-      }
-    }
+        sh[threadIdx.x] =
+            C_tmp[c_cur_offset + active_threads * k + threadIdx.x];
 
-    if (!first) {
-      float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
-      float* sh_c_ptr = reinterpret_cast<float*>(&sh[sh_offset]);
+        float* sh_c_ptr = reinterpret_cast<float*>(&sh[threadIdx.x]);
   #pragma unroll
-      for (int f = 0; f < num_floats; f++) {
-        frag_c_ptr[f] += sh_c_ptr[f];
+        for (int f = 0; f < 4; f++) {
+          frag_c_ptr[k * 4 + f] += sh_c_ptr[f];
+        }
       }
     }
 
@@ -1373,7 +1432,7 @@ __global__ void Marlin(
       int4* frag_c_ptr = reinterpret_cast<int4*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k++) {
-        C_tmp[c_cur_offset + k] = frag_c_ptr[k];
+        C_tmp[c_cur_offset + active_threads * k + threadIdx.x] = frag_c_ptr[k];
       }
     }
   };
@@ -1602,7 +1661,11 @@ __global__ void Marlin(
       if (slice_count > 1) {  // only globally reduce if there is more than one
                               // block in a slice
         barrier_acquire(&locks[slice_col], slice_idx);
-        global_reduce(slice_idx == 0, last);
+        if (use_fp32_reduce) {
+          global_reduce_fp32(slice_idx == 0, last);
+        } else {
+          global_reduce_fp16(slice_idx == 0, last);
+        }
         barrier_release(&locks[slice_col], last);
       }
       if (last)  // only the last block in a slice actually writes the result
@@ -1658,7 +1721,7 @@ __global__ void Marlin(
              HAS_ZP, GROUP_BLOCKS>                                             \
           <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                   \
               A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,        \
-              num_groups, prob_m, prob_n, prob_k, locks);                      \
+              num_groups, prob_m, prob_n, prob_k, locks, use_fp32_reduce);     \
     }
 
 typedef struct {
@@ -1917,7 +1980,7 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* C_tmp,
                      int num_bits, bool has_act_order, bool is_k_full,
                      bool has_zp, int num_groups, int group_size, int dev,
                      cudaStream_t stream, int thread_k, int thread_n, int sms,
-                     int max_par) {
+                     int max_par, bool use_fp32_reduce) {
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
               "num_bits must be 4 or 8. Got = ", num_bits);
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
@@ -2081,7 +2144,8 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& g_idx, torch::Tensor& perm,
                                torch::Tensor& workspace, int64_t num_bits,
                                int64_t size_m, int64_t size_n, int64_t size_k,
-                               bool is_k_full, bool has_zp) {
+                               bool is_k_full, bool has_zp,
+                               bool use_fp32_reduce) {
   // Verify num_bits
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
               "num_bits must be 4 or 8. Got = ", num_bits);
@@ -2214,7 +2278,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
         workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, marlin::max_par);
+        thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     marlin::marlin_mm_f16i4<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
@@ -2223,7 +2287,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
         workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, marlin::max_par);
+        thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }

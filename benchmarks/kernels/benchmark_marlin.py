@@ -127,11 +127,21 @@ def bench_run(results: List[benchmark.Measurement], model: str,
     results.append(
         benchmark.Timer(
             stmt=
-            "output = gptq_marlin_gemm(a, marlin_q_w, marlin_s, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, num_bits, size_m, size_n, size_k, is_k_full, False)",  # noqa: E501
+            "output = gptq_marlin_gemm(a, marlin_q_w, marlin_s, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, num_bits, size_m, size_n, size_k, is_k_full, False, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
-            description="gptq_marlin_gemm",
+            description="gptq_marlin_gemm_fp16",
+        ).blocked_autorange(min_run_time=min_run_time))
+
+    results.append(
+        benchmark.Timer(
+            stmt=
+            "output = gptq_marlin_gemm(a, marlin_q_w, marlin_s, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, num_bits, size_m, size_n, size_k, is_k_full, False, True)",  # noqa: E501
+            globals=globals,
+            label=label,
+            sub_label=sub_label,
+            description="gptq_marlin_gemm_fp32",
         ).blocked_autorange(min_run_time=min_run_time))
 
     # if (num_bits in GPTQ_MARLIN_24_SUPPORTED_NUM_BITS

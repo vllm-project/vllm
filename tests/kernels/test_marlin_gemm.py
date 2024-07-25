@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
+USE_FP32_REDUCE_OPTS = [False, True]
 
 # MARLIN_K_CHUNKS = [128]
 MARLIN_K_CHUNKS = [256]
@@ -176,6 +177,7 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)
+@pytest.mark.parametrize("use_fp32_reduce", [True]) 
 def test_gptq_marlin_gemm(
     k_chunk,
     n_chunk,
@@ -184,6 +186,7 @@ def test_gptq_marlin_gemm(
     mnk_factors,
     act_order,
     is_k_full,
+    use_fp32_reduce,
 ):
     m_factor, n_factor, k_factor = mnk_factors
 
@@ -225,6 +228,7 @@ def test_gptq_marlin_gemm(
         a_input.shape[1],
         is_k_full,
         has_zp=False,
+        use_fp32_reduce=use_fp32_reduce,
     )
     output_ref = torch.matmul(a_input, w_ref)
 
