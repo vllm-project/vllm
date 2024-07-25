@@ -3,7 +3,7 @@ import gc
 import time
 import warnings
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
                     Tuple, Type, TypeVar, Union)
 
@@ -171,48 +171,83 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
 class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     """Build ModelInputForGPU from SequenceGroupMetadata."""
 
-    @dataclass
+    # Note: ideally we would be using a dataclass(kw_only=True)
+    # here, so that this can be subclassed easily,
+    # but kw_only is not supported in python<3.10.
     class InterDataForSeqGroup:
         """Intermediate data for the current sequence group."""
-        # From sequence group metadata.
-        request_id: str
-        seq_ids: List[int]
-        is_prompt: bool
-        block_tables: Optional[Dict[int, List[int]]]
-        computed_block_nums: List[int]
-        n_seqs: int = 0
 
-        # Input tokens and positions.
-        input_tokens: List[List[int]] = field(default_factory=list)
-        input_positions: List[List[int]] = field(default_factory=list)
+        def __init__(
+            self,
+            *,
+            # From sequence group metadata.
+            request_id: str,
+            seq_ids: List[int],
+            is_prompt: bool,
+            block_tables: Optional[Dict[int, List[int]]],
+            computed_block_nums: List[int],
+            n_seqs: int = 0,
 
-        # The sequence length (may be capped to the sliding window).
-        seq_lens: List[int] = field(default_factory=list)
-        # The original sequence length (before applying sliding window).
-        # This is used to compute slot mapping.
-        orig_seq_lens: List[int] = field(default_factory=list)
-        # The query length.
-        query_lens: List[int] = field(default_factory=list)
-        # The number of tokens that are already computed.
-        context_lens: List[int] = field(default_factory=list)
-        # The current sliding window block.
-        curr_sliding_window_blocks: List[int] = field(default_factory=list)
+            # Input tokens and positions.
+            input_tokens: Optional[List[List[int]]] = None,
+            input_positions: Optional[List[List[int]]] = None,
 
-        # LoRA inputs.
-        lora_index_mapping: List[List[int]] = field(default_factory=list)
-        lora_prompt_mapping: List[List[int]] = field(default_factory=list)
-        lora_requests: Set[LoRARequest] = field(default_factory=set)
+            # The sequence length (may be capped to the sliding window).
+            seq_lens: Optional[List[int]] = None,
+            # The original sequence length (before applying sliding window).
+            # This is used to compute slot mapping.
+            orig_seq_lens: Optional[List[int]] = None,
+            # The query length.
+            query_lens: Optional[List[int]] = None,
+            # The number of tokens that are already computed.
+            context_lens: Optional[List[int]] = None,
+            # The current sliding window block.
+            curr_sliding_window_blocks: Optional[List[int]] = None,
 
-        # Prompt adapter inputs.
-        prompt_adapter_index_mapping: List[int] = field(default_factory=list)
-        prompt_adapter_prompt_mapping: List[int] = field(default_factory=list)
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+            # LoRA inputs.
+            lora_index_mapping: Optional[List[List[int]]] = None,
+            lora_prompt_mapping: Optional[List[List[int]]] = None,
+            lora_requests: Optional[Set[LoRARequest]] = None,
 
-        # Multi-modal inputs.
-        multi_modal_inputs: Optional[MultiModalInputs] = None
+            # Prompt adapter inputs.
+            prompt_adapter_index_mapping: Optional[List[int]] = None,
+            prompt_adapter_prompt_mapping: Optional[List[int]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
 
-        # Whether the prefix cache is hit (prefill only).
-        prefix_cache_hit: bool = False
+            # Multi-modal inputs.
+            multi_modal_inputs: Optional[MultiModalInputs] = None,
+
+            # Whether the prefix cache is hit (prefill only).
+            prefix_cache_hit: bool = False,
+        ):
+            self.request_id = request_id
+            self.seq_ids = seq_ids
+            self.is_prompt = is_prompt
+            self.block_tables = block_tables
+            self.computed_block_nums = computed_block_nums
+            self.n_seqs = n_seqs
+            self.input_tokens = input_tokens or []
+            self.input_positions = input_positions or []
+            self.seq_lens = seq_lens or []
+            self.orig_seq_lens = orig_seq_lens or []
+            self.query_lens = query_lens or []
+            self.context_lens = context_lens or []
+            self.curr_sliding_window_blocks = curr_sliding_window_blocks or []
+
+            self.lora_index_mapping = lora_index_mapping or []
+            self.lora_prompt_mapping = lora_prompt_mapping or []
+            self.lora_requests = lora_requests or set()
+
+            self.prompt_adapter_index_mapping = (prompt_adapter_index_mapping
+                                                 or [])
+            self.prompt_adapter_prompt_mapping = (prompt_adapter_prompt_mapping
+                                                  or [])
+            self.prompt_adapter_request = prompt_adapter_request
+
+            self.multi_modal_inputs = multi_modal_inputs
+            self.prefix_cache_hit = prefix_cache_hit
+
+            self.__post_init__()
 
         def __post_init__(self):
             self.n_seqs = len(self.seq_ids)
@@ -457,6 +492,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         for per_seq_group_fn in self.per_seq_group_compute_fns:
             per_seq_group_fn(inter_data, seq_group_metadata)
 
+    def _use_captured_graph(self, batch_size: int,
+                            max_decode_seq_len: int) -> bool:
+        return (self.decode_only and not self.runner.model_config.enforce_eager
+                and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                and max_decode_seq_len <= self.runner.max_seq_len_to_capture)
+
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
         create on-device tensors.
@@ -491,10 +532,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         }
 
         batch_size = len(input_tokens)
-        use_captured_graph = (
-            self.decode_only and not self.runner.model_config.enforce_eager
-            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-            and max_decode_seq_len <= self.runner.max_seq_len_to_capture)
+        use_captured_graph = self._use_captured_graph(batch_size,
+                                                      max_decode_seq_len)
 
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
@@ -593,6 +632,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     Helper class for shared methods between GPU model runners.
     """
     _model_input_cls: Type[TModelInputForGPU]
+    _builder_cls: Type[ModelInputForGPUBuilder]
 
     def __init__(
         self,
@@ -795,8 +835,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        builder = ModelInputForGPUBuilder(weakref.proxy(self),
-                                          finished_requests_ids)
+        builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
         for seq_group_metadata in seq_group_metadata_list:
             builder.add_seq_group(seq_group_metadata)
         return builder.build()  # type: ignore
@@ -1054,9 +1093,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.parallel_config.pipeline_parallel_size):
                 for batch_size in reversed(batch_size_capture_list):
                     if self.attn_backend.get_name() == "flashinfer":
-                        indptr_buffer = indptr_buffer[:batch_size + 1]
-                        last_page_len_buffer = last_page_len_buffer[:
-                                                                    batch_size]
+                        _indptr_buffer = indptr_buffer[:batch_size + 1]
+                        _last_page_len_buffer = last_page_len_buffer[:
+                                                                     batch_size]
 
                         num_qo_heads = (
                             self.model_config.get_num_attention_heads(
@@ -1069,8 +1108,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             use_tensor_cores = False
                         decode_wrapper = \
                             CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-                            decode_workspace_buffer, indptr_buffer,
-                            indices_buffer, last_page_len_buffer, "NHD",
+                            decode_workspace_buffer, _indptr_buffer,
+                            indices_buffer, _last_page_len_buffer, "NHD",
                             use_tensor_cores)
                         kv_cache_dtype = get_kv_cache_torch_dtype(
                             self.kv_cache_dtype, self.model_config.dtype)
@@ -1145,10 +1184,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self.model, self.attn_backend.get_name())
 
                     if self.attn_backend.get_name() == "flashinfer":
-                        graph_runner.flashinfer_indptr_buffer = indptr_buffer
+                        graph_runner.flashinfer_indptr_buffer = _indptr_buffer
                         graph_runner.flashinfer_indices_buffer = indices_buffer
                         graph_runner.flashinfer_last_page_len_buffer = \
-                            last_page_len_buffer
+                            _last_page_len_buffer
                         graph_runner.flashinfer_decode_workspace_buffer = \
                                 decode_workspace_buffer
                         graph_runner.flashinfer_decode_wrapper = \
@@ -1205,6 +1244,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
     _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
         ModelInputForGPUWithSamplingMetadata)
+    _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,

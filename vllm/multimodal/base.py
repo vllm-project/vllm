@@ -2,7 +2,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from typing import (Any, Callable, Dict, List, Optional, Type, TypedDict,
-                    TypeVar, Union)
+                    TypeVar, Union, cast)
 
 import torch
 import torch.types
@@ -15,10 +15,17 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-BatchedTensors = Union[torch.Tensor, List[torch.Tensor]]
+NestedTensors = Union[List[torch.Tensor], torch.Tensor]
+"""
+Use a list instead of a tensor if the dimensions of each element do not match.
+Currently only supports up to singly nested list of tensors.
+"""
+
+BatchedTensors = Union[List[NestedTensors], NestedTensors]
 """
 If each input tensor in the batch has the same size, this is a single batched
-tensor; otherwise, this is a list of tensors with one element per batch.
+tensor; otherwise, this is a list of :class:`NestedTensors` with one element
+per item in the batch.
 """
 
 if sys.version_info < (3, 9):
@@ -27,7 +34,7 @@ if sys.version_info < (3, 9):
         pass
 else:
 
-    class _MultiModalInputsBase(UserDict[str, torch.Tensor]):
+    class _MultiModalInputsBase(UserDict[str, NestedTensors]):
         pass
 
 
@@ -39,19 +46,26 @@ class MultiModalInputs(_MultiModalInputsBase):
 
     @staticmethod
     def try_concat(
-        tensors: List[torch.Tensor],
+        tensors: List[NestedTensors],
         *,
         device: torch.types.Device,
     ) -> BatchedTensors:
-        unbatched_shape = tensors[0].shape[1:]
+        # may be list rather than tensors
+        if isinstance(tensors[0], list):
+            return [[t.to(device=device) for t in tensor[0]]
+                    for tensor in tensors]
 
-        for tensor in tensors:
+        tensors_ = cast(List[torch.Tensor], tensors)
+
+        unbatched_shape = tensors_[0].shape[1:]
+
+        for tensor in tensors_:
             if tensor.shape[1:] != unbatched_shape:
                 return [
-                    tensor.squeeze(0).to(device=device) for tensor in tensors
+                    tensor.squeeze(0).to(device=device) for tensor in tensors_
                 ]
 
-        return torch.cat(tensors, dim=0).to(device=device)
+        return torch.cat(tensors_, dim=0).to(device=device)
 
     @staticmethod
     def batch(
@@ -64,7 +78,7 @@ class MultiModalInputs(_MultiModalInputsBase):
 
         keys = inputs_list[0].keys()
 
-        item_lists: Dict[str, List[torch.Tensor]] = defaultdict(list)
+        item_lists: Dict[str, List[NestedTensors]] = defaultdict(list)
 
         for inputs in inputs_list:
             if inputs.keys() != keys:

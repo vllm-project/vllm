@@ -50,13 +50,15 @@ class OpenAIServingChat(OpenAIServing):
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
+        return_tokens_as_token_ids: bool = False,
     ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
                          prompt_adapters=prompt_adapters,
-                         request_logger=request_logger)
+                         request_logger=request_logger,
+                         return_tokens_as_token_ids=return_tokens_as_token_ids)
 
         self.response_role = response_role
 
@@ -247,7 +249,15 @@ class OpenAIServingChat(OpenAIServing):
                             model=model_name)
                         if (request.stream_options
                                 and request.stream_options.include_usage):
-                            chunk.usage = None
+                            if (request.stream_options.continuous_usage_stats):
+                                prompt_tokens = len(res.prompt_token_ids)
+                                usage = UsageInfo(prompt_tokens=prompt_tokens,
+                                                  completion_tokens=0,
+                                                  total_tokens=prompt_tokens)
+                                chunk.usage = usage
+                            else:
+                                chunk.usage = None
+
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
 
@@ -277,7 +287,18 @@ class OpenAIServingChat(OpenAIServing):
                                     model=model_name)
                                 if (request.stream_options and
                                         request.stream_options.include_usage):
-                                    chunk.usage = None
+                                    if (request.stream_options.
+                                            continuous_usage_stats):
+                                        prompt_tokens = len(
+                                            res.prompt_token_ids)
+                                        usage = UsageInfo(
+                                            prompt_tokens=prompt_tokens,
+                                            completion_tokens=0,
+                                            total_tokens=prompt_tokens)
+                                        chunk.usage = usage
+                                    else:
+                                        chunk.usage = None
+
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
                                 yield f"data: {data}\n\n"
@@ -336,7 +357,19 @@ class OpenAIServingChat(OpenAIServing):
                             model=model_name)
                         if (request.stream_options
                                 and request.stream_options.include_usage):
-                            chunk.usage = None
+                            if (request.stream_options.continuous_usage_stats):
+                                prompt_tokens = len(res.prompt_token_ids)
+                                completion_tokens = len(output.token_ids)
+                                usage = UsageInfo(
+                                    prompt_tokens=prompt_tokens,
+                                    completion_tokens=completion_tokens,
+                                    total_tokens=prompt_tokens +
+                                    completion_tokens,
+                                )
+                                chunk.usage = usage
+                            else:
+                                chunk.usage = None
+
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                     else:
@@ -356,7 +389,18 @@ class OpenAIServingChat(OpenAIServing):
                             model=model_name)
                         if (request.stream_options
                                 and request.stream_options.include_usage):
-                            chunk.usage = None
+                            if (request.stream_options.continuous_usage_stats):
+                                prompt_tokens = len(res.prompt_token_ids)
+                                completion_tokens = len(output.token_ids)
+                                usage = UsageInfo(
+                                    prompt_tokens=prompt_tokens,
+                                    completion_tokens=completion_tokens,
+                                    total_tokens=prompt_tokens +
+                                    completion_tokens,
+                                )
+                                chunk.usage = usage
+                            else:
+                                chunk.usage = None
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
@@ -480,11 +524,14 @@ class OpenAIServingChat(OpenAIServing):
             self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
             tokenizer: PreTrainedTokenizer) -> List[ChatCompletionLogProb]:
         return [
-            ChatCompletionLogProb(
-                token=(token := self._get_decoded_token(p[1], p[0],
-                                                        tokenizer)),
-                logprob=max(p[1].logprob, -9999.0),
-                bytes=list(token.encode("utf-8", errors="replace")))
+            ChatCompletionLogProb(token=(token := self._get_decoded_token(
+                p[1],
+                p[0],
+                tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids)),
+                                  logprob=max(p[1].logprob, -9999.0),
+                                  bytes=list(
+                                      token.encode("utf-8", errors="replace")))
             for i, p in enumerate(logprobs.items())
             if top_logprobs and i < top_logprobs
         ]
@@ -504,6 +551,8 @@ class OpenAIServingChat(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
+                if self.return_tokens_as_token_ids:
+                    token = f"token_id:{token_id}"
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=token,
@@ -511,7 +560,9 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
-                        token=step_top_logprobs[token_id].decoded_token,
+                        token=self._get_decoded_token(
+                            step_top_logprobs[token_id], token_id, tokenizer,
+                            self.return_tokens_as_token_ids),
                         logprob=max(step_top_logprobs[token_id].logprob,
                                     -9999.0),
                         bytes=list(
