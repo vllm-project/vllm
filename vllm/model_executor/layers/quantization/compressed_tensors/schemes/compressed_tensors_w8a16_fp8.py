@@ -1,69 +1,63 @@
 from typing import Callable, List, Optional
 
 import torch
-from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, create_per_channel_scale_param,
-    create_per_tensor_scale_param, cutlass_fp8_supported,
-    requantize_with_max_scale)
+    convert_to_channelwise, create_per_channel_scale_param,
+    create_per_tensor_scale_param)
 from vllm.model_executor.utils import set_weight_attrs
 
-__all__ = ["CompressedTensorsW8A8Fp8"]
+__all__ = ["CompressedTensorsW8A16Fp8"]
+
+SUPPORTED_STRATEGIES = [
+    QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR
+]
 
 
-class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
+class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # lovelace and up
-        return 89
+        # ampere and up
+        return 80
 
+    # W8A8-Fp8 kernels support only per-tensor and per-channel cases.
+    # So if we have a fused module (QKV, MLP) with per tensor scales,
+    # we expand each scale to its shard's channels.
     def process_weights_after_loading(self, layer) -> None:
-        # If per tensor, when we have a fused module (e.g. QKV) with per
-        # tensor scales (thus N scales being passed to the kernel),
-        # requantize so we can always run per tensor
         if self.strategy == QuantizationStrategy.TENSOR:
-            max_w_scale, weight = requantize_with_max_scale(
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
-                logical_widths=layer.logical_widths,
-            )
+            ws_channelwise = convert_to_channelwise(layer.weight_scale,
+                                                    layer.logical_widths)
+            layer.weight_scale = torch.nn.Parameter(ws_channelwise,
+                                                    requires_grad=False)
 
-            layer.weight = Parameter(weight.t(), requires_grad=False)
-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
-
-        # If channelwise, scales are already lined up, so just transpose.
-        elif self.strategy == QuantizationStrategy.CHANNEL:
-            weight = layer.weight
-            layer.weight = Parameter(weight.t(), requires_grad=False)
-
-        else:
-            raise ValueError(f"Unknown quantization strategy {self.strategy}")
-
-        # INPUT SCALE
-        if self.is_static_input_scheme:
-            layer.input_scale = Parameter(layer.input_scale.max(),
+        # Weights must be transposed for marlin
+        layer.weight = torch.nn.Parameter(layer.weight.t(),
                                           requires_grad=False)
-        else:
-            layer.input_scale = None
 
-    def create_weights(self, layer: torch.nn.Module,
+        prepare_fp8_layer_for_marlin(layer, strategy="channel")
+
+    def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         # WEIGHT
         weight = torch.nn.Parameter(torch.empty(output_size_per_partition,
@@ -82,13 +76,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if self.strategy == QuantizationStrategy.CHANNEL:
             weight_scale = create_per_channel_scale_param(
                 output_partition_sizes, **layer_kwargs)
-        else:
-            assert self.strategy == QuantizationStrategy.TENSOR
+        elif self.strategy == QuantizationStrategy.TENSOR:
             weight_scale = create_per_tensor_scale_param(
                 output_partition_sizes, **layer_kwargs)
+        else:
+            raise ValueError(
+                f"Unsupported weight strategy={self.strategy}, "
+                f"supported strategies are {SUPPORTED_STRATEGIES}")
         layer.register_parameter("weight_scale", weight_scale)
 
-        # INPUT SCALE
+        # INPUT SCALE (to deal with converted checkpoints)
         if self.is_static_input_scheme:
             input_scale = create_per_tensor_scale_param(
                 output_partition_sizes, **layer_kwargs)
@@ -99,11 +96,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported,
-            use_per_token_if_dynamic=True)
+        return apply_fp8_marlin_linear(input=x,
+                                       weight=layer.weight,
+                                       weight_scale=layer.weight_scale,
+                                       workspace=layer.workspace,
+                                       size_n=layer.output_size_per_partition,
+                                       size_k=layer.input_size_per_partition,
+                                       bias=bias)
