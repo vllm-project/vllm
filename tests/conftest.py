@@ -11,7 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForSeq2SeqLM,
-                          AutoModelForVision2Seq, AutoTokenizer, BatchEncoding)
+                          AutoModelForVision2Seq, AutoTokenizer, BatchEncoding,
+                          BatchFeature)
 
 from tests.models.utils import DecoderPromptType
 from vllm import LLM, SamplingParams
@@ -170,7 +171,7 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class HfRunner:
@@ -379,7 +380,6 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            input_ids = inputs.input_ids
 
             output = self.model.generate(
                 **self.wrap_device(inputs),
@@ -421,7 +421,7 @@ class HfRunner:
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
-            output_len = seq_ids.shape[0] - input_ids.shape[1]
+            output_len = len(seq_logprobs_lst)
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
@@ -679,10 +679,12 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         images: Optional[List[Image.Image]] = None,
+        stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
                                                 max_tokens=max_tokens,
-                                                logprobs=num_logprobs)
+                                                logprobs=num_logprobs,
+                                                stop_token_ids=stop_token_ids)
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images)

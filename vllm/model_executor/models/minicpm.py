@@ -463,10 +463,11 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        input_embeds: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
+                                   attn_metadata, input_embeds)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

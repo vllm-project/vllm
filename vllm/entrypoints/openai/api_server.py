@@ -254,6 +254,7 @@ async def build_server(
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         chat_template=args.chat_template,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_completion = OpenAIServingCompletion(
         engine,
@@ -262,6 +263,7 @@ async def build_server(
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
