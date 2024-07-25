@@ -42,7 +42,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                      group_size=self.group_size,
                                      is_sym=True)
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         # ampere and up
         return 80
 

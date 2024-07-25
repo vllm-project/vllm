@@ -18,7 +18,8 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
     in a linear transformation.
     """
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         # volta and up
         return 70
 
