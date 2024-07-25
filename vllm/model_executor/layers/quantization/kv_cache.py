@@ -46,10 +46,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
                 # If no scales were loaded (both scales are invalid negative
                 # values), use the default value of 1.0
-                k_scale = torch.nn.Parameter(torch.tensor(1.0),
-                                             requires_grad=False)
-                v_scale = torch.nn.Parameter(torch.tensor(1.0),
-                                             requires_grad=False)
+                k_scale = 1.0
+                v_scale = 1.0
             else:
                 # If we find a single kv_scale in the checkpoint, we remap
                 # kv_scale to k_scale during weight loading, and duplicate
