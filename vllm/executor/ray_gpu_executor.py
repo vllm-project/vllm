@@ -29,6 +29,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
+        self.forward_dag: Optional["ray.dag.CompiledDAG"] = None
         # If the env var is set, it uses the Ray's compiled DAG API
         # which optimizes the control plane overhead.
         # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
@@ -59,8 +60,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
-
-        self.forward_dag: Optional["ray.dag.CompiledDAG"] = None
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
