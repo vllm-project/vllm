@@ -48,9 +48,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
             assert self.use_ray_compiled_dag, (
                 "VLLM_USE_RAY_SPMD_WORKER=1 requires "
                 "VLLM_USE_RAY_COMPILED_DAG=1")
-            assert self.parallel_config.tensor_parallel_size > 1, (
-                "VLLM_USE_RAY_SPMD_WORKER=1 doesn't work with TP size 1."
-            )
 
         assert self.uses_ray
         placement_group = self.parallel_config.placement_group
@@ -278,8 +275,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        outputs = ray.get(self.forward_dag.execute(execute_model_req))
-        return outputs[0]
+        import pickle
+        serialized_data = pickle.dumps(execute_model_req)
+
+        outputs = ray.get(self.forward_dag.execute(serialized_data))
+        return pickle.loads(outputs[0])
 
     def _run_workers(
         self,

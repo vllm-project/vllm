@@ -31,9 +31,11 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def execute_model_spmd(self, execute_model_req: ExecuteModelRequest):
+        def execute_model_spmd(self, execute_model_req: bytes):
             """Used only when SPMD worker and compiled DAG are both
             enabled."""
+            import pickle
+            execute_model_req: ExecuteModelRequest = pickle.loads(execute_model_req)
             # TODO(swang): This is needed right now because Ray aDAG executes
             # on a background thread, so we need to reset torch's current
             # device.
@@ -42,7 +44,8 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            return self.worker._execute_model_spmd(execute_model_req)
+            output = self.worker._execute_model_spmd(execute_model_req)
+            return pickle.dumps(output)
 
     ray_import_err = None
 

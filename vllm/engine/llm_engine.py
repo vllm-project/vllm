@@ -63,6 +63,9 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 
     return config.to_diff_dict()
 
+last_input = None
+last_output = None
+
 
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
@@ -910,6 +913,19 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
+
+            # global last_input, last_output
+            # import pickle
+            # this_input = pickle.dumps(execute_model_req)
+            # this_output = pickle.dumps(output)
+            # print(f"{len(this_input)=}, {len(this_output)=}")
+            # from Levenshtein import distance
+            # if last_input is not None:
+            #     input_distance = distance(this_input, last_input)
+            #     output_distance = distance(this_output, last_output)
+            #     print(f"{input_distance=}, {output_distance=}")
+            # last_input = this_input
+            # last_output = this_output
         else:
             output = []
 

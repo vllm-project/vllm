@@ -1024,30 +1024,32 @@ class HiddenStates:
             self.seq_ids = seq_ids
 
 
-@dataclass
 class ExecuteModelRequest:
     """The model execution request, containing CPU metadata only. The LLM
     engine should create an instance of this class for each request batch."""
-    # The sequence group metadata list.
-    seq_group_metadata_list: List[SequenceGroupMetadata]
-    # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: List[Tuple[int, int]] = field(default_factory=list)
-    # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
-    # Blocks to copy. Source to dest block.
-    blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
-    # Virtual engine ID for pipeline parallel.
-    virtual_engine: int = 0
-    # The number of slots for lookahead decoding.
-    num_lookahead_slots: int = 0
-    # The number of requests in the running queue.
-    running_queue_size: int = 0
-    # Optional hidden states from prior step.
-    previous_hidden_states: Optional[HiddenStates] = None
-    # The number of forward steps to run.
-    num_steps: int = 1
-    # Finished request ids since last step.
-    finished_requests_ids: List[str] = field(default_factory=list)
+    def __init__(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: List[Tuple[int, int]]=None,
+        blocks_to_swap_out: List[Tuple[int, int]]=None,
+        blocks_to_copy: List[Tuple[int, int]]=None,
+        virtual_engine: int = 0,
+        num_lookahead_slots: int = 0,
+        running_queue_size: int = 0,
+        previous_hidden_states: Optional[HiddenStates] = None,
+        num_steps: int = 1,
+        finished_requests_ids: List[str] = None
+    ):
+        self.seq_group_metadata_list = seq_group_metadata_list
+        self.blocks_to_swap_in = blocks_to_swap_in or []
+        self.blocks_to_swap_out = blocks_to_swap_out or []
+        self.blocks_to_copy = blocks_to_copy or []
+        self.virtual_engine = virtual_engine
+        self.num_lookahead_slots = num_lookahead_slots
+        self.running_queue_size = running_queue_size
+        self.previous_hidden_states = previous_hidden_states
+        self.num_steps = num_steps
+        self.finished_requests_ids = finished_requests_ids or []
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -1064,3 +1066,41 @@ class ExecuteModelRequest:
             previous_hidden_states=self.previous_hidden_states,
             num_steps=self.num_steps,
             finished_requests_ids=self.finished_requests_ids)
+
+
+    # # The sequence group metadata list.
+    # seq_group_metadata_list: List[SequenceGroupMetadata]
+    # # Blocks to swap in. List of CPU -> GPU block number.
+    # blocks_to_swap_in: List[Tuple[int, int]] = field(default_factory=list)
+    # # Blocks to swap out. List of GPU -> CPU block number.
+    # blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
+    # # Blocks to copy. Source to dest block.
+    # blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
+    # # Virtual engine ID for pipeline parallel.
+    # virtual_engine: int = 0
+    # # The number of slots for lookahead decoding.
+    # num_lookahead_slots: int = 0
+    # # The number of requests in the running queue.
+    # running_queue_size: int = 0
+    # # Optional hidden states from prior step.
+    # previous_hidden_states: Optional[HiddenStates] = None
+    # # The number of forward steps to run.
+    # num_steps: int = 1
+    # # Finished request ids since last step.
+    # finished_requests_ids: List[str] = field(default_factory=list)
+
+    # def clone(
+    #     self, seq_group_metadata_list: List[SequenceGroupMetadata]
+    # ) -> "ExecuteModelRequest":
+    #     """Clone the request with a new sequence group metadata list."""
+    #     return ExecuteModelRequest(
+    #         seq_group_metadata_list=seq_group_metadata_list,
+    #         blocks_to_swap_in=self.blocks_to_swap_in.copy(),
+    #         blocks_to_swap_out=self.blocks_to_swap_out.copy(),
+    #         blocks_to_copy=self.blocks_to_copy.copy(),
+    #         virtual_engine=self.virtual_engine,
+    #         num_lookahead_slots=self.num_lookahead_slots,
+    #         running_queue_size=self.running_queue_size,
+    #         previous_hidden_states=self.previous_hidden_states,
+    #         num_steps=self.num_steps,
+    #         finished_requests_ids=self.finished_requests_ids)
