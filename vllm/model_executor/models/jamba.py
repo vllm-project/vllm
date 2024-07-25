@@ -718,7 +718,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                 # and finish right after
                 continue
             self._assign_seq_id_to_mamba_cache_in_specific_dest(
-                    request_id, seq_id, dest_index)
+                request_id, seq_id, dest_index)
             running_indices.append(dest_index)
 
         self._clean_up_first_bs_blocks(batch_size, running_indices)
