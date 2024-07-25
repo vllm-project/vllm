@@ -100,6 +100,7 @@ class MorflotLLM:
                                         not in request_stats):
                     request_stats[output.request_id] = output_len
                     result = output.outputs[0].text
+                    steps_before_yield = 0
                 else:
                     result = output.outputs[0].text[
                         request_stats[output.request_id]:output_len]
