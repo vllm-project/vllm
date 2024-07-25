@@ -135,7 +135,7 @@ class LibEntry(triton.KernelInterface):
             elif isinstance(grid, list):
                 grid = grid + [1, 1]
             kernel[grid[0:3]](*k_args)
-        # maintaining the same return  type as the JITFunction.run
+        # maintaining the same return type as the JITFunction.run
         return kernel
 
 
