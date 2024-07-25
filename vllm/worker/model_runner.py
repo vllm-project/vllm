@@ -545,6 +545,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.flashinfer_prefill_workspace_buffer = None
         self.flashinfer_prefill_wrapper = None
 
+        self.seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
 

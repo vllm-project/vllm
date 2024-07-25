@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
 
 import torch
 from transformers import PretrainedConfig
+import vllm.envs as envs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -811,6 +812,7 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
+        self._use_delta = envs.VLLM_USE_DELTA_INPUT
         self._verify_args()
 
     def _verify_args(self) -> None:

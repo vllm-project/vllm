@@ -1,8 +1,8 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.utils import get_ip, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 

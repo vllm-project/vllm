@@ -621,6 +621,22 @@ class SequenceGroup:
                 f"num_seqs={len(self.seqs_dict)})")
 
 
+class SequenceGroupMetadataDecode:
+    """Delta sequence group metadata."""
+
+    def __init__(
+        self,
+        request_id: str,
+        block_tables: Dict[int, List[int]],
+        do_sample: bool = True,
+        token_chunk_size: Optional[int] = None,
+    ) -> None:
+        self.request_id = request_id
+        self.block_tables = block_tables
+        self.token_chunk_size = token_chunk_size
+        self.do_sample = do_sample
+
+
 class SequenceGroupMetadata:
     """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
@@ -718,6 +734,13 @@ class SequenceGroupMetadata:
         """Return the number of tokens to be processed (chunk size)."""
         assert self._token_chunk_size is not None
         return self._token_chunk_size
+
+    def apply_delta(
+            self, sequence_group_metadata_decode: SequenceGroupMetadataDecode):
+        self.request_id = sequence_group_metadata_decode.request_id
+        self.block_tables = sequence_group_metadata_decode.block_tables
+        self._token_chunk_size = sequence_group_metadata_decode.token_chunk_size
+        self.do_sample = sequence_group_metadata_decode.do_sample
 
 
 class SequenceOutput:
