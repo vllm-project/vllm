@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
-                                      LORA_WARMUP_RANK, GPUModelRunnerBase,
+                                      GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata)
 
@@ -28,7 +28,6 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 from vllm.inputs import INPUT_REGISTRY
-from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.models.interfaces import supports_vision
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
@@ -59,8 +58,6 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
             "input_positions": self.input_positions,
             "encoder_input_tokens": self.encoder_input_tokens,
             "encoder_input_positions": self.encoder_input_positions,
-            "lora_requests": self.lora_requests,
-            "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
             "prompt_adapter_mapping": self.prompt_adapter_mapping,
             "prompt_adapter_requests": self.prompt_adapter_requests,
@@ -109,7 +106,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                          device_config,
                          cache_config,
                          load_config,
-                         lora_config=lora_config,
+                         lora_config=None,
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
                          prompt_adapter_config=prompt_adapter_config,
@@ -126,12 +123,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
-
-        # if self.lora_config:
-        #     assert model_input.lora_requests is not None
-        #     assert model_input.lora_mapping is not None
-        #     self.set_active_loras(model_input.lora_requests,
-        #                           model_input.lora_mapping)
 
         if self.prompt_adapter_config:
             assert model_input.prompt_adapter_requests is not None
@@ -260,29 +251,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
-        # This represents the maximum number of different requests
-        # that will have unique loras, an therefore the max amount of memory
-        # consumption create dummy lora request copies from the lora request
-        # passed in, which contains a lora from the lora warmup path.
-        dummy_lora_requests: List[LoRARequest] = []
-        dummy_lora_requests_per_seq: List[LoRARequest] = []
-        if self.lora_config:
-            assert self.lora_manager is not None
-            with self.lora_manager.dummy_lora_cache():
-                for idx in range(self.lora_config.max_loras):
-                    lora_id = idx + 1
-                    dummy_lora_request = LoRARequest(
-                        lora_name=f"warmup_{lora_id}",
-                        lora_int_id=lora_id,
-                        lora_local_path="/not/a/real/path",
-                    )
-                    self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                     rank=LORA_WARMUP_RANK)
-                    dummy_lora_requests.append(dummy_lora_request)
-                dummy_lora_requests_per_seq = [
-                    dummy_lora_requests[idx % len(dummy_lora_requests)]
-                    for idx in range(max_num_seqs)
-                ]
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
@@ -329,8 +297,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                lora_request=dummy_lora_requests_per_seq[group_id]
-                if dummy_lora_requests_per_seq else None,
                 encoder_seq_data=seq_data,
                 cross_block_table=None,
                 multi_modal_data=dummy_multi_modal_data,
@@ -373,9 +339,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-        lora_index_mapping: List[int] = []
-        lora_prompt_mapping: List[int] = []
-        lora_requests: Set[LoRARequest] = set()
         prompt_adapter_index_mapping: List[int] = []
         prompt_adapter_prompt_mapping: List[int] = []
         prompt_adapter_requests: Set[PromptAdapterRequest] = set()
@@ -510,7 +473,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             query_lens.append(query_len)
             input_tokens.extend(tokens)
             input_positions.extend(list(range(context_len, seq_len)))
-            lora_id = seq_group_metadata.lora_int_id
             prompt_adapter_id = seq_group_metadata.prompt_adapter_id
 
             if is_prompt:
@@ -520,21 +482,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 decode_only = False
                 prefill_seq_lens.append(seq_len)
             else:
-                # assert is_encoder_seq or query_len == 1, (
-                #     "seq_len: {}, context_len: {}, query_len: {}".format(
-                #         seq_len, context_len, query_len))
                 num_decode_tokens += query_len
                 decode_seq_lens.append(sliding_seq_len)
-
-            if lora_id > 0:
-                lora_requests.add(seq_group_metadata.lora_request)
-
-            lora_index_mapping += [lora_id] * query_len
-            lora_prompt_mapping.extend(
-                [lora_id] *
-                (query_len if seq_group_metadata.sampling_params and
-                 seq_group_metadata.sampling_params.prompt_logprobs is not None
-                 else 1))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
