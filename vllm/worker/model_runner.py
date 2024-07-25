@@ -1033,8 +1033,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                                dtype=torch.int32,
                                                device=self.device)
 
-        # Synchronize to prevent possible data race on block_tables
-        torch.cuda.current_stream().synchronize()
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
