@@ -37,30 +37,6 @@ common_container_settings: &common_container_settings
 
 steps:
   - block: ":rocket: Ready for comparing vllm against alternatives? This will take 4 hours."
-  - label: "A100 trt benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
-                <<: *common_container_settings
-
-  - label: "A100 lmdeploy benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: openmmlab/lmdeploy:v0.5.0
-                <<: *common_container_settings
-  
 
   - label: "A100 vllm benchmark"
     priority: 100
@@ -74,7 +50,7 @@ steps:
               - image: vllm/vllm-openai:latest 
                 <<: *common_container_settings
 
-  - label: "A100 tgi benchmark"
+  - label: "A100 sglang benchmark"
     priority: 100
     agents:
       queue: A100
@@ -83,7 +59,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: ghcr.io/huggingface/text-generation-inference:2.1 
+              - image: lmsysorg/sglang:latest 
                 <<: *common_container_settings
         
   - wait
