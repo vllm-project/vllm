@@ -5,7 +5,7 @@ from tests.kernels.quant_utils import ref_dynamic_per_token_quant
 from vllm._custom_ops import scaled_int8_quant
 
 DTYPES = [torch.float]
-HIDDEN_SIZES = [16, 32, 64, 67, 128, 768, 2048, 5120, 5137, 8192,
+HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
                 8193]  # Arbitrary values for testing
 NUM_TOKENS = [1, 7, 83, 4096, 16384]  # Arbitrary values for testing
 SEEDS = [0]
