@@ -1912,44 +1912,30 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   return exec_config_t{0, {-1, -1, -1}};
 }
 
-// #define GPTQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-  //                                                                             \
-  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-  //                                                                             \
-  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-  //                                                                             \
-  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-  //                                                                             \
-  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
-
-  #define GPTQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)            \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
-                                                                             \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS) \
-                                                                             \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS) \
-                                                                             \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS) \
-                                                                             \
+  #define GPTQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+                                                                              \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+                                                                              \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+                                                                              \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+                                                                              \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
 
   #define AWQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
@@ -2109,19 +2095,19 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* C_tmp,
     GPTQ_CALL_IF(4, 8, 8, 256)
     GPTQ_CALL_IF(4, 8, 4, 128)
     GPTQ_CALL_IF(4, 4, 8, 128)
-    // GPTQ_CALL_IF(8, 16, 4, 256)
-    // GPTQ_CALL_IF(8, 8, 8, 256)
-    // GPTQ_CALL_IF(8, 8, 4, 128)
-    // GPTQ_CALL_IF(8, 4, 8, 128)
+    GPTQ_CALL_IF(8, 16, 4, 256)
+    GPTQ_CALL_IF(8, 8, 8, 256)
+    GPTQ_CALL_IF(8, 8, 4, 128)
+    GPTQ_CALL_IF(8, 4, 8, 128)
 
-    // AWQ_CALL_IF(4, 16, 4, 256)
-    // AWQ_CALL_IF(4, 8, 8, 256)
-    // AWQ_CALL_IF(4, 8, 4, 128)
-    // AWQ_CALL_IF(4, 4, 8, 128)
-    // AWQ_CALL_IF(8, 16, 4, 256)
-    // AWQ_CALL_IF(8, 8, 8, 256)
-    // AWQ_CALL_IF(8, 8, 4, 128)
-    // AWQ_CALL_IF(8, 4, 8, 128)
+    AWQ_CALL_IF(4, 16, 4, 256)
+    AWQ_CALL_IF(4, 8, 8, 256)
+    AWQ_CALL_IF(4, 8, 4, 128)
+    AWQ_CALL_IF(4, 4, 8, 128)
+    AWQ_CALL_IF(8, 16, 4, 256)
+    AWQ_CALL_IF(8, 8, 8, 256)
+    AWQ_CALL_IF(8, 8, 4, 128)
+    AWQ_CALL_IF(8, 4, 8, 128)
     else {
       TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
                   ", ", prob_k, "]", ", has_act_order = ", has_act_order,
@@ -2197,9 +2183,14 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
 
   // Alloc C tmp buffer that is going to be used for the global reduce
   int reduce_max_m = marlin::determine_reduce_max_m(size_m, marlin::max_par);
+  int reduce_n = size_n;
   auto options_fp32 =
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
-  torch::Tensor c_tmp = torch::empty({reduce_max_m, size_n}, options_fp32);
+  if (!use_fp32_reduce) {
+    reduce_max_m = 0;
+    reduce_n = 0;
+  }
+  torch::Tensor c_tmp = torch::empty({reduce_max_m, reduce_n}, options_fp32);
 
   // thread_k: `k` size of a thread_tile in `weights` (can usually be left as
   // auto -1)
