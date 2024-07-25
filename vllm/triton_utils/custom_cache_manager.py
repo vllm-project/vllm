@@ -1,7 +1,8 @@
 import os
 
 from vllm.logger import init_logger
-from vllm.triton_utils import maybe_import_triton
+
+from .importing import maybe_import_triton
 
 logger = init_logger(__name__)
 
@@ -20,7 +21,10 @@ def maybe_set_triton_cache_manager() -> None:
 
 if triton.__version__ != "0.0.0":
 
-    class CustomCacheManager(triton.runtime.cache.FileCacheManager):
+    from triton.runtime.cache import (FileCacheManager, default_cache_dir,
+                                      default_dump_dir, default_override_dir)
+
+    class CustomCacheManager(FileCacheManager):
         """Re-implements Triton's cache manager, ensuring that a
         unique cache directory is created for each process. This is
         needed to avoid collisions when running with tp>1 and
@@ -35,18 +39,17 @@ if triton.__version__ != "0.0.0":
             self.key = key
             self.lock_path = None
             if dump:
-                self.cache_dir = triton.default_dump_dir()
+                self.cache_dir = default_dump_dir()
                 self.cache_dir = os.path.join(self.cache_dir, self.key)
                 self.lock_path = os.path.join(self.cache_dir, "lock")
                 os.makedirs(self.cache_dir, exist_ok=True)
             elif override:
-                self.cache_dir = triton.default_override_dir()
+                self.cache_dir = default_override_dir()
                 self.cache_dir = os.path.join(self.cache_dir, self.key)
             else:
                 # create cache directory if it doesn't exist
-                self.cache_dir = os.getenv(
-                    "TRITON_CACHE_DIR",
-                    "").strip() or triton.default_cache_dir()
+                self.cache_dir = os.getenv("TRITON_CACHE_DIR",
+                                           "").strip() or default_cache_dir()
                 if self.cache_dir:
                     self.cache_dir = f"{self.cache_dir}_{os.getpid()}"
                     self.cache_dir = os.path.join(self.cache_dir, self.key)
