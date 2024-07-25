@@ -305,27 +305,23 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             return model_input
 
         for seq_group_metadata in seq_group_metadata_list:
-            seq_ids = list(seq_group_metadata.seq_data.keys())
             is_prompt = seq_group_metadata.is_prompt
 
-            seq_data = seq_group_metadata.encoder_seq_data
+            encoder_seq_data = seq_group_metadata.encoder_seq_data
             cross_block_table = seq_group_metadata.cross_block_table
             if is_prompt:
-                context_len = seq_data.get_num_computed_tokens()
+                context_len = encoder_seq_data.get_num_computed_tokens()
             else:
-                # get_num_computed_tokens is incorrect for spec decoding.
-                # So, we should have a special logic here.
-                # TODO(sang): Fix it.
-                context_len = seq_data.get_len()
+                context_len = encoder_seq_data.get_len()
 
-            seq_len = seq_data.get_len()
+            seq_len = encoder_seq_data.get_len()
 
             if is_prompt:
-                tokens = seq_data.get_token_ids()[context_len:seq_len]
+                tokens = encoder_seq_data.get_token_ids()[context_len:seq_len]
             else:
                 # Optimization. get_token_ids requires the entire copy of
                 # tokens.
-                tokens = [seq_data.get_last_token_id()]
+                tokens = [encoder_seq_data.get_last_token_id()]
 
             # These are seq_len/context_len capped to the sliding window.
             # They are passed to decode kernel.
@@ -359,7 +355,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             prompt_adapter_id = seq_group_metadata.prompt_adapter_id
 
             if is_prompt:
-                assert len(seq_ids) == 1
                 num_prefills += 1
                 num_prefill_tokens += len(tokens)
                 prefill_seq_lens.append(seq_len)
@@ -438,14 +433,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                                            dtype=torch.long,
                                            device=self.device)
 
-        # Set encoder-oriented attention metadata fields
-        attn_metadata.num_encoder_tokens = sum(seq_lens)
-        attn_metadata.encoder_seq_lens = seq_lens
-        attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
-        attn_metadata.max_encoder_seq_len = max_seq_len
-        attn_metadata.cross_slot_mapping = slot_mapping_tensor
-        attn_metadata.cross_block_tables = block_tables
-
         if seq_group_metadata.is_prompt:
 
             input_tokens_tensor = torch.tensor(input_tokens,
@@ -464,6 +451,14 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                                                   dtype=torch.long,
                                                   device=self.device)
 
+        # Set encoder-oriented attention metadata fields
+        attn_metadata.num_encoder_tokens = sum(seq_lens)
+        attn_metadata.encoder_seq_lens = seq_lens
+        attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
+        attn_metadata.max_encoder_seq_len = max_seq_len
+        attn_metadata.cross_slot_mapping = slot_mapping_tensor
+        attn_metadata.cross_block_tables = block_tables
+
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
         # Frozen dataclass fields cannot be modified, so use
@@ -481,7 +476,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         if logits_soft_cap is not None and self.attn_backend.get_name(
         ) != "flashinfer":
-            raise ValueError("Models with logits_soft_cap (i.e., Gemma-2)"
+            raise ValueError("Models with logits_soft_cap"
                              " require FlashInfer backend, however vLLM"
                              " currently only supports xFormers backend"
                              " for encoder/decoder models.")
