@@ -16,9 +16,8 @@ _GENERATION_MODELS = {
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
-    "ChameleonForCausalLM":
-    ("chameleon", "ChameleonForConditionalGeneration"
-     ),  #TODO(ywang96): fix model name when huggingface fixes it
+    "ChameleonForConditionalGeneration":
+    ("chameleon", "ChameleonForConditionalGeneration"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -52,6 +51,7 @@ _GENERATION_MODELS = {
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
+    "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
