@@ -100,7 +100,7 @@ class MorflotLLM:
                                         not in request_stats):
                     request_stats[output.request_id] = output_len
                     result = output.outputs[0].text
-                    steps_before_yield = 0
+                    steps_before_yield = envs.VLLM_ENGINE_STEPS_FIRST_TOKEN
                 else:
                     result = output.outputs[0].text[
                         request_stats[output.request_id]:output_len]
@@ -114,7 +114,7 @@ class MorflotLLM:
                     }
                     del request_stats[output.request_id]
                     del self.result_queues[output.request_id]
-                    steps_before_yield = 0
+                    steps_before_yield = envs.VLLM_ENGINE_STEPS_COMPLETED_REQUEST
                 else:
                     request_stats[output.request_id] = output_len
                 result_queue.put_nowait((output.request_id, result, stats))

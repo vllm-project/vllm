@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ENGINE_STEPS_BEFORE_YIELD: int = 10
+    VLLM_ENGINE_STEPS_FIRST_TOKEN: int = 1
+    VLLM_ENGINE_STEPS_COMPLETED_REQUEST: int = 1
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -225,6 +227,16 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # the sync server mode
     "VLLM_ENGINE_STEPS_BEFORE_YIELD":
     lambda: int(os.getenv("VLLM_ENGINE_STEPS_BEFORE_YIELD", "10")),
+
+    # Number of steps before yielding in the sync engine for
+    # the sync server mode
+    "VLLM_ENGINE_STEPS_FIRST_TOKEN":
+    lambda: int(os.getenv("VLLM_ENGINE_STEPS_FIRST_TOKEN", "1")),
+
+    # Number of steps before yielding in the sync engine for
+    # the sync server mode
+    "VLLM_ENGINE_STEPS_COMPLETED_REQUEST":
+    lambda: int(os.getenv("VLLM_ENGINE_STEPS_COMPLETED_REQUEST", "1")),
 }
 
 # end-env-vars-definition
