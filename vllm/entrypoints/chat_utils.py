@@ -100,7 +100,9 @@ def _image_token_str(model_config: ModelConfig,
     if model_type == "phi3_v":
         # Workaround since this token is not defined in the tokenizer
         return "<|image_1|>"
-    if model_type in ("blip-2", "chatglm", "fuyu", "minicpmv", "paligemma"):
+    if model_type == "minicpmv":
+        return "(<image>./</image>)"
+    if model_type in ("blip-2", "chatglm", "fuyu", "paligemma"):
         # These models do not use image tokens in the prompt
         return None
     if model_type.startswith("llava"):
