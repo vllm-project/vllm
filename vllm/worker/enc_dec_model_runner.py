@@ -13,9 +13,8 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
                                       LORA_WARMUP_RANK, GPUModelRunnerBase,
-                                      ModelInputForGPUWithSamplingMetadata,
                                       ModelInputForGPUBuilder,
-                                      )
+                                      ModelInputForGPUWithSamplingMetadata)
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -88,8 +87,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
 class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
     _model_input_cls: Type[EncoderDecoderModelInput] = (
         EncoderDecoderModelInput)
-    _builder_cls: Type[ModelInputForGPUBuilder] = (
-        ModelInputForGPUBuilder)
+    _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
 
     def __init__(
         self,
