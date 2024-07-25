@@ -100,7 +100,8 @@ class MorflotLLM:
                                         not in request_stats):
                     request_stats[output.request_id] = output_len
                     result = output.outputs[0].text
-                    steps_before_yield = envs.VLLM_ENGINE_STEPS_FIRST_TOKEN
+                    steps_before_yield = min(
+                        steps_before_yield, envs.VLLM_ENGINE_STEPS_FIRST_TOKEN)
                 else:
                     result = output.outputs[0].text[
                         request_stats[output.request_id]:output_len]
@@ -114,14 +115,16 @@ class MorflotLLM:
                     }
                     del request_stats[output.request_id]
                     del self.result_queues[output.request_id]
-                    steps_before_yield = envs.VLLM_ENGINE_STEPS_COMPLETED_REQUEST
+                    steps_before_yield = min(
+                        steps_before_yield,
+                        envs.VLLM_ENGINE_STEPS_COMPLETED_REQUEST)
                 else:
                     request_stats[output.request_id] = output_len
                 result_queue.put_nowait((output.request_id, result, stats))
             steps_before_yield -= 1
             if steps_before_yield <= 0:
                 logger.info(
-                   f"Engine yield. Requests: {self.llm_engine.get_num_unfinished_requests()}"
+                    f"Engine yield. Requests: {self.llm_engine.get_num_unfinished_requests()}"
                 )
                 steps_before_yield = envs.VLLM_ENGINE_STEPS_BEFORE_YIELD
                 await asyncio.sleep(0)
