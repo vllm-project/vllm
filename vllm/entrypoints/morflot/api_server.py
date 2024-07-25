@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from vllm import MorflotLLM as LLM
 from vllm import SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -25,22 +27,15 @@ class BackgroundRunner:
 
     def __init__(self):
         self.value = 0
+        self.engine_args = None
+    
+    def set_engine_args(self, engine_args):
+        self.engine_args = engine_args
 
     async def run_main(self):
         self.input_queue = asyncio.Queue()
         self.result_queue = asyncio.Queue()
-        self.llm = LLM(
-            '/models/llama-2-7b-chat-hf',
-            tensor_parallel_size=4,
-            #quantization="serenity",
-            #dtype='float16',
-            #enforce_eager=True,
-            #kv_cache_dtype="fp8",
-            #quantization="fp8",
-            #quantized_weights_path="/quantized/quark/llama.safetensors",
-            #worker_use_ray=True,
-            #trust_remote_code=True,
-            distributed_executor_backend="mp",
+        self.llm = LLM(engine_args=self.engine_args,
             input_queue=self.input_queue,
         )
 
@@ -340,7 +335,6 @@ async def completions(request: CompletionRequest, raw_request: Request):
     res.usage.total_tokens = res.usage.completion_tokens + res.usage.prompt_tokens
     return res
 
-
 @app.get("/flush")
 async def flush():
     from rpdTracerControl import rpdTracerControl
@@ -351,7 +345,14 @@ async def flush():
     return JSONResponse(content=ver)
 
 
+def parse_args():
+    parser = make_arg_parser()
+    return parser.parse_args()
+
 if __name__ == "__main__":
+    args = parse_args()
+    engine_args = EngineArgs.from_cli_args(args)
+    runner.set_engine_args(engine_args)
     #from rpdTracerControl import rpdTracerControl
     #rpd = rpdTracerControl()
     #rpd.setPythonTrace(True)
