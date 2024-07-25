@@ -2,10 +2,11 @@ import math
 from typing import Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.model_executor.layers.ops.rand import seeded_uniform
+from vllm.triton_utils import maybe_import_triton
+
+triton, tl = maybe_import_triton()
 
 _EPS = 1e-6
 
@@ -326,16 +327,25 @@ def _uniform_to_exponential(uniform_noise):
 
 @triton.jit
 def _sample_triton(
-        sample_indices_ptr: torch.Tensor, output_ptr: torch.Tensor,
+        sample_indices_ptr: torch.Tensor,
+        output_ptr: torch.Tensor,
         output_logprobs_ptr: torch.Tensor,
-        output_modified_probs_ptr: torch.Tensor, probs_ptr: torch.Tensor,
-        logprobs_ptr: torch.Tensor, seeds_ptr: torch.Tensor,
-        uniform_noise_ptr: torch.Tensor, output_row_stride: int,
-        probs_row_stride: int, uniform_noise_row_stride: int,
-        uniform_noise_best_stride: int, n_samples: int, n_cols: int,
-        n_best: int, block_size: tl.constexpr,
-        modify_greedy_probs: tl.constexpr, save_logprobs: tl.constexpr,
-        save_modified_probs: tl.constexpr):
+        output_modified_probs_ptr: torch.Tensor,
+        probs_ptr: torch.Tensor,
+        logprobs_ptr: torch.Tensor,
+        seeds_ptr: torch.Tensor,
+        uniform_noise_ptr: torch.Tensor,
+        output_row_stride: int,
+        probs_row_stride: int,
+        uniform_noise_row_stride: int,
+        uniform_noise_best_stride: int,
+        n_samples: int,
+        n_cols: int,
+        n_best: int,
+        block_size: tl.constexpr,  # type: ignore
+        modify_greedy_probs: tl.constexpr,  # type: ignore
+        save_logprobs: tl.constexpr,  # type: ignore
+        save_modified_probs: tl.constexpr):  # type: ignore
     # The rows are independent, so we parallelize across those
     sample_idx = tl.program_id(0)
     best_idx = tl.program_id(1)

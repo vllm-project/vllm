@@ -5,53 +5,54 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.triton_utils import maybe_import_triton
+
+triton, tl = maybe_import_triton()
 
 logger = init_logger(__name__)
 
 
 @triton.jit
 def fused_moe_kernel(
-    # Pointers to matrices
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    a_scale_ptr,
-    b_scale_ptr,
-    topk_weights_ptr,
-    sorted_token_ids_ptr,
-    expert_ids_ptr,
-    num_tokens_post_padded_ptr,
-    # Matrix dimensions
-    N,
-    K,
-    EM,
-    num_valid_tokens,
-    # The stride variables represent how much to increase the ptr by when
-    # moving by 1 element in a particular dimension. E.g. `stride_am` is
-    # how much to increase `a_ptr` by to get the element one row down
-    # (A has M rows).
-    stride_am,
-    stride_ak,
-    stride_be,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    # Meta-parameters
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    MUL_ROUTED_WEIGHT: tl.constexpr,
-    top_k: tl.constexpr,
-    compute_type: tl.constexpr,
-    use_fp8: tl.constexpr,
+        # Pointers to matrices
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        a_scale_ptr,
+        b_scale_ptr,
+        topk_weights_ptr,
+        sorted_token_ids_ptr,
+        expert_ids_ptr,
+        num_tokens_post_padded_ptr,
+        # Matrix dimensions
+        N,
+        K,
+        EM,
+        num_valid_tokens,
+        # The stride variables represent how much to increase the ptr by when
+        # moving by 1 element in a particular dimension. E.g. `stride_am` is
+        # how much to increase `a_ptr` by to get the element one row down
+        # (A has M rows).
+        stride_am,
+        stride_ak,
+        stride_be,
+        stride_bk,
+        stride_bn,
+        stride_cm,
+        stride_cn,
+        # Meta-parameters
+        BLOCK_SIZE_M: tl.constexpr,  # type: ignore
+        BLOCK_SIZE_N: tl.constexpr,  # type: ignore
+        BLOCK_SIZE_K: tl.constexpr,  # type: ignore
+        GROUP_SIZE_M: tl.constexpr,  # type: ignore
+        MUL_ROUTED_WEIGHT: tl.constexpr,  # type: ignore
+        top_k: tl.constexpr,  # type: ignore
+        compute_type: tl.constexpr,  # type: ignore
+        use_fp8: tl.constexpr,  # type: ignore
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -220,16 +221,22 @@ def moe_align_block_size(
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
-def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-                            A_scale: Optional[torch.Tensor],
-                            B_scale: Optional[torch.Tensor],
-                            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                            sorted_token_ids: torch.Tensor,
-                            expert_ids: torch.Tensor,
-                            num_tokens_post_padded: torch.Tensor,
-                            mul_routed_weight: bool, top_k: int,
-                            config: Dict[str, Any], compute_type: tl.dtype,
-                            use_fp8: bool) -> None:
+def invoke_fused_moe_kernel(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        B_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        mul_routed_weight: bool,
+        top_k: int,
+        config: Dict[str, Any],
+        compute_type: tl.dtype,  # type: ignore
+        use_fp8: bool) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
