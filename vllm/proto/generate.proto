@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package generate.v1;
+
+service TextGenerationService {
+    rpc Generate (GenerateRequest) returns (GenerateResponse); // will need a streaming version later- unary for POC
+
+    rpc Health (HealthRequest) returns (HealthResponse);
+}
+
+
+message GenerateRequest {
+    PromptInputs prompt_inputs = 1;
+    // SamplingParams sampling_params = 2;
+    string request_id = 3;
+}
+
+message PromptInputs {
+    string prompt = 1;
+}
+
+message GenerateResponse {
+    repeated CompletionOutput outputs = 1; // 1 per generation from a single prompt
+}
+
+message CompletionOutput {
+    uint64 index = 1;
+    repeated uint64 token_ids = 2;
+}
+
