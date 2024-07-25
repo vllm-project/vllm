@@ -38,18 +38,6 @@ common_container_settings: &common_container_settings
 steps:
   - block: ":rocket: Ready for comparing vllm against alternatives? This will take 4 hours."
 
-  - label: "A100 vllm benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: vllm/vllm-openai:latest 
-                <<: *common_container_settings
-
   - label: "A100 sglang benchmark"
     priority: 100
     agents:
@@ -60,6 +48,20 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: lmsysorg/sglang:latest 
+                <<: *common_container_settings
+
+  - wait
+
+  - label: "A100 vllm benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: vllm/vllm-openai:latest 
                 <<: *common_container_settings
         
   - wait
