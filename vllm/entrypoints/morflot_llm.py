@@ -114,6 +114,7 @@ class MorflotLLM:
                     }
                     del request_stats[output.request_id]
                     del self.result_queues[output.request_id]
+                    steps_before_yield = 0
                 else:
                     request_stats[output.request_id] = output_len
                 result_queue.put_nowait((output.request_id, result, stats))
