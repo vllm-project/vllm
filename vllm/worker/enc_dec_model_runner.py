@@ -16,8 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.model_runner import (_PAD_SLOT_ID,
-                                      GPUModelRunnerBase,
+from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -295,7 +294,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         context_lens: List[int] = []
         query_lens: List[int] = []
         block_tables: List[List[int]] = []
-        decode_only = True
         num_prefills = 0
         num_prefill_tokens = 0
         num_decode_tokens = 0
@@ -309,8 +307,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             is_prompt = seq_group_metadata.is_prompt
-
-            computed_block_nums = None
 
             seq_data = seq_group_metadata.encoder_seq_data
             cross_block_table = seq_group_metadata.cross_block_table
@@ -366,7 +362,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 assert len(seq_ids) == 1
                 num_prefills += 1
                 num_prefill_tokens += len(tokens)
-                decode_only = False
                 prefill_seq_lens.append(seq_len)
             else:
                 num_decode_tokens += query_len
