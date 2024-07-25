@@ -16,7 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
+from vllm.worker.model_runner import (_PAD_SLOT_ID,
                                       GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata)
@@ -116,14 +116,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             self.set_active_prompt_adapters(
                 model_input.prompt_adapter_requests,
                 model_input.prompt_adapter_mapping)
-
-        # Currently cuda graph is not supported for encoder/decoder models
-        assert model_input.attn_metadata is not None
-        prefill_meta = model_input.attn_metadata.prefill_metadata
-        decode_meta = model_input.attn_metadata.decode_metadata
-        if prefill_meta is None and decode_meta.use_cuda_graph:
-            raise NotImplementedError("CUDAGraph is currently not supported "
-                                      "for encoder/decoder models.")
 
         model_executable = self.model
 
@@ -289,6 +281,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         * Updated model inputs data structure
         """
+
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
@@ -414,21 +407,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_seq_len = (max(prefill_seq_lens, default=0)
                        if is_prompt else max(decode_seq_lens, default=0))
-
-        # If cuda graph can be used, pad tensors accordingly.
-        # See `capture_model` API for more details.
-        # vLLM uses cuda graph only for decoding requests.
-        use_captured_graph = (decode_only
-                              and not self.model_config.enforce_eager
-                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-                              and max_seq_len <= self.max_seq_len_to_capture)
-        if use_captured_graph:
-            raise NotImplementedError("CUDAGraph is currently not supported "
-                                      "for encoder/decoder models.")
 
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
@@ -445,12 +426,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
                                        device=self.device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=self.device)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=self.device)
+
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=self.device)
@@ -459,10 +435,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
 
         attn_metadata = model_input.attn_metadata
         assert attn_metadata is not None
