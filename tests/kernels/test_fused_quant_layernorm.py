@@ -153,4 +153,4 @@ def test_rms_norm(
         assert torch.allclose(ref_out.to(dtype=torch.float32),
                               ops_out.to(dtype=torch.float32))
     if add_residual:
-        assert torch.allclose(ref_residual, ops_residual, atol=1e-2, rtol=1e-2)
+        assert torch.allclose(ref_residual, ops_residual)
