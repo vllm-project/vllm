@@ -75,7 +75,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-            - image: vllm/vllm-openai:v0.5.0.post1
+            - image: vllm/vllm-openai:v0.5.2
               command:
               - bash .buildkite/nightly-benchmarks/scripts/nightly-annotate.sh
               resources:
