@@ -16,17 +16,6 @@ from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata)
 
-try:
-    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
-except ImportError:
-    BatchDecodeWithPagedKVCacheWrapper = None
-    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
-    BatchPrefillWithPagedKVCacheWrapper = None
-    FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
-
 from vllm.inputs import INPUT_REGISTRY
 from vllm.model_executor import SamplingMetadata
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -128,10 +117,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             self.set_active_prompt_adapters(
                 model_input.prompt_adapter_requests,
                 model_input.prompt_adapter_mapping)
-
-        if self.attn_backend.get_name() == "flashinfer":
-            raise NotImplementedError("FlashInfer is currently not supported "
-                                      "for encoder/decoder models.")
 
         # Currently cuda graph is not supported for encoder/decoder models
         assert model_input.attn_metadata is not None
@@ -391,14 +376,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     "Prefix caching is not supported with sliding window"
                 sliding_context_len = context_len
 
-                if self.attn_backend.get_name() == "flash-attn":
-                    # NOTE(woosuk): For flash-attn, the block table should
-                    # include the entries for the incoming prefill tokens.
-                    # TODO(woosuk): This is a temporary fix. We should
-                    # provide a unified interface for different backends.
-                    block_table = cross_block_table
-                else:
-                    block_table = computed_block_nums
+                block_table = computed_block_nums
+                
             elif (self.scheduler_config.chunked_prefill_enabled
                   or not is_prompt):
                 if cross_block_table is not None:
@@ -585,6 +564,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         logits_soft_cap = getattr(self.model_config.hf_config,
                                   'attn_logit_softcapping', None)
+        
         if logits_soft_cap is not None and self.attn_backend.get_name(
         ) != "flashinfer":
             raise ValueError("Models with logits_soft_cap (i.e., Gemma-2)"
