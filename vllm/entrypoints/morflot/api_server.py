@@ -357,4 +357,4 @@ if __name__ == "__main__":
     #rpd = rpdTracerControl()
     #rpd.setPythonTrace(True)
     #rpd.start()
-    uvicorn.run(app, port=8000)
+    uvicorn.run(app, port=args.port, host=args.host)
