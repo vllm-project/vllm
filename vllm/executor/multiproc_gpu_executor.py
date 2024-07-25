@@ -44,11 +44,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
-        # Set OMP_NUM_THREADS to 1 if it is not set explicitly, avoids CPU
-        # contention amongst the shards
-        if "OMP_NUM_THREADS" not in os.environ:
-            os.environ["OMP_NUM_THREADS"] = "1"
-
         # workaround for https://github.com/vllm-project/vllm/issues/6103
         if world_size > 1:
             maybe_set_triton_cache_manager()
