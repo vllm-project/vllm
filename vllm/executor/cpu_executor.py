@@ -38,6 +38,21 @@ class CPUExecutor(ExecutorBase):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
+        # Intel OpenMP setting
+        ld_prealod_str = os.getenv("LD_PRELOAD", "")
+        if "libiomp5.so" in ld_prealod_str:
+            # The time(milliseconds) that a thread should wait after
+            # completing the execution of a parallel region, before sleeping.
+            os.environ['KMP_BLOCKTIME'] = "1"
+            # dump settings on start up
+            os.environ['KMP_SETTINGS'] = "1"
+            # Prevents the CPU to run into low performance state
+            os.environ['KMP_TPAUSE'] = "0"
+            # Provides fine granularity parallelism
+            os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+
         self.model_config = _verify_and_get_model_config(self.model_config)
         self.cache_config = _verify_and_get_cache_config(self.cache_config)
         self.scheduler_config = _verify_and_get_scheduler_config(
