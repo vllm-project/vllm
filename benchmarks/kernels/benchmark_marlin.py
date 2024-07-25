@@ -7,7 +7,7 @@ from benchmark_shapes import WEIGHT_SHAPES
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_NUM_BITS, GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
+    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_SUPPORTED_NUM_BITS)
