@@ -157,20 +157,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             sampling_metadata=model_input.sampling_metadata,
         )
 
-        if self.return_hidden_states:
-            # we only need to pass hidden states of most recent token
-            assert model_input.sampling_metadata is not None
-            indices = model_input.sampling_metadata.selected_token_indices
-            if model_input.is_prompt:
-                hidden_states = hidden_or_intermediate_states.index_select(
-                    0, indices)
-            # elif decode_meta.use_cuda_graph:
-            #     hidden_states = hidden_or_intermediate_states[:len(indices)]
-            else:
-                hidden_states = hidden_or_intermediate_states
-
-            output.hidden_states = hidden_states
-
         return [output]
 
     def make_model_input_from_broadcasted_tensor_dict(
@@ -189,15 +175,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
 
-        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+        Since chunked prefill is not supported for encoder/decoder models,
+        `input_tokens` is assumed to be either entirely prefill tokens or
+        entirely decode tokens.
 
-        The result tensors and data structure also batches input in prefill
-        -> decode order. For example,
-
-        - input_tokens[:num_prefill_tokens] contains prefill tokens.
-        - input_tokens[num_prefill_tokens:] contains decode tokens.
-
-        If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
@@ -320,13 +301,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             is_prompt = seq_group_metadata.is_prompt
 
             computed_block_nums = None
-            if (self.scheduler_config is not None
-                    and self.scheduler_config.chunked_prefill_enabled
-                    and not (computed_block_nums is None
-                             or computed_block_nums == [])):
-                raise RuntimeError(
-                    "chunked prefill cannot be used with prefix caching "
-                    "now.")
 
             seq_data = seq_group_metadata.encoder_seq_data
             cross_block_table = seq_group_metadata.cross_block_table
@@ -361,26 +335,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             sliding_seq_len = seq_len
             sliding_context_len = context_len
 
-            # TODO(sang): Combine chunked prefill and prefix caching by
-            # only allowing multiple of block_size chunk size.
-            # NOTE: This only works for oooooooxxx style attention.
-            if prefix_cache_hit:
-                assert computed_block_nums is not None
-                context_len = len(computed_block_nums) * self.block_size
-                tokens = tokens[context_len:]
-
-                # need to think what to set it to when we have both sliding
-                # window and prefix caching...
-                assert self.sliding_window is None, \
-                    "Prefix caching is not supported with sliding window"
-                sliding_context_len = context_len
-
-                block_table = computed_block_nums
-
-            elif (self.scheduler_config.chunked_prefill_enabled
-                  or not is_prompt):
+            if not is_prompt:
                 if cross_block_table is not None:
-                    # chunked prefill or decode
+                    # Decode
                     block_table = cross_block_table
                     if curr_sliding_window_blocks is not None:
                         block_table = block_table[-curr_sliding_window_blocks:]
@@ -388,8 +345,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     # Only happens when memory profiling runs.
                     block_table = []
             else:
-                # Prefill without chunked prefill or memory profiling.
+                # Prefill without memory profiling.
                 block_table = []
+
             block_tables.append(block_table)
 
             seq_lens.append(sliding_seq_len)
