@@ -5,7 +5,6 @@ import pytest
 import torch
 from huggingface_hub import snapshot_download
 from PIL.Image import Image
-from transformers import GenerationConfig
 
 from vllm.model_executor.models.internvl import (IMG_CONTEXT, IMG_END,
                                                  IMG_START,
@@ -25,6 +24,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<image>\nWhat is the season?\n",
 })
 
+# we use snapshot_download to prevent conflicts between
+# dynamic_module and trust_remote_code for hf_runner
 models = [
     snapshot_download("OpenGVLab/InternVL2-1B"),
     snapshot_download("OpenGVLab/InternVL2-2B"),
@@ -52,24 +53,17 @@ class InternVLProcessor:
         return prompt
 
 
-# copied from https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py
+# adapted from https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py
 def generate(
     self,
     pixel_values: torch.FloatTensor,
     input_ids: torch.FloatTensor,
     attention_mask: Optional[torch.LongTensor] = None,
-    visual_features: Optional[torch.FloatTensor] = None,
-    generation_config: Optional[GenerationConfig] = None,
-    output_hidden_states: Optional[bool] = None,
-    return_dict: Optional[bool] = None,
     **generate_kwargs,
 ) -> torch.LongTensor:
     """Generate method for InternVL2 model without fixed use_cache."""
     assert self.img_context_token_id is not None
-    if visual_features is not None:
-        vit_embeds = visual_features
-    else:
-        vit_embeds = self.extract_feature(pixel_values)
+    vit_embeds = self.extract_feature(pixel_values)
     input_embeds = self.language_model.get_input_embeddings()(input_ids)
     B, N, C = input_embeds.shape
     input_embeds = input_embeds.reshape(B * N, C)
@@ -77,17 +71,13 @@ def generate(
     input_ids = input_ids.reshape(B * N)
     selected = (input_ids == self.img_context_token_id)
     assert selected.sum() != 0
-    input_embeds[selected] = vit_embeds.reshape(-1,
-                                                C).to(input_embeds.device)
+    input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
 
     input_embeds = input_embeds.reshape(B, N, C)
 
     outputs = self.language_model.generate(
         inputs_embeds=input_embeds,
         attention_mask=attention_mask,
-        generation_config=generation_config,
-        output_hidden_states=output_hidden_states,
-        return_dict=return_dict,
         **generate_kwargs,
     )
 
