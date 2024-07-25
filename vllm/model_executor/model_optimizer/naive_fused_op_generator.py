@@ -234,7 +234,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 call_str = call_str + sep + self.convert_getitem_arg(idx_arg)
                 sep = ", "
 
-            call_str = call_str + ")]);"
+            call_str = call_str + ")];"
 
         return call_str
 
