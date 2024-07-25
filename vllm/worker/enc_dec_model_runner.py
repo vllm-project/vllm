@@ -8,19 +8,18 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import get_pp_group
+from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
+from vllm.model_executor import SamplingMetadata
+from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
                                       GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata)
-
-from vllm.inputs import INPUT_REGISTRY
-from vllm.model_executor import SamplingMetadata
-from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
-from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
@@ -377,7 +376,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 sliding_context_len = context_len
 
                 block_table = computed_block_nums
-                
+
             elif (self.scheduler_config.chunked_prefill_enabled
                   or not is_prompt):
                 if cross_block_table is not None:
@@ -564,7 +563,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         logits_soft_cap = getattr(self.model_config.hf_config,
                                   'attn_logit_softcapping', None)
-        
+
         if logits_soft_cap is not None and self.attn_backend.get_name(
         ) != "flashinfer":
             raise ValueError("Models with logits_soft_cap (i.e., Gemma-2)"
