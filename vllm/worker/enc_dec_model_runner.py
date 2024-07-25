@@ -13,7 +13,9 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
                                       LORA_WARMUP_RANK, GPUModelRunnerBase,
-                                      ModelInputForGPUWithSamplingMetadata)
+                                      ModelInputForGPUWithSamplingMetadata,
+                                      ModelInputForGPUBuilder,
+                                      )
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -86,6 +88,8 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
 class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
     _model_input_cls: Type[EncoderDecoderModelInput] = (
         EncoderDecoderModelInput)
+    _builder_cls: Type[ModelInputForGPUBuilder] = (
+        ModelInputForGPUBuilder)
 
     def __init__(
         self,
@@ -125,11 +129,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
 
-        if self.lora_config:
-            assert model_input.lora_requests is not None
-            assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
+        # if self.lora_config:
+        #     assert model_input.lora_requests is not None
+        #     assert model_input.lora_mapping is not None
+        #     self.set_active_loras(model_input.lora_requests,
+        #                           model_input.lora_mapping)
 
         if self.prompt_adapter_config:
             assert model_input.prompt_adapter_requests is not None
