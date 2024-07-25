@@ -6,7 +6,6 @@ from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             DeepSeekMultiModalityConfig,
                                              JAISConfig, MedusaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              RWConfig)
@@ -27,7 +26,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
-    "multi_modality": DeepSeekMultiModalityConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():

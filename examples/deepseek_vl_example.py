@@ -1,5 +1,5 @@
-from vllm.assets.image import ImageAsset
 from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
 
 sample_params = SamplingParams(temperature=0, max_tokens=1024)
 model = "deepseek-ai/deepseek-vl-7b-chat"
