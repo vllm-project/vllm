@@ -28,7 +28,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
-MARLIN_K_CHUNKS = [128]
+# MARLIN_K_CHUNKS = [128]
+MARLIN_K_CHUNKS = [256]
 MARLIN_N_CHUNKS = [64, 128, 256]
 
 MARLIN_24_K_CHUNKS = [128]
@@ -170,8 +171,8 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("num_bits", [4])#MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", [128])#MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)

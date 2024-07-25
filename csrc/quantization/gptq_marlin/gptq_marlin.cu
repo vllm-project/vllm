@@ -59,6 +59,7 @@ __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C,        // fp16 output buffer of shape mxn
+    int4* __restrict__ C_tmp,    // fp32 tmp output buffer (for reduce)
     const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
                                           // (k/groupsize)xn
     const int* __restrict__ g_idx,        // int32 group indices of shape k
@@ -532,6 +533,7 @@ __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C,        // fp16 output buffer of shape mxn
+    int4* __restrict__ C_tmp,    // fp32 tmp output buffer (for reduce)
     const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
                                           // (k/groupsize)xn
     const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
@@ -595,6 +597,8 @@ __global__ void Marlin(
   int slice_idx;  // index of threadblock in current slice; numbered bottom to
                   // top
 
+  int par_id = 0;
+
   // We can easily implement parallel problem execution by just remapping
   // indices and advancing global pointers
   if (slice_col_par >= n_tiles) {
@@ -602,6 +606,7 @@ __global__ void Marlin(
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
+    par_id = slice_col_par / n_tiles;
   }
 
   // Compute all information about the current slice which is required for
@@ -632,6 +637,7 @@ __global__ void Marlin(
       C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
+      par_id++;
     }
   };
   init_slice();
@@ -1317,67 +1323,57 @@ __global__ void Marlin(
     }
   };
 
-  // Since multiple threadblocks may process parts of the same column slice, we
-  // finally have to globally reduce over the results. As the striped
-  // partitioning minimizes the number of such reductions and our outputs are
-  // usually rather small, we perform this reduction serially in L2 cache.
+  // Globally reduce over threadblocks that compute the same column block.
+  // We use a tmp C buffer to reduce in full fp32 precision.
   auto global_reduce = [&](bool first = false, bool last = false) {
-    // We are very careful here to reduce directly in the output buffer to
-    // maximize L2 cache utilization in this step. To do this, we write out
-    // results in FP16 (but still reduce with FP32 compute).
+    constexpr int tb_m = thread_m_blocks * 16;
+    constexpr int tb_n = thread_n_blocks * 16;
+
+    constexpr int c_size = tb_m * tb_n * sizeof(float) / 16;
+
     constexpr int active_threads = 32 * thread_n_blocks / 4;
-    if (threadIdx.x < active_threads) {
-      int c_gl_stride = prob_n / 8;
-      int c_gl_wr_delta_o = 8 * c_gl_stride;
-      int c_gl_wr_delta_i = 4 * (active_threads / 32);
-      int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) +
-                    4 * (threadIdx.x / 32) + threadIdx.x % 4;
-      c_gl_wr += (2 * thread_n_blocks) * slice_col;
-      constexpr int c_sh_wr_delta = active_threads;
-      int c_sh_wr = threadIdx.x;
+    bool is_th_active = threadIdx.x < active_threads;
 
-      int row = (threadIdx.x % 32) / 4;
+    int par_offset = c_size * n_tiles * par_id;
+    int slice_offset = c_size * slice_col;
 
-      if (!first) {
-  // Interestingly, doing direct global accesses here really seems to mess up
-  // the compiler and lead to slowdowns, hence we also use async-copies even
-  // though these fetches are not actually asynchronous.
+    constexpr int num_floats = thread_m_blocks * 4 * 2 * 4;
+    constexpr int th_size = num_floats * sizeof(float) / 16;
+
+    int warp_id = threadIdx.x / 32;
+    int th_id = threadIdx.x % 32;
+
+    int c_warp_offset = warp_id * th_size * 32;
+    int c_th_offset = th_id * th_size;
+
+    int c_cur_offset = par_offset + slice_offset + c_warp_offset + c_th_offset;
+    int sh_offset = c_warp_offset + c_th_offset;
+
+    if (!is_th_active) {
+      return;
+    }
+
+    if (!first) {
   #pragma unroll
-        for (int i = 0; i < thread_m_blocks * 4; i++) {
-          cp_async4_pred(
-              &sh[c_sh_wr + c_sh_wr_delta * i],
-              &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) +
-                 c_gl_wr_delta_i * (i % 2)],
-              i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m);
-        }
-        cp_async_fence();
-        cp_async_wait<0>();
+      for (int k = 0; k < th_size; k++) {
+        sh[sh_offset + k] = C_tmp[c_cur_offset + k];
       }
+    }
 
+    if (!first) {
+      float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
+      float* sh_c_ptr = reinterpret_cast<float*>(&sh[sh_offset]);
   #pragma unroll
-      for (int i = 0; i < thread_m_blocks * 4; i++) {
-        if (i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m) {
-          if (!first) {
-            int4 c_red = sh[c_sh_wr + i * c_sh_wr_delta];
+      for (int f = 0; f < num_floats; f++) {
+        frag_c_ptr[f] += sh_c_ptr[f];
+      }
+    }
+
+    if (!last) {
+      int4* frag_c_ptr = reinterpret_cast<int4*>(&frag_c);
   #pragma unroll
-            for (int j = 0; j < 2 * 4; j++) {
-              reinterpret_cast<float*>(
-                  &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)] +=
-                  Dtype::num2float(reinterpret_cast<scalar_t*>(&c_red)[j]);
-            }
-          }
-          if (!last) {
-            int4 c;
-  #pragma unroll
-            for (int j = 0; j < 2 * 4; j++) {
-              reinterpret_cast<scalar_t*>(&c)[j] =
-                  Dtype::float2num(reinterpret_cast<float*>(
-                      &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)]);
-            }
-            C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)] =
-                c;
-          }
-        }
+      for (int k = 0; k < th_size; k++) {
+        C_tmp[c_cur_offset + k] = frag_c_ptr[k];
       }
     }
   };
@@ -1661,8 +1657,8 @@ __global__ void Marlin(
              THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages, HAS_ACT_ORDER,     \
              HAS_ZP, GROUP_BLOCKS>                                             \
           <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                   \
-              A_ptr, B_ptr, C_ptr, s_ptr, zp_ptr, g_idx_ptr, num_groups,       \
-              prob_m, prob_n, prob_k, locks);                                  \
+              A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,        \
+              num_groups, prob_m, prob_n, prob_k, locks);                      \
     }
 
 typedef struct {
@@ -1801,6 +1797,27 @@ bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
   return true;
 }
 
+int determine_reduce_max_m(int prob_m, int max_par) {
+  constexpr int tile_m_size = 16;
+
+  if (prob_m <= tile_m_size) {
+    return tile_m_size;
+
+  } else if (prob_m <= tile_m_size * 2) {
+    return tile_m_size * 2;
+
+  } else if (prob_m <= tile_m_size * 3) {
+    return tile_m_size * 3;
+
+  } else if (prob_m <= tile_m_size * 4) {
+    return tile_m_size * 4;
+
+  } else {
+    int cur_par = min(div_ceil(prob_m, tile_m_size * 4), max_par);
+    return tile_m_size * 4 * cur_par;
+  }
+}
+
 exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
                                       int num_bits, int group_size,
                                       bool has_act_order, bool is_k_full,
@@ -1832,30 +1849,44 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   return exec_config_t{0, {-1, -1, -1}};
 }
 
-  #define GPTQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-                                                                              \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-                                                                              \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-                                                                              \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-                                                                              \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+// #define GPTQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
+  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+  //                                                                             \
+  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+  //                                                                             \
+  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+  //                                                                             \
+  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+  //                                                                             \
+  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+  //   __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
+
+  #define GPTQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)            \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)  \
+                                                                             \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS) \
+                                                                             \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS) \
+                                                                             \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS) \
+                                                                             \
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
 
   #define AWQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
@@ -1880,11 +1911,11 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)
 
 template <typename scalar_t>
-void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, void* zp,
-                     void* g_idx, void* perm, void* a_tmp, int prob_m,
-                     int prob_n, int prob_k, void* workspace, int num_bits,
-                     bool has_act_order, bool is_k_full, bool has_zp,
-                     int num_groups, int group_size, int dev,
+void marlin_mm_f16i4(const void* A, const void* B, void* C, void* C_tmp,
+                     void* s, void* zp, void* g_idx, void* perm, void* a_tmp,
+                     int prob_m, int prob_n, int prob_k, void* workspace,
+                     int num_bits, bool has_act_order, bool is_k_full,
+                     bool has_zp, int num_groups, int group_size, int dev,
                      cudaStream_t stream, int thread_k, int thread_n, int sms,
                      int max_par) {
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
@@ -1970,6 +2001,7 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, void* zp,
   const int4* A_ptr = (const int4*)A;
   const int4* B_ptr = (const int4*)B;
   int4* C_ptr = (int4*)C;
+  int4* C_tmp_ptr = (int4*)C_tmp;
   const int4* s_ptr = (const int4*)s;
   const int4* zp_ptr = (const int4*)zp;
   const int* g_idx_ptr = (const int*)g_idx;
@@ -2014,19 +2046,19 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, void* zp,
     GPTQ_CALL_IF(4, 8, 8, 256)
     GPTQ_CALL_IF(4, 8, 4, 128)
     GPTQ_CALL_IF(4, 4, 8, 128)
-    GPTQ_CALL_IF(8, 16, 4, 256)
-    GPTQ_CALL_IF(8, 8, 8, 256)
-    GPTQ_CALL_IF(8, 8, 4, 128)
-    GPTQ_CALL_IF(8, 4, 8, 128)
+    // GPTQ_CALL_IF(8, 16, 4, 256)
+    // GPTQ_CALL_IF(8, 8, 8, 256)
+    // GPTQ_CALL_IF(8, 8, 4, 128)
+    // GPTQ_CALL_IF(8, 4, 8, 128)
 
-    AWQ_CALL_IF(4, 16, 4, 256)
-    AWQ_CALL_IF(4, 8, 8, 256)
-    AWQ_CALL_IF(4, 8, 4, 128)
-    AWQ_CALL_IF(4, 4, 8, 128)
-    AWQ_CALL_IF(8, 16, 4, 256)
-    AWQ_CALL_IF(8, 8, 8, 256)
-    AWQ_CALL_IF(8, 8, 4, 128)
-    AWQ_CALL_IF(8, 4, 8, 128)
+    // AWQ_CALL_IF(4, 16, 4, 256)
+    // AWQ_CALL_IF(4, 8, 8, 256)
+    // AWQ_CALL_IF(4, 8, 4, 128)
+    // AWQ_CALL_IF(4, 4, 8, 128)
+    // AWQ_CALL_IF(8, 16, 4, 256)
+    // AWQ_CALL_IF(8, 8, 8, 256)
+    // AWQ_CALL_IF(8, 8, 4, 128)
+    // AWQ_CALL_IF(8, 4, 8, 128)
     else {
       TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
                   ", ", prob_k, "]", ", has_act_order = ", has_act_order,
@@ -2098,6 +2130,12 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c = torch::empty({size_m, size_n}, options);
   torch::Tensor a_tmp = torch::empty({size_m, size_k}, options);
+
+  // Alloc C tmp buffer that is going to be used for the global reduce
+  int reduce_max_m = marlin::determine_reduce_max_m(size_m, marlin::max_par);
+  auto options_fp32 =
+      torch::TensorOptions().dtype(at::kFloat).device(a.device());
+  torch::Tensor c_tmp = torch::empty({reduce_max_m, size_n}, options_fp32);
 
   // thread_k: `k` size of a thread_tile in `weights` (can usually be left as
   // auto -1)
@@ -2171,17 +2209,18 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   if (a.scalar_type() == at::ScalarType::Half) {
     marlin::marlin_mm_f16i4<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        b_scales.data_ptr<at::Half>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
+        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
+        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
+        a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
         workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, marlin::max_par);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     marlin::marlin_mm_f16i4<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
-        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
+        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
         workspace.data_ptr(), num_bits, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, marlin::max_par);

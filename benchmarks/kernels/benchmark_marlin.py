@@ -6,11 +6,10 @@ from benchmark_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+    GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
-    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
+    MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
@@ -55,6 +54,8 @@ def bench_run(results: List[benchmark.Measurement], model: str,
     # Marlin_24 quant
     (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta,
      marlin_24_s) = marlin_24_quantize(b, num_bits, group_size)
+    
+    marlin_zp = torch.empty(0, dtype=torch.int, device=b.device)
 
     # GPTQ quant
     (w_ref, q_w, s, g_idx,
@@ -87,6 +88,7 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         "marlin_w_ref": marlin_w_ref,
         "marlin_q_w": marlin_q_w,
         "marlin_s": marlin_s,
+        "marlin_zp": marlin_zp,
         "marlin_g_idx": marlin_g_idx,
         "marlin_sort_indices": marlin_sort_indices,
         "marlin_rand_perm": marlin_rand_perm,
@@ -125,34 +127,34 @@ def bench_run(results: List[benchmark.Measurement], model: str,
     results.append(
         benchmark.Timer(
             stmt=
-            "output = gptq_marlin_gemm(a, marlin_q_w, marlin_s, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, num_bits, size_m, size_n, size_k, is_k_full)",  # noqa: E501
+            "output = gptq_marlin_gemm(a, marlin_q_w, marlin_s, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, num_bits, size_m, size_n, size_k, is_k_full, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
             description="gptq_marlin_gemm",
         ).blocked_autorange(min_run_time=min_run_time))
 
-    if (num_bits in GPTQ_MARLIN_24_SUPPORTED_NUM_BITS
-            and group_size in GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES):
-        results.append(
-            benchmark.Timer(
-                stmt=
-                "output = gptq_marlin_24_gemm(a, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, marlin_24_workspace.scratch, num_bits, size_m, size_n, size_k)",  # noqa: E501
-                globals=globals,
-                label=label,
-                sub_label=sub_label,
-                description="gptq_marlin_24_gemm",
-            ).blocked_autorange(min_run_time=min_run_time))
+    # if (num_bits in GPTQ_MARLIN_24_SUPPORTED_NUM_BITS
+    #         and group_size in GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES):
+    #     results.append(
+    #         benchmark.Timer(
+    #             stmt=
+    #             "output = gptq_marlin_24_gemm(a, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, marlin_24_workspace.scratch, num_bits, size_m, size_n, size_k)",  # noqa: E501
+    #             globals=globals,
+    #             label=label,
+    #             sub_label=sub_label,
+    #             description="gptq_marlin_24_gemm",
+    #         ).blocked_autorange(min_run_time=min_run_time))
 
-    results.append(
-        benchmark.Timer(
-            stmt=
-            "q_res = gptq_marlin_repack(q_w_gptq, repack_sort_indices, size_k, size_n, num_bits)",  # noqa: E501
-            globals=globals,
-            label=label,
-            sub_label=sub_label,
-            description="gptq_marlin_repack",
-        ).blocked_autorange(min_run_time=min_run_time))
+    # results.append(
+    #     benchmark.Timer(
+    #         stmt=
+    #         "q_res = gptq_marlin_repack(q_w_gptq, repack_sort_indices, size_k, size_n, num_bits)",  # noqa: E501
+    #         globals=globals,
+    #         label=label,
+    #         sub_label=sub_label,
+    #         description="gptq_marlin_repack",
+    #     ).blocked_autorange(min_run_time=min_run_time))
 
 
 def main(args):
@@ -183,12 +185,12 @@ def main(args):
                            ) > 0 and is_k_full not in args.limit_k_full:
                         continue
 
-                    for num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS:
+                    for num_bits in MARLIN_SUPPORTED_NUM_BITS:
                         if len(args.limit_num_bits
                                ) > 0 and num_bits not in args.limit_num_bits:
                             continue
 
-                        for group_size in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES:
+                        for group_size in MARLIN_SUPPORTED_GROUP_SIZES:
                             if len(
                                     args.limit_group_size
                             ) > 0 and group_size not in args.limit_group_size:
