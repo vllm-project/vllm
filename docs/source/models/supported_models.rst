@@ -212,6 +212,10 @@ Vision Language Models
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
     -
+  * - :code:`MiniCPM-V`
+    - MiniCPM-V
+    - :code:`openbmb/MiniCPM-V-2`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
+    -
 
 ----
 

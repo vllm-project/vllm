@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding, BatchFeature)
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -133,7 +133,7 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class HfRunner:
@@ -513,10 +513,12 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         images: Optional[List[Image.Image]] = None,
+        stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
                                                 max_tokens=max_tokens,
-                                                logprobs=num_logprobs)
+                                                logprobs=num_logprobs,
+                                                stop_token_ids=stop_token_ids)
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images)
