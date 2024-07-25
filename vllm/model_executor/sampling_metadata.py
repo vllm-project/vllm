@@ -1,4 +1,5 @@
 import random
+from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -329,8 +330,8 @@ class SamplingTensors:
             user-defined seed for each sequence.
         extra_entropy: extra entropy to use when generating seeds.
         """
-        prompt_tokens: List[List[int]] = []
-        output_tokens: List[List[int]] = []
+        prompt_tokens: List[array] = []
+        output_tokens: List[array] = []
         top_ks: List[int] = []
         temperatures: List[float] = []
         top_ps: List[float] = []
@@ -432,13 +433,15 @@ class SamplingTensors:
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
-                    prompt_tokens.extend([] for _ in range(prefill_len))
-                    output_tokens.extend([] for _ in range(prefill_len))
+                    prompt_tokens.extend(
+                        array('l') for _ in range(prefill_len))
+                    output_tokens.extend(
+                        array('l') for _ in range(prefill_len))
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
-                        prompt_tokens.append(list(seq_data.prompt_token_ids))
-                        output_tokens.append(list(seq_data.output_token_ids))
+                        prompt_tokens.append(seq_data.prompt_token_ids_array)
+                        output_tokens.append(seq_data.output_token_ids_array)
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,
@@ -454,8 +457,8 @@ class SamplingTensors:
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
                    sampling_seeds: List[int], sample_indices: List[int],
-                   prompt_tokens: List[List[int]],
-                   output_tokens: List[List[int]], vocab_size: int,
+                   prompt_tokens: List[array],
+                   output_tokens: List[array], vocab_size: int,
                    extra_seeds_to_generate: int, device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
