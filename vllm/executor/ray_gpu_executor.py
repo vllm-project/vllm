@@ -48,6 +48,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
             assert self.use_ray_compiled_dag, (
                 "VLLM_USE_RAY_SPMD_WORKER=1 requires "
                 "VLLM_USE_RAY_COMPILED_DAG=1")
+            assert self.parallel_config.tensor_parallel_size > 1, (
+                "VLLM_USE_RAY_SPMD_WORKER=1 doesn't work with TP size 1."
+            )
 
         assert self.uses_ray
         placement_group = self.parallel_config.placement_group
