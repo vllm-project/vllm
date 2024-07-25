@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8KVCacheMethod,
 MODELS = [
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
     "nm-testing/Phi-3-mini-128k-instruct-FP8",
+    "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
 ]
 
 
