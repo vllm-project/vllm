@@ -8,7 +8,7 @@ import asyncio
 from grpc_reflection.v1alpha import reflection
 
 MODEL = "facebook/opt-125m"
-MAX_TOKENS = 200
+MAX_TOKENS = 10
 TEMPERATURE = 0
 
 

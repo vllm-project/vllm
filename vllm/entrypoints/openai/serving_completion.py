@@ -152,6 +152,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator: AsyncIterator[Tuple[
             int, RequestOutput]] = merge_async_iterators(*generators)
+        
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. In addition, we do not stream the results when use
@@ -175,6 +176,8 @@ class OpenAIServingCompletion(OpenAIServing):
         final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
+            # async for res in generators[0]:
+            #     i = 0
                 if await raw_request.is_disconnected():
                     # Abort the request if the client disconnects.
                     await self.engine.abort(f"{request_id}-{i}")
@@ -189,7 +192,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     final_res.prompt = prompts[i]["prompt"]
-
             final_res_batch_checked = cast(List[RequestOutput],
                                            final_res_batch)
 
@@ -236,6 +238,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             async for prompt_idx, res in result_generator:
+                breakpoint()
 
                 # Abort the request if the client disconnects.
                 if await raw_request.is_disconnected():

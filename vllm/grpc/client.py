@@ -76,6 +76,7 @@ class TextGenerationClient(AsyncLLMEngine):
                     text=output.text,
                     token_ids=output.token_ids,
                     cumulative_logprob=0.0,
+                    logprobs=None,
                     finish_reason=output.finish_reason,
                 ) for output in generate_response.outputs
             ]
@@ -83,5 +84,8 @@ class TextGenerationClient(AsyncLLMEngine):
             yield RequestOutput(
                 request_id=request_id,
                 prompt_token_ids=[],
-                outputs=completion_outputs
+                outputs=completion_outputs,
+                finished=(completion_outputs[0].finish_reason != ""),
+                prompt_logprobs=None,
+                prompt=prompt,
             )
