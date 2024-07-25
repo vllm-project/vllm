@@ -51,13 +51,15 @@ class OpenAIServingCompletion(OpenAIServing):
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
+        return_tokens_as_token_ids: bool = False,
     ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
                          prompt_adapters=prompt_adapters,
-                         request_logger=request_logger)
+                         request_logger=request_logger,
+                         return_tokens_as_token_ids=return_tokens_as_token_ids)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -430,12 +432,17 @@ class OpenAIServingCompletion(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
+                if self.return_tokens_as_token_ids:
+                    token = f"token_id:{token_id}"
                 out_tokens.append(token)
                 out_token_logprobs.append(None)
                 out_top_logprobs.append(None)
             else:
-                token = self._get_decoded_token(step_top_logprobs[token_id],
-                                                token_id, tokenizer)
+                token = self._get_decoded_token(
+                    step_top_logprobs[token_id],
+                    token_id,
+                    tokenizer,
+                    return_as_token_id=self.return_tokens_as_token_ids)
                 token_logprob = max(step_top_logprobs[token_id].logprob,
                                     -9999.0)
                 out_tokens.append(token)
@@ -448,7 +455,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append({
                     # Convert float("-inf") to the
                     # JSON-serializable float that OpenAI uses
-                    self._get_decoded_token(top_lp[1], top_lp[0], tokenizer):
+                    self._get_decoded_token(
+                        top_lp[1],
+                        top_lp[0],
+                        tokenizer,
+                        return_as_token_id=self.return_tokens_as_token_ids):
                     max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i
