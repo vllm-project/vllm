@@ -4,6 +4,8 @@ from typing import List
 import pytest
 import torch
 
+from tests.kernels.utils import (STR_FLASH_ATTN_VAL,
+                                 override_backend_env_variable)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
@@ -387,3 +389,108 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     for attr_expected, attr_actual in zip(vars(attn_metadata.decode_metadata),
                                           vars(decode_meta_actual)):
         assert attr_expected[1] == attr_actual[1]
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_hybrid_batches_with_prefix_caching(enforce_eager, monkeypatch):
+    override_backend_env_variable(monkeypatch, STR_FLASH_ATTN_VAL)
+
+    model_runner = _create_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        enforce_eager=enforce_eager,
+        max_num_batched_tokens=100000,
+        max_num_seqs=100000,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+    )
+
+    seq_lens: List[int] = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    # Use a large number of blocks to test longer sequences
+    # with chunked prefill and prefix caching
+    block_tables = {0: list(range(128))}
+
+    # case 1: prefix_cache_len <= context_len:
+    seq_len = 1000
+    seq_lens.append(seq_len)
+    seq_data = SequenceData(list(range(seq_len)))
+    seq_group_metadata = SequenceGroupMetadata(
+        request_id="test_0",
+        is_prompt=True,
+        seq_data={0: seq_data},
+        sampling_params=SamplingParams(temperature=0),
+        block_tables=block_tables,
+        token_chunk_size=200,
+        computed_block_nums=range(10),
+    )
+    seq_data.update_num_computed_tokens(200)
+    seq_group_metadata_list.append(seq_group_metadata)
+
+    # case 2: context_len < prefix_cache_len < seq_len
+    seq_len = 1000
+    seq_lens.append(seq_len)
+    seq_data = SequenceData(list(range(seq_len)))
+    seq_group_metadata = SequenceGroupMetadata(
+        request_id="test_0",
+        is_prompt=True,
+        seq_data={0: seq_data},
+        sampling_params=SamplingParams(temperature=0),
+        block_tables=block_tables,
+        token_chunk_size=100,
+        computed_block_nums=range(10),
+    )
+    seq_data.update_num_computed_tokens(80)
+    seq_group_metadata_list.append(seq_group_metadata)
+
+    # case 3: prefix_cache_len >= seq_len
+    seq_len = 1000
+    seq_lens.append(seq_len)
+    seq_data = SequenceData(list(range(seq_len)))
+    seq_group_metadata = SequenceGroupMetadata(
+        request_id="test_0",
+        is_prompt=True,
+        seq_data={0: seq_data},
+        sampling_params=SamplingParams(temperature=0),
+        block_tables=block_tables,
+        token_chunk_size=100,
+        computed_block_nums=range(10),
+    )
+    seq_data.update_num_computed_tokens(50)
+    seq_group_metadata_list.append(seq_group_metadata)
+
+    model_input = model_runner.prepare_model_input(seq_group_metadata_list)
+    (input_tokens, input_positions, attn_metadata) = (
+        model_input.input_tokens,
+        model_input.input_positions,
+        model_input.attn_metadata,
+    )
+
+    # The nums of tokens to be computed are:
+    #   - for the first sequence: no matched, and all of 200 tokens are
+    #     left to be recomputed
+    #   - for the second sequence: partially cached, and 20 tokens are
+    #     left to recomputed
+    #   - for the be third sequence: fully cached, and only 1 token is
+    #     left to be recomputed
+    assert len(input_tokens) == 221
+    assert len(input_positions) == 221
+
+    torch.testing.assert_close(
+        attn_metadata.query_start_loc,
+        torch.tensor([0, 200, 220, 221],
+                     dtype=torch.int32,
+                     device=attn_metadata.query_start_loc.device))
+
+    torch.testing.assert_close(
+        attn_metadata.seq_start_loc,
+        torch.tensor([0, 400, 580, 730],
+                     dtype=torch.int32,
+                     device=attn_metadata.seq_start_loc.device))
+
+    torch.testing.assert_close(
+        attn_metadata.context_lens_tensor,
+        torch.tensor([200, 160, 149],
+                     dtype=torch.int32,
+                     device=attn_metadata.context_lens_tensor.device))

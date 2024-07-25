@@ -498,20 +498,41 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             and self.sliding_window is None
                             and inter_data.is_prompt)
         inter_data.prefix_cache_hit = prefix_cache_hit
-        if self.chunked_prefill_enabled and prefix_cache_hit:
-            raise RuntimeError(
-                "chunked prefill cannot be used with prefix caching now.")
 
         # If prefix cache is hit, advance context length to bypass
         # hit blocks. Accordingly, input tokens, position and query length
         # have to be updated.
         if prefix_cache_hit:
             assert computed_block_nums is not None
-            context_len = len(computed_block_nums) * self.block_size
-            inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
-                seq_idx][context_len:]
-            inter_data.input_positions[seq_idx] = inter_data.input_positions[
-                seq_idx][context_len:]
+            prefix_cache_len = len(computed_block_nums) * self.block_size
+            # When prefix caching meets chunked prefill, we would be in
+            # one of the following three cases:
+            context_len = inter_data.context_lens[seq_idx]
+            seq_len = inter_data.seq_lens[seq_idx]
+            if prefix_cache_len <= context_len:
+                # Do normal chunked prefill.
+                pass
+            elif context_len < prefix_cache_len < seq_len:
+                # Advance the context_len to seq_len to prefill non-cached
+                # parts of the prompt.
+                inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
+                    seq_idx][(prefix_cache_len - context_len):]
+                inter_data.input_positions[
+                    seq_idx] = inter_data.input_positions[seq_idx][(
+                        prefix_cache_len - context_len):]
+                context_len = prefix_cache_len
+            elif seq_len <= prefix_cache_len:
+                # The current partial sequence is fully cache hit,
+                # and no further computation is needed. In this case,
+                # We leave at least 1 token for chunked prefill to prevent
+                # empty sequences in the attention computation.
+                inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
+                    seq_idx][(seq_len - 1 - context_len):]
+                inter_data.input_positions[
+                    seq_idx] = inter_data.input_positions[seq_idx][(
+                        seq_len - 1 - context_len):]
+                context_len = seq_len - 1
+
             inter_data.context_lens[seq_idx] = context_len
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
