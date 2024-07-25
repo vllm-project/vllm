@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import List, Optional, Set, Tuple, Type, Dict
+from typing import Dict, List, Optional, Set, Tuple, Type
 
 import torch
 import torch.distributed
@@ -18,7 +18,8 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata, SequenceGroupMetadataDecode
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata, SequenceGroupMetadataDecode)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -314,13 +315,13 @@ class Worker(LocalOrDistributedWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
-        # breakpoint()
-        # print(execute_model_req.seq_group_metadata_list[0].seq_data)
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list)
-            execute_model_req.seq_group_metadata_list = new_seq_group_metadata_list
-        return super().execute_model(execute_model_req)
+            execute_model_req.seq_group_metadata_list = (
+                new_seq_group_metadata_list)
+        output = super().execute_model(execute_model_req)
+        return output
 
     def _execute_model_spmd(
         self, execute_model_req: ExecuteModelRequest
@@ -328,8 +329,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list)
-            execute_model_req.seq_group_metadata_list = new_seq_group_metadata_list
-        return super()._execute_model_spmd(execute_model_req)
+            execute_model_req.seq_group_metadata_list = (
+                new_seq_group_metadata_list)
+        output = super()._execute_model_spmd(execute_model_req)
+        return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

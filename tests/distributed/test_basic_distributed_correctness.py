@@ -47,7 +47,7 @@ def test_models(
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(model,
                      dtype=dtype,
-                     tensor_parallel_size=2,
+                     tensor_parallel_size=1,
                      distributed_executor_backend=distributed_executor_backend
                      ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)

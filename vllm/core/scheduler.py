@@ -13,8 +13,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus,
-                           SequenceGroupMetadataDecode)
+                           SequenceGroupMetadata, SequenceGroupMetadataDecode,
+                           SequenceStatus)
 
 logger = init_logger(__name__)
 
@@ -1041,7 +1041,12 @@ class Scheduler:
                     prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
             else:
+                seq_data_delta = {}
+                for id, data in seq_data.items():
+                    seq_data_delta[id] = data.get_delta()
+
                 seq_group_metadata = SequenceGroupMetadataDecode(
+                    seq_data_delta,
                     seq_group.request_id,
                     block_tables,
                     do_sample=do_sample,

@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
 
 import torch
 from transformers import PretrainedConfig
-import vllm.envs as envs
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry

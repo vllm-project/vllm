@@ -268,7 +268,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # execution on all workers.
     # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
     "VLLM_USE_RAY_SPMD_WORKER":
-    lambda: bool(os.getenv("VLLM_USE_RAY_SPMD_WORKER", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", 0))),
 
     # When enabled, vLLM sends delta input to workers instead of
     # an entire data. THIS ENV VAR WILL BE REMOVED SOON.
@@ -279,7 +279,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # which optimizes the control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
-    lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
