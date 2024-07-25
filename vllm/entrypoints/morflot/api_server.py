@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import random
 import re
 import string
@@ -34,7 +35,6 @@ class BackgroundRunner:
 
     async def run_main(self):
         self.input_queue = asyncio.Queue()
-        self.result_queue = asyncio.Queue()
         self.llm = LLM(engine_args=self.engine_args,
             input_queue=self.input_queue,
         )
@@ -223,19 +223,18 @@ class CompletionRequest(BaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(runner.run_main())
+    yield
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 # Add prometheus asgi middleware to route /metrics requests
 route = Mount("/metrics", make_asgi_app())
 # Workaround for 307 Redirect for /metrics
 route.path_regex = re.compile('^/metrics(?P<path>.*)$')
 app.routes.append(route)
-
-
-@app.on_event('startup')
-async def app_startup():
-    asyncio.create_task(runner.run_main())
 
 
 async def completion_generator(model, result_queue, choices, created_time):

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     VLLM_INSTALL_PUNICA_KERNELS: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
+    VLLM_ENGINE_STEPS_BEFORE_YIELD: int = 10
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -219,6 +220,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
+
+    # Number of steps before yielding in the sync engine for
+    # the sync server mode
+    "VLLM_ENGINE_STEPS_BEFORE_YIELD":
+    lambda: os.getenv("VLLM_ENGINE_STEPS_BEFORE_YIELD", "10"),
 }
 
 # end-env-vars-definition
