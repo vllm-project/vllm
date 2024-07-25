@@ -9,6 +9,12 @@ import warnings
 from shutil import which
 from typing import Dict, List
 
+from shlex import split
+from subprocess import CalledProcessError, check_call
+from textwrap import dedent
+from setuptools.command.build_py import build_py
+from setuptools.errors import SetupError
+
 import torch
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
@@ -26,6 +32,39 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
+
+
+class BuildPyAndGenerateGrpc(build_py):
+    """build python module using protoc to prepare generated files."""
+
+    proto_source = "vllm/grpc/pb/generation.proto"
+
+    def run(self):
+        print(f"Invoking protoc on {self.proto_source}")
+
+        # NOTE: imports in generated files will be broken unless some care is given in
+        # how --proto_path, --*_out and .proto paths are given.
+        #
+        # See https://github.com/grpc/grpc/issues/9575#issuecomment-293934506
+        try:
+            check_call(
+                split(
+                    dedent(
+                        f"""
+                        python -m grpc_tools.protoc \
+                            --proto_path=src \
+                            --python_out=src/ \
+                            --grpc_python_out=src/ \
+                            --mypy_out=src/ \
+                            {self.proto_source}
+                      """,
+                    ),
+                )
+            )
+        except CalledProcessError as exc:
+            raise SetupError(f"protoc failed, exit code {exc.returncode}") from exc
+
+        super().run()
 
 
 def embed_commit_hash():
@@ -486,7 +525,7 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
     },
-    cmdclass={"build_ext": cmake_build_ext} if _build_custom_ops() else {},
+    cmdclass={"build_ext": cmake_build_ext, "build_py": BuildPyAndGenerateGrpc} if _build_custom_ops() else {"build_py": BuildPyAndGenerateGrpc},
     package_data=package_data,
     entry_points={
         "console_scripts": [
