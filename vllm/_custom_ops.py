@@ -413,8 +413,8 @@ def scaled_int8_quant(
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
-        assert not symmetric, "Asymmetric quantization per-tensor not supported yet."
-        torch.ops._C.static_scaled_int8_quant(output, input, scale)
+        assert symmetric == azp is None, "azp must be only be provided for asymmetric quantization."
+        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, None
 
     # dynamic-per-token quantization.

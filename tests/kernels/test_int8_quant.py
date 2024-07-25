@@ -106,3 +106,32 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 
     assert torch.allclose(out1, out2,
                           atol=1)  # big atol to account for rounding errors
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("scale", SCALE[2:]) # Fewer scales to reduce test time
+@pytest.mark.parametrize("azp", [-255, 54])
+@torch.inference_mode()
+def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
+                                      dtype: torch.dtype, seed: int,
+                                      scale: float, azp: int) -> None:
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    int8_traits = torch.iinfo(torch.int8)
+
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype,
+                   device="cuda") * 1000 - 300
+
+    out1 = ((x / scale).round() + azp).clamp(int8_traits.min,
+                                             int8_traits.max).to(torch.int8)
+    out2 = torch.empty_like(x, dtype=torch.int8)
+    scale_argument = torch.tensor([scale], dtype=torch.float32, device="cuda")
+    azp_argument = torch.tensor([azp], dtype=torch.int32, device="cuda")
+
+    torch.ops._C.static_scaled_int8_quant(out2, x, scale_argument,
+                                          azp_argument)
+    assert torch.allclose(out1, out2, atol=1)  # atol for rounding
+
