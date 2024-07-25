@@ -496,12 +496,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
 
                 break
             else:
-                # if word embeddings are tied, 
+                # if word embeddings are tied,
                 # lm_head will not be used.
                 # To prevent errors, skip loading lm_head.
-                if self.config.tie_word_embeddings:
-                    if "lm_head" in name:
-                        continue
+                if self.config.tie_word_embeddings and "lm_head" in name:
+                    continue
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
