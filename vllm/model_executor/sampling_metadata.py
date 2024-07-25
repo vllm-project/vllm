@@ -457,9 +457,9 @@ class SamplingTensors:
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
                    sampling_seeds: List[int], sample_indices: List[int],
-                   prompt_tokens: List[array],
-                   output_tokens: List[array], vocab_size: int,
-                   extra_seeds_to_generate: int, device: torch.device,
+                   prompt_tokens: List[array], output_tokens: List[array],
+                   vocab_size: int, extra_seeds_to_generate: int,
+                   device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
