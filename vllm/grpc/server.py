@@ -1,3 +1,4 @@
+from vllm.inputs.data import TextPrompt, TokensPrompt
 from .pb import generate_pb2_grpc, generate_pb2
 from .pb.generate_pb2 import DESCRIPTOR as _GENERATION_DESCRIPTOR
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
@@ -6,7 +7,7 @@ from grpc import aio
 import asyncio
 from grpc_reflection.v1alpha import reflection
 
-MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+MODEL = "facebook/opt-125m"
 MAX_TOKENS = 200
 TEMPERATURE = 0
 
@@ -22,9 +23,14 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
     async def Generate(
         self, request: generate_pb2.GenerateRequest, context
     ) -> AsyncIterator[generate_pb2.GenerateResponse]:
+        
+        if len(request.prompt_inputs.prompt_token_ids) > 0:
+            inputs = TokensPrompt(prompt_token_ids=request.prompt_inputs.prompt_token_ids)
+        else:
+            inputs = TextPrompt(prompt=request.prompt_inputs.prompt)
 
         results_generator = self.engine.generate(
-            request.prompt_inputs.prompt, 
+            inputs, 
             sampling_params=SamplingParams(max_tokens=MAX_TOKENS, 
                                            temperature=TEMPERATURE),
             request_id=request.request_id)

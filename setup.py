@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class BuildPyAndGenerateGrpc(build_py):
     """build python module using protoc to prepare generated files."""
 
-    proto_source = "vllm/grpc/pb/generation.proto"
+    proto_source = "vllm/grpc/pb/generate.proto"
 
     def run(self):
         print(f"Invoking protoc on {self.proto_source}")

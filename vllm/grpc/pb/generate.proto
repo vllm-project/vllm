@@ -3,7 +3,7 @@ syntax = "proto3";
 package generate.v1;
 
 service TextGenerationService {
-    rpc Generate (GenerateRequest) returns (stream GenerateResponse); // will need a streaming version later- unary for POC
+    rpc Generate (GenerateRequest) returns (stream GenerateResponse);
 }
 
 
@@ -14,6 +14,7 @@ message GenerateRequest {
 
 message PromptInputs {
     string prompt = 1;
+    repeated uint64 prompt_token_ids = 2;
 }
 
 message GenerateResponse {

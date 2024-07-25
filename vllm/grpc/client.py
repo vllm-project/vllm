@@ -1,7 +1,8 @@
+import asyncio
 from vllm import AsyncLLMEngine
 import grpc
 from .pb import generate_pb2_grpc, generate_pb2
-from typing import AsyncIterator, Optional, Mapping
+from typing import AsyncIterator, List, Optional, Mapping
 
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
@@ -14,9 +15,37 @@ from vllm.sampling_params import SamplingParams
 
 class TextGenerationClient(AsyncLLMEngine):
     def __init__(self):
-        channel = grpc.insecure_channel("localhost:5543")
+        channel = grpc.aio.insecure_channel("localhost:5543")
         self.stub = generate_pb2_grpc.TextGenerationServiceStub(channel)
+        self.engine_use_ray = False
+        self.worker_use_ray = False
+        self.log_requests = False
+        self.engine = None
+
+    @property
+    def is_running(self) -> bool:
+        return True
     
+    @property
+    def is_stopped(self) -> bool:
+        return False
+
+    @property
+    def errored(self) -> bool:
+        return False
+    
+    async def run_engine_loop(self):
+        while True:
+            await asyncio.sleep(1)
+    
+    async def get_tokenizer(
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> "PreTrainedTokenizer":
+        # TODO: what to return :/
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained("facebook/opt-125m")
+
     async def generate(
         self,
         inputs: PromptInputs,
@@ -27,9 +56,15 @@ class TextGenerationClient(AsyncLLMEngine):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
         
+        prompt: str = inputs.get('prompt', "")
+        prompt_token_ids: List[int] = inputs.get('prompt_token_ids', [])
+
         generate_stream = self.stub.Generate(
             generate_pb2.GenerateRequest(
-                prompt_inputs=generate_pb2.PromptInputs(prompt=inputs.prompt),
+                prompt_inputs=generate_pb2.PromptInputs(
+                    prompt=prompt,
+                    prompt_token_ids=prompt_token_ids,
+                ),
                 request_id=request_id,
             )
         )

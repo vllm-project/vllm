@@ -96,18 +96,18 @@ class OpenAIServingCompletion(OpenAIServing):
             tokenizer = await self.engine.get_tokenizer(lora_request)
 
             sampling_params = request.to_sampling_params()
-            decoding_config = await self.engine.get_decoding_config()
-            guided_decoding_backend = request.guided_decoding_backend \
-                or decoding_config.guided_decoding_backend
-            guided_decode_logit_processor = (
-                await
-                get_guided_decoding_logits_processor(guided_decoding_backend,
-                                                     request, tokenizer))
-            if guided_decode_logit_processor is not None:
-                if sampling_params.logits_processors is None:
-                    sampling_params.logits_processors = []
-                sampling_params.logits_processors.append(
-                    guided_decode_logit_processor)
+            # decoding_config = await self.engine.get_decoding_config()
+            # guided_decoding_backend = request.guided_decoding_backend \
+            #     or decoding_config.guided_decoding_backend
+            # guided_decode_logit_processor = (
+            #     await
+            #     get_guided_decoding_logits_processor(guided_decoding_backend,
+            #                                          request, tokenizer))
+            # if guided_decode_logit_processor is not None:
+            #     if sampling_params.logits_processors is None:
+            #         sampling_params.logits_processors = []
+            #     sampling_params.logits_processors.append(
+            #         guided_decode_logit_processor)
 
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
@@ -128,13 +128,13 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = await self.engine.is_tracing_enabled()
-                trace_headers = None
-                if is_tracing_enabled:
-                    trace_headers = extract_trace_headers(raw_request.headers)
-                if not is_tracing_enabled and contains_trace_headers(
-                        raw_request.headers):
-                    log_tracing_disabled_warning()
+                # is_tracing_enabled = await self.engine.is_tracing_enabled()
+                # trace_headers = None
+                # if is_tracing_enabled:
+                #     trace_headers = extract_trace_headers(raw_request.headers)
+                # if not is_tracing_enabled and contains_trace_headers(
+                #         raw_request.headers):
+                #     log_tracing_disabled_warning()
 
                 generator = self.engine.generate(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
@@ -142,7 +142,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     request_id_item,
                     lora_request=lora_request,
                     prompt_adapter_request=prompt_adapter_request,
-                    trace_headers=trace_headers,
+                    # trace_headers=trace_headers,
                 )
 
                 generators.append(generator)
