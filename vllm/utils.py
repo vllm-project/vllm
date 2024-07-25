@@ -325,7 +325,7 @@ def merge_async_iterators(
         try:
             while not all(finished) or not queue.empty():
                 # we think there is a race condition here
-                item = await queue.get(timeout=0.1)
+                item = await queue.get()
 
                 if isinstance(item, ProducerFinished):
                     # Signal that a producer finished- not a real item
