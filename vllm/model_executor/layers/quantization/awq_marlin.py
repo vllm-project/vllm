@@ -25,7 +25,7 @@ class AWQMarlinConfig(QuantizationConfig):
     def __init__(self, weight_bits: int, group_size: int, has_zp: bool,
                  lm_head_quantized: bool) -> None:
         self.weight_bits = weight_bits
-        self.pack_factor = 32 // self.weight_bits  # packed into int32
+        self.pack_factor = 32 // self.weight_bits  # packed into 32bits
         self.group_size = group_size
         self.has_zp = has_zp
         self.lm_head_quantized = lm_head_quantized
@@ -69,7 +69,8 @@ class AWQMarlinConfig(QuantizationConfig):
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
-        is_valid_user_quant = (user_quant is None or user_quant == "marlin")
+        is_valid_user_quant = (user_quant is None or user_quant == "marlin"
+                               or user_quant == "awq_marlin")
 
         if can_convert and is_valid_user_quant:
             msg = ("The model is convertible to {} during runtime."

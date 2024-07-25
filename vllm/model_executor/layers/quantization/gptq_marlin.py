@@ -79,7 +79,8 @@ class GPTQMarlinConfig(QuantizationConfig):
                                      user_quant) -> Optional[str]:
         can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
-        is_valid_user_quant = (user_quant is None or user_quant == "marlin")
+        is_valid_user_quant = (user_quant is None or user_quant == "marlin"
+                               or user_quant == "gptq_marlin")
 
         if can_convert and is_valid_user_quant:
             msg = ("The model is convertible to {} during runtime."
