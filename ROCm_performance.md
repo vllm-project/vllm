@@ -11,7 +11,7 @@ The default attention function on ROCm is using triton attention kernel. To fall
 `VLLM_USE_FLASH_ATTN_TRITON=False`
 ## Tunable ops
 Pytorch tunable ops are supported.  
-Define the following environment symbol: `PYTORCH_TUNABLEOP_ENABLED=1` in order to enable both the runtime tuning and the subsequent use of tuned results. To only use the tuned results without tuning any newly encountered shapes, also define `PYTORCH_TUNABLEOP_TUNING=1`
+Define the following environment symbol: `PYTORCH_TUNABLEOP_ENABLED=1` in order to enable both the runtime tuning and the subsequent use of tuned results. To only use the tuned results without tuning any newly encountered shapes, set `PYTORCH_TUNABLEOP_TUNING=0`
 
 ## Custom PagedAttention
 
