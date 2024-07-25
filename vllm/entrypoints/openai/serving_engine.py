@@ -62,7 +62,7 @@ class OpenAIServing:
     def __init__(
         self,
         engine: AsyncLLMEngine,
-        model_config: ModelConfig,
+        # model_config: ModelConfig,
         served_model_names: List[str],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
@@ -73,8 +73,9 @@ class OpenAIServing:
         super().__init__()
 
         self.engine = engine
-        self.model_config = model_config
-        self.max_model_len = model_config.max_model_len
+        # self.model_config = model_config
+        # self.max_model_len = model_config.max_model_len
+        self.max_model_len = 4096
 
         self.served_model_names = served_model_names
 

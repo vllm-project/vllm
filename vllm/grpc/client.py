@@ -41,6 +41,7 @@ class TextGenerationClient(AsyncLLMEngine):
                     text=output.text,
                     token_ids=output.token_ids,
                     cumulative_logprob=0.0,
+                    finish_reason=output.finish_reason,
                 ) for output in generate_response.outputs
             ]
 

@@ -24,4 +24,5 @@ message CompletionOutput {
     uint64 index = 1;
     repeated uint64 token_ids = 2;
     string text = 3;
+    string finish_reason = 4;
 }

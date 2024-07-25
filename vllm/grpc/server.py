@@ -33,7 +33,9 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             outputs = [ 
                 generate_pb2.CompletionOutput(
                     index=output.index,
-                    token_ids=output.token_ids) 
+                    token_ids=output.token_ids,
+                    text=output.text,
+                    finish_reason=output.finish_reason)
                 for output in request_output.outputs
             ]
             yield generate_pb2.GenerateResponse(outputs=outputs)
@@ -55,6 +57,7 @@ async def start_grpc_server() -> aio.Server:
     grpc_port = 5543
     server.add_insecure_port(f"{host}:{grpc_port}")
     await server.start()
+    print("ready")
     return server
 
 
