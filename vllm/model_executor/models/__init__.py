@@ -21,6 +21,8 @@ _GENERATION_MODELS = {
     "ChameleonForCausalLM":
     ("chameleon", "ChameleonForConditionalGeneration"
      ),  #TODO(ywang96): fix model name when huggingface fixes it
+    "ChameleonForConditionalGeneration":
+    ("chameleon", "ChameleonForConditionalGeneration"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
