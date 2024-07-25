@@ -29,7 +29,7 @@ class bench_params_t:
 
 def get_bench_params() -> List[bench_params_t]:
     ## Test Fixtures
-    NUM_TOKENS = [2**x for x in range(10)] + list(range(1024, 8192, 1024))
+    NUM_TOKENS = [2**x for x in range(11)]
     HIDDEN_SIZES = list(range(1024, 8129, 1024))
     ADD_RESIDUAL = [True, False]
     DTYPES = [torch.bfloat16, torch.float]
@@ -160,7 +160,7 @@ def main():
     timers = []
     for bp in tqdm(bench_params):
         timers.extend(
-            bench(bp, bp.description(), "rms-norm-dynamic-per-token-quant"))
+            bench(bp, "rms-norm-dynamic-per-token-quant", bp.description()))
     print_timers(timers)
 
     # pickle all the results
