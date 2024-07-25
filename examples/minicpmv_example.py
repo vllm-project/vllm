@@ -4,6 +4,8 @@ from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 
 # 2.0
+# The official repo doesn't work yet, so we need to use a fork for now
+# For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 # MODEL_NAME = "HwwwH/MiniCPM-V-2"
 # 2.5
 MODEL_NAME = "openbmb/MiniCPM-Llama3-V-2_5"
