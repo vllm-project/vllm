@@ -88,9 +88,9 @@ def run_test(
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=vllm_images,
+                                                images=images,
                                                 stop_token_ids=stop_token_ids)
-            for prompts, vllm_images in inputs_per_image
+            for prompts, images in inputs_per_image
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model, torch.no_grad():
@@ -114,9 +114,9 @@ def run_test(
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images,
+                                                    images=images,
                                                     tokenizer=tokenizer)
-            for prompts, hf_images in inputs_per_image
+            for prompts, images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
