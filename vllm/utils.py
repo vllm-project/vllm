@@ -287,6 +287,9 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     return _async_wrapper
 
 
+class ProducerFinished:
+    pass
+
 def merge_async_iterators(
         *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
     """Merge multiple asynchronous iterators into a single iterator.
@@ -310,6 +313,8 @@ def merge_async_iterators(
             await queue.put(e)
         finished[i] = True
         print("producer finished")
+        # Signal to the consumer that we've finished
+        await queue.put(ProducerFinished())
 
     _tasks = [
         asyncio.create_task(producer(i, iterator))
@@ -321,6 +326,11 @@ def merge_async_iterators(
             while not all(finished) or not queue.empty():
                 # we think there is a race condition here
                 item = await queue.get(timeout=0.1)
+
+                if isinstance(item, ProducerFinished):
+                    # Signal that a producer finished- not a real item
+                    continue
+
                 if isinstance(item, Exception):
                     raise item
                 yield item
