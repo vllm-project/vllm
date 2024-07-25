@@ -255,19 +255,39 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
     def _prepare_encoder_model_input_tensors(
             self, seq_group_metadata_list: List[SequenceGroupMetadata],
             model_input: EncoderDecoderModelInput) -> EncoderDecoderModelInput:
-        """Helper method to prepare the model input based on a given sequence
-        group. Prepares metadata needed for the base model forward pass but not
-        metadata for possible additional steps, e.g., sampling.
+        """Helper method to prepare the encoder- and cross-attn-related
+        model inputs based on a given sequence group. These additional inputs
+        are used to augment an already-computed `EncoderDecoderModelInput`
+        data structure which already has decoder-related model inputs
+        populated.
 
-        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+        Sets the following attn_metadata fields:
+        * `num_encoder_tokens`
+        * `encoder_seq_lens`
+        * `encoder_seq_lens_tensor`
+        * `max_encoder_seq_len`
+        * `cross_slot_mapping`
+        * `cross_block_tables`
 
-        The result tensors and data structure also batches input in prefill
-        -> decode order. For example,
+        Constructs a new model inputs data structure, based on
+        (1) the existing fields in the `model_inputs` argument,
+        and (2) the following addition fields that are
+        computed (or in the case of `attn_metadata`, updated) 
+        by this function:
+        * attn_metadata
+        * encoder_input_tokens
+        * encoder_input_positions
 
-        - input_tokens[:num_prefill_tokens] contains prefill tokens.
-        - input_tokens[num_prefill_tokens:] contains decode tokens.
+        Arguments:
 
-        If cuda graph is required, this API automatically pads inputs.
+        * seq_group_metadata_list: list of sequence groups for which to
+                                   compute inputs
+        * model_inputs: model inputs data structure with decoder-oriented
+                        fields already computed.
+
+        Return:
+
+        * Updated model inputs data structure
         """
         input_tokens: List[int] = []
         input_positions: List[int] = []
