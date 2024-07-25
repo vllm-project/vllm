@@ -224,7 +224,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Number of steps before yielding in the sync engine for
     # the sync server mode
     "VLLM_ENGINE_STEPS_BEFORE_YIELD":
-    lambda: os.getenv("VLLM_ENGINE_STEPS_BEFORE_YIELD", "10"),
+    lambda: int(os.getenv("VLLM_ENGINE_STEPS_BEFORE_YIELD", "10")),
 }
 
 # end-env-vars-definition
