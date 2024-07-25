@@ -83,7 +83,8 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
     if residual is not None:
         residual = residual.clone()
     out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
-                                        quant_dtype, scale_ub, residual)
+                                                       quant_dtype, scale_ub,
+                                                       residual)
     return out, scales, residual
 
 def ops_impl(weight: torch.Tensor,
