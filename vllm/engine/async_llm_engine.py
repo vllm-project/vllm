@@ -248,6 +248,8 @@ class _AsyncLLMEngine(LLMEngine):
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 virtual_engine=virtual_engine,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
+                kv_to_block_buffer=scheduler_outputs.kv_to_block_buffer,
+                kv_from_block_buffer=scheduler_outputs.kv_from_block_buffer,
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
             output = await self.model_executor.execute_model_async(

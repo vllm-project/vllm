@@ -327,7 +327,7 @@ class NaiveBlockAllocator(BlockAllocator):
             # Here we allocate either immutable or mutable block and then
             # extract its block_id. Note that the block object is released
             # and the block_id is assigned to "block" to allow reusing the
-            # existing "block" object
+            # original "block" object
             if block.is_full:
                 tmp_block = self.allocate_immutable_block(
                     prev_block=block.prev_block, token_ids=block.token_ids)

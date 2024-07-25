@@ -126,6 +126,8 @@ class WorkerInput:
     blocks_to_swap_in: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
+    kv_to_block_buffer: Optional[torch.Tensor] = None
+    kv_from_block_buffer: Optional[torch.Tensor] = None
     virtual_engine: int = 0
 
     @classmethod

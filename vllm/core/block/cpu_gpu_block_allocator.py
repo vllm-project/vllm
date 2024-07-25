@@ -260,7 +260,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 current_swap_mapping[src_block_id] = dst_block_id
         return current_swap_mapping
 
-    def get_kv_cache_from_block(self, block: Block) -> List[torch.Tensor]:
+    async def get_kv_cache_from_block(self, block: Block) -> List[torch.Tensor]:
         """Return the corresponding KV cache of the given block.
 
         Args:
@@ -269,16 +269,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             List[torch.Tensor]: The kv_cache object.
         """
-        # see block object contents
-        # what is the kv cache?
-            # block contains token_ids
-            # find mapping betwen token_ids and tokens?
-            # token_ids and kv cache?
-        # convert to raw tensor list
-            # Sequence → token_ids?
+        pass
 
 
-    def put_kv_cache_into_block(block: Block, kv_cache: List[torch.Tensor]) -> None:
+    async def put_kv_cache_into_block(block: Block, kv_cache: List[torch.Tensor]) -> None:
         """Inserts the KV cache into the given block
 
         Args:
@@ -288,6 +282,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             None
         """
+        pass
 
     def get_num_blocks_touched(self,
                                blocks: List[Block],

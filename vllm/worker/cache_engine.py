@@ -101,6 +101,23 @@ class CacheEngine:
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
+    def put_kv_cache_into_block(kv_to_block_buffer: List[int]):
+        '''TODO 
+                1) dereference the ptr to the buffer, convert into Block object and KV cache tensor
+                2) use some attn_backend function to insert the KV cache tensor into the block
+                3) signal to corresponding function in cpu_gpu_block_allocator.py to return (add special val to shared buffer?)
+        '''
+        pass
+    
+    def get_kv_cache_from_block(kv_from_block_buffer: List[int]):
+        '''TODO 
+                1) dereference the ptr to the buffer, convert into Block object
+                2) use some attn_backend function to extract the kv cache from the Block
+                3) add kv cache to buffer and signal to corresponding function in cpu_gpu_block_allocator.py to return
+        '''
+        pass
+
+
     @staticmethod
     def get_cache_block_size(
         cache_config: CacheConfig,
