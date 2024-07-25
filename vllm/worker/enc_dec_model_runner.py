@@ -293,9 +293,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # metadata list arg is an empty list
             return model_input
 
-        if self.sliding_window is not None:
-            raise NotImplementedError()
-
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             is_prompt = seq_group_metadata.is_prompt
@@ -320,12 +317,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # Optimization. get_token_ids requires the entire copy of
                 # tokens.
                 tokens = [seq_data.get_last_token_id()]
-
-            # Prefix cache was hit.
-            # Prefix is not supported with sliding_window
-            prefix_cache_hit = (computed_block_nums is not None
-                                and len(computed_block_nums) > 0
-                                and self.sliding_window is None and is_prompt)
 
             # These are seq_len/context_len capped to the sliding window.
             # They are passed to decode kernel.
@@ -396,28 +387,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # Compute the slot mapping.
             block_table = cross_block_table
 
-            # Mask the [0, start_idx) tokens of the prompt with
-            # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
-            # sliding_window). For example, if the prompt len is 10,
-            # sliding window is 8, and block size is 4, the first two
-            # tokens are masked and the slot mapping will be
-            # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-            start_idx = 0
-            if self.sliding_window is not None:
-                if is_prompt:
-                    assert self.scheduler_config.use_v2_block_manager \
-                        or context_len == 0, (
-                        "Prefix caching is currently not supported with "
-                        "sliding window attention in V1 block manager")
-                # It is an optimization. When it is decoding, it is always
-                # 0. When prefill, we use it to not write slots to kv cache
-                # to save memory.
-                start_idx = max(0, query_len - self.sliding_window)
-
             for i in range(context_len, seq_len):
-                if i < start_idx:
-                    slot_mapping.append(_PAD_SLOT_ID)
-                    continue
 
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
