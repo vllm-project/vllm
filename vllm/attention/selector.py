@@ -2,6 +2,9 @@ import enum
 from functools import lru_cache
 from typing import Optional, Type
 
+from contextlib import contextmanager
+from typing import Generator
+
 import torch
 
 import vllm.envs as envs
@@ -28,6 +31,9 @@ class _Backend(enum.Enum):
 # to be forced, overriding the logic which auto-selects
 # a backend based on system & workload configuration
 # (default behavior if this variable is None)
+#
+# THIS SELECTION ALSO OVERRIDES THE VLLM_ATTENTION_BACKEND
+# ENVIRONMENT VARIABLE
 forced_attn_backend: Optional[_Backend] = None
 
 
@@ -136,7 +142,10 @@ def which_attn_to_use(
     selected_backend = _Backend.FLASH_ATTN
 
     # Check whether a particular choice of backend was
-    # previously forced
+    # previously forced.
+    #
+    # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
+    # ENVIRONMENT VARIABLE.
     backend_by_global_setting: Optional[_Backend] = (
         get_global_forced_attn_backend())
     if backend_by_global_setting is not None:
@@ -234,3 +243,35 @@ def which_attn_to_use(
             selected_backend = _Backend.XFORMERS
 
     return selected_backend
+
+@contextmanager
+def global_force_attn_backend_context_manager(
+    attn_backend: _Backend, 
+    ) -> Generator[None, None, None]:
+    '''
+    Globally force a vLLM attention backend override within a
+    context manager, reverting the global attention backend
+    override to its prior state upon exiting the context
+    manager.
+
+    Arguments:
+
+    * attn_backend: attention backend to force
+
+    Returns:
+
+    * Generator
+    '''
+
+    # Save the current state of the global backend override (if any)
+    original_value = get_global_forced_attn_backend()
+
+    # Globally force the new backend override
+    global_force_attn_backend(attn_backend)
+
+    # Yield control back to the enclosed code block
+    try:
+        yield
+    finally:
+        # Revert the original global backend override, if any
+        global_force_attn_backend(original_value)

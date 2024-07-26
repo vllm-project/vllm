@@ -1,5 +1,8 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, cast
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, cast)
+
+from vllm.attention.selector import (global_force_attn_backend,
+                                     _Backend)
 
 import torch
 import torch.distributed
@@ -94,6 +97,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         the base-class constructor.
         '''
 
+        self._force_supported_attention_backend()
+
         super().__init__(
             model_config,
             parallel_config,
@@ -109,6 +114,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         # Crash for unsupported encoder/scenarios
         assert_enc_dec_mr_supported_scenario(self)
+
+    def _force_supported_attention_backend(self):
+        '''
+        Force vLLM to use the XFormers attention backend,
+        which is currently the only supported option.
+        '''
+        global_force_attn_backend(_Backend.XFORMERS)
 
     @torch.inference_mode()
     def execute_model(
