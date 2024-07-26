@@ -1038,7 +1038,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
         previous_hidden_states = None
         if "previous_hidden_states" in inspect.signature(
-                self.execute_model).parameters:
+                self.model.forward).parameters:
             previous_hidden_states = torch.empty(
                 [max_batch_size,
                  self.model_config.get_hidden_size()],
