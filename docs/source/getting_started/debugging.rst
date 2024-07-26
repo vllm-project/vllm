@@ -67,7 +67,7 @@ If the problem persists, feel free to `open an issue on GitHub <https://github.c
 
 Some known issues:
 
-- In ``v0.5.2``, ``v0.5.3``, and ``v0.5.3.post1``, there is a bug caused by `zmq <https://github.com/zeromq/pyzmq/issues/2000>`_ , which can cause hangs at a low probability (once in about 20 times, depending on the machine configuration). The fix is to upgrade to the latest version of ``vllm``.
+- In ``v0.5.2``, ``v0.5.3``, and ``v0.5.3.post1``, there is a bug caused by `zmq <https://github.com/zeromq/pyzmq/issues/2000>`_ , which can cause hangs at a low probability (once in about 20 times, depending on the machine configuration). The solution is to upgrade to the latest version of ``vllm`` to include the `fix <https://github.com/vllm-project/vllm/pull/6759>`_ .
 
 .. warning::
 
