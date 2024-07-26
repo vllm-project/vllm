@@ -3,10 +3,8 @@
 
 name: Create Release
 
-on:
-  push:
-    tags:
-      - v*
+on: workflow_dispatch
+
 
 # Needed to create release and upload assets
 permissions:
