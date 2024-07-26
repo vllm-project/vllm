@@ -3,6 +3,7 @@ import math
 # This is a hardcoded limit in Triton (max block size).
 MAX_TRITON_N_COLS = 131072
 
+
 def get_num_triton_sampler_splits(n_cols: int) -> int:
     """Get the number of splits to use for Triton sampling.
 
