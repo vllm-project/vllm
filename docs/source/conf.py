@@ -143,5 +143,6 @@ intersphinx_mapping = {
 }
 
 autodoc_preserve_defaults = True
+autodoc_warningiserror = True
 
 navigation_with_keys = False
