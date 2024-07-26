@@ -156,7 +156,6 @@ class Blip2QFormerAttention(nn.Module):
         )
 
         self.output = Blip2QFormerSelfOutput(config)
-        self.pruned_heads = set()
 
     def forward(
         self,
