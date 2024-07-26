@@ -42,6 +42,7 @@ class CPUModelInput(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
     multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
+    virtual_engine: Optional[int] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -204,8 +205,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             seq_lens=seq_lens,
-            seq_lens_tensor=None,
-            max_decode_seq_len=None,
+            seq_lens_tensor=torch.tensor([]),
+            max_decode_seq_len=0,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
@@ -345,7 +346,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             multi_modal_kwargs=multi_modal_kwargs,
         )
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def execute_model(
         self,
         model_input: CPUModelInput,

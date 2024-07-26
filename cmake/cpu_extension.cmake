@@ -83,6 +83,8 @@ endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
+list(APPEND LIBS "numa")
+
 
 #
 # Define extension targets
@@ -95,6 +97,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
     "csrc/cpu/attention.cpp"
     "csrc/cpu/cache.cpp"
+    "csrc/cpu/utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/torch_bindings.cpp")
@@ -104,6 +107,7 @@ define_gpu_extension_target(
     DESTINATION vllm
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_SRC}
+    LIBRARIES ${LIBS}
     COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
     USE_SABI 3
     WITH_SOABI
