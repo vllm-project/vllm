@@ -371,7 +371,6 @@ class Blip2QFormerModel(nn.Module):
             encoder_hidden_states=encoder_hidden_states,
             query_length=query_length,
         )
-        # pooled_output = sequence_output[:, 0, :]
 
         return sequence_output
 
