@@ -228,13 +228,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_STEPS_BEFORE_YIELD":
     lambda: int(os.getenv("VLLM_ENGINE_STEPS_BEFORE_YIELD", "10")),
 
-    # Number of steps before yielding in the sync engine for
-    # the sync server mode
+    # Maximum number of steps before yielding in the sync engine 
+    # when a first token is ready for a request
     "VLLM_ENGINE_STEPS_FIRST_TOKEN":
     lambda: int(os.getenv("VLLM_ENGINE_STEPS_FIRST_TOKEN", "1")),
 
-    # Number of steps before yielding in the sync engine for
-    # the sync server mode
+    # Maximum number of steps before yielding in the sync engine 
+    # when a request is completed
     "VLLM_ENGINE_STEPS_COMPLETED_REQUEST":
     lambda: int(os.getenv("VLLM_ENGINE_STEPS_COMPLETED_REQUEST", "1")),
 }
