@@ -2,13 +2,12 @@
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
 import torch
+import triton
+import triton.language as tl
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import maybe_import_triton
 
-triton, tl = maybe_import_triton()
-
-if triton.__version__ >= "2.1.0" or triton.__version__ == "0.0.0":
+if triton.__version__ >= "2.1.0":
 
     @triton.jit
     def _fwd_kernel(

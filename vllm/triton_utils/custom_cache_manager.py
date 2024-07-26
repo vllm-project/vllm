@@ -2,11 +2,10 @@ import os
 
 from vllm.logger import init_logger
 
-from .importing import maybe_import_triton
+
+from .importing import HAS_TRITON
 
 logger = init_logger(__name__)
-
-triton, _ = maybe_import_triton()
 
 
 def maybe_set_triton_cache_manager() -> None:
@@ -19,7 +18,7 @@ def maybe_set_triton_cache_manager() -> None:
         os.environ["TRITON_CACHE_MANAGER"] = manager
 
 
-if triton.__version__ != "0.0.0":
+if HAS_TRITON:
 
     from triton.runtime.cache import (FileCacheManager, default_cache_dir,
                                       default_dump_dir, default_override_dir)

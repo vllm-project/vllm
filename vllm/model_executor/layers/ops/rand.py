@@ -1,10 +1,8 @@
 from typing import Optional, Union
 
 import torch
-
-from vllm.triton_utils import maybe_import_triton
-
-triton, tl = maybe_import_triton()
+import triton
+import triton.language as tl
 
 
 def seeded_uniform(
@@ -95,16 +93,16 @@ def seeded_uniform(
 
 @triton.jit
 def _seeded_uniform_triton(
-        out_ptr: torch.Tensor,
-        seed_ptr: torch.Tensor,
-        out_row_stride: int,
-        out_3d_stride: int,
-        seed_row_stride: int,
-        n_rows: int,
-        n_3d: int,
-        n_cols: int,
-        n_slices: tl.constexpr,  # type: ignore
-        block_size: tl.constexpr,  # type: ignore
+    out_ptr: torch.Tensor,
+    seed_ptr: torch.Tensor,
+    out_row_stride: int,
+    out_3d_stride: int,
+    seed_row_stride: int,
+    n_rows: int,
+    n_3d: int,
+    n_cols: int,
+    n_slices: tl.constexpr,
+    block_size: tl.constexpr,
 ):
     """
     Generate a random float32 number in [0, 1) for each element in the output
