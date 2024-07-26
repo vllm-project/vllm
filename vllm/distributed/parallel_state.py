@@ -34,10 +34,6 @@ from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-
-if current_platform.is_tpu():
-    import torch_xla.core.xla_model as xm
 
 
 @dataclass
@@ -129,7 +125,6 @@ class GroupCoordinator:
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
     mq_broadcaster: Optional[Any]  # shared memory broadcaster
-    use_xla: bool  # Whether to use PyTorch XLA communicator
 
     def __init__(
         self,
@@ -138,6 +133,7 @@ class GroupCoordinator:
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
+        use_tpu_communicator: bool,
         use_message_queue_broadcaster: bool = False,
     ):
 
@@ -145,7 +141,6 @@ class GroupCoordinator:
         self.local_rank = local_rank
         self.device_group = None
         self.cpu_group = None
-        self.use_xla = current_platform.is_tpu()
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
@@ -170,6 +165,7 @@ class GroupCoordinator:
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+        self.use_tpu_communicator = use_tpu_communicator
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -195,6 +191,16 @@ class GroupCoordinator:
             )
         else:
             self.ca_comm = None
+
+        from vllm.distributed.device_communicators.tpu_communicator import (
+            TpuCommunicator)
+        self.tpu_communicator: Optional[TpuCommunicator]
+        if use_tpu_communicator and self.world_size > 1:
+            self.tpu_communicator = TpuCommunicator(
+                group=self.cpu_group,
+                local_rank=local_rank,
+                world_size=self.world_size,
+            )
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
@@ -296,9 +302,10 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
-        # For TPUs, use xm.all_reduce.
-        if self.use_xla:
-            return xm.all_reduce(xm.REDUCE_SUM, input_)
+        # For TPUs, use TPU communicator.
+        tpu_comm = self.tpu_communicator
+        if tpu_comm is not None and not tpu_comm.disabled:
+            return tpu_comm.all_reduce(input_)
 
         if ca_comm is not None:
             out = ca_comm.custom_all_reduce(input_)
@@ -319,10 +326,10 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
-        # For TPUs, use xm.all_gather.
-        if self.use_xla:
-            assert dim == -1, "TPUs only support dim=-1 for all-gather."
-            return xm.all_gather(input_, dim)
+        # For TPUs, use TPU communicator.
+        tpu_comm = self.tpu_communicator
+        if tpu_comm is not None and not tpu_comm.disabled:
+            return tpu_comm.all_gather(input_, dim)
 
         if dim < 0:
             # Convert negative dim to positive.
@@ -741,6 +748,7 @@ def init_world_group(ranks: List[int], local_rank: int,
         torch_distributed_backend=backend,
         use_pynccl=False,
         use_custom_allreduce=False,
+        use_tpu_communicator=False,
     )
 
 
@@ -759,6 +767,7 @@ def init_model_parallel_group(
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
+        use_tpu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
     )
 
