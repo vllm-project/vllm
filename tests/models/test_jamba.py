@@ -1,7 +1,6 @@
 import pytest
 
 from tests.models.utils import check_outputs_equal
-from vllm.sampling_params import SamplingParams
 from vllm.worker.model_runner import _get_graph_batch_size
 
 MODELS = ["ai21labs/Jamba-tiny-random"]
