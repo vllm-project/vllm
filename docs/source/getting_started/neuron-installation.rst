@@ -131,6 +131,6 @@ Once neuronx-cc and transformers-neuronx packages are installed, we will be able
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
     $ pip install -U -r requirements-neuron.txt
-    $ pip install .
+    $ VLLM_TARGET_DEVICE="neuron" pip install .
 
 If neuron packages are detected correctly in the installation process, ``vllm-0.3.0+neuron212`` will be installed.
