@@ -274,7 +274,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 self.model_runner.
                 make_model_input_from_broadcasted_tensor_dict(broadcast_data))
 
-            kwargs = broadcast_data
+            if "previous_hidden_states" in broadcast_data:
+                kwargs = {
+                    "previous_hidden_states": broadcast_data["previous_hidden_states"]
+                }
+            else:
+                kwargs = {}
 
         self.execute_worker(worker_input)
 
