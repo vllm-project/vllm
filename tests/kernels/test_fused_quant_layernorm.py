@@ -1,19 +1,51 @@
 from typing import Optional, Tuple, Union
+from enum import Enum
 
 import pytest
 import torch
 
 import vllm._custom_ops as ops
 from vllm.model_executor.layers.layernorm import RMSNorm
+import quant_utils
+
+class QuantType(Enum):
+    SymmetricInt8DynamicPerTokenQuant = 0
+    SymmetricFP8DynamicPerTokenQuant = 1
+    ASymmetricInt8DynamicPerTokenQuant = 2
+
+def is_int8_quant(qtype: QuantType) -> bool:
+    return qtype in [QuantType.SymmetricInt8DynamicPerTokenQuant,
+                 QuantType.ASymmetricInt8DynamicPerTokenQuant]
+
+def is_fp8_quant(qtype: QuantType) -> bool:
+    return qtype in [QuantType.SymmetricFP8DynamicPerTokenQuant]
+
+def is_symmetric_quant(qtype: QuantType) -> bool:
+    return qtype in [QuantType.SymmetricInt8DynamicPerTokenQuant,
+            QuantType.SymmetricFP8DynamicPerTokenQuant]
+
+def is_asymmetric_quant(qtype: QuantType) -> bool:
+    return qtype in [QuantType.ASymmetricInt8DynamicPerTokenQuant]
+
+def quant_dtype_from_quant_type(qtype : QuantType) -> torch.dtype:
+    if is_int8_quant(qtype):
+        return torch.int8
+    if is_fp8_quant(qtype):
+        return torch.float8_e4m3fn
+    raise ValueError(f"Unsupported quant type {qtype}")
 
 DTYPES = [torch.bfloat16, torch.float]
-QUANT_DTYPES = [torch.int8, torch.float8_e4m3fn]
+QUANT_TYPES = [QuantType.SymmetricFP8DynamicPerTokenQuant,
+               QuantType.SymmetricInt8DynamicPerTokenQuant,
+               QuantType.ASymmetricFP8DynamicPerTokenQuant,
+               QuantType.ASymmetricInt8DynamicPerTokenQuant]
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
                 8193]  # Arbitrary values for testing
 HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
-ADD_RESIDUAL = [False, True]
-SCALE_UBS = [True, False]
+AZPS = [True, False] #  With and without AZP (i.e. asymmetric and symmetric quantization) 
+ADD_RESIDUAL = [True, False] # With and without fused residual add
+SCALE_UBS = [True, False] # With and without scale_ub
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -22,7 +54,6 @@ CUDA_DEVICES = [
 EPS = 1e-6
 
 ## Helpers
-
 
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
     return torch.as_tensor(x, dtype=torch.float32, device='cuda')
@@ -40,7 +71,7 @@ def ref_rms_norm(rms_norm_layer: RMSNorm,
 
     return out, residual
 
-def ref_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
+def ref_symmetric_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
                             x: torch.Tensor,
                             quant_dtype: torch.dtype,
                             residual: Optional[torch.Tensor],
@@ -64,14 +95,44 @@ def ref_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
 
     return torch_out, scales, residual
 
+def ref_asymmetric_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
+                            x: torch.Tensor,
+                            quant_dtype: torch.dtype,
+                            residual: Optional[torch.Tensor]) \
+                -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+
+    # Only support int8 for now
+    assert quant_dtype == torch.int8
+
+    # Norm
+    torch_out, residual = ref_rms_norm(rms_norm_layer, x, residual)
+
+    # Quant
+    # TODO Switch to GPU reference when it becomes available.
+    torch_out, scales, azps = quant_utils.ref_asymmetric_dynamic_per_token_quant(x, quant_dtype)
+
+    return torch_out, scales, azps, residual
+
 def ref_impl(rms_norm_layer: RMSNorm,
              x: torch.Tensor,
-             quant_dtype: torch.dtype,
+             quant_type: QuantType,
              residual: Optional[torch.Tensor],
              scale_ub: Optional[torch.Tensor]) \
-           -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    return ref_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype,
+           -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+
+    quant_dtype = quant_dtype_from_quant_type(quant_type)
+
+    out, scales, azps, residual = (None, None, None, None)
+    
+    if is_symmetric_quant(quant_type):
+        out, scales, residual = ref_symmetric_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype,
                                        residual, scale_ub)
+    else:
+        assert is_asymmetric_quant(quant_type)
+        out, scales, azps, residual = ref_asymmetric_dynamic_per_token_quant(
+                rms_norm_layer. x, quant_dtype, residual, scale_ub)
+
+    return out, scales, azps, residual
 
 def ops_dynamic_per_token_quant(weight: torch.Tensor,
                             x: torch.Tensor,
@@ -89,10 +150,13 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
 
 def ops_impl(weight: torch.Tensor,
              x: torch.Tensor,
-             quant_dtype: torch.dtype,
+             quant_type: QuantType,
              residual: Optional[torch.Tensor],
              scale_ub: Optional[torch.Tensor]) \
                 -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+
+    quant_dtype = quant_dtype_from_quant_type(quant_type)
+
     return ops_dynamic_per_token_quant(weight, x, quant_dtype, residual,
                                        scale_ub)
 
@@ -102,7 +166,7 @@ def ops_impl(weight: torch.Tensor,
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
+@pytest.mark.parametrize("quant_type", QUANT_TYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
@@ -112,7 +176,7 @@ def test_rms_norm(
     add_residual: bool,
     scale_ub: bool,
     dtype: torch.dtype,
-    quant_dtype: torch.dtype,
+    quant_type: QuantType,
     seed: int,
     device: str,
 ) -> None:
@@ -120,6 +184,8 @@ def test_rms_norm(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
+
+    quant_dtype = quant_dtype_from_quant_type(quant_type)
 
     if scale_ub is not None and quant_dtype != torch.float8_e4m3fn:
         # skip
@@ -138,14 +204,16 @@ def test_rms_norm(
         rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device='cuda')
 
-    ref_out, ref_scales, ref_residual = \
-            ref_impl(layer, x, quant_dtype, residual, scale_ub)
-    ops_out, ops_scales, ops_residual = \
-            ops_impl(layer.weight, x, quant_dtype, residual, scale_ub)
+    ref_out, ref_scales, ref_residual, ref_azp = \
+            ref_impl(layer, x, quant_type, residual, scale_ub)
+    ops_out, ops_scales, ops_residual, ops_azp = \
+            ops_impl(layer.weight, x, quant_type, residual, scale_ub)
 
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
     assert torch.allclose(ref_scales, ops_scales)
+    if is_asymmetric_quant(quant_type):  
+        torch.allclose(ref_azp, ops_azp)
     if quant_dtype == torch.int8:
         # big atol to account for round-off errors.
         assert torch.allclose(ref_out, ops_out, atol=1)

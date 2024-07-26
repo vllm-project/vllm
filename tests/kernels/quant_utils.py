@@ -6,6 +6,8 @@ import torch
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
     return torch.as_tensor(x, dtype=torch.float32, device='cuda')
 
+# Symmetric dynamic per token quantization
+# TODO (varun) : Should I change the fn name to ref_symmetric_dynamic_per_token_quant
 def ref_dynamic_per_token_quant(x: torch.tensor,
                                 quant_dtype: torch.dtype,
                                 scale_ub: Optional[torch.tensor] = None) \
@@ -49,6 +51,37 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
 
     return torch_out, scales
 
+# Asymmetric quantization only supports int8.
+def ref_asymmetric_dynamic_per_token_quant(x: torch.tensor,
+                                quant_dtype: torch.dtype) \
+        -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
+
+    assert quant_dtype == torch.int8
+
+    qtype_traits = torch.iinfo(quant_dtype)
+    qtype_max = as_float32_tensor(qtype_traits.max)
+    qtype_min = as_float32_tensor(qtype_traits.min)
+    s_1 = as_float32_tensor(1.0)
+    s_255 = as_float32_tensor(255.0)
+
+    # Compute scales
+    x_token_max, _ = x.max(dim=-1)
+    x_token_max = as_float32_tensor(x_token_max)
+    x_token_min, _ = x.min(dim=-1)
+    x_token_min = as_float32_tensor(x_token_min)
+
+    scales = (x_token_max - x_token_min) / s_255
+    azps = torch.round(qtype_min - x_token_min / scales).to(torch.int32)
+
+    # Quant
+    iscales = as_float32_tensor(s_1 / scales)
+    torch_out = as_float32_tensor(x) * iscales
+    torch_out = torch_out.round()
+    torch_out = torch_out + azps 
+    torch_out = torch_out.clamp(qtype_traits.min,
+                                qtype_traits.max).to(quant_dtype)
+
+    return torch_out, scales, azps
 
 # The int8 version is very similar. Incorporate the int8 version, like in
 # ref_dynamic_per_token_quant, when we have a dynamic_per_tensor int8 quant
