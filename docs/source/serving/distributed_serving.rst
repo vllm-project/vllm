@@ -79,7 +79,7 @@ On the rest of the worker nodes, run the following command:
     $                   --worker \
     $                   /path/to/the/huggingface/home/in/this/node
 
-Then you get a ray cluster of containers. Note that you need to keep the shells running these commands alive to hold the cluster. Any shell disconnect will terminate the cluster.
+Then you get a ray cluster of containers. Note that you need to keep the shells running these commands alive to hold the cluster. Any shell disconnect will terminate the cluster. In addition, please note that the argument ``ip_of_head_node`` should be the IP address of the head node, which is accessible by all the worker nodes. A common misunderstanding is to use the IP address of the worker node, which is not correct.
 
 Then, on any node, use ``docker exec -it node /bin/bash`` to enter the container, execute ``ray status`` to check the status of the Ray cluster. You should see the right number of nodes and GPUs.
 
@@ -101,7 +101,7 @@ You can also use tensor parallel without pipeline parallel, just set the tensor 
 To make tensor parallel performant, you should make sure the communication between nodes is efficient, e.g. using high-speed network cards like Infiniband. To correctly set up the cluster to use Infiniband, append additional arguments like ``--privileged -e NCCL_IB_HCA=mlx5`` to the ``run_cluster.sh`` script. Please contact your system administrator for more information on how to set up the flags. One way to confirm if the Infiniband is working is to run vLLM with ``NCCL_DEBUG=TRACE`` environment variable set, e.g. ``NCCL_DEBUG=TRACE vllm serve ...`` and check the logs for the NCCL version and the network used. If you find ``[send] via NET/Socket`` in the logs, it means NCCL uses raw TCP Socket, which is not efficient for cross-node tensor parallel. If you find ``[send] via NET/IB/GDRDMA`` in the logs, it means NCCL uses Infiniband with GPU-Direct RDMA, which is efficient.
 
 .. warning::
-    After you start the Ray cluster, you'd better also check the GPU-GPU communication between nodes. It can be non-trivial to set up. Please refer to the `sanity check script <https://docs.vllm.ai/en/latest/getting_started/debugging.html>`_ for more information.
+    After you start the Ray cluster, you'd better also check the GPU-GPU communication between nodes. It can be non-trivial to set up. Please refer to the `sanity check script <https://docs.vllm.ai/en/latest/getting_started/debugging.html>`_ for more information. If you need to set some environment variables for the communication configuration, you can append them to the ``run_cluster.sh`` script, e.g. ``-e NCCL_SOCKET_IFNAME=eth0``. Note that setting environment variables in the shell (e.g. ``NCCL_SOCKET_IFNAME=eth0 vllm serve ...``) only works for the processes in the same node, not for the processes in the other nodes. Setting environment variables when you create the cluster is the recommended way. See the `discussion <https://github.com/vllm-project/vllm/issues/6803>`_ for more information.
 
 .. warning::
 
