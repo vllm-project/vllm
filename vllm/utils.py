@@ -306,13 +306,10 @@ def merge_async_iterators(
     async def producer(i: int, iterator: AsyncIterator[T]):
         try:
             async for item in iterator:
-                print(f"{i}: before producer loop")
                 await queue.put((i, item))
-                print(f"{i}: after producer await")
         except Exception as e:
             await queue.put(e)
         finished[i] = True
-        print("producer finished")
         # Signal to the consumer that we've finished
         await queue.put(ProducerFinished())
 
