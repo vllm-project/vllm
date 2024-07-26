@@ -174,13 +174,6 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
         assert seq_group_metadata.token_chunk_size == seq_data.get_len()
         seq_group_metadata_list.append(seq_group_metadata)
 
-    expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for seq_len in seq_lens:
-        expected_selected_token_indices.append(selected_token_start_idx +
-                                               seq_len - 1)
-        selected_token_start_idx += seq_len
-
     # Build decoder model inputs &
     # decoder self-attention KV caching data structures
     decoder_only_model_input = (
@@ -204,9 +197,9 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
         encoder_decoder_model_input.encoder_input_positions)
     attn_metadata = encoder_decoder_model_input.attn_metadata
     cross_slot_mapping = attn_metadata.cross_slot_mapping
-    return_encoder_seq_lens = (
-        encoder_decoder_model_input.attn_metadata.encoder_seq_lens)
-    assert return_encoder_seq_lens == encoder_seq_lens
+    # return_encoder_seq_lens = (
+    #     encoder_decoder_model_input.attn_metadata.encoder_seq_lens)
+    # assert return_encoder_seq_lens == encoder_seq_lens
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
     # Verify input metadata is correct for prompts.
@@ -214,15 +207,14 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
     device = model_runner.device
     assert attn_metadata.num_prefills > 0
     assert attn_metadata.num_decode_tokens == 0
-    assert torch.allclose(
-        attn_metadata.seq_lens_tensor,
-        torch.tensor(seq_lens, device=device, dtype=torch.int))
+    assert torch.equal(attn_metadata.seq_lens_tensor,
+                       torch.tensor(seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.seq_lens == seq_lens
     assert attn_metadata.max_prefill_seq_len == max(seq_lens)
     assert attn_metadata.max_decode_seq_len == 0
     # - Encoder attention metadata
     assert attn_metadata.encoder_seq_lens == encoder_seq_lens
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.encoder_seq_lens_tensor,
         torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.max_encoder_seq_len == max(encoder_seq_lens)
@@ -234,7 +226,7 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
     for seq_len in seq_lens:
         start_idx += seq_len
         start_loc.append(start_idx)
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device),
     )
@@ -247,11 +239,11 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
         start_idx += seq_len
         seq_start_loc.append(start_idx)
 
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.seq_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device),
     )
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.context_lens_tensor,
         torch.zeros(attn_metadata.context_lens_tensor.shape[0],
                     dtype=torch.int,
@@ -265,33 +257,58 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
         dtype=torch.int32,
         device=model_runner.device,
     )
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.block_tables,
         expected,
     )
     # - Encoder/decoder cross-attention
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.cross_block_tables,
         expected,
     )
 
-    # Cuda graph should not be used for prerill.
+    # Cuda graph should not be used for prefill.
     assert attn_metadata.use_cuda_graph is False
 
     # Verify the lengths of input tokens & positions
     # - Decoder
     assert len(input_tokens) == sum(seq_lens)
     assert len(input_positions) == sum(seq_lens)
-    torch.testing.assert_close(
+    # -- An indirect check that model_input.input_tokens
+    #    and model_input.input_positions are correct -
+    #    by design of the test, the input tokens are
+    #    equal to the input position values, so if
+    #    the model_input data structure has the correct
+    #    values then these two should be equal
+    assert torch.equal(
         input_tokens,
         input_positions,
     )
     # - Encoder
     assert len(encoder_input_tokens) == sum(encoder_seq_lens)
-    torch.testing.assert_close(
+    # -- An indirect check that model_input.encoder_input_tokens
+    #    and model_input.encoder_input_positions are correct -
+    #    by design of the test, the input tokens are
+    #    equal to the input position values, so if
+    #    the model_input data structure has the correct
+    #    values then these two should be equal
+    assert torch.equal(
         encoder_input_tokens,
         encoder_input_positions,
     )
+
+    # Test that vLLM sampling infrastructure chooses the correct
+    # sequence positions at which to sample (i.e. the end of
+    # each sequence) in the prefill phase
+
+    expected_selected_token_indices = []
+    selected_token_start_idx = 0
+    for seq_len in seq_lens:
+        # Compute the index offset of the final token in each
+        # prompt (recall that the prompts are concatenated)
+        expected_selected_token_indices.append(selected_token_start_idx +
+                                               seq_len - 1)
+        selected_token_start_idx += seq_len
 
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
@@ -307,14 +324,7 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
         device=actual.device,
         dtype=actual.dtype,
     )
-    torch.testing.assert_close(actual, expected)
-    torch.allclose(input_tokens, input_positions)
-
-    actual = sampling_metadata.selected_token_indices
-    expected = torch.tensor(expected_selected_token_indices,
-                            device=actual.device,
-                            dtype=actual.dtype)
-    torch.testing.assert_close(actual, expected)
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.skipif(condition=is_cpu(),
@@ -405,9 +415,9 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     encoder_input_positions = (
         encoder_decoder_model_input.encoder_input_positions)
     attn_metadata = encoder_decoder_model_input.attn_metadata
-    return_encoder_seq_lens = attn_metadata.encoder_seq_lens
+    # return_encoder_seq_lens = attn_metadata.encoder_seq_lens
     cross_slot_mapping = attn_metadata.cross_slot_mapping
-    assert return_encoder_seq_lens == encoder_seq_lens
+    # assert return_encoder_seq_lens == encoder_seq_lens
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
     # Verify input metadata is correct for decode phase.
@@ -415,15 +425,14 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     device = model_runner.device
     assert attn_metadata.num_prefills == 0
     assert attn_metadata.num_decode_tokens > 0
-    assert torch.allclose(
-        attn_metadata.seq_lens_tensor,
-        torch.tensor(seq_lens, device=device, dtype=torch.int))
+    assert torch.equal(attn_metadata.seq_lens_tensor,
+                       torch.tensor(seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.seq_lens == seq_lens
     assert attn_metadata.max_prefill_seq_len == 0
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
     # - Encoder attention metadata
     assert attn_metadata.encoder_seq_lens == encoder_seq_lens
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.encoder_seq_lens_tensor,
         torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.max_encoder_seq_len == max(encoder_seq_lens)
@@ -435,7 +444,7 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     for seq_len in seq_lens:
         start_idx += 1
         start_loc.append(start_idx)
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device),
     )
@@ -448,11 +457,11 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
         start_idx += seq_len
         seq_start_loc.append(start_idx)
 
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.seq_start_loc,
         torch.tensor(seq_start_loc, dtype=torch.int32, device=device),
     )
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.context_lens_tensor,
         torch.tensor([seq_len - 1 for seq_len in seq_lens],
                      dtype=torch.int,
@@ -464,7 +473,7 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
         [block_tables[0] for _ in range(len(seq_group_metadata_list))],
         dtype=torch.int32,
         device=model_runner.device)
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.block_tables,
         expected,
     )
@@ -473,7 +482,7 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
         [cross_block_table for _ in range(len(seq_group_metadata_list))],
         dtype=torch.int32,
         device=model_runner.device)
-    assert torch.allclose(
+    assert torch.equal(
         attn_metadata.cross_block_tables,
         expected,
     )
@@ -485,14 +494,59 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     # - Decoder
     assert len(input_tokens) == len(seq_lens)
     assert len(input_positions) == len(seq_lens)
-    torch.testing.assert_close(
+    # -- An indirect check that model_input.input_tokens
+    #    and model_input.input_positions are correct -
+    #    by design of the test, the input tokens are
+    #    equal to the input position values, so if
+    #    the model_input data structure has the correct
+    #    values then these two should be equal
+    assert torch.equal(
         input_tokens,
         input_positions,
     )
     # - Encoder
     assert len(encoder_input_tokens) == 0
     assert len(encoder_input_tokens) == 0
-    torch.testing.assert_close(
+    # -- An indirect check that model_input.encoder_input_tokens
+    #    and model_input.encoder_input_positions are correct -
+    #    by design of the test, the input tokens are
+    #    equal to the input position values, so if
+    #    the model_input data structure has the correct
+    #    values then these two should be equal
+    assert torch.equal(
         encoder_input_tokens,
         encoder_input_positions,
     )
+
+    # Test that vLLM sampling infrastructure chooses the correct
+    # sequence positions at which to sample (i.e. the end of
+    # each sequence) in the decode phase
+
+    expected_selected_token_indices = []
+    selected_token_start_idx = 0
+    for seq_len in seq_lens:
+        # Compute the index offset of the final token in each
+        # sequence's decoded outputs; since a single token is
+        # decoded per iteration per sequence, then the length
+        # of the decoded tokens for a given sequence is 1 and
+        # the final index offset into a given sequence's
+        # generated tokens is 0 (i.e. the expected sampling index
+        # for a given sequence is just `selected_token_start_idx`)
+        expected_selected_token_indices.append(selected_token_start_idx)
+        selected_token_start_idx += 1
+
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        seq_lens,
+        query_lens=seq_lens,
+        device=model_runner.device,
+        pin_memory=model_runner.pin_memory,
+    )
+
+    actual = sampling_metadata.selected_token_indices
+    expected = torch.tensor(
+        expected_selected_token_indices,
+        device=actual.device,
+        dtype=actual.dtype,
+    )
+    assert torch.equal(actual, expected)
