@@ -38,9 +38,9 @@ class TextGenerationClient(AsyncLLMEngine):
     def errored(self) -> bool:
         return False
     
-    async def run_engine_loop(self):
-        while True:
-            await asyncio.sleep(1)
+    def start_background_loop(self):
+        # TODO something lol
+        pass
     
     async def get_tokenizer(
         self,
