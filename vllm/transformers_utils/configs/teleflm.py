@@ -1,3 +1,5 @@
+# yapf: disable
+# ruff: noqa: E501
 # coding=utf-8
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -21,11 +23,11 @@
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
-
+from typing import Dict
 
 logger = logging.get_logger(__name__)
 
-TeleFLM_PRETRAINED_CONFIG_ARCHIVE_MAP={}
+TeleFLM_PRETRAINED_CONFIG_ARCHIVE_MAP: Dict[str, str]={}
 
 
 class TeleFLMConfig(PretrainedConfig):
@@ -107,7 +109,7 @@ class TeleFLMConfig(PretrainedConfig):
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
-    ```"""
+    ```""" # noqa: E501
 
     model_type = "TeleFLM"
     keys_to_ignore_at_inference = ["past_key_values"]
