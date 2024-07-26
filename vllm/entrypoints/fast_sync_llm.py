@@ -96,7 +96,6 @@ class FastSyncLLM:
                     result = output.outputs[0].text[
                         request_stats[output.request_id]:output_len]
                 if output.finished:
-                    # signal end of stream with None
                     stats = {
                         "prompt": len(output.prompt_token_ids),
                         "tokens": len(output.outputs[0].token_ids),
