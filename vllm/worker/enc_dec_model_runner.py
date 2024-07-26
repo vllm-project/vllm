@@ -22,6 +22,7 @@ from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
+from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -84,6 +85,15 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
     ):
+        '''
+        EncoderDecoderModelRunner constructor.
+
+        `lora_config` and `multimodal_config` are unused (since LoRA & 
+        multimodal are not yet supported for encoder/decoder models) 
+        but these arguments are present here for compatibility with 
+        the base-class constructor.
+        '''
+
         super().__init__(
             model_config,
             parallel_config,
@@ -96,6 +106,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             is_driver_worker=is_driver_worker,
             prompt_adapter_config=prompt_adapter_config,
         )
+
+        # Crash for unsupported encoder/scenarios
+        assert_enc_dec_mr_supported_scenario(self)
 
     @torch.inference_mode()
     def execute_model(
