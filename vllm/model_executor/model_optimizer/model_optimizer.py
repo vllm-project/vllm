@@ -88,6 +88,7 @@ class backend_class:
     def __call__(self, gm: torch.fx.GraphModule,
                  example_inputs: List[torch.Tensor]) -> Callable:
         # Temporarily disable optimizer so we can collect dynamo issues.
+        logger.info("Graph optimizer disabled")
         return gm
 
         logger.info("Graph optimizer start")
