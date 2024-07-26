@@ -5,7 +5,6 @@ import pytest
 import vllm
 from vllm.lora.request import LoRARequest
 
-
 MODEL_PATH = "ibm-granite/granite-3b-code-base"
 
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
