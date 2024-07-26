@@ -1,6 +1,5 @@
-from typing import Union
-
 import torch
+import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.platforms import current_platform
@@ -12,18 +11,14 @@ if current_platform.is_tpu():
 
 class TpuCommunicator:
 
-    def __init__(
-        self,
-        group: ProcessGroup,
-        local_rank: int,
-        world_size: int,
-    ):
-        del group  # Unused.
+    def __init__(self, group: ProcessGroup):
         if not current_platform.is_tpu():
             self.disabled = True
             return
         self.disabled = False
 
+        local_rank = dist.get_rank(group)
+        world_size = dist.get_world_size(group)
         pjrt.initialize_multiprocess(local_rank, world_size)
         xm._init_world_size_ordinal()
 
