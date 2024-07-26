@@ -334,11 +334,9 @@ def scaled_fp8_quant(
         Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
             scaling factor.
     """
-
     # This code assumes batch_dim and num_tokens are flattened
     assert(input.ndim == 2)
     shape = input.shape
-
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
@@ -354,7 +352,7 @@ def scaled_fp8_quant(
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        # num_tokens padding not implemented for this case
+        # num_token_padding not implemented for this case
         assert(scale.numel() == 1 or num_token_padding is None)
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
