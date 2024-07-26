@@ -644,10 +644,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             accepted_index = accepted_token_ids + 1  # Convert -1 to 0
             accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)
             index = accepted_index[:, None, None].expand(-1, 1, hs_size)
+            bonus_token_previous_hidden_states = hidden_states[:, -2]  # b x d
             hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
             # Store hidden states from target model for subsequent decode step
             self.previous_hidden_states = HiddenStates(seq_group_metadata_list,
-                                                       hidden_states)
+                                                       hidden_states,
+                                                       bonus_token_previous_hidden_states)
 
         return accepted_token_ids, logprobs
 
