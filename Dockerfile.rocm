@@ -104,7 +104,7 @@ FROM export_cupy_${BUILD_CUPY} AS export_cupy
 # -----------------------
 # Triton build stages
 FROM base AS build_triton
-ARG TRITON_BRANCH="main"
+ARG TRITON_BRANCH="6ddb79b"
 ARG TRITON_REPO="https://github.com/OpenAI/triton.git"
 RUN git clone ${TRITON_REPO} \
     && cd triton \
