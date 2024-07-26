@@ -56,7 +56,7 @@ def _bgmv_expand_kernel(
             mask=offset_k < K,
             other=0,
         )  # [BLOCK_K]
-
+    # N must be divisible by SPLIT_N
     split_n_length = tl.cdiv(N, SPLIT_N)
     if CAST_TYPE:
         tiled_a = tiled_a.to(lora_ptr.dtype.element_ty)

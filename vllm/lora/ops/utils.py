@@ -8,9 +8,25 @@ def _get_op_configs(op_type: str, batch: int, hidden_size: int):
     return None
 
 
+def _check_divisibility(hidden_size: int):
+    # The bgmv_expand kernel requires that the hidden_size be divisible by
+    # the number below.
+    divisibility = [2, 4, 8, 16, 32, 64]
+    divisibility.sort(reverse=True)
+    for div in divisibility:
+        if hidden_size % div == 0:
+            return div
+    # hidden_size is an odd number
+    return 1
+
+
 def _get_default_config(op_type: str, batch: int, hidden_size: int):
     if op_type == "expand":
-        return {"BLOCK_N": 256, "SPLIT_N": 64, "num_warps": 8}
+        return {
+            "BLOCK_N": 256,
+            "SPLIT_N": _check_divisibility(hidden_size),
+            "num_warps": 8
+        }
     else:
         return {"BLOCK_K": 256, "SPLIT_K": 64, "num_warps": 8}
 
