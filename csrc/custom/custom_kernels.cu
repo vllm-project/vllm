@@ -422,24 +422,28 @@ __global__ void wvSpltK_hf_m1_sml_(const int K, const int N, const DTYPE* B,
     //----------------------------------------------------
     for (int m = 0; m < M; m++) {
       for (int y = 0; y < YTILE; y++) {
-        sum[m][y] += __shfl_down(sum[m][y], 32);
-        sum[m][y] += __shfl_down(sum[m][y], 16);
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:4 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shl:1 bound_ctrl:0"
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
       }
     }
 
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 63) {
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
           C[n + i + m * N] = __float2half(sum[m][i]);
@@ -749,27 +753,28 @@ __global__ void wvSpltK_hf_m1_(const int K, const int N, const DTYPE* B,
     //----------------------------------------------------
     for (int m = 0; m < M; m++) {
       for (int y = 0; y < YTILE; y++) {
-        // for (int offset = 64 / 2; offset > 4 ; offset /= 2) {
-        //     sum[y] += __shfl_down(sum[y], offset);
-        // }
-        sum[m][y] += __shfl_down(sum[m][y], 32);
-        sum[m][y] += __shfl_down(sum[m][y], 16);
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:4 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shl:1 bound_ctrl:0"
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
       }
     }
 
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 63) {
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
           if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[m][i]);
@@ -1101,27 +1106,28 @@ __global__ void wvSpltK_hf_m2_(const int K, const int N, const DTYPE* B,
     //----------------------------------------------------
     for (int m = 0; m < M; m++) {
       for (int y = 0; y < YTILE; y++) {
-        // for (int offset = 64 / 2; offset > 4 ; offset /= 2) {
-        //     sum[y] += __shfl_down(sum[y], offset);
-        // }
-        sum[m][y] += __shfl_down(sum[m][y], 32);
-        sum[m][y] += __shfl_down(sum[m][y], 16);
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:4 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shl:1 bound_ctrl:0"
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
       }
     }
 
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 63) {
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
           if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[m][i]);
@@ -1453,27 +1459,28 @@ __global__ void wvSpltK_hf_m3_(const int K, const int N, const DTYPE* B,
     //----------------------------------------------------
     for (int m = 0; m < M; m++) {
       for (int y = 0; y < YTILE; y++) {
-        // for (int offset = 64 / 2; offset > 4 ; offset /= 2) {
-        //     sum[y] += __shfl_down(sum[y], offset);
-        // }
-        sum[m][y] += __shfl_down(sum[m][y], 32);
-        sum[m][y] += __shfl_down(sum[m][y], 16);
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:4 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shl:1 bound_ctrl:0"
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
       }
     }
 
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 63) {
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
           if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[m][i]);
@@ -1805,27 +1812,28 @@ __global__ void wvSpltK_hf_m4_(const int K, const int N, const DTYPE* B,
     //----------------------------------------------------
     for (int m = 0; m < M; m++) {
       for (int y = 0; y < YTILE; y++) {
-        // for (int offset = 64 / 2; offset > 4 ; offset /= 2) {
-        //     sum[y] += __shfl_down(sum[y], offset);
-        // }
-        sum[m][y] += __shfl_down(sum[m][y], 32);
-        sum[m][y] += __shfl_down(sum[m][y], 16);
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:8 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:4 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:2 bound_ctrl:0 "
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shl:1 bound_ctrl:0"
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
+            : "=v"(sum[m][y])
+            : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
             : "=v"(sum[m][y])
             : "0"(sum[m][y]), "v"(sum[m][y]), "v"(sum[m][y]));
       }
     }
 
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 63) {
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
           if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[m][i]);
