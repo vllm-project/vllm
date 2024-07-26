@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
+import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
@@ -127,7 +128,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xm.get_ordinal()
+        xm_tp_rank = xr.global_ordinal()
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
