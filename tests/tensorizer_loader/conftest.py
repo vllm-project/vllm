@@ -9,6 +9,7 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
+
 def cleanup():
     destroy_model_parallel()
     destroy_distributed_environment()
