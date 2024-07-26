@@ -1,37 +1,28 @@
 import asyncio
 from asyncio import Queue as queue
 from asyncio import QueueEmpty
-from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
-
-from tqdm import tqdm
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing import Dict, Union
 
 from vllm import envs
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
-                         TextTokensPrompt, TokensPrompt,
-                         parse_and_batch_prompt)
+from vllm.inputs import PromptInputs, TextTokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, async_rpd_trace, deprecate_kwargs
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
 
-class MorflotLLM:
+class FastSyncLLM:
 
     def __init__(
         self,
         engine_args: EngineArgs,
-        input_queue: queue = None,
-        sampling_params: SamplingParams = SamplingParams(),
+        input_queue: queue,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -41,9 +32,8 @@ class MorflotLLM:
         self.request_counter = Counter()
 
         self.input_queue = input_queue
-        self.sampling_params = sampling_params
         self.finish = False
-        self.result_queues = {}
+        self.result_queues: Dict[str, asyncio.Queue] = {}
         self.need_restart = False
 
     def _add_request(
@@ -61,11 +51,11 @@ class MorflotLLM:
     async def _poll_requests(self):
         while True:
             if not self.llm_engine.has_unfinished_requests():
-                #broadcast_tensor_dict({}, src=0)
                 logger.info("No unfinished requests. Waiting...")
                 (request_id, prompt, sampling_params,
                  result_queue) = await self.input_queue.get()
                 if self.need_restart:
+                    logger.info("Restarting worker loops")
                     for worker in self.llm_engine.model_executor.workers:
                         worker.execute_method("start_worker_execution_loop")
                     self.need_restart = False
@@ -123,8 +113,7 @@ class MorflotLLM:
                 result_queue.put_nowait((output.request_id, result, stats))
             steps_before_yield -= 1
             if steps_before_yield <= 0:
-                logger.info(
-                    f"Engine yield. Requests: {self.llm_engine.get_num_unfinished_requests()}"
-                )
+                logger.info("Engine yield. Requests: %d",
+                            self.llm_engine.get_num_unfinished_requests())
                 steps_before_yield = envs.VLLM_ENGINE_STEPS_BEFORE_YIELD
                 await asyncio.sleep(0)

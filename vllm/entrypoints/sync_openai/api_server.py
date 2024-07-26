@@ -1,20 +1,19 @@
 import asyncio
-from contextlib import asynccontextmanager
-import random
 import re
-import string
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.routing import Mount
-from prometheus_client import make_asgi_app
-import torch
 import time
-from typing import Annotated, AsyncGenerator, Dict, List, Optional, Union
+from contextlib import asynccontextmanager
+from typing import Dict, List, Optional, Union
 
+import torch
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from fastapi.routing import Mount
+from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
+from typing_extensions import Annotated
 
-from vllm import MorflotLLM as LLM
+from vllm import FastSyncLLM as LLM
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
@@ -29,20 +28,21 @@ class BackgroundRunner:
     def __init__(self):
         self.value = 0
         self.engine_args = None
-    
+
     def set_engine_args(self, engine_args):
         self.engine_args = engine_args
 
     async def run_main(self):
-        self.input_queue = asyncio.Queue()
-        self.llm = LLM(engine_args=self.engine_args,
+        self.input_queue: asyncio.Queue = asyncio.Queue()
+        self.llm = LLM(
+            engine_args=self.engine_args,
             input_queue=self.input_queue,
         )
 
         await self.llm.run_engine()
 
     async def add_request(self, prompt, sampling_params):
-        result_queue = asyncio.Queue()
+        result_queue: asyncio.Queue = asyncio.Queue()
         ids = []
         if isinstance(prompt, str) or (isinstance(prompt, list)
                                        and isinstance(prompt[0], int)):
@@ -66,7 +66,7 @@ runner = BackgroundRunner()
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
-    completion_tokens: Optional[int] = 0
+    completion_tokens: int = 0
 
 
 class CompletionLogProbs(BaseModel):
@@ -223,10 +223,12 @@ class CompletionRequest(BaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(runner.run_main())
     yield
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -258,9 +260,10 @@ async def completion_generator(model, result_queue, choices, created_time):
                                      usage=None)
             if stats is not None:
                 res.usage = UsageInfo()
-                res.usage.completion_tokens = stats["tokens"]
-                res.usage.prompt_tokens = stats["prompt"]
-                res.usage.total_tokens = res.usage.completion_tokens + res.usage.prompt_tokens
+                res.usage.completion_tokens = stats.get("tokens", 0)
+                res.usage.prompt_tokens = stats.get("prompt", 0)
+                res.usage.total_tokens = (res.usage.completion_tokens +
+                                          res.usage.prompt_tokens)
                 res.choices[0].finish_reason = stats["finish_reason"]
                 res.choices[0].stop_reason = stats["stop_reason"]
                 completed += 1
@@ -271,27 +274,8 @@ async def completion_generator(model, result_queue, choices, created_time):
 
         yield "data: [DONE]\n\n"
     except Exception as e:
-        logger.error(f"Error in completion_generator: {e}")
+        logger.error("Error in completion_generator: %s", e)
     return
-
-
-"""
-    async for request_id, token, stats in result_queue:
-        choice_idx = choices[request_id]
-        res = CompletionResponse(model=model, choices=CompletionResponseChoice(index=choice_idx, text=token), usage=None)
-        if stats is not None:
-            res.usage.completion_tokens = stats["tokens"]
-            res.usage.prompt_tokens = stats["prompt"]
-            res.usage.total_tokens = res.usage.completion_tokens + res.usage.prompt_tokens
-            res.choices[choice_idx].finish_reason = stats["finish_reason"]
-            res.choices[choice_idx].stop_reason = stats["stop_reason"]
-            completed += 1
-            if completed == len(choices):
-                break
-        response_json = res.model_dump_json(exclude_unset=True)
-        yield f"data: {response_json}\n\n"
-    yield "data: [DONE]\n\n"
-"""
 
 
 @app.post("/v1/completions")
@@ -323,37 +307,26 @@ async def completions(request: CompletionRequest, raw_request: Request):
         choice_idx = choices[request_id]
         res.choices[choice_idx].text += str(token)
         if stats is not None:
-            res.usage.completion_tokens += stats["tokens"]
-            res.usage.prompt_tokens += stats["prompt"]
+            res.usage.completion_tokens += stats["tokens"]  # type: ignore
+            res.usage.prompt_tokens += stats["prompt"]  # type: ignore
             res.choices[choice_idx].finish_reason = stats["finish_reason"]
             res.choices[choice_idx].stop_reason = stats["stop_reason"]
             completed += 1
             if completed == len(ids):
                 break
             continue
-    res.usage.total_tokens = res.usage.completion_tokens + res.usage.prompt_tokens
+    res.usage.total_tokens = (  # type: ignore
+        res.usage.completion_tokens + res.usage.prompt_tokens)  # type: ignore
     return res
-
-@app.get("/flush")
-async def flush():
-    from rpdTracerControl import rpdTracerControl
-    rpd = rpdTracerControl()
-    rpd.stop()
-    rpd.flush()
-    ver = {"res": "OK"}
-    return JSONResponse(content=ver)
 
 
 def parse_args():
     parser = make_arg_parser()
     return parser.parse_args()
 
+
 if __name__ == "__main__":
     args = parse_args()
     engine_args = EngineArgs.from_cli_args(args)
     runner.set_engine_args(engine_args)
-    #from rpdTracerControl import rpdTracerControl
-    #rpd = rpdTracerControl()
-    #rpd.setPythonTrace(True)
-    #rpd.start()
     uvicorn.run(app, port=args.port, host=args.host)

@@ -14,7 +14,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.utils import set_weight_attrs
-import torch.nn.functional as F
 
 logger = init_logger(__name__)
 
