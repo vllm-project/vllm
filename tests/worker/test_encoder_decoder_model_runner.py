@@ -116,6 +116,25 @@ def test_empty_seq_group(backend_name, enforce_eager, monkeypatch):
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
 def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
+    '''
+    Test the ability of the encoder/decoder model runner subclass to
+    produce prefill-phase model inputs & attention metadata.
+
+    Test behavior:
+
+    * Instantiate BART base model & enc/dec model runner
+    * Construct sequence-group metadata for dummy prompts
+    * Test that encoder attention, decoder self-attention,
+      and encoder/decoder cross-attention inputs are correct
+
+    Arguments:
+
+    * batch_size
+    * backend_name: The attention backend under test
+    * enforce_eager: Enforce eager mode if True (i.e. no CUDAGraph)
+    * monkeypatch: PyTest monkeypatch instance which supports forcing
+                   the attention backend via environment variable
+    '''
 
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
@@ -306,6 +325,25 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
 def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
+    '''
+    Test the ability of the encoder/decoder model runner subclass to
+    produce prefill-phase model inputs & attention metadata.
+
+    Test behavior:
+
+    * Instantiate BART base model & enc/dec model runner
+    * Construct sequence-group metadata for dummy prompts
+    * Test that encoder attention, decoder self-attention,
+      and encoder/decoder cross-attention inputs are correct
+
+    Arguments:
+
+    * batch_size
+    * backend_name: The attention backend under test
+    * enforce_eager: Enforce eager mode if True (i.e. no CUDAGraph)
+    * monkeypatch: PyTest monkeypatch instance which supports forcing
+                   the attention backend via environment variable
+    '''
 
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
