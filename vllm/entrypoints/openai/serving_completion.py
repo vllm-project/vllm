@@ -317,10 +317,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         else:
                             chunk.usage = None
 
-                    
                     response_json = chunk.model_dump_json(exclude_unset=False)
-                    # print(response_json)
-                    # breakpoint()
                     yield f"data: {response_json}\n\n"
 
             if (request.stream_options
