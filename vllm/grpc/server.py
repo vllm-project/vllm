@@ -5,6 +5,7 @@ from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from collections.abc import AsyncIterator
 from grpc import aio
 import asyncio
+import time
 # from grpc_reflection.v1alpha import reflection
 
 # MODEL = "facebook/opt-125m"
@@ -26,6 +27,12 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
     # ) -> AsyncIterator[generate_pb2.GenerateResponse]:
     ) -> AsyncIterator:
         
+        start = time.time()
+        first = True
+        ttft = 0
+        tpots = []
+
+        
         if len(request.prompt_inputs.prompt_token_ids) > 0:
             inputs = TokensPrompt(prompt_token_ids=request.prompt_inputs.prompt_token_ids)
         else:
@@ -38,6 +45,14 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             request_id=request.request_id)
         
         async for request_output in results_generator:
+            if first:
+                ttft = time.time() - start
+                first = False
+            else:
+                tpot = time.time() - last
+                tpots.append(tpot)
+            last = time.time()
+
             outputs = [ 
                 generate_pb2.CompletionOutput(
                     index=output.index,
@@ -47,6 +62,9 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
                 for output in request_output.outputs
             ]
             yield generate_pb2.GenerateResponse(outputs=outputs)
+
+        print(f"TTFT (backend): {ttft}")
+        print(f"TPOT (backend): {sum(tpots)/len(tpots)}")
  
 
 async def start_grpc_server() -> aio.Server:

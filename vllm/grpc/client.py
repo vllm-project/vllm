@@ -13,6 +13,7 @@ from vllm.outputs import CompletionOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
+import time
 
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
@@ -62,6 +63,9 @@ class TextGenerationClient(AsyncLLMEngine):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
         
+        start = time.time()
+        first = True
+        
         prompt: str = inputs.get('prompt', "")
         prompt_token_ids: List[int] = inputs.get('prompt_token_ids', [])
 
@@ -75,7 +79,17 @@ class TextGenerationClient(AsyncLLMEngine):
             )
         )
 
+        ttft = 0
+        tpots = []
         async for generate_response in generate_stream:
+            if first:
+                ttft = time.time() - start
+                first = False
+            else:
+                tpot = time.time() - last
+                tpots.append(tpot)
+            last = time.time()
+
             completion_outputs = [
                 CompletionOutput(
                     index=output.index,
@@ -95,3 +109,6 @@ class TextGenerationClient(AsyncLLMEngine):
                 prompt_logprobs=None,
                 prompt=prompt,
             )
+
+        print(f"TTFT: {ttft}")
+        print(f"TPOT: {sum(tpots)/len(tpots)}")
