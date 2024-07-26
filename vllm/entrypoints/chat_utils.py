@@ -1,20 +1,59 @@
 import codecs
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Awaitable, Iterable, List, Optional, TypedDict, cast, final
+from typing import Awaitable, Iterable, List, Optional, Union, cast, final
 
-from openai.types.chat import (ChatCompletionContentPartImageParam,
-                               ChatCompletionContentPartTextParam)
+# yapf conflicts with isort for this block
+# yapf: disable
+from openai.types.chat import ChatCompletionContentPartImageParam
+from openai.types.chat import (
+    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
+from openai.types.chat import ChatCompletionContentPartTextParam
+from openai.types.chat import (
+    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
+# yapf: enable
+# pydantic needs the TypedDict from typing_extensions
+from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer
+from typing_extensions import Required, TypedDict
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.protocol import (ChatCompletionContentPartParam,
-                                              ChatCompletionMessageParam)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import async_get_and_parse_image
 
 logger = init_logger(__name__)
+
+
+class CustomChatCompletionContentPartParam(TypedDict, total=False):
+    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
+
+    type: Required[str]
+    """The type of the content part."""
+
+
+ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
+                                       CustomChatCompletionContentPartParam]
+
+
+class CustomChatCompletionMessageParam(TypedDict, total=False):
+    """Enables custom roles in the Chat Completion API."""
+    role: Required[str]
+    """The role of the message's author."""
+
+    content: Union[str, List[ChatCompletionContentPartParam]]
+    """The contents of the message."""
+
+    name: str
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the
+    same role.
+    """
+
+
+ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
+                                   CustomChatCompletionMessageParam]
 
 
 @final  # So that it should be compatible with Dict[str, str]
@@ -61,13 +100,16 @@ def _image_token_str(model_config: ModelConfig,
     if model_type == "phi3_v":
         # Workaround since this token is not defined in the tokenizer
         return "<|image_1|>"
-    if model_type in ("blip-2", "chatglm", "fuyu", "minicpmv", "paligemma"):
+    if model_type == "minicpmv":
+        return "(<image>./</image>)"
+    if model_type in ("blip-2", "chatglm", "fuyu", "paligemma"):
         # These models do not use image tokens in the prompt
         return None
     if model_type.startswith("llava"):
         return tokenizer.decode(model_config.hf_config.image_token_index)
-
-    raise TypeError("Unknown model type: {model_type}")
+    if model_type == "chameleon":
+        return "<image>"
+    raise TypeError(f"Unknown model type: {model_type}")
 
 
 # TODO: Let user specify how to insert image tokens into prompt

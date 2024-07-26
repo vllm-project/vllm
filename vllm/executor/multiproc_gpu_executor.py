@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+import threading
 import weakref
 from functools import partial
 from typing import Any, List, Optional
@@ -24,6 +25,8 @@ logger = init_logger(__name__)
 
 class MultiprocessingGPUExecutor(DistributedGPUExecutor):
     """Python multiprocessing-based multi-GPU executor"""
+
+    uses_ray: bool = False
 
     def _init_executor(self) -> None:
         # Create the parallel GPU workers.
@@ -113,8 +116,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             if executor := ref():
                 executor.shutdown()
 
-        signal.signal(signal.SIGINT, shutdown)
-        signal.signal(signal.SIGTERM, shutdown)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, shutdown)
+            signal.signal(signal.SIGTERM, shutdown)
 
         self.driver_worker = self._create_worker(
             distributed_init_method=distributed_init_method)

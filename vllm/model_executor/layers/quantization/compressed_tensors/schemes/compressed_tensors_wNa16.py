@@ -7,8 +7,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, replace_tensor, verify_marlin_supported,
+    apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
+    marlin_permute_scales, replace_tensor, verify_gptq_marlin_supported,
     verify_marlin_supports_shape)
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -38,11 +38,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             self.group_size = group_size
 
         # Verify supported on platform.
-        verify_marlin_supported(num_bits=self.num_bits,
-                                group_size=self.group_size,
-                                is_sym=True)
+        verify_gptq_marlin_supported(num_bits=self.num_bits,
+                                     group_size=self.group_size,
+                                     is_sym=True)
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         # ampere and up
         return 80
 
@@ -54,7 +55,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
 
         # If group_size is -1, we are in channelwise case.
-        group_size = input_size if self.group_size == -1 else self.group_size
+        channelwise = (self.group_size == -1)
+        group_size = input_size if channelwise else self.group_size
+        row_parallel = (input_size != input_size_per_partition)
+        # In the case of channelwise quantization, we need to replicate the
+        # scales across all gpus.
+        partition_scales = (row_parallel and not channelwise)
 
         verify_marlin_supports_shape(
             output_size_per_partition=output_size_per_partition,
@@ -65,8 +71,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         weight_scale_dim = None
         scales_and_zp_size = input_size // group_size
 
-        if (input_size != input_size_per_partition
-                and self.group_size is not None):
+        if partition_scales:
+            assert input_size_per_partition % group_size == 0
             weight_scale_dim = 1
             scales_and_zp_size = input_size_per_partition // group_size
 
@@ -135,6 +141,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.g_idx = marlin_make_empty_g_idx(device)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
+        # No zero-point
+        layer.weight_zp = marlin_make_empty_g_idx(device)
+
         # Repack weights from compressed-tensors format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
             layer.weight_packed.t().contiguous(),
@@ -155,10 +164,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
 
-        return apply_marlin_linear(
+        return apply_gptq_marlin_linear(
             input=x,
             weight=layer.weight_packed,
             weight_scale=layer.weight_scale,
+            weight_zp=layer.weight_zp,
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,

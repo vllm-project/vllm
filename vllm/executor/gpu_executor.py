@@ -23,6 +23,8 @@ def create_worker(worker_module_name, worker_class_name, **kwargs):
 
 class GPUExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
