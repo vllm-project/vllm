@@ -1,15 +1,18 @@
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 from torch.nn import Module
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
-                                                  fused_moe)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, fused_moe
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, per_tensor_dequantize)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
 
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
@@ -24,14 +27,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self,
-        quant_config: "Fp8Config" # type: ignore
-        ):
+    def __init__(self, quant_config: 'Fp8Config'):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: Module, num_experts: int,
-                       hidden_size: int, intermediate_size: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
+    def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
+                       intermediate_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
 
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -160,8 +161,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                     shard_size, :],
                         layer.w13_scale[expert_id][shard_id])
                     layer.w13_weight[expert_id][
-                        start:start +
-                        shard_size, :], _ = ops.scaled_fp8_quant(
+                        start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
