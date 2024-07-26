@@ -359,6 +359,44 @@ class HfRunner:
             all_logprobs.append(seq_logprobs)
         return all_logprobs
 
+    def _hidden_states_to_logprobs(
+        self,
+        hidden_states,
+        num_logprobs,
+    ) -> Tuple[List[Dict[int, float]], int]:
+        seq_logprobs: List[torch.Tensor] = []
+        output_len = len(hidden_states)
+        for _, hidden_state in enumerate(hidden_states):
+            last_hidden_states = hidden_state[-1][0]
+            logits = torch.matmul(
+                last_hidden_states,
+                self.model.get_output_embeddings().weight.t(),
+            )
+            if getattr(self.model.get_output_embeddings(), "bias",
+                       None) is not None:
+                logits += self.model.get_output_embeddings().bias.unsqueeze(0)
+            logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+            seq_logprobs.append(logprobs)
+
+        # convert to dict
+        seq_logprobs_lst: List[Dict[int, float]] = []
+        for tok_idx, tok_logprobs in enumerate(seq_logprobs):
+            # drop prompt logprobs
+            if tok_idx == 0:
+                tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+            topk = tok_logprobs.topk(num_logprobs)
+
+            tok_logprobs_dct = {}
+            for token_id, logprob in zip(topk.indices[0], topk.values[0]):
+                tok_logprobs_dct[token_id.item()] = logprob.item()
+
+            seq_logprobs_lst.append(tok_logprobs_dct)
+
+        return (
+            seq_logprobs_lst,
+            output_len,
+        )
+
     def generate_greedy_logprobs_limit(
         self,
         prompts: List[str],
@@ -391,33 +429,11 @@ class HfRunner:
                 **kwargs,
             )
 
-            seq_logprobs: List[torch.Tensor] = []
-            for _, hidden_states in enumerate(output.hidden_states):
-                last_hidden_states = hidden_states[-1][0]
-                logits = torch.matmul(
-                    last_hidden_states,
-                    self.model.get_output_embeddings().weight.t(),
-                )
-                if getattr(self.model.get_output_embeddings(), "bias",
-                           None) is not None:
-                    logits += self.model.get_output_embeddings(
-                    ).bias.unsqueeze(0)
-                logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-                seq_logprobs.append(logprobs)
-
-            # convert to dict
-            seq_logprobs_lst: List[Dict[int, float]] = []
-            for tok_idx, tok_logprobs in enumerate(seq_logprobs):
-                # drop prompt logprobs
-                if tok_idx == 0:
-                    tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
-                topk = tok_logprobs.topk(num_logprobs)
-
-                tok_logprobs_dct = {}
-                for token_id, logprob in zip(topk.indices[0], topk.values[0]):
-                    tok_logprobs_dct[token_id.item()] = logprob.item()
-
-                seq_logprobs_lst.append(tok_logprobs_dct)
+            (
+                seq_logprobs_lst,
+                output_len,
+            ) = self._hidden_states_to_logprobs(output.hidden_states,
+                                                num_logprobs)
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
@@ -435,14 +451,11 @@ class HfRunner:
         encoder_decoder_prompts: Tuple[List[str], List[str]],
         max_tokens: int,
         num_logprobs: int,
+        **kwargs: Any,
     ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
         '''
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
-
-        # decoder_start_token_id = getattr(self.model.config,
-        #                                  'decoder_start_token_id',
-        #                                  None)
 
         all_logprobs: List[List[Dict[int, float]]] = []
         all_output_ids: List[List[int]] = []
@@ -457,13 +470,6 @@ class HfRunner:
                     self.tokenizer(decoder_prompt,
                                    return_tensors="pt").input_ids))
 
-            # # If the decoder input ids do not begin with decoder start
-            # # token, HF transformers will likely add it automatically.
-            # # This becomes important information later.
-            # implicit_decoder_start_token=(True
-            # if decoder_input_ids.shape[1] < 1 else
-            # (decoder_input_ids[0][0] ==decoder_start_token_id))
-
             from transformers.generation.configuration_utils import (
                 GenerationConfig)
             generation_config = GenerationConfig.from_model_config(
@@ -472,9 +478,7 @@ class HfRunner:
             generation_config.top_k = None
             generation_config.num_beams = 1
             generation_config.repetition_penalty = 1.0
-            # generation_config.temperature = 0.0
             generation_config.top_p = 1.0
-            # generation_config.min_p = 0.0
             generation_config.length_penalty = 1.0
             generation_config.early_stopping = False
             generation_config.no_repeat_ngram_size = None
@@ -484,46 +488,21 @@ class HfRunner:
                 encoder_input_ids,
                 decoder_input_ids=decoder_input_ids,
                 use_cache=True,
-                # do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
                 generation_config=generation_config,
+                **kwargs,
             )
 
-            seq_logprobs: List[torch.Tensor] = []
-            output_len = len(output.decoder_hidden_states)
-            for _, decoder_hidden_states in enumerate(
-                    output.decoder_hidden_states):
-                last_hidden_states = decoder_hidden_states[-1][0]
-                logits = torch.matmul(
-                    last_hidden_states,
-                    self.model.get_output_embeddings().weight.t(),
-                )
-                if getattr(self.model.get_output_embeddings(), "bias",
-                           None) is not None:
-                    logits += self.model.get_output_embeddings(
-                    ).bias.unsqueeze(0)
-                logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-                seq_logprobs.append(logprobs)
-
-            # convert to dict
-            seq_logprobs_lst: List[Dict[int, float]] = []
-            for tok_idx, tok_logprobs in enumerate(seq_logprobs):
-                # drop prompt logprobs
-                if tok_idx == 0:
-                    tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
-                topk = tok_logprobs.topk(num_logprobs)
-
-                tok_logprobs_dct = {}
-                for token_id, logprob in zip(topk.indices[0], topk.values[0]):
-                    tok_logprobs_dct[token_id.item()] = logprob.item()
-
-                seq_logprobs_lst.append(tok_logprobs_dct)
+            (
+                seq_logprobs_lst,
+                output_len,
+            ) = self._hidden_states_to_logprobs(output.decoder_hidden_states,
+                                                num_logprobs)
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
-            #output_len = seq_ids.shape[0] - decoder_input_ids.shape[1]
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
