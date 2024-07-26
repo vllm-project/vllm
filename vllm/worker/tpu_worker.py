@@ -5,7 +5,6 @@ import torch
 import torch_xla.core.xla_model as xm
 import torch_xla.experimental.dynamo_set_buffer_donor  # noqa: F401
 import torch_xla.runtime as xr
-from torch_xla._internal import pjrt
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
@@ -71,15 +70,6 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
-        if self.parallel_config.world_size > 1:
-            # FIXME(woosuk): local_world_size should be used instead of
-            # parallel_config.world_size.
-            pjrt.initialize_multiprocess(self.local_rank,
-                                         self.parallel_config.world_size)
-            xm._init_world_size_ordinal()
-
-        self.device = xm.xla_device()
-        self.device_config.device = self.device
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
@@ -97,6 +87,11 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+
+        # Device initialization should happen after initializing the distributed
+        # runtime.
+        self.device = xm.xla_device()
+        self.device_config.device = self.device
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
