@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
-
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:

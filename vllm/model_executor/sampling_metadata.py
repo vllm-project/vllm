@@ -7,7 +7,8 @@ import torch
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
+    from vllm.model_executor.layers.ops.sample import (
+        get_num_triton_sampler_splits)
 
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData, SequenceGroupMetadata
