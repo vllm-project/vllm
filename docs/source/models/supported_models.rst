@@ -113,6 +113,10 @@ Decoder-only Language Models
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
     -
+  * - :code:`NemotronForCausalLM`
+    - Nemotron-3, Nemotron-4, Minitron
+    - :code:`nvidia/Minitron-8B-Base`, :code:`mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.
+    - ✅︎
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
@@ -205,6 +209,10 @@ Vision Language Models
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    -
+  * - :code:`MiniCPM-V`
+    - MiniCPM-V
+    - :code:`openbmb/MiniCPM-V-2`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
     -
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.

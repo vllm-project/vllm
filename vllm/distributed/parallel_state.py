@@ -243,6 +243,13 @@ class GroupCoordinator:
         ca_comm = self.ca_comm
         maybe_ca_context = nullcontext(
         ) if ca_comm is None else ca_comm.capture()
+
+        # ensure all initialization operations complete before attempting to
+        # capture the graph on another stream
+        curr_stream = torch.cuda.current_stream()
+        if curr_stream != stream:
+            stream.wait_stream(curr_stream)
+
         with torch.cuda.stream(stream), maybe_ca_context:
             # In graph mode, we have to be very careful about the collective
             # operations. The current status is:
@@ -289,6 +296,9 @@ class GroupCoordinator:
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
+        elif input_.is_cpu:
+            import intel_extension_for_pytorch as ipex
+            ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
         return input_
