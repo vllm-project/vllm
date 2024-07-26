@@ -113,6 +113,10 @@ Decoder-only Language Models
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
     -
+  * - :code:`OLMoEForCausalLM`
+    - OLMoE
+    - :code:`allenai/OLMoE-7B-A1B`, :code:`allenai/OLMoE-7B-A1B`, etc.
+    -
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
