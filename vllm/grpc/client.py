@@ -26,6 +26,9 @@ class TextGenerationClient(AsyncLLMEngine):
         self.log_requests = False
         self.engine = None
 
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
     @property
     def is_running(self) -> bool:
         return True
@@ -47,8 +50,7 @@ class TextGenerationClient(AsyncLLMEngine):
         lora_request: Optional[LoRARequest] = None,
     ) -> "PreTrainedTokenizer":
         # TODO: what to return :/
-        from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(MODEL)
+        return self.tokenizer
 
     async def generate(
         self,
