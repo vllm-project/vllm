@@ -281,22 +281,16 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         * Updated model inputs data structure
         """
 
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
-        slot_mapping: List[int] = []
+        encoder_input_tokens: List[int] = []
+        encoder_input_positions: List[int] = []
+        encoder_seq_lens: List[int] = []
+        context_lens: List[int] = []
+        query_lens: List[int] = []
+        cross_slot_mapping: List[int] = []
+        cross_block_tables: List[List[int]] = []
         prompt_adapter_index_mapping: List[int] = []
         prompt_adapter_prompt_mapping: List[int] = []
         prompt_adapter_requests: Set[PromptAdapterRequest] = set()
-
-        seq_lens: List[int] = []
-        prefill_seq_lens: List[int] = []
-        decode_seq_lens: List[int] = []
-        context_lens: List[int] = []
-        query_lens: List[int] = []
-        block_tables: List[List[int]] = []
-        num_prefills = 0
-        num_prefill_tokens = 0
-        num_decode_tokens = 0
 
         if len(seq_group_metadata_list) == 0:
             # Leave the encoder/cross-attention input
@@ -309,13 +303,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
             encoder_seq_data = seq_group_metadata.encoder_seq_data
             cross_block_table = seq_group_metadata.cross_block_table
-            if is_prompt:
-                context_len = encoder_seq_data.get_num_computed_tokens()
-            else:
-                context_len = encoder_seq_data.get_len()
+            context_len = (0 if is_prompt else encoder_seq_data.get_len())
 
             seq_len = encoder_seq_data.get_len()
 
+            block_table = []  # Default for memory profiling
             if is_prompt:
                 tokens = encoder_seq_data.get_token_ids()[context_len:seq_len]
             else:
@@ -323,44 +315,25 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # tokens.
                 tokens = [encoder_seq_data.get_last_token_id()]
 
-            # These are seq_len/context_len capped to the sliding window.
-            # They are passed to decode kernel.
-            # We still need original seq_len/context_len to compute slot
-            # mapping (and input position) below.
-            curr_sliding_window_blocks = None
-            sliding_seq_len = seq_len
-            sliding_context_len = context_len
-
-            if not is_prompt:
                 if cross_block_table is not None:
                     # Decode
                     block_table = cross_block_table
-                    if curr_sliding_window_blocks is not None:
-                        block_table = block_table[-curr_sliding_window_blocks:]
-                else:
-                    # Only happens when memory profiling runs.
-                    block_table = []
-            else:
-                # Prefill without memory profiling.
-                block_table = []
 
-            block_tables.append(block_table)
+            block_table = (
+                []  # Memory profiling
+                if
+                (is_prompt or cross_block_table is None) else cross_block_table
+            )  # Decode
 
-            seq_lens.append(sliding_seq_len)
-            context_lens.append(sliding_context_len)
-            query_len = sliding_seq_len - sliding_context_len
+            cross_block_tables.append(block_table)
+
+            encoder_seq_lens.append(seq_len)
+            context_lens.append(context_len)
+            query_len = seq_len - context_len
             query_lens.append(query_len)
-            input_tokens.extend(tokens)
-            input_positions.extend(list(range(context_len, seq_len)))
+            encoder_input_tokens.extend(tokens)
+            encoder_input_positions.extend(list(range(context_len, seq_len)))
             prompt_adapter_id = seq_group_metadata.prompt_adapter_id
-
-            if is_prompt:
-                num_prefills += 1
-                num_prefill_tokens += len(tokens)
-                prefill_seq_lens.append(seq_len)
-            else:
-                num_decode_tokens += query_len
-                decode_seq_lens.append(sliding_seq_len)
 
             if prompt_adapter_id > 0 and is_prompt:
                 prompt_adapter_requests.add(
@@ -384,7 +357,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # initialized yet. In this case, we just use a dummy
                 # slot mapping.
                 # In embeddings, the block tables are {seq_id: None}.
-                slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+                cross_slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
                 continue
 
             # Compute the slot mapping.
@@ -395,17 +368,16 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                cross_slot_mapping.append(slot)
 
         max_query_len = max(query_lens)
-        max_seq_len = (max(prefill_seq_lens, default=0)
-                       if is_prompt else max(decode_seq_lens, default=0))
+        encoder_max_seq_len = max(encoder_seq_lens, default=0)
 
-        max_block_table_len = max(
-            len(block_table) for block_table in block_tables)
-        block_tables = make_tensor_with_pad(
-            block_tables,
-            max_len=max_block_table_len,
+        max_cross_block_table_len = max(
+            len(block_table) for block_table in cross_block_tables)
+        cross_block_tables = make_tensor_with_pad(
+            cross_block_tables,
+            max_len=max_cross_block_table_len,
             pad=0,
             dtype=torch.int,
             device=self.device,
@@ -413,51 +385,51 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         assert (not is_prompt) or max_query_len > 0, (
             "Decode-phase query_lens: {}".format(query_lens))
 
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
+        encoder_seq_lens_tensor = torch.tensor(encoder_seq_lens,
+                                               dtype=torch.int,
+                                               device=self.device)
 
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                    dtype=torch.int32,
-                                    device=self.device)
+        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
+                                            1,
+                                            dtype=torch.int32,
+                                            device=self.device)
 
-        torch.cumsum(seq_lens_tensor,
+        torch.cumsum(encoder_seq_lens_tensor,
                      dim=0,
-                     dtype=seq_start_loc.dtype,
-                     out=seq_start_loc[1:])
+                     dtype=encoder_seq_start_loc.dtype,
+                     out=encoder_seq_start_loc[1:])
 
         attn_metadata = model_input.attn_metadata
         assert attn_metadata is not None
 
-        slot_mapping_tensor = torch.tensor(slot_mapping,
-                                           dtype=torch.long,
-                                           device=self.device)
+        cross_slot_mapping_tensor = torch.tensor(cross_slot_mapping,
+                                                 dtype=torch.long,
+                                                 device=self.device)
 
         if seq_group_metadata.is_prompt:
 
-            input_tokens_tensor = torch.tensor(input_tokens,
-                                               dtype=torch.long,
-                                               device=self.device)
-            input_positions_tensor = torch.tensor(input_positions,
-                                                  dtype=torch.long,
-                                                  device=self.device)
+            encoder_input_tokens_tensor = torch.tensor(encoder_input_tokens,
+                                                       dtype=torch.long,
+                                                       device=self.device)
+            encoder_input_positions_tensor = torch.tensor(
+                encoder_input_positions, dtype=torch.long, device=self.device)
 
         else:
 
-            input_tokens_tensor = torch.tensor([],
-                                               dtype=torch.long,
-                                               device=self.device)
-            input_positions_tensor = torch.tensor([],
-                                                  dtype=torch.long,
-                                                  device=self.device)
+            encoder_input_tokens_tensor = torch.tensor([],
+                                                       dtype=torch.long,
+                                                       device=self.device)
+            encoder_input_positions_tensor = torch.tensor([],
+                                                          dtype=torch.long,
+                                                          device=self.device)
 
         # Set encoder-oriented attention metadata fields
-        attn_metadata.num_encoder_tokens = sum(seq_lens)
-        attn_metadata.encoder_seq_lens = seq_lens
-        attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
-        attn_metadata.max_encoder_seq_len = max_seq_len
-        attn_metadata.cross_slot_mapping = slot_mapping_tensor
-        attn_metadata.cross_block_tables = block_tables
+        attn_metadata.num_encoder_tokens = sum(encoder_seq_lens)
+        attn_metadata.encoder_seq_lens = encoder_seq_lens
+        attn_metadata.encoder_seq_lens_tensor = encoder_seq_lens_tensor
+        attn_metadata.max_encoder_seq_len = encoder_max_seq_len
+        attn_metadata.cross_slot_mapping = cross_slot_mapping_tensor
+        attn_metadata.cross_block_tables = cross_block_tables
 
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
@@ -467,19 +439,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         model_input = dataclasses.replace(
             model_input,
             attn_metadata=attn_metadata,
-            encoder_input_tokens=input_tokens_tensor,
-            encoder_input_positions=input_positions_tensor,
+            encoder_input_tokens=encoder_input_tokens_tensor,
+            encoder_input_positions=encoder_input_positions_tensor,
         )
-
-        logits_soft_cap = getattr(self.model_config.hf_config,
-                                  'attn_logit_softcapping', None)
-
-        if logits_soft_cap is not None and self.attn_backend.get_name(
-        ) != "flashinfer":
-            raise ValueError("Models with logits_soft_cap"
-                             " require FlashInfer backend, however vLLM"
-                             " currently only supports xFormers backend"
-                             " for encoder/decoder models.")
 
         return model_input
 
