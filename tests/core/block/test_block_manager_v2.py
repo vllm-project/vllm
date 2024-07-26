@@ -317,7 +317,8 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
 @pytest.mark.parametrize("enable_caching", [True, False])
 def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
                   enable_caching):
-    """
+    """ Verify the block manager can correctly determine if a sequence group
+        can be swapped in/out.
     """
     num_cpu_blocks = num_gpu_blocks
     block_manager = BlockSpaceManagerV2(block_size,
