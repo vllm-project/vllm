@@ -35,6 +35,7 @@ _PP_SUPPORTED_MODELS = [
     "Phi3ForCausalLM",
     "GPT2LMHeadModel",
     "MixtralForCausalLM",
+    "TeleFLMForCausalLM",
 ]
 
 
