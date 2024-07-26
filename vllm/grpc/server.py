@@ -64,7 +64,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             yield generate_pb2.GenerateResponse(outputs=outputs)
 
         print(f"TTFT (backend): {ttft}")
-        print(f"TPOT (backend): {sum(tpots)/len(tpots)}")
+        # print(f"TPOT (backend): {sum(tpots)/len(tpots)}")
  
 
 async def start_grpc_server() -> aio.Server:
@@ -72,11 +72,10 @@ async def start_grpc_server() -> aio.Server:
     generation = TextGenerationService()
     generate_pb2_grpc.add_TextGenerationServiceServicer_to_server(generation, server)
 
-    service_names = (
-        generation.SERVICE_NAME,
-        # reflection.SERVICE_NAME,
-    )
-
+    # service_names = (
+    #     generation.SERVICE_NAME,
+    #     reflection.SERVICE_NAME,
+    # )
     # reflection.enable_server_reflection(service_names, server)
 
     host = "0.0.0.0"
@@ -92,8 +91,7 @@ async def run_grpc_server() -> None:
     server = await start_grpc_server()
 
     try:
-        while True:
-            await asyncio.sleep(10)
+        await server.wait_for_termination()
 
     except asyncio.CancelledError:
         print("Gracefully stopping gRPC server")  # noqa: T201
@@ -101,4 +99,7 @@ async def run_grpc_server() -> None:
         await server.wait_for_termination()
 
 if __name__ == "__main__":
+    import uvloop
+
+    # uvloop.run(run_grpc_server())
     asyncio.run(run_grpc_server())

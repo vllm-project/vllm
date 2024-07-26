@@ -111,4 +111,4 @@ class TextGenerationClient(AsyncLLMEngine):
             )
 
         print(f"TTFT: {ttft}")
-        print(f"TPOT: {sum(tpots)/len(tpots)}")
+        # print(f"TPOT: {sum(tpots)/len(tpots)}")
