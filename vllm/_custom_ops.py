@@ -8,6 +8,11 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# NOTE: 7/26/24: Use Triton implementation of AWQ functions. Currently, only
+#       awq_dequantize is implemented, but awq_gemm coming soon.
+
+use_awq_triton = False 
+
 try:
     import vllm._C
 except ImportError as e:
@@ -19,6 +24,7 @@ with contextlib.suppress(ImportError):
 with contextlib.suppress(ImportError):
     # ruff: noqa: F401
     import vllm._punica_C
+
 
 
 def is_custom_op_supported(op_name: str) -> bool:
@@ -183,6 +189,10 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
+    if use_awq_triton:
+        from vllm.model_executor.layers.quantization.awq_triton import awq_dequantize_triton
+        return awq_dequantize_triton(qweight, scales, zeros, split_k_iters,
+                                           thx, thy)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
                                        thx, thy)
 
