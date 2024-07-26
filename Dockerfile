@@ -109,7 +109,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
             export SCCACHE_BUCKET=vllm-build-sccache; \
            fi \
         && export SCCACHE_REGION=us-west-2 \
-        && export SCCACHE_S3_NO_CREDENTIALS=1 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
