@@ -67,10 +67,6 @@ def write_keyfile(keyfile_path: str):
     with open(keyfile_path, 'wb') as f:
         f.write(encryption_params.key)
 
-@pytest.fixture(autouse=True)
-def tensorizer_config():
-    config = TensorizerConfig(tensorizer_uri="vllm")
-    return config
 
 
 @patch('vllm.model_executor.model_loader.tensorizer.TensorizerAgent')
@@ -320,8 +316,6 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
 
 
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
-    ## Explicitly ensure VRAM is empty
-    cleanup()
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(tensorizer_uri=str(model_path))
