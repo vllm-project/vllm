@@ -307,7 +307,7 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
-    num_tokens_padding: Optional[int] = None,
+    num_token_padding: Optional[int] = None,
     scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -325,7 +325,7 @@ def scaled_fp8_quant(
         scale: Optional scaling factor for the FP8 quantization
         scale_ub: Optional upper bound for scaling factor in dynamic 
             per token case
-        num_tokens_padding: If specified, pad the first dimension
+        num_token_padding: If specified, pad the first dimension
             of the output to at least this value.
         use_per_token_if_dynamic: Whether to do per_tensor or per_token 
             in the dynamic quantization case.
@@ -339,8 +339,8 @@ def scaled_fp8_quant(
     assert(input.ndim == 2)
     shape = input.shape
 
-    if num_tokens_padding:
-        shape[0] = max(num_tokens_padding, input.shape[0])
+    if num_token_padding:
+        shape[0] = max(num_token_padding, input.shape[0])
     output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
 
     if scale is None:
@@ -355,7 +355,7 @@ def scaled_fp8_quant(
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         # num_tokens padding not implemented for this case
-        assert(scale.numel() == 1 or num_tokens_padding is None)
+        assert(scale.numel() == 1 or num_token_padding is None)
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
