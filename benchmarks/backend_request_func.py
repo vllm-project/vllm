@@ -252,7 +252,6 @@ async def async_request_openai_completions(
         try:
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
-                # breakpoint()
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -282,8 +281,6 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]
-                                # print(generated_text)
-                                # breakpoint()
 
                     output.generated_text = generated_text
                     output.success = True
