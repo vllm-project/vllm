@@ -176,8 +176,6 @@ class OpenAIServingCompletion(OpenAIServing):
         final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
-            # async for res in generators[0]:
-            #     i = 0
                 if await raw_request.is_disconnected():
                     # Abort the request if the client disconnects.
                     await self.engine.abort(f"{request_id}-{i}")
