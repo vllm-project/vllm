@@ -8,7 +8,8 @@
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
+
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
 ENV DEBIAN_FRONTEND=noninteractive
@@ -133,7 +134,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
 WORKDIR /vllm-workspace
