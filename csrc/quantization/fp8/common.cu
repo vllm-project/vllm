@@ -48,7 +48,7 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
                                         const scalar_t* __restrict__ input,
                                         int64_t num_elems) {
   __shared__ float cache[1024];
-  int i = blockDim.x * blockIdx.x + threadIdx.x;
+  int64_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
   // First store maximum for all values processes by
   // the current thread in cache[threadIdx.x]
