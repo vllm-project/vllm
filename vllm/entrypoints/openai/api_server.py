@@ -3,9 +3,10 @@ import importlib
 import inspect
 import re
 import signal
+from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 import fastapi
 import uvicorn
@@ -165,7 +166,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-def build_app(args):
+def build_app(args: Namespace) -> fastapi.FastAPI:
     app = fastapi.FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
@@ -215,9 +216,9 @@ def build_app(args):
 
 
 async def build_server(
-    args,
+    args: Namespace,
     llm_engine: Optional[AsyncLLMEngine] = None,
-    **uvicorn_kwargs,
+    **uvicorn_kwargs: Any,
 ) -> uvicorn.Server:
     app = build_app(args)
 
@@ -304,7 +305,11 @@ async def build_server(
     return uvicorn.Server(config)
 
 
-async def run_server(args, llm_engine=None, **uvicorn_kwargs) -> None:
+async def run_server(
+    args: Namespace,
+    llm_engine: Optional[AsyncLLMEngine] = None,
+    **uvicorn_kwargs: Any,
+) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
