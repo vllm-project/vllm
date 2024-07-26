@@ -276,7 +276,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
             if "previous_hidden_states" in broadcast_data:
                 kwargs = {
-                    "previous_hidden_states": broadcast_data["previous_hidden_states"]
+                    "previous_hidden_states":
+                    broadcast_data["previous_hidden_states"]
                 }
             else:
                 kwargs = {}
