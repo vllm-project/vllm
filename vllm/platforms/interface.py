@@ -23,9 +23,6 @@ class Platform:
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
 
-    def is_xla(self) -> bool:
-        return self.is_tpu()
-
     @staticmethod
     def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
         raise NotImplementedError
