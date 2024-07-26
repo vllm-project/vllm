@@ -18,8 +18,8 @@ logger = init_logger(__name__)
 #torch._dynamo.config.allow_ignore_mark_dynamic = True
 
 # Bump up cache limits for CUDA graphs
-torch._dynamo.config.cache_size_limit = 128
-torch._dynamo.config.accumulated_cache_size_limit = 128
+torch._dynamo.config.cache_size_limit = 256
+torch._dynamo.config.accumulated_cache_size_limit = 256
 
 ###############################################################################
 #
