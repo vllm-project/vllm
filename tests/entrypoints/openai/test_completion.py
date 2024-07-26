@@ -538,6 +538,28 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_allowed_token_ids(client: openai.AsyncOpenAI):
+    prompt = "Hello, my name is"
+    max_tokens = 1
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+    # Test exclusive selection
+    allowed_ids = [1000, 1001, 1002]
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        seed=42,
+        extra_body=dict(allowed_token_ids=allowed_ids, ),
+    )
+    response_tokens = tokenizer(completion.choices[0].text,
+                                add_special_tokens=False)["input_ids"]
+    assert len(response_tokens) == 1
+    assert response_tokens[0] in allowed_ids
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_json_completion(client: openai.AsyncOpenAI,
