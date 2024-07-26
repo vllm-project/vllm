@@ -199,12 +199,16 @@ class ReplicatedLinear(LinearBase):
                                          self.input_size,
                                          self.output_size,
                                          self.params_dtype,
+                                         weight_loader=self.weight_loader,
                                          prefix=prefix)
 
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size, dtype=self.params_dtype))
-            set_weight_attrs(self.bias, {"output_dim": 0})
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
         else:
             self.register_parameter("bias", None)
 
