@@ -42,7 +42,7 @@ if not is_cpu():
             decoder_prompt_type]
 
         with hf_runner(model, dtype=dtype,
-                    is_encoder_decoder_model=True) as hf_model:
+                       is_encoder_decoder_model=True) as hf_model:
             hf_outputs = (
                 hf_model.generate_encoder_decoder_greedy_logprobs_limit(
                     test_case_prompts, max_tokens, num_logprobs))
@@ -52,6 +52,6 @@ if not is_cpu():
                 test_case_prompts, max_tokens, num_logprobs)
 
         check_logprobs_close(outputs_0_lst=hf_outputs,
-                            outputs_1_lst=vllm_outputs,
-                            name_0="hf",
-                            name_1="vllm")
+                             outputs_1_lst=vllm_outputs,
+                             name_0="hf",
+                             name_1="vllm")

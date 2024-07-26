@@ -1,12 +1,11 @@
 """Kernel test utils"""
 
 import itertools
+import os
 import random
-from numbers import Number
-from typing import (Any, List, NamedTuple, Optional, Tuple, Union)
-
 from contextlib import contextmanager
-from typing import Generator
+from numbers import Number
+from typing import Any, Generator, List, NamedTuple, Optional, Tuple, Union
 
 import pytest
 import torch
@@ -209,6 +208,7 @@ def override_backend_env_variable(mpatch: pytest.MonkeyPatch,
     '''
     mpatch.setenv(STR_BACKEND_ENV_VAR, backend_name)
 
+
 @contextmanager
 def override_backend_env_var_context_manager(
     backend_name: str, ) -> Generator[None, None, None]:
@@ -247,6 +247,7 @@ def override_backend_env_var_context_manager(
         else:
             os.environ[
                 key] = original_value  # Revert back to the original value
+
 
 def ref_masked_attention(query: torch.Tensor,
                          key: torch.Tensor,

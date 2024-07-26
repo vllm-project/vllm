@@ -1,12 +1,10 @@
 import dataclasses
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, cast)
-
-from vllm.attention.selector import (global_force_attn_backend,
-                                     _Backend)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, cast
 
 import torch
 import torch.distributed
 
+from vllm.attention.selector import _Backend, global_force_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)

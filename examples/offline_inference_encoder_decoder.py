@@ -4,9 +4,9 @@ encoder/decoder models, specifically BART
 '''
 
 from vllm import LLM, SamplingParams
+from vllm.attention.selector import _Backend
 from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
 from vllm.utils import zip_enc_dec_prompt_lists
-from vllm.attention.selector import _Backend
 
 supported_backend = _Backend.XFORMERS
 
@@ -100,5 +100,5 @@ for output in outputs:
     encoder_prompt = output.encoder_prompt
     generated_text = output.outputs[0].text
     print(f"Encoder prompt: {encoder_prompt!r}, "
-            f"Decoder prompt: {prompt!r}, "
-            f"Generated text: {generated_text!r}")
+          f"Decoder prompt: {prompt!r}, "
+          f"Generated text: {generated_text!r}")
