@@ -17,32 +17,26 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus=48-95 \
  --cpuset-mems=1 --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-avx2 cpu-test-avx2
 
-function cpu_tests() {
-    # offline inference
-    docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
+# offline inference
+docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
 
-    # Run basic model test
-    docker exec cpu-test bash -c "
-    pip install pytest Pillow protobuf
-    pytest -v -s tests/models -m \"not vlm\" --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py --ignore=tests/models/test_jamba.py" # Mamba on CPU is not supported
+# Run basic model test
+docker exec cpu-test bash -c "
+  pip install pytest Pillow protobuf
+  pytest -v -s tests/models -m \"not vlm\" --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py --ignore=tests/models/test_jamba.py" # Mamba on CPU is not supported
 
-    # online inference
-    docker exec cpu-test bash -c "
-    export VLLM_CPU_KVCACHE_SPACE=10 
-    export VLLM_CPU_OMP_THREADS_BIND=48-92 
-    python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
-    wget -q https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json 
-    timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-    python3 benchmarks/benchmark_serving.py \
-        --backend vllm \
-        --dataset-name sharegpt \
-        --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json \
-        --model facebook/opt-125m \
-        --num-prompts 20 \
-        --endpoint /v1/completions \
-        --tokenizer facebook/opt-125m"
-}
-
-# All of CPU tests are expected to be finished less than 20 mins.
-export -f cpu_tests
-timeout 20m cpu_tests
+# online inference
+docker exec cpu-test bash -c "
+  export VLLM_CPU_KVCACHE_SPACE=10 
+  export VLLM_CPU_OMP_THREADS_BIND=48-92 
+  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
+  wget -q https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json 
+  timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
+  python3 benchmarks/benchmark_serving.py \
+    --backend vllm \
+    --dataset-name sharegpt \
+    --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json \
+    --model facebook/opt-125m \
+    --num-prompts 20 \
+    --endpoint /v1/completions \
+    --tokenizer facebook/opt-125m"
