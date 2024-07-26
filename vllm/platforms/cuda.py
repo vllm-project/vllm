@@ -34,11 +34,10 @@ def get_physical_device_capability(device_id: int = 0) -> Tuple[int, int]:
 def device_id_to_physical_device_id(device_id: int) -> int:
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-        device_ids = [int(device_id) for device_id in device_ids]
         physical_device_id = device_ids[device_id]
+        return int(physical_device_id)
     else:
-        physical_device_id = device_id
-    return physical_device_id
+        return device_id
 
 
 class CudaPlatform(Platform):

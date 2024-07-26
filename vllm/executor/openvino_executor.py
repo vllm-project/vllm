@@ -18,6 +18,8 @@ logger = init_logger(__name__)
 
 class OpenVINOExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "openvino"
         assert self.lora_config is None, "OpenVINO backend doesn't support LoRA"
@@ -89,6 +91,22 @@ class OpenVINOExecutor(ExecutorBase):
 
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
+
+    def add_prompt_adapter(self, prompt_adapter_request) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the OPENVINO backend.")
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the OPENVINO backend.")
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the OPENVINO backend.")
+
+    def list_prompt_adapters(self) -> Set[int]:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the OPENVINO backend.")
 
     def check_health(self) -> None:
         # OpenVINOExecutor will always be healthy as long as

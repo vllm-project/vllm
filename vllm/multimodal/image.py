@@ -100,6 +100,7 @@ def repeat_and_pad_image_tokens(
 
 
 class ImagePlugin(MultiModalPlugin):
+    """Plugin for image data."""
 
     def get_data_key(self) -> str:
         return "image"

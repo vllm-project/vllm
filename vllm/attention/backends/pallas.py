@@ -116,7 +116,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         self.megacore_mode = None
         tpu_type = torch_xla.tpu.get_tpu_env()["TYPE"].lower()
-        if not tpu_type.endswith("lite"):
+        if "lite" not in tpu_type:
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"
             else:
@@ -131,7 +131,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
         attn_metadata: PallasMetadata,
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
@@ -146,7 +147,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        assert kv_scale == 1.0
+        assert k_scale == 1.0 and v_scale == 1.0
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "

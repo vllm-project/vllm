@@ -8,6 +8,10 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _SAMPLING_EPS = 1e-5
 
 
