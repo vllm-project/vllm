@@ -1,5 +1,3 @@
-from typing import Union
-
 import torch
 from torch.distributed import ProcessGroup
 
