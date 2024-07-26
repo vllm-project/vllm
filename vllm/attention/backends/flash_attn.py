@@ -177,17 +177,16 @@ def _flash_attn_varlen_func_meta(
                        device=q.device)
 
 
-torch.library.define("vllm::flash_attn_with_kvcache",
-                     ("(int[] out_shape, "
-                      "Tensor q, "
-                      "Tensor k, "
-                      "Tensor v, "
-                      "Tensor block_table, "
-                      "Tensor cache_seqlens, "
-                      "float softmax_scale, "
-                      "bool causal, "
-                      "float[]? alibi_slopes"
-                      ") -> Tensor"))
+torch.library.define("vllm::flash_attn_with_kvcache", ("(int[] out_shape, "
+                                                       "Tensor q, "
+                                                       "Tensor k, "
+                                                       "Tensor v, "
+                                                       "Tensor block_table, "
+                                                       "Tensor cache_seqlens, "
+                                                       "float softmax_scale, "
+                                                       "bool causal, "
+                                                       "float[]? alibi_slopes"
+                                                       ") -> Tensor"))
 
 
 @torch.library.impl("vllm::flash_attn_with_kvcache", "cuda")

@@ -4,7 +4,7 @@ from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 from tqdm.auto import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import EngineArgs, VLLM_DEFAULT_GPU_MEMORY_UTILIZATION
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_chat_template,
@@ -121,7 +121,7 @@ class LLM:
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.9,
+        gpu_memory_utilization: float = VLLM_DEFAULT_GPU_MEMORY_UTILIZATION,
         swap_space: int = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: Optional[bool] = None,

@@ -37,10 +37,12 @@ def generate_cxx_sig(n: torch.fx.Node) -> str:
                 "torch::Tensor const&, torch::Tensor const&, "
                 "torch::Tensor const&, "
                 "c10::optional<torch::Tensor> const& bias)")
-    elif (trg == "torch.ops._C.dynamic_scaled_fp8_quant"
-          or trg == "torch.ops._C.static_scaled_fp8_quant"):
-        return ("void(torch::Tensor& out, torch::Tensor& input, "
+    elif trg == "torch.ops._C.dynamic_scaled_fp8_quant":
+        return ("void(torch::Tensor& out, torch::Tensor const& input, "
                 "torch::Tensor& scale)")
+    elif (trg == "torch.ops._C.static_scaled_fp8_quant"):
+        return ("void(torch::Tensor& out, torch::Tensor const& input, "
+                "torch::Tensor const& scale)")
     elif trg == "torch.ops._C.dynamic_scaled_int8_quant":
         return ("void(torch::Tensor& out, torch::Tensor const& input, "
                 "torch::Tensor& scale)")

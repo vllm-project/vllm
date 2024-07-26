@@ -32,15 +32,10 @@ class SiluAndMul(CustomOp):
         from vllm import _custom_ops as ops
 
         d = x.shape[-1] // 2
-        # TODO: support silu_and_mul properly.
-        # this doesn't work for fp16 for some reason
-        if False and torch._utils.is_compiling():
-            return F.silu(x[..., :d]) * x[..., d:]
-        else:
-            output_shape = (x.shape[:-1] + (d, ))
-            out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-            ops.silu_and_mul(out, x)
-            return out
+        output_shape = (x.shape[:-1] + (d, ))
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        ops.silu_and_mul(out, x)
+        return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         from vllm._ipex_ops import ipex_ops as ops

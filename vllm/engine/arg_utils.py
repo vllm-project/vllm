@@ -18,6 +18,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
+VLLM_DEFAULT_GPU_MEMORY_UTILIZATION = 0.80
+
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
@@ -84,7 +86,7 @@ class EngineArgs:
     use_v2_block_manager: bool = False
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
-    gpu_memory_utilization: float = 0.90
+    gpu_memory_utilization: float = VLLM_DEFAULT_GPU_MEMORY_UTILIZATION
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
