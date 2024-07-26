@@ -286,9 +286,9 @@ class TeleFLMModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: TeleFLMDecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+                                               cache_config=cache_config,
+                                               quant_config=quant_config,
+                                               prefix=prefix),
             prefix=f"{prefix}.layers")
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -386,10 +386,10 @@ class TeleFLMForCausalLM(nn.Module):
         self.lora_config = lora_config
 
         self.model = TeleFLMModel(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config,
-                                prefix="model")
+                                  cache_config,
+                                  quant_config,
+                                  lora_config=lora_config,
+                                  prefix="model")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -413,7 +413,7 @@ class TeleFLMForCausalLM(nn.Module):
             if self.use_mup:
                 self.mup_scale_factor = config.mup_scale_factor
                 self.output_mult = config.output_mult / self.mup_scale_factor
-            logit_scale = self.output_mult 
+            logit_scale = self.output_mult
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     logit_scale)
