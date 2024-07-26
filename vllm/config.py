@@ -284,7 +284,7 @@ class ModelConfig:
 
         if self.quantization == "bitsandbytes" and self.enforce_eager is False:
             raise ValueError(
-                "BitAndBytes with enforce_eager = False is no supported yet.")
+                "BitAndBytes with enforce_eager = False is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
