@@ -1,3 +1,5 @@
+# isort: skip_file
+
 import contextlib
 import gc
 
