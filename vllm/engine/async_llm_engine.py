@@ -410,8 +410,6 @@ class AsyncLLMEngine:
             from vllm.executor.tpu_executor import TPUExecutorAsync
             executor_class = TPUExecutorAsync
         elif engine_config.device_config.device_type == "cpu":
-            assert distributed_executor_backend is None, (
-                "Distributed execution is not supported with the CPU backend.")
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
         elif engine_config.device_config.device_type == "openvino":
