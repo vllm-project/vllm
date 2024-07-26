@@ -18,9 +18,6 @@ _GENERATION_MODELS = {
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "Blip2ForConditionalGeneration":
     ("blip2", "Blip2ForConditionalGeneration"),
-    "ChameleonForCausalLM":
-    ("chameleon", "ChameleonForConditionalGeneration"
-     ),  #TODO(ywang96): fix model name when huggingface fixes it
     "ChameleonForConditionalGeneration":
     ("chameleon", "ChameleonForConditionalGeneration"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
