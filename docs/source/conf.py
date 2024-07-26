@@ -93,6 +93,7 @@ def setup(app):
 
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
+nitpicky = True
 autodoc_mock_imports = [
     "aiohttp",
     "cpuinfo",
