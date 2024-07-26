@@ -139,7 +139,7 @@ def apply_fp8_linear(
         qinput, x_scale = ops.scaled_fp8_quant(
             input,
             input_scale,
-            batch_dim_padding=17,
+            num_tokens_padding=17,
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         per_tensor_weights = (weight_scale.numel() == 1)
@@ -177,7 +177,7 @@ def apply_fp8_linear(
             output, _ = torch._scaled_mm(qinput,
                                          weight,
                                          out_dtype=torch.float32)
-            # Unpad (undo batch_dim_padding)
+            # Unpad (undo num_tokens_padding)
             output = torch.narrow(output, 0, 0, input.shape[0])
 
             # DQ
