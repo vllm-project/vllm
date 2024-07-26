@@ -41,7 +41,8 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
         results_generator = self.engine.generate(
             inputs, 
             sampling_params=SamplingParams(max_tokens=MAX_TOKENS, 
-                                           temperature=TEMPERATURE),
+                                           temperature=TEMPERATURE,
+                                           detokenize=False),
             request_id=request.request_id)
         
         async for request_output in results_generator:
@@ -63,7 +64,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             ]
             yield generate_pb2.GenerateResponse(outputs=outputs)
 
-        print(f"TTFT (backend): {ttft}")
+        # print(f"TTFT (backend): {ttft}")
         # print(f"TPOT (backend): {sum(tpots)/len(tpots)}")
  
 

@@ -303,6 +303,7 @@ async def build_server(
         ssl_certfile=args.ssl_certfile,
         ssl_ca_certs=args.ssl_ca_certs,
         ssl_cert_reqs=args.ssl_cert_reqs,
+        # workers=8,
         **uvicorn_kwargs,
     )
 

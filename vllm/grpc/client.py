@@ -81,6 +81,7 @@ class TextGenerationClient(AsyncLLMEngine):
 
         ttft = 0
         tpots = []
+        text = ""
         async for generate_response in generate_stream:
             if first:
                 ttft = time.time() - start
@@ -89,11 +90,13 @@ class TextGenerationClient(AsyncLLMEngine):
                 tpot = time.time() - last
                 tpots.append(tpot)
             last = time.time()
-
+            text += "test_"
             completion_outputs = [
                 CompletionOutput(
                     index=output.index,
-                    text=output.text,
+                    # text=output.text,
+                    # text=self.tokenizer.decode(output.token_ids),
+                    text=text,
                     token_ids=output.token_ids,
                     cumulative_logprob=0.0,
                     logprobs=None,
@@ -110,5 +113,5 @@ class TextGenerationClient(AsyncLLMEngine):
                 prompt=prompt,
             )
 
-        print(f"TTFT: {ttft}")
+        # print(f"TTFT: {ttft}")
         # print(f"TPOT: {sum(tpots)/len(tpots)}")
