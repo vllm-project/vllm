@@ -49,7 +49,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BitsAndBytesConfig":
-        adapter_name = cls.get_from_keys(config, ["adapter_name_or_path"])
+        adapter_name = cls.get_from_keys_or(config, ["adapter_name_or_path"], "")
         default_target_modules = [
             "gate_proj", "down_proj", "up_proj", "q_proj", "k_proj", "v_proj",
             "o_proj"
