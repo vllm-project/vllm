@@ -144,6 +144,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
                 else:
+                    if draft_worker_kwargs[
+                        "model_config"].hf_config.model_type == "eagle":
+                        raise NotImplementedError(
+                            "EAGLE does not support TP > 1 yet")
+
                     allow_zero_draft_token_step = False
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
@@ -450,8 +455,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-        if not skip_proposer:
-            self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
@@ -466,6 +469,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             else:
                 self.previous_hidden_states.update(
                     execute_model_req.seq_group_metadata_list, hidden_states)
+                
+        if not skip_proposer:
+            execute_model_req.previous_hidden_states = sampler_output.prefill_hidden_states
+            self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
@@ -530,6 +537,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
+            
+        execute_model_req.previous_hidden_states = None
 
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,

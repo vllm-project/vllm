@@ -872,6 +872,9 @@ class SamplerOutput:
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None
 
+    # Optional prefill hidden states from the model (used for models like EAGLE).
+    prefill_hidden_states: Optional[torch.Tensor] = None
+
     def __getitem__(self, idx: int):
         return self.outputs[idx]
 
@@ -994,7 +997,7 @@ class ExecuteModelRequest:
     # The number of requests in the running queue.
     running_queue_size: int = 0
     # Optional hidden states from prior step.
-    previous_hidden_states: Optional[HiddenStates] = None
+    previous_hidden_states: Union[HiddenStates, torch.Tensor, None] = None
     # The number of forward steps to run.
     num_steps: int = 1
     # Finished request ids since last step.

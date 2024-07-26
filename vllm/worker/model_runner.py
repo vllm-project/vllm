@@ -1383,6 +1383,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             if model_input.is_prompt:
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
+                
+                prefill_hidden_states = hidden_or_intermediate_states.roll(shifts=1, dims=0)
+                prefill_hidden_states.masked_fill_((model_input.input_positions == 0).unsqueeze(-1), 0)
+                output.prefill_hidden_states = prefill_hidden_states
             elif decode_meta.use_cuda_graph:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:

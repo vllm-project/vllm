@@ -234,6 +234,7 @@ class TP1DraftModelRunner(ModelRunner):
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
+        previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
@@ -313,8 +314,12 @@ class TP1DraftModelRunner(ModelRunner):
             model_executable = self.model
 
         outputs: List[SamplerOutput] = []
+        hidden_states = previous_hidden_states
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+
+            kwargs = {"previous_hidden_states": hidden_states} \
+                if previous_hidden_states is not None else {}
 
             # Run model
             hidden_states = model_executable(
@@ -324,6 +329,7 @@ class TP1DraftModelRunner(ModelRunner):
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **multi_modal_kwargs,
+                **kwargs,
             )
 
             # Compute the logits.
