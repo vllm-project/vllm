@@ -335,7 +335,9 @@ async def build_server(
         **uvicorn_kwargs,
     )
 
-    return uvicorn.Server(config)
+    global server
+    server = uvicorn.Server(config)
+    return server
 
 
 async def run_server(args, llm_engine=None, **uvicorn_kwargs) -> None:
