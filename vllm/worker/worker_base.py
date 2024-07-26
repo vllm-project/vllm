@@ -10,8 +10,8 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
-from vllm.sequence import (ExecuteModelRequest, HiddenStates, IntermediateTensors,
-                           SamplerOutput)
+from vllm.sequence import (ExecuteModelRequest, HiddenStates,
+                           IntermediateTensors, SamplerOutput)
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
@@ -239,10 +239,26 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     execute_model_req.finished_requests_ids))
             num_steps = execute_model_req.num_steps
 
+            if isinstance(execute_model_req.previous_hidden_states,
+                          torch.Tensor):
+                kwargs = {
+                    "previous_hidden_states":
+                    execute_model_req.previous_hidden_states
+                }
+            elif isinstance(execute_model_req.previous_hidden_states,
+                            HiddenStates):
+                kwargs = {
+                    "previous_hidden_states":
+                    execute_model_req.previous_hidden_states.hidden_states
+                }
+            else:
+                kwargs = {}
+
             if self.do_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_tensor_dict()
                 broadcast_data.update(
                     model_input.as_broadcastable_tensor_dict())
+                broadcast_data.update(kwargs)
                 broadcast_data["num_steps"] = num_steps
                 broadcast_tensor_dict(broadcast_data, src=0)
         else:
@@ -258,6 +274,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 self.model_runner.
                 make_model_input_from_broadcasted_tensor_dict(broadcast_data))
 
+            kwargs = broadcast_data
+
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.
@@ -269,16 +287,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict())
 
-        if isinstance(execute_model_req.previous_hidden_states, torch.Tensor):
-            kwargs = {"previous_hidden_states": execute_model_req.previous_hidden_states}
-        elif isinstance(execute_model_req.previous_hidden_states, HiddenStates):
-            kwargs = {"previous_hidden_states": execute_model_req.previous_hidden_states.hidden_states}
-        else:
-            kwargs = {}
-
         output = self.model_runner.execute_model(
             model_input=model_input,
-            kv_caches=self.kv_cache[worker_input.virtual_engine] if self.kv_cache is not None else None,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
             intermediate_tensors=intermediate_tensors,
             num_steps=num_steps,
             **kwargs,

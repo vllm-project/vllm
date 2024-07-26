@@ -1037,12 +1037,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
         previous_hidden_states = None
-        if "previous_hidden_states" in inspect.signature(self.execute_model).parameters:
+        if "previous_hidden_states" in inspect.signature(
+                self.execute_model).parameters:
             previous_hidden_states = torch.empty(
-                [max_batch_size, self.model_config.get_hidden_size()],
+                [max_batch_size,
+                 self.model_config.get_hidden_size()],
                 dtype=self.model_config.dtype,
                 device=self.device)
-            
+
         intermediate_inputs = None
         if not get_pp_group().is_first_rank:
             intermediate_inputs = self.model.make_empty_intermediate_tensors(
@@ -1211,7 +1213,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_capture_context.stream
                     }
                     if previous_hidden_states is not None:
-                        capture_inputs["previous_hidden_states"] = previous_hidden_states[:batch_size]
+                        capture_inputs[
+                            "previous_hidden_states"] = previous_hidden_states[:
+                                                                               batch_size]
 
                     if self.has_seqlen_agnostic:
                         # Only used by Mamba-based models CUDA graph atm (Jamba)
@@ -1394,9 +1398,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             if model_input.is_prompt:
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
-                
-                prefill_hidden_states = hidden_or_intermediate_states.roll(shifts=1, dims=0)
-                prefill_hidden_states.masked_fill_((model_input.input_positions == 0).unsqueeze(-1), 0)
+                prefill_hidden_states = hidden_or_intermediate_states.roll(
+                    shifts=1, dims=0)
+                assert isinstance(model_input.input_positions, torch.Tensor)
+                prefill_hidden_states.masked_fill_(
+                    (model_input.input_positions == 0).unsqueeze(-1), 0)
                 output.prefill_hidden_states = prefill_hidden_states
             elif decode_meta.use_cuda_graph:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
@@ -1545,11 +1551,11 @@ class CUDAGraphRunner:
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
-            
+
         if "previous_hidden_states" in self.input_buffers:
             self.input_buffers["previous_hidden_states"].copy_(
                 kwargs["previous_hidden_states"], non_blocking=True)
-            
+
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
                 self.input_buffers[key].copy_(intermediate_tensors[key],

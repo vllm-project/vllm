@@ -872,7 +872,8 @@ class SamplerOutput:
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None
 
-    # Optional prefill hidden states from the model (used for models like EAGLE).
+    # Optional prefill hidden states from the model
+    # (used for models like EAGLE).
     prefill_hidden_states: Optional[torch.Tensor] = None
 
     def __getitem__(self, idx: int):
@@ -954,17 +955,22 @@ class HiddenStates:
     seq_ids are the sequence ids of each entry of the batch
     dimension of the hidden_states tensor"""
 
-    def __init__(self, seq_group_metadata_list: List[SequenceGroupMetadata],
-                 hidden_states: torch.Tensor,
-                 bonus_token_previous_hidden_states: Optional[torch.Tensor] = None):
+    def __init__(
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            hidden_states: torch.Tensor,
+            bonus_token_previous_hidden_states: Optional[torch.Tensor] = None):
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
         self.hidden_states: torch.Tensor = hidden_states
-        self.bonus_token_previous_hidden_states: Optional[torch.Tensor] = bonus_token_previous_hidden_states
+        self.bonus_token_previous_hidden_states: Optional[
+            torch.Tensor] = bonus_token_previous_hidden_states
 
-    def update(self, seq_group_metadata_list: List[SequenceGroupMetadata],
-               hidden_states: torch.Tensor,
-               bonus_token_previous_hidden_states: Optional[torch.Tensor] = None):
+    def update(
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            hidden_states: torch.Tensor,
+            bonus_token_previous_hidden_states: Optional[torch.Tensor] = None):
         """Update hidden states from target model invocation."""
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
@@ -972,7 +978,9 @@ class HiddenStates:
         # Adding dummy hidden_states to this to maintain same shape
         self.bonus_token_previous_hidden_states = torch.cat([
             self.hidden_states,
-            hidden_states if bonus_token_previous_hidden_states is None else bonus_token_previous_hidden_states])
+            hidden_states if bonus_token_previous_hidden_states is None else
+            bonus_token_previous_hidden_states
+        ])
 
     def prune(self,
               seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
@@ -983,12 +991,14 @@ class HiddenStates:
             index = [self.seq_ids.index(seq_id) for seq_id in seq_ids]
             self.hidden_states = self.hidden_states[index]
             if self.bonus_token_previous_hidden_states is not None:
-                self.bonus_token_previous_hidden_states = self.bonus_token_previous_hidden_states[index]
+                self.bonus_token_previous_hidden_states = self\
+                    .bonus_token_previous_hidden_states[index]
             self.seq_ids = seq_ids
-            
-    def expand_with_bonus_tokens(self,
-                                 seq_with_bonus_token_in_last_step: set) -> None:
-        if self.bonus_token_previous_hidden_states is None or not seq_with_bonus_token_in_last_step:
+
+    def expand_with_bonus_tokens(
+            self, seq_with_bonus_token_in_last_step: set) -> None:
+        if self.bonus_token_previous_hidden_states is None \
+            or not seq_with_bonus_token_in_last_step:
             return
 
         index = []
@@ -997,9 +1007,11 @@ class HiddenStates:
             if seq_id in seq_with_bonus_token_in_last_step:
                 index.append(i + len(self.seq_ids))
             index.append(i)
-            
-        self.hidden_states = torch.cat([self.hidden_states,
-                                        self.bonus_token_previous_hidden_states])[index]
+
+        self.hidden_states = torch.cat(
+            [self.hidden_states,
+             self.bonus_token_previous_hidden_states])[index]
+
 
 @dataclass
 class ExecuteModelRequest:

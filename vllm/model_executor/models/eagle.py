@@ -25,8 +25,8 @@ class EAGLE(nn.Module):
 
         self.model = model_cls(self.config.model, *args, **kwargs)
         self.fc = nn.Linear(config.model.hidden_size * 2,
-                              config.model.hidden_size,
-                              bias=False)
+                            config.model.hidden_size,
+                            bias=False)
 
         self.token_map = None
 
@@ -45,22 +45,21 @@ class EAGLE(nn.Module):
     ) -> torch.Tensor:
 
         tok_embeds = self.model.model.embed_tokens(input_ids)
-        inputs_embeds = self.fc(torch.cat([tok_embeds, previous_hidden_states], dim=-1))
+        inputs_embeds = self.fc(
+            torch.cat([tok_embeds, previous_hidden_states], dim=-1))
 
-        hidden_states = self.model.model(input_ids=None,
-                                         inputs_embeds=inputs_embeds,
-                                         positions=positions,
-                                         kv_caches=kv_caches,
-                                         attn_metadata=attn_metadata,
-                                         intermediate_tensors=intermediate_tensors)
+        hidden_states = self.model.model(
+            input_ids=None,
+            inputs_embeds=inputs_embeds,
+            positions=positions,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors)
         return hidden_states
-    
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        return self.model.compute_logits(hidden_states,
-                                         sampling_metadata)
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states, sampling_metadata)
 
     def sample(
         self,

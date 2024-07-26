@@ -145,7 +145,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         "model_runner_cls"] = TP1DraftModelRunner
                 else:
                     if draft_worker_kwargs[
-                        "model_config"].hf_config.model_type == "eagle":
+                            "model_config"].hf_config.model_type == "eagle":
                         raise NotImplementedError(
                             "EAGLE does not support TP > 1 yet")
 
@@ -469,9 +469,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             else:
                 self.previous_hidden_states.update(
                     execute_model_req.seq_group_metadata_list, hidden_states)
-                
+
         if not skip_proposer:
-            execute_model_req.previous_hidden_states = sampler_output.prefill_hidden_states
+            execute_model_req.previous_hidden_states = sampler_output\
+                .prefill_hidden_states
             self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
@@ -537,7 +538,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
-            
+
         execute_model_req.previous_hidden_states = None
 
         proposal_scores = self.scorer.score_proposals(
@@ -647,9 +648,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             bonus_token_previous_hidden_states = hidden_states[:, -2]  # b x d
             hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
             # Store hidden states from target model for subsequent decode step
-            self.previous_hidden_states = HiddenStates(seq_group_metadata_list,
-                                                       hidden_states,
-                                                       bonus_token_previous_hidden_states)
+            self.previous_hidden_states = HiddenStates(
+                seq_group_metadata_list, hidden_states,
+                bonus_token_previous_hidden_states)
 
         return accepted_token_ids, logprobs
 
