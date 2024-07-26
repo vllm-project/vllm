@@ -1,10 +1,6 @@
 # This script runs test inside the corresponding ROCm docker container.
 set -ex
 
-# Print ROCm version
-echo "--- ROCm info"
-rocminfo
-
 # cleanup older docker images
 cleanup_docker() {
   # Get Docker's root directory
