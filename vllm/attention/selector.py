@@ -2,6 +2,9 @@ import enum
 from functools import lru_cache
 from typing import Optional, Type
 
+from contextlib import contextmanager
+from typing import Generator
+
 import torch
 
 import vllm.envs as envs
@@ -22,6 +25,43 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+
+
+# Global state allows a particular choice of backend
+# to be forced, overriding the logic which auto-selects
+# a backend based on system & workload configuration
+# (default behavior if this variable is None)
+#
+# THIS SELECTION ALSO OVERRIDES THE VLLM_ATTENTION_BACKEND
+# ENVIRONMENT VARIABLE
+forced_attn_backend: Optional[_Backend] = None
+
+
+def global_force_attn_backend(attn_backend: Optional[_Backend], ) -> None:
+    '''
+    Force all attention operations to use a specified backend.
+
+    Arguments:
+
+    * attn_backend: backend selection (None to revert to auto)
+    '''
+    global forced_attn_backend
+    forced_attn_backend = attn_backend
+
+
+def global_auto_attn_backend() -> None:
+    '''
+    Re-enable auto backend selection.
+    '''
+    global_force_attn_backend(None)
+
+
+def get_global_forced_attn_backend() -> Optional[_Backend]:
+    '''
+    Get the currently-forced choice of attention backend,
+    or None if auto-selection is currently enabled.
+    '''
+    return forced_attn_backend
 
 
 @lru_cache(maxsize=None)
@@ -101,16 +141,26 @@ def which_attn_to_use(
     # Default case.
     selected_backend = _Backend.FLASH_ATTN
 
-    # Check the environment variable and override if specified
-    backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
-    if backend_by_env_var is not None:
-        backend_members = _Backend.__members__
-        if backend_by_env_var not in backend_members:
-            raise ValueError(
-                f"Invalid attention backend '{backend_by_env_var}'. "
-                f"Available backends: {', '.join(backend_members)} "
-                "(case-sensitive).")
-        selected_backend = _Backend[backend_by_env_var]
+    # Check whether a particular choice of backend was
+    # previously forced.
+    #
+    # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
+    # ENVIRONMENT VARIABLE.
+    backend_by_global_setting: Optional[_Backend] = (
+        get_global_forced_attn_backend())
+    if backend_by_global_setting is not None:
+        selected_backend = backend_by_global_setting
+    else:
+        # Check the environment variable and override if specified
+        backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
+        if backend_by_env_var is not None:
+            backend_members = _Backend.__members__
+            if backend_by_env_var not in backend_members:
+                raise ValueError(
+                    f"Invalid attention backend '{backend_by_env_var}'. "
+                    f"Available backends: {', '.join(backend_members)} "
+                    "(case-sensitive).")
+            selected_backend = _Backend[backend_by_env_var]
 
     if is_cpu():
         if selected_backend != _Backend.TORCH_SDPA:
@@ -193,3 +243,35 @@ def which_attn_to_use(
             selected_backend = _Backend.XFORMERS
 
     return selected_backend
+
+@contextmanager
+def global_force_attn_backend_context_manager(
+    attn_backend: _Backend, 
+    ) -> Generator[None, None, None]:
+    '''
+    Globally force a vLLM attention backend override within a
+    context manager, reverting the global attention backend
+    override to its prior state upon exiting the context
+    manager.
+
+    Arguments:
+
+    * attn_backend: attention backend to force
+
+    Returns:
+
+    * Generator
+    '''
+
+    # Save the current state of the global backend override (if any)
+    original_value = get_global_forced_attn_backend()
+
+    # Globally force the new backend override
+    global_force_attn_backend(attn_backend)
+
+    # Yield control back to the enclosed code block
+    try:
+        yield
+    finally:
+        # Revert the original global backend override, if any
+        global_force_attn_backend(original_value)
