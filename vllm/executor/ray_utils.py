@@ -100,22 +100,24 @@ def initialize_ray_cluster(
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
         # Verify that we can use the placement group.
-        gpu_bundles = 0
+        device_bundles = 0
         for bundle in bundles:
-            bundle_gpus = bundle.get(device_str, 0)
-            if bundle_gpus > 1:
+            bundle_devices = bundle.get(device_str, 0)
+            if bundle_devices > 1:
                 raise ValueError(
                     "Placement group bundle cannot have more than 1 "
                     f"{device_str}.")
-            if bundle_gpus:
-                gpu_bundles += 1
-        if parallel_config.world_size > gpu_bundles:
+            if bundle_devices:
+                device_bundles += 1
+        if parallel_config.world_size > device_bundles:
             raise ValueError(
                 f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group.")
+                f"number of available {device_str}s in the placement group."
+                f"Required number of devices: {parallel_config.world_size}. "
+                f"Total number of devices: {device_bundles}.")
     else:
-        num_gpus_in_cluster = ray.cluster_resources().get(device_str, 0)
-        if parallel_config.world_size > num_gpus_in_cluster:
+        num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+        if parallel_config.world_size > num_devices_in_cluster:
             raise ValueError(
                 f"The number of required {device_str}s exceeds the total "
                 f"number of available {device_str}s in the placement group.")
