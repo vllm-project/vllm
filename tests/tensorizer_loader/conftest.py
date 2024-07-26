@@ -7,7 +7,7 @@ import torch
 
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
-
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 def cleanup():
     destroy_model_parallel()
@@ -34,3 +34,9 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
         cleanup()
+
+
+@pytest.fixture(autouse=True)
+def tensorizer_config():
+    config = TensorizerConfig(tensorizer_uri="vllm")
+    return config
