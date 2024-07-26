@@ -12,6 +12,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 
+MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 class TextGenerationClient(AsyncLLMEngine):
     def __init__(self):
@@ -44,7 +45,7 @@ class TextGenerationClient(AsyncLLMEngine):
     ) -> "PreTrainedTokenizer":
         # TODO: what to return :/
         from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained("facebook/opt-125m")
+        return AutoTokenizer.from_pretrained(MODEL)
 
     async def generate(
         self,
