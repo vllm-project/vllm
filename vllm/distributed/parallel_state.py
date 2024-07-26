@@ -34,6 +34,10 @@ from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import is_tpu
+
+if is_tpu():
+    import torch_xla.core.xla_model as xm
 
 
 @dataclass
@@ -125,6 +129,7 @@ class GroupCoordinator:
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
     mq_broadcaster: Optional[Any]  # shared memory broadcaster
+    use_xla: bool  # Whether to use PyTorch XLA communicator
 
     def __init__(
         self,
@@ -140,6 +145,7 @@ class GroupCoordinator:
         self.local_rank = local_rank
         self.device_group = None
         self.cpu_group = None
+        self.use_xla = is_tpu()
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
@@ -289,6 +295,11 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return input_
+
+        # For TPUs, use xm.all_reduce.
+        if self.use_xla:
+            return xm.all_reduce(xm.REDUCE_SUM, input_)
+
         if ca_comm is not None:
             out = ca_comm.custom_all_reduce(input_)
             if out is not None:
@@ -307,6 +318,12 @@ class GroupCoordinator:
             return input_
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+
+        # For TPUs, use xm.all_gather.
+        if self.use_xla:
+            assert dim == -1, "TPUs only support dim=-1 for all-gather."
+            return xm.all_gather(input_, dim)
+
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
