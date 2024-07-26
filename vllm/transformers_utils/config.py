@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MedusaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
-                                             RWConfig)
+                                             RWConfig, InternVLChatConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -26,6 +26,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
+    "internvl_chat": InternVLChatConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
@@ -80,9 +81,6 @@ def get_hf_text_config(config: PretrainedConfig):
         # if transformers config doesn't align with this assumption.
         assert hasattr(config.text_config, "num_attention_heads")
         return config.text_config
-    elif hasattr(config, "llm_config"):
-        assert hasattr(config.llm_config, "num_attention_heads")
-        return config.llm_config
     else:
         return config
 

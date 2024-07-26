@@ -531,12 +531,12 @@ class InternVLChatModel(nn.Module, SupportsVision):
 
         self.vision_model = InternVisionModel(config.vision_config)
         llm_class = ModelRegistry.load_model_cls(
-            config.llm_config.architectures[0])
-        self.language_model = llm_class(config.llm_config, cache_config,
+            config.text_config.architectures[0])
+        self.language_model = llm_class(config.text_config, cache_config,
                                         quant_config)
 
         vit_hidden_size = config.vision_config.hidden_size
-        llm_hidden_size = config.llm_config.hidden_size
+        llm_hidden_size = config.text_config.hidden_size
 
         self.mlp1 = nn.Sequential(
             nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2),
@@ -678,7 +678,7 @@ class InternVLChatModel(nn.Module, SupportsVision):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if self.config.llm_config.tie_word_embeddings \
+            if self.config.text_config.tie_word_embeddings \
                 and "lm_head.weight" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -698,7 +698,7 @@ class InternVLChatModel(nn.Module, SupportsVision):
                     continue
                 param = params_dict[name]
                 if "wqkv" in name:
-                    config = self.config.llm_config
+                    config = self.config.text_config
                     kv_groups = (config.num_attention_heads //
                                  config.num_key_value_heads)
                     head_dim = config.hidden_size // config.num_attention_heads
