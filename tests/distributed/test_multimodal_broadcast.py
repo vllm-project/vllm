@@ -21,7 +21,7 @@ model = os.environ["TEST_DIST_MODEL"]
 
 if model.startswith("llava-hf/llava-1.5"):
     from ..models.test_llava import models, run_test
-if model.startswith("llava-hf/llava-v1.6"):
+elif model.startswith("llava-hf/llava-v1.6"):
     from ..models.test_llava_next import models, run_test
 else:
     raise NotImplementedError(f"Unsupported model: {model}")
