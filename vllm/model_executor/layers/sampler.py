@@ -220,7 +220,7 @@ def _apply_min_tokens_penalty(
             seqs_to_penalize: List[int] = []
             for j, seq_id in enumerate(seq_ids):
                 seq_data = seq_group.seq_data[seq_id]
-                if len(seq_data.output_token_ids) < min_tokens:
+                if len(seq_data.output_token_ids_array) < min_tokens:
                     seqs_to_penalize.append(j)
 
             if seqs_to_penalize:
