@@ -340,7 +340,7 @@ def scaled_fp8_quant(
     shape = input.shape
 
     if num_token_padding:
-        shape[0] = max(num_token_padding, input.shape[0])
+        shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
 
     if scale is None:
