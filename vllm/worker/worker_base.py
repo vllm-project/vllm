@@ -246,7 +246,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 broadcast_data.update(
                     model_input.as_broadcastable_tensor_dict())
                 broadcast_data["num_steps"] = num_steps
-                broadcast_tensor_dict(broadcast_data, src=0)P
+                broadcast_tensor_dict(broadcast_data, src=0)
         else:
             assert self.do_metadata_broadcast
             broadcast_data = broadcast_tensor_dict(src=0)

@@ -1,5 +1,6 @@
-import torch
 from typing import Dict, FrozenSet, List, Optional, Tuple
+
+import torch
 
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
@@ -260,7 +261,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 current_swap_mapping[src_block_id] = dst_block_id
         return current_swap_mapping
 
-    async def get_kv_cache_from_block(self, block: Block) -> List[torch.Tensor]:
+    async def get_kv_cache_from_block(self,
+                                      block: Block) -> List[torch.Tensor]:
         """Return the corresponding KV cache of the given block.
 
         Args:
@@ -269,10 +271,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             List[torch.Tensor]: The kv_cache object.
         """
-        pass
+        raise NotImplementedError
 
-
-    async def put_kv_cache_into_block(block: Block, kv_cache: List[torch.Tensor]) -> None:
+    async def put_kv_cache_into_block(self, lock: Block,
+                                      kv_cache: List[torch.Tensor]) -> None:
         """Inserts the KV cache into the given block
 
         Args:
@@ -282,7 +284,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             None
         """
-        pass
+        raise NotImplementedError
 
     def get_num_blocks_touched(self,
                                blocks: List[Block],

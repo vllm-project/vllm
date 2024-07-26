@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
+
 import torch
+
 from vllm.utils import Device
 
 BlockId = int
@@ -267,11 +269,13 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_kvcache_from_block(self, block: Block) -> List[torch.Tensor]:
+    async def get_kv_cache_from_block(self,
+                                      block: Block) -> List[torch.Tensor]:
         pass
 
     @abstractmethod
-    def put_kvcache_into_block(block: Block, kv_cache: List[torch.Tensor]) -> None:
+    async def put_kv_cache_into_block(self, block: Block,
+                                      kv_cache: List[torch.Tensor]) -> None:
         pass
 
     @abstractmethod

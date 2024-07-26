@@ -128,9 +128,11 @@ class SchedulerOutputs:
     ignored_seq_groups: List[SequenceGroup]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
-     # Buffer containing the KV cache (torch.Tensor) and the Block we want to add it to
+    # Buffer containing the KV cache (torch.Tensor) and
+    # the Block we want to add it to
     kv_to_block_buffer: List[int]
-    # Buffer containing the block we want to extract the KV cache (torch.Tensor) from
+    # Buffer containing the block we want to extract
+    # the KV cache (torch.Tensor) from
     kv_from_block_buffer: List[int]
     # The number of requests in the running queue
     running_queue_size: int
@@ -195,11 +197,13 @@ class SchedulerRunningOutputs:
     blocks_to_copy: List[Tuple[int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
-    # Buffer containing the KV cache (torch.Tensor) and the Block we want to add it to
-    kv_to_block_buffer: List[int]
-    # Buffer containing the block we want to extract the KV cache (torch.Tensor) from
-    kv_from_block_buffer: List[int]
 
+    # Buffer containing the KV cache (torch.Tensor) and
+    # the Block we want to add it to
+    kv_to_block_buffer: List[int]
+    # Buffer containing the block we want to extract
+    # the KV cache (torch.Tensor) from
+    kv_from_block_buffer: List[int]
 
     @classmethod
     def create_empty(cls) -> "SchedulerRunningOutputs":
@@ -211,6 +215,8 @@ class SchedulerRunningOutputs:
             blocks_to_swap_out=[],
             blocks_to_copy=[],
             num_lookahead_slots=0,
+            kv_to_block_buffer=[],
+            kv_from_block_buffer=[],
         )
 
 
@@ -303,7 +309,7 @@ class Scheduler:
             num_cpu_blocks //= pipeline_parallel_size
 
         # Create the block space manager.
-        self.block_manager = BlockSpacexManagerImpl(
+        self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
@@ -435,8 +441,13 @@ class Scheduler:
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_out: List[Tuple[int, int]] = []
         blocks_to_copy: List[Tuple[int, int]] = []
-        kv_to_block_buffer: List[int] # should we use ctypes to malloc a buffer and return a ptr?
-        kv_from_block_buffer: List[int] # currently, neither this nor the previous object are modified within this function
+
+        # should we use ctypes to malloc a buffer and return a ptr?
+        kv_to_block_buffer: List[int] = []
+
+        # currently, neither this nor the previous
+        # object are modified within this function
+        kv_from_block_buffer: List[int] = []
 
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
@@ -523,7 +534,6 @@ class Scheduler:
                 is_prefill=False),
             kv_to_block_buffer=kv_to_block_buffer,
             kv_from_block_buffer=kv_from_block_buffer),
-            
 
     def _schedule_swapped(
         self,
@@ -953,6 +963,8 @@ class Scheduler:
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=running_scheduled.blocks_to_copy +
             swapped_in.blocks_to_copy,
+            kv_to_block_buffer=running_scheduled.kv_to_block_buffer,
+            kv_from_block_buffer=running_scheduled.kv_from_block_buffer,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
