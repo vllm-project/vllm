@@ -40,6 +40,10 @@ model_ref = "facebook/opt-125m"
 tensorize_model_for_testing_script = os.path.join(
     os.path.dirname(__file__), "tensorize_vllm_model_for_testing.py")
 
+@pytest.fixture(autouse=True)
+def tensorizer_cleanup():
+    cleanup()
+
 
 def is_curl_installed():
     try:
