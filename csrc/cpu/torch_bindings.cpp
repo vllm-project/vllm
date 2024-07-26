@@ -4,6 +4,8 @@
 
 #include <torch/library.h>
 
+void init_cpu_threads_env(const std::string& cpu_ids);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -105,6 +107,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                  str kv_cache_dtype,"
       "                  float k_scale, float v_scale) -> ()");
   cache_ops.impl("reshape_and_cache", torch::kCPU, &reshape_and_cache);
+}
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
+  // CPU utils
+  utils.def("init_cpu_threads_env(str cpu_ids) -> ()", &init_cpu_threads_env);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
