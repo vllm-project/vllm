@@ -671,8 +671,8 @@ class InternVLChatModel(nn.Module, SupportsVision):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
+            (".gate_up_proj", ".w1", 0),
+            (".gate_up_proj", ".w3", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
