@@ -54,6 +54,9 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_ENGINE_STEPS_BEFORE_YIELD: int = 10
+    VLLM_ENGINE_STEPS_FIRST_TOKEN: int = 1
+    VLLM_ENGINE_STEPS_COMPLETED_REQUEST: int = 1
 
 
 def get_default_cache_root():
@@ -356,6 +359,21 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+
+    # Number of steps before yielding in the sync engine for
+    # the sync server mode
+    "VLLM_ENGINE_STEPS_BEFORE_YIELD":
+    lambda: int(os.getenv("VLLM_ENGINE_STEPS_BEFORE_YIELD", "10")),
+
+    # Maximum number of steps before yielding in the sync engine
+    # when a first token is ready for a request
+    "VLLM_ENGINE_STEPS_FIRST_TOKEN":
+    lambda: int(os.getenv("VLLM_ENGINE_STEPS_FIRST_TOKEN", "1")),
+
+    # Maximum number of steps before yielding in the sync engine
+    # when a request is completed
+    "VLLM_ENGINE_STEPS_COMPLETED_REQUEST":
+    lambda: int(os.getenv("VLLM_ENGINE_STEPS_COMPLETED_REQUEST", "1")),
 }
 
 # end-env-vars-definition
