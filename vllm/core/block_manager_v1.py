@@ -669,6 +669,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if max_full_block == -1:
             return
         for i in reversed(range(max_full_block)):
+            # [help wanted]
+            # max_full_block < block_table makes sense, but combining pc + cp may produce a conflict,
+            # (do not know why) so following 'if' statement is needed, little hurt for performance
+            if i >= len(block_table):
+                continue
             if block_table[i].computed:
                 break
             block_table[i].computed = True

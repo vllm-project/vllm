@@ -246,6 +246,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             self.multi_modal_inputs = multi_modal_inputs
             self.prefix_cache_hit = prefix_cache_hit
+            
+            # maybe dirty hack
+            self.cached_len = 0
 
             self.__post_init__()
 
@@ -365,20 +368,36 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             and self.sliding_window is None
                             and inter_data.is_prompt)
         inter_data.prefix_cache_hit = prefix_cache_hit
-        if self.chunked_prefill_enabled and prefix_cache_hit:
-            raise RuntimeError(
-                "chunked prefill cannot be used with prefix caching now.")
+        # if self.chunked_prefill_enabled and prefix_cache_hit:
+        #     raise RuntimeError(
+        #         "chunked prefill cannot be used with prefix caching now.")
 
         # If prefix cache is hit, advance context length to bypass
         # hit blocks. Accordingly, input tokens, position and query length
         # have to be updated.
         if prefix_cache_hit:
             assert computed_block_nums is not None
-            context_len = len(computed_block_nums) * self.block_size
-            inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
-                seq_idx][context_len:]
-            inter_data.input_positions[seq_idx] = inter_data.input_positions[
-                seq_idx][context_len:]
+
+            # [help wanted] 
+            # inter_data.cached_len is just a work-around for mutable cached length when chunked prefill 
+            # enabled with prefix caching, in order to fix the cached length for the same seq being chunked
+            context_len = inter_data.context_lens[seq_idx]
+            if context_len == 0:
+                inter_data.cached_len = len(computed_block_nums) * self.block_size
+                context_len = min(inter_data.cached_len, seq_group_metadata.token_chunk_size - 1)
+                inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
+                    seq_idx][context_len:]
+                inter_data.input_positions[seq_idx] = inter_data.input_positions[
+                    seq_idx][context_len:]
+            else:
+                if inter_data.cached_len > context_len:
+                    delta_len = min(inter_data.cached_len - context_len, seq_group_metadata.token_chunk_size - 1)
+                    context_len += delta_len
+                    inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
+                        seq_idx][delta_len:]
+                    inter_data.input_positions[seq_idx] = inter_data.input_positions[
+                        seq_idx][delta_len:]
+
             inter_data.context_lens[seq_idx] = context_len
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
