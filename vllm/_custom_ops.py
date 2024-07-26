@@ -179,7 +179,6 @@ def silu_and_mul_quant(out: torch.Tensor, input: torch.Tensor,
     torch.ops._C.silu_and_mul_quant(out, input, scale, tmp)
 
 
-
 def advance_step(num_seqs: int, num_queries: int, block_size: int,
                  input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
                  input_positions: torch.Tensor, seq_lens: torch.Tensor,
