@@ -11,7 +11,7 @@ import asyncio
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 MAX_TOKENS = 150
 TEMPERATURE = 0
-
+UNIX_SOCKET = "unix:///tmp/ricky-bobby"
 
 class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
     SERVICE_NAME = _GENERATION_DESCRIPTOR.services_by_name[
@@ -63,7 +63,8 @@ async def start_grpc_server() -> aio.Server:
 
     host = "0.0.0.0"
     grpc_port = 5543
-    server.add_insecure_port(f"{host}:{grpc_port}")
+    # server.add_insecure_port(f"{host}:{grpc_port}")
+    server.add_insecure_port(UNIX_SOCKET)
     await server.start()
     print("ready")
     return server

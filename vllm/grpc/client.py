@@ -1,6 +1,8 @@
 import asyncio
 from vllm import AsyncLLMEngine
 import grpc
+
+from vllm.grpc.server import UNIX_SOCKET
 from .pb import generate_pb2_grpc, generate_pb2
 from typing import AsyncIterator, List, Optional, Mapping
 
@@ -16,7 +18,8 @@ MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 class TextGenerationClient(AsyncLLMEngine):
     def __init__(self):
-        channel = grpc.aio.insecure_channel("localhost:5543")
+        # channel = grpc.aio.insecure_channel("localhost:5543")
+        channel = grpc.aio.insecure_channel(UNIX_SOCKET)
         self.stub = generate_pb2_grpc.TextGenerationServiceStub(channel)
         self.engine_use_ray = False
         self.worker_use_ray = False
