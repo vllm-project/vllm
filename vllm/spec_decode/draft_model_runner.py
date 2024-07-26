@@ -310,11 +310,16 @@ class TP1DraftModelRunner(ModelRunner):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = (self.graph_runners[model_input.virtual_engine]
                                 [graph_batch_size])
+            hidden_states = torch.cat([previous_hidden_states,
+                                       torch.empty([graph_batch_size - previous_hidden_states.shape[0], 
+                                                     *previous_hidden_states.shape[1:]],
+                                                    dtype=previous_hidden_states.dtype,
+                                                    device=previous_hidden_states.device)])
         else:
             model_executable = self.model
+            hidden_states = previous_hidden_states
 
         outputs: List[SamplerOutput] = []
-        hidden_states = previous_hidden_states
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
