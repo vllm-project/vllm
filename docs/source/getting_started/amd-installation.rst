@@ -109,7 +109,43 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
 .. tip::
 
+    For example, vLLM v0.5.3 on ROCM 6.1 can be built with the following steps:
+
+    .. code-block:: console
+
+        $ pip install --upgrade pip
+
+        $ # Install PyTorch
+        $ pip uninstall torch -y
+        $ pip install --no-cache-dir --pre torch==2.5.0.dev20240710 --index-url https://download.pytorch.org/whl/nightly/rocm6.1
+
+        $ # Build & install AMD SMI
+        $ pip install /opt/rocm/share/amd_smi
+
+        $ # Install dependencies
+        $ pip install --upgrade numba scipy huggingface-hub[cli]
+        $ pip install "numpy<2"
+        $ pip install -r requirements-rocm.txt
+
+        $ # Apply the patch to ROCM 6.1 (requires root permission)
+        $ wget -N https://github.com/ROCm/vllm/raw/fa78403/rocm_patch/libamdhip64.so.6 -P /opt/rocm/lib
+        $ rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so*
+
+        $ # Build vLLM for MI210/MI250/MI300.
+        $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+        $ python3 setup.py develop
+
+
+.. tip::
+
     - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
     - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
     - To use CK flash-attention or PyTorch naive attention, please use this flag ``export VLLM_USE_TRITON_FLASH_ATTN=0`` to turn off triton flash attention. 
     - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
+
+
+.. tip::
+    - For MI300x (gfx942) users, to achieve optimal performance, please refer to `MI300x tuning guide <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html>`_ for performance optimization and tuning tips on system and workflow level.
+      For vLLM, please refer to `vLLM performance optimization <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization>`_.
+
+

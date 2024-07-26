@@ -66,6 +66,7 @@ class OpenAIServing:
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
+        return_tokens_as_token_ids: bool = False,
     ):
         super().__init__()
 
@@ -100,6 +101,7 @@ class OpenAIServing:
                         prompt_adapter_num_virtual_tokens=num_virtual_tokens))
 
         self.request_logger = request_logger
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -382,11 +384,13 @@ class OpenAIServing:
         )
 
     @staticmethod
-    def _get_decoded_token(
-        logprob: Logprob,
-        token_id: int,
-        tokenizer: AnyTokenizer,
-    ) -> str:
+    def _get_decoded_token(logprob: Logprob,
+                           token_id: int,
+                           tokenizer: AnyTokenizer,
+                           return_as_token_id: bool = False) -> str:
+        if return_as_token_id:
+            return f"token_id:{token_id}"
+
         if logprob.decoded_token is not None:
             return logprob.decoded_token
         return tokenizer.decode(token_id)

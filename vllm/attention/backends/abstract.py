@@ -7,7 +7,6 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
 import torch
 
 if TYPE_CHECKING:
-    from vllm.sequence import SequenceGroupMetadata
     from vllm.worker.model_runner_base import ModelRunnerInputBuilderBase
 
 
@@ -128,25 +127,12 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
 
     @abstractmethod
-    def __init__(self, input_builder) -> None:
+    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def add_seq_group(self, seq_group_metadata: "SequenceGroupMetadata",
-                      token_lens: List[int], seq_lens: List[int],
-                      curr_seq_lens: List[int], query_lens: List[int],
-                      context_lens: List[int],
-                      curr_sliding_window_blocks: List[int],
-                      prefix_cache_hit: bool, chunked_prefill_enabled: bool):
-        """Add a sequence group to the metadata and update
-        corresponding fields (in Python objects).
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def build(self, runner: "ModelRunnerInputBuilderBase", seq_lens: List[int],
-              query_lens: List[int], cuda_graph_pad_size: int,
-              batch_size: int) -> T:
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int) -> T:
         """Build attention metadata with on-device tensors."""
         raise NotImplementedError
 
