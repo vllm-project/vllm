@@ -27,7 +27,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 IMAGE_TOKEN_ID = 32000
 
-models =  ["llava-hf/llava-v1.6-vicuna-7b-hf"]
+models = ["llava-hf/llava-v1.6-vicuna-7b-hf"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
