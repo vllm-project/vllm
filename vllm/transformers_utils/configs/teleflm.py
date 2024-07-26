@@ -21,9 +21,10 @@
 # limitations under the License.
 """ Tele-FLM model configuration"""
 
+from typing import Dict
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
-from typing import Dict
 
 logger = logging.get_logger(__name__)
 
