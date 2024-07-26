@@ -5,7 +5,7 @@ from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from collections.abc import AsyncIterator
 from grpc import aio
 import asyncio
-from grpc_reflection.v1alpha import reflection
+# from grpc_reflection.v1alpha import reflection
 
 MODEL = "facebook/opt-125m"
 MAX_TOKENS = 10
@@ -22,7 +22,8 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
 
     async def Generate(
         self, request: generate_pb2.GenerateRequest, context
-    ) -> AsyncIterator[generate_pb2.GenerateResponse]:
+    # ) -> AsyncIterator[generate_pb2.GenerateResponse]:
+    ) -> AsyncIterator:
         
         if len(request.prompt_inputs.prompt_token_ids) > 0:
             inputs = TokensPrompt(prompt_token_ids=request.prompt_inputs.prompt_token_ids)
@@ -54,10 +55,10 @@ async def start_grpc_server() -> aio.Server:
 
     service_names = (
         generation.SERVICE_NAME,
-        reflection.SERVICE_NAME,
+        # reflection.SERVICE_NAME,
     )
 
-    reflection.enable_server_reflection(service_names, server)
+    # reflection.enable_server_reflection(service_names, server)
 
     host = "0.0.0.0"
     grpc_port = 5543

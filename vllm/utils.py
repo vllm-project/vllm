@@ -301,7 +301,6 @@ def merge_async_iterators(
     queue: asyncio.Queue[Union[Tuple[int, T], Exception]] = asyncio.Queue()
 
     finished = [False] * len(iterators)
-    print(f"len(iterators) = {len(iterators)}")
 
     async def producer(i: int, iterator: AsyncIterator[T]):
         try:
