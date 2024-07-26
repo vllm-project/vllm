@@ -7,8 +7,9 @@ from grpc import aio
 import asyncio
 # from grpc_reflection.v1alpha import reflection
 
-MODEL = "facebook/opt-125m"
-MAX_TOKENS = 10
+# MODEL = "facebook/opt-125m"
+MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+MAX_TOKENS = 150
 TEMPERATURE = 0
 
 
