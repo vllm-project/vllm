@@ -196,11 +196,7 @@ class GroupCoordinator:
             TpuCommunicator)
         self.tpu_communicator: Optional[TpuCommunicator]
         if use_tpu_communicator and self.world_size > 1:
-            self.tpu_communicator = TpuCommunicator(
-                group=self.cpu_group,
-                local_rank=local_rank,
-                world_size=self.world_size,
-            )
+            self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
