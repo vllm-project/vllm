@@ -34,9 +34,9 @@ from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import is_tpu
+from vllm.platforms import current_platform
 
-if is_tpu():
+if current_platform.is_xla():
     import torch_xla.core.xla_model as xm
 
 
@@ -145,7 +145,7 @@ class GroupCoordinator:
         self.local_rank = local_rank
         self.device_group = None
         self.cpu_group = None
-        self.use_xla = is_tpu()
+        self.use_xla = current_platform.is_xla()
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(

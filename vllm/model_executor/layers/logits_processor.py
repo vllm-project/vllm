@@ -10,7 +10,7 @@ from vllm.distributed import (tensor_model_parallel_all_gather,
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.utils import is_tpu
+from vllm.platforms import current_platform
 
 
 class LogitsProcessor(nn.Module):
@@ -42,7 +42,7 @@ class LogitsProcessor(nn.Module):
         # Soft cap the logits. Used in Gemma 2.
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
-        self.use_gather = not is_tpu()
+        self.use_gather = not current_platform.is_xla()
 
     def forward(
         self,
