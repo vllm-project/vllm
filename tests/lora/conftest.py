@@ -162,6 +162,10 @@ def dummy_model_gate_up() -> nn.Module:
 def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 
+@pytest.fixture(scope="session")
+def lora_bias_files():
+    return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
+
 
 @pytest.fixture(scope="session")
 def mixtral_lora_files():

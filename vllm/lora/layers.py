@@ -90,12 +90,12 @@ def _apply_lora(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
-
     if bias_stacked is not None:
         bias_stacked = bias_stacked.view(-1, bias_stacked.shape[-1])
         bias_stacked = bias_stacked[indices]
         output += bias_stacked
+
+    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
 
     return output.view_as(org_output)
 
@@ -135,23 +135,27 @@ def _apply_lora_packed_nslice(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    offset_left = 0
 
-    for slice_idx in range(len(output_slices)):
-        add_lora_slice(output, x, lora_a_stacked[slice_idx],
-                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
-                       output_slices[slice_idx])
-
-        if bias_stacked is not None:
+    if bias_stacked is not None:
+        offset_left = 0
+        for slice_idx in range(len(output_slices)):
             bias = bias_stacked[slice_idx]
             if bias is not None:
                 bias = bias.view(-1, bias.shape[-1])
                 bias = bias[indices]
                 output[:, offset_left:offset_left +
-                       output_slices[slice_idx]] += bias
+                        output_slices[slice_idx]] += bias
 
+            offset_left += output_slices[slice_idx]
+
+    offset_left = 0
+    for slice_idx in range(len(output_slices)):
+        add_lora_slice(output, x, lora_a_stacked[slice_idx],
+                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
+                       output_slices[slice_idx])
         offset_left += output_slices[slice_idx]
-    return output.view_as(org_output)
+
+        return output.view_as(org_output)
 
 
 @dataclass
