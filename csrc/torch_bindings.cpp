@@ -74,9 +74,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // prepare_inputs advance_step
   ops.def(
-      "advance_step(int num_seqs, int num_queries, int block_size, Tensor! "
-      "input_tokens, Tensor sampled_token_ids, Tensor! input_positions, "
-      "Tensor! seq_lens, Tensor! slot_mapping, Tensor block_tables) -> ()");
+      "advance_step(int num_seqs, int num_queries, int block_size, "
+      "Tensor! input_tokens, Tensor sampled_token_ids, Tensor! "
+      "input_positions, Tensor! seq_lens, Tensor! slot_mapping, "
+      "Tensor block_tables) -> ()");
   ops.impl("advance_step", torch::kCUDA, &advance_step);
 
   // Layernorm
@@ -159,8 +160,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor g_idx, Tensor perm, Tensor! workspace, int num_bits, int size_m, "
-      "int size_n, int size_k, bool is_k_full) -> Tensor");
+      "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor! workspace, "
+      "int num_bits, int size_m, int size_n, int size_k, bool is_k_full, "
+      "bool has_zp) -> Tensor");
   ops.impl("gptq_marlin_gemm", torch::kCUDA, &gptq_marlin_gemm);
   ops.impl("gptq_marlin_gemm", torch::kMeta, &gptq_marlin_gemm_meta);
 
