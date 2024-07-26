@@ -774,6 +774,7 @@ def get_rope(
     is_neox_style: bool = True,
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
+    rotary_percent: float = 1.0,
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
@@ -786,6 +787,8 @@ def get_rope(
         rope_scaling_args = tuple(rope_scaling_tuple.items())
     else:
         rope_scaling_args = None
+    if rotary_percent < 1.0:
+        rotary_dim = int(rotary_dim * rotary_percent)
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
            rope_scaling_args, dtype)
     if key in _ROPE_DICT:
