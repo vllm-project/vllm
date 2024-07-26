@@ -526,7 +526,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_model(pixel_values, vision_feature_layer=-1)
+        image_features = vision_model(pixel_values)
 
         return image_features
 
@@ -540,11 +540,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def _process_image_input(self,
                              image_input: Blip2ImageInputs) -> torch.Tensor:
-        if image_input["type"] == "pixel_values":
-            assert self.vision_model is not None
-            image_features = self._process_image_pixels(image_input)
-        else:
-            image_features = image_input["data"]
+        assert self.vision_model is not None
+        image_features = self._process_image_pixels(image_input)
 
         query_tokens = self.query_tokens.expand(image_features.shape[0], -1,
                                                 -1)

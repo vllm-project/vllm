@@ -192,7 +192,6 @@ class BlipEncoderLayer(nn.Module):
                                         eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
@@ -218,24 +217,25 @@ class BlipEncoder(nn.Module):
 
     def __init__(self,
                  config: BlipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
 
         self.config = config
 
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
+
         self.layers = nn.ModuleList([
             BlipEncoderLayer(config=config, quant_config=quant_config)
-            for _ in range(config.num_hidden_layers)
+            for _ in range(num_hidden_layers)
         ])
 
-    def forward(self,
-                inputs_embeds: torch.Tensor,
-                vision_feature_layer: int = -1):
-
-        # Encoder forward pass only up to the required layer
-        num_layer = len(self.layers) + vision_feature_layer + 1
+    def forward(self, inputs_embeds: torch.Tensor):
         hidden_states = inputs_embeds
-        for encoder_layer in self.layers[:num_layer]:
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
 
         return hidden_states
@@ -247,24 +247,23 @@ class BlipVisionModel(nn.Module):
 
     def __init__(self,
                  config: BlipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
 
         self.config = config
 
         self.embeddings = BlipVisionEmbeddings(config)
-        self.encoder = BlipEncoder(config=config, quant_config=quant_config)
+        self.encoder = BlipEncoder(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+        )
         self.post_layernorm = nn.LayerNorm(config.hidden_size,
                                            eps=config.layer_norm_eps)
 
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        vision_feature_layer: int = -1,
-    ) -> torch.Tensor:
-
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embeddings(pixel_values)
-        hidden_states = self.encoder(inputs_embeds=hidden_states,
-                                     vision_feature_layer=vision_feature_layer)
+        hidden_states = self.encoder(inputs_embeds=hidden_states)
 
         return self.post_layernorm(hidden_states)
