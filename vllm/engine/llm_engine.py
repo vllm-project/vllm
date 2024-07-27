@@ -394,8 +394,14 @@ class LLMEngine:
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
         elif engine_config.device_config.device_type == "tpu":
-            from vllm.executor.tpu_executor import TPUExecutor
-            executor_class = TPUExecutor
+            if distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_tpu_executor import RayTPUExecutor
+                executor_class = RayTPUExecutor
+            else:
+                assert distributed_executor_backend is None
+                from vllm.executor.tpu_executor import TPUExecutor
+                executor_class = TPUExecutor
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
