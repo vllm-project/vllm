@@ -286,12 +286,12 @@ def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor, b_zeros: torch.Tensor,
                      g_idx: torch.Tensor, perm: torch.Tensor,
                      workspace: torch.Tensor, num_bits: int, size_m: int,
-                     size_n: int, size_k: int, is_k_full: bool,
-                     has_zp: bool) -> torch.Tensor:
+                     size_n: int, size_k: int, is_k_full: bool, has_zp: bool,
+                     use_fp32_reduce: bool) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, num_bits,
                                          size_m, size_n, size_k, is_k_full,
-                                         has_zp)
+                                         has_zp, use_fp32_reduce)
 
 
 # fp8 marlin
