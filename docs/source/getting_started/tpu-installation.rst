@@ -79,7 +79,7 @@ Next, build vLLM from source. This will only take a few seconds:
 
     Since TPU relies on XLA which requires static shapes, vLLM bucketizes the possible input shapes and compiles an XLA graph for each different shape.
     The compilation time may take 20~30 minutes in the first run.
-    However, the compilation time reduces to ~5 minutes in the second run because the XLA graphs are cached in the disk (in :code:`VLLM_XLA_CACHE_PATH` or :code:`~/.cache/vllm/xla_cache` by default).
+    However, the compilation time reduces to ~5 minutes afterwards because the XLA graphs are cached in the disk (in :code:`VLLM_XLA_CACHE_PATH` or :code:`~/.cache/vllm/xla_cache` by default).
 
 
 .. tip::
