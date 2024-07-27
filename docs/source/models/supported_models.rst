@@ -113,6 +113,10 @@ Decoder-only Language Models
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
     -
+  * - :code:`NemotronForCausalLM`
+    - Nemotron-3, Nemotron-4, Minitron
+    - :code:`nvidia/Minitron-8B-Base`, :code:`mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.
+    - ✅︎
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
