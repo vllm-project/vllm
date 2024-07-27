@@ -158,7 +158,6 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models')
-    args = parser.parse_args()
     parser.add_argument('--model-type',
                         '-m',
                         type=str,
