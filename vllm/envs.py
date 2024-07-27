@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -241,10 +242,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
-    # CPU key-value cache space
+    # (CPU backend only) CPU key-value cache space.
     # default is 4GB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
+
+    # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
+    # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
+    "VLLM_CPU_OMP_THREADS_BIND":
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
 
     # OpenVINO key-value cache space
     # default is 4GB
