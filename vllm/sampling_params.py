@@ -2,11 +2,12 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Set
 
 import torch
 from pydantic import Field
 from typing_extensions import Annotated
+import msgspec
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -33,7 +34,7 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-class SamplingParams:
+class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
@@ -111,81 +112,63 @@ class SamplingParams:
             (i.e., no truncation).
     """
 
-    def __init__(
-        self,
-        n: int = 1,
-        best_of: Optional[int] = None,
-        presence_penalty: float = 0.0,
-        frequency_penalty: float = 0.0,
-        repetition_penalty: float = 1.0,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = -1,
-        min_p: float = 0.0,
-        seed: Optional[int] = None,
-        use_beam_search: bool = False,
-        length_penalty: float = 1.0,
-        early_stopping: Union[bool, str] = False,
-        stop: Optional[Union[str, List[str]]] = None,
-        stop_token_ids: Optional[List[int]] = None,
-        include_stop_str_in_output: bool = False,
-        ignore_eos: bool = False,
-        max_tokens: Optional[int] = 16,
-        min_tokens: int = 0,
-        logprobs: Optional[int] = None,
-        prompt_logprobs: Optional[int] = None,
-        detokenize: bool = True,
-        skip_special_tokens: bool = True,
-        spaces_between_special_tokens: bool = True,
-        logits_processors: Optional[List[LogitsProcessor]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-    ) -> None:
-        self.n = n
-        self.best_of = best_of if best_of is not None else n
-        self.presence_penalty = presence_penalty
-        self.frequency_penalty = frequency_penalty
-        self.repetition_penalty = repetition_penalty
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
-        self.min_p = min_p
-        if seed == -1:
+    n: int = 1
+    best_of: Optional[int] = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    repetition_penalty: float = 1.0
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = -1
+    min_p: float = 0.0
+    seed: Optional[int] = None
+    use_beam_search: bool = False
+    length_penalty: float = 1.0
+    early_stopping: Union[bool, str] = False
+    stop: Optional[Union[str, List[str]]] = None
+    stop_token_ids: Optional[List[int]] = None
+    ignore_eos: bool = False
+    max_tokens: Optional[int] = 16
+    min_tokens: int = 0
+    logprobs: Optional[int] = None
+    prompt_logprobs: Optional[int] = None
+    # NOTE: This parameter is only exposed at the engine level for now.
+    # It is not exposed in the OpenAI API server, as the OpenAI API does
+    # not support returning only a list of token IDs.
+    detokenize: bool = True
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
+    # logits_processors: Optional[List[LogitsProcessor]] = None
+    logits_processors: Optional[Any] = None
+    include_stop_str_in_output: bool = False
+    truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+
+    # The below fields are not supposed to be used as an input.
+    # They are set in post_init.
+    output_text_buffer_length: int = 0
+    all_stop_token_ids: Optional[Set[int]] = None
+
+    def __post_init__(self) -> None:
+        self.best_of = self.best_of or self.n
+        if self.seed == -1:
             self.seed = None
         else:
-            self.seed = seed
-        self.use_beam_search = use_beam_search
-        self.length_penalty = length_penalty
-        self.early_stopping = early_stopping
-        if stop is None:
+            self.seed = self.seed
+        if self.stop is None:
             self.stop = []
-        elif isinstance(stop, str):
-            self.stop = [stop]
+        elif isinstance(self.stop, str):
+            self.stop = [self.stop]
         else:
-            self.stop = list(stop)
-        if stop_token_ids is None:
+            self.stop = list(self.stop)
+        if self.stop_token_ids is None:
             self.stop_token_ids = []
         else:
-            self.stop_token_ids = list(stop_token_ids)
-        self.ignore_eos = ignore_eos
-        self.max_tokens = max_tokens
-        self.min_tokens = min_tokens
-        self.logprobs = logprobs
-        self.prompt_logprobs = prompt_logprobs
-        # NOTE: This parameter is only exposed at the engine level for now.
-        # It is not exposed in the OpenAI API server, as the OpenAI API does
-        # not support returning only a list of token IDs.
-        self.detokenize = detokenize
-        self.skip_special_tokens = skip_special_tokens
-        self.spaces_between_special_tokens = spaces_between_special_tokens
-        self.logits_processors = logits_processors
-        self.include_stop_str_in_output = include_stop_str_in_output
-        self.truncate_prompt_tokens = truncate_prompt_tokens
+            self.stop_token_ids = list(self.stop_token_ids)
+
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
-        if self.stop and not include_stop_str_in_output:
+        if self.stop and not self.include_stop_str_in_output:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
-        else:
-            self.output_text_buffer_length = 0
 
         self._verify_args()
         if self.use_beam_search:
@@ -322,7 +305,7 @@ class SamplingParams:
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    @cached_property
+    @property
     def sampling_type(self) -> SamplingType:
         if self.use_beam_search:
             return SamplingType.BEAM

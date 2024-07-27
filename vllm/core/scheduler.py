@@ -1028,18 +1028,18 @@ class Scheduler:
                     sampling_params=seq_group.sampling_params,
                     block_tables=block_tables,
                     do_sample=do_sample,
-                    pooling_params=seq_group.pooling_params,
+                    # pooling_params=seq_group.pooling_params,
                     token_chunk_size=token_chunk_size,
-                    lora_request=seq_group.lora_request,
+                    # lora_request=seq_group.lora_request,
                     computed_block_nums=common_computed_block_nums,
-                    state=seq_group.state,
-                    # `multi_modal_data` will only be present for the 1st comm
-                    # between engine and worker.
-                    # the subsequent comms can still use delta, but
-                    # `multi_modal_data` will be None.
-                    multi_modal_data=seq_group.multi_modal_data
-                    if scheduler_outputs.num_prefill_groups > 0 else None,
-                    prompt_adapter_request=seq_group.prompt_adapter_request,
+                    # state=seq_group.state,
+                    # # `multi_modal_data` will only be present for the 1st comm
+                    # # between engine and worker.
+                    # # the subsequent comms can still use delta, but
+                    # # `multi_modal_data` will be None.
+                    # multi_modal_data=seq_group.multi_modal_data
+                    # if scheduler_outputs.num_prefill_groups > 0 else None,
+                    # prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
             else:
                 # Delta is used only for spmd workers.
@@ -1063,7 +1063,6 @@ class Scheduler:
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
-
         return seq_group_metadata_list, scheduler_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:

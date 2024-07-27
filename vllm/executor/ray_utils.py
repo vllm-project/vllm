@@ -1,4 +1,7 @@
 from typing import List, Optional, Tuple
+import time
+import pickle
+import msgspec
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -22,6 +25,8 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
+            self.i = 0
+            self.decoder = msgspec.msgpack.Decoder(ExecuteModelRequest)
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -34,8 +39,10 @@ try:
         def execute_model_spmd(self, execute_model_req: bytes):
             """Used only when SPMD worker and compiled DAG are both
             enabled."""
-            import pickle
-            execute_model_req: ExecuteModelRequest = pickle.loads(execute_model_req)
+            s = time.time()
+            execute_model_req: ExecuteModelRequest = self.decoder.decode(execute_model_req)
+            # execute_model_req: ExecuteModelRequest = pickle.loads(execute_model_req)
+            # print(f"SANG-TODO input deserialization takes {(time.time() - s) * 1000} ms index: {self.i}")
             # TODO(swang): This is needed right now because Ray aDAG executes
             # on a background thread, so we need to reset torch's current
             # device.
@@ -43,9 +50,11 @@ try:
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
-
             output = self.worker._execute_model_spmd(execute_model_req)
-            return pickle.dumps(output)
+            output = pickle.dumps(output)
+            # print(f"SANG-TODO worker takes {(time.time() - s) * 1000} ms index: {self.i}")
+            self.i += 1
+            return output
 
     ray_import_err = None
 

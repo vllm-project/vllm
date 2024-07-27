@@ -283,7 +283,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             target_seq_id:
             SequenceData(
                 prompt_token_ids=prompt_token_ids,
-                output_token_ids=new_output_token_ids,
+                _output_token_ids=new_output_token_ids,
             ),
         }
         # This is a hack. Technically, spec decoding should compute

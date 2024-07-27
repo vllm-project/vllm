@@ -221,7 +221,6 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
-
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -899,6 +898,7 @@ class LLMEngine:
                 "as performance will be severely degraded otherwise.")
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
+        # print("SANG-TODO batch size,", len(seq_group_metadata_list))
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
