@@ -170,7 +170,18 @@ struct VisitorRowOrScalarBroadcast {
         }
       } else {
         // In this case we are loading from a scalar and broadcasting
-        fill_dst(*params_ptr->ptr_row);
+        VecType filled_vec;
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < VecLength; i++) {
+          reinterpret_cast<Element*>(&filled_vec)[i] = *(params_ptr->ptr_row);
+        }
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < size(src_v); ++i) {
+          if (get<1>(coord_v(i)) < n) {
+            dst_v(i) = filled_vec;
+          }
+        }
       }
     }
 
@@ -324,7 +335,14 @@ struct VisitorColOrScalarBroadcast {
         copy_if(pred, tC_gCol, tC_rCol);
       } else {
         // In this case we are loading from a scalar and broadcasting
-        fill_dst(*params_ptr->ptr_col);
+        auto dst_v = filter(tC_rCol);
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < size(dst_v); ++i) {
+          if (pred(i)) {
+            dst_v(i) = *(params_ptr->ptr_col);
+          }
+        }
       }
     }
 
