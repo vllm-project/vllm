@@ -18,11 +18,6 @@ CacheDevicePtr::CacheDevicePtr()
 CacheDevicePtr::~CacheDevicePtr() {
   if (dptr != 0) {
     auto status = cuMemUnmap(dptr, reservedPageNum * pageSize);
-
-    for (int i = 0; i < handles.size(); i++) {
-      auto status = cuMemRelease(handles[i]);
-    }
-
     status = cuMemAddressFree(dptr, reservedPageNum * pageSize);
   }
 }
@@ -58,22 +53,16 @@ CacheAllocator::CacheAllocator() {
   accessDescr.location.id = prop.location.id;
   accessDescr.location.type = prop.location.type;
   accessDescr.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-
-  // get the granularity of device memory allocation
-  // getGranurality();
-
-  // set the page size of memory allocation, default is equal to granurality
-  // pageSize = granurality;
 }
 
-int64_t CacheAllocator::getGranurality() {
-  cuMemGetAllocationGranularity(&granurality, &prop,
+int64_t CacheAllocator::getGranularity() {
+  cuMemGetAllocationGranularity(&granularity, &prop,
                                 CU_MEM_ALLOC_GRANULARITY_MINIMUM);
-  printf("Granularity: %ld Bytes\n", granurality);
-  return granurality;
+  printf("granularity: %ld Bytes\n", granularity);
+  return granularity;
 }
 
-void CacheAllocator::setPageSize(int64_t num) { pageSize = num * granurality; }
+void CacheAllocator::setPageSize(int64_t num) { pageSize = num * granularity; }
 
 // reserve function, reserve virtual address space
 int64_t CacheAllocator::reserveCachePtr(
@@ -101,7 +90,6 @@ int64_t CacheAllocator::allocCachePtr(
   if (pageNum == 0) {
     return CUDA_SUCCESS;
   }
-  // size = ((size - 1) / pageSize + 1) * pageSize;
   size_t size = pageNum * pageSize;
   auto start_dptr = ptr->dptr + offset;
 
@@ -113,7 +101,6 @@ int64_t CacheAllocator::allocCachePtr(
         CUDA_SUCCESS) {
       if ((status = cuMemSetAccess(start_dptr, size, &accessDescr, 1)) ==
           CUDA_SUCCESS) {
-        // ptr.handles.push_back(allocationHandle);  // handles is unused now
         ptr->allocatedPageNum += pageNum;
       } else {
         printf("cuMemMap success,but cuMemSetAccess failed!, err code: %d\n",
@@ -121,13 +108,9 @@ int64_t CacheAllocator::allocCachePtr(
         cuMemUnmap(start_dptr, size);
       }
     }
-    // if (status != CUDA_SUCCESS) {
-    //   printf("cuMemMap or cuMemsetAccess failed!, err code: %d\n", status);
-    //   cuMemRelease(allocationHandle);
-    // }
-    cuMemRelease(
-        allocationHandle);  // always release the handle, but the memory is
-                            // still can access util cuMemUnmap
+    // always release the handle, but the memory is still can access util
+    // cuMemUnmap
+    cuMemRelease(allocationHandle);
   } else {
     printf("cuMemCreate failed!, err code: %d\n", status);
   }
@@ -141,19 +124,9 @@ int64_t CacheAllocator::freeCachePtr(
   CUresult status = CUDA_SUCCESS;
   if (ptr->dptr != 0) {
     status = cuMemUnmap(ptr->dptr, ptr->reservedPageNum * pageSize);
-    // status = cuMemUnmap(ptr.dptr, ptr.allocatedPageNum * pageSize);
     if (status != CUDA_SUCCESS) {
       printf("cuMemUnmap failed! error-code: %d\n", status);
     } else {
-      for (int i = 0; i < ptr->handles.size(); i++) {
-        status = cuMemRelease(ptr->handles[i]);
-        if (status != CUDA_SUCCESS) {
-          printf("cuMemRelease failed! error-code: %d\n", status);
-          return status;
-        }
-      }
-      ptr->handles.clear();
-
       status = cuMemAddressFree(ptr->dptr, ptr->reservedPageNum * pageSize);
       if (status != CUDA_SUCCESS) {
         printf("cuMemAddressFree failed! error-code: %d\n", status);
@@ -168,6 +141,9 @@ int64_t CacheAllocator::freeCachePtr(
 int64_t CacheAllocator::releaseCachePtr(
     const c10::intrusive_ptr<CacheDevicePtr>& ptr, int64_t pageNum,
     int64_t offset) {
+  if (pageNum == 0 && offset == 0) {
+    pageNum = ptr->reservedPageNum;
+  }
   if (pageNum == 0) {
     return CUDA_SUCCESS;
   }
@@ -175,18 +151,8 @@ int64_t CacheAllocator::releaseCachePtr(
   CUresult status = CUDA_SUCCESS;
   if (ptr->dptr != 0) {
     status = cuMemUnmap(start_dptr, pageNum * pageSize);
-    // status = cuMemUnmap(ptr.dptr, ptr.allocatedPageNum * pageSize);
     if (status != CUDA_SUCCESS) {
       printf("cuMemUnmap failed! error-code: %d\n", status);
-    } else {
-      for (int i = 0; i < ptr->handles.size(); i++) {
-        status = cuMemRelease(ptr->handles[i]);
-        if (status != CUDA_SUCCESS) {
-          printf("cuMemRelease failed! error-code: %d\n", status);
-          return status;
-        }
-      }
-      ptr->handles.clear();
     }
   }
   return status;

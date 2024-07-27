@@ -435,7 +435,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
-        use_vmm: bool = False,  # new add for vmm
+        use_vmm: bool = False,
         block_bytes_size: int = 2 * _MB,
     ) -> None:
         self.block_size = block_size

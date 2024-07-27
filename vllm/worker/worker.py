@@ -306,7 +306,7 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
-        # new add for vmm, CacheEngineVMM
+        # new add for vmm cache operations
         if self.use_vmm and worker_input.free_buffer_ids is not None:
             self.cache_engine[virtual_engine].free_seqs(  # type: ignore
                 worker_input.free_buffer_ids)

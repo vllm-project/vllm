@@ -51,7 +51,7 @@ class EngineArgs:
     block_size: int = 16
 
     # new add for vmm
-    block_bytes_size: int = 2 * _MB  # 2MB
+    block_bytes_size: int = 2 * _MB
     use_vmm: bool = False
 
     enable_prefix_caching: bool = False
@@ -673,7 +673,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend)
 
-        # if use_vmm, block_size = 2MB / single_token_bytes_size
+        # if use_vmm, we need to calculate the block size
         if self.use_vmm:
             if self.kv_cache_dtype == "auto":
                 dtype = model_config.dtype
@@ -712,7 +712,6 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
-            # new add for vmm
             use_vmm=self.use_vmm,
             block_bytes_size=self.block_bytes_size,
         )

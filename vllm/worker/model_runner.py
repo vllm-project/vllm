@@ -228,14 +228,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
 
-        # TODO: we will soon support these features in VMM
+        # TODO: support these features in VMM
         self.use_vmm = cache_config.use_vmm
         if self.use_vmm:
             if self.lora_config:
-                #TODO:
                 raise NotImplementedError("VMM is not supported with LoRA ")
             if self.sliding_window:
-                #TODO:
                 raise NotImplementedError(
                     "VMM is not supported with sliding window")
             if self.attn_backend.get_name() != "flash-attn":
@@ -524,10 +522,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         block_table = []
                     block_tables.append(block_table)
 
-                # if use_vmm, no need to prepare block_tables & slot_mapping
-                # else:
-                #     pass
-
                 seq_lens.append(sliding_seq_len)
                 context_lens.append(sliding_context_len)
                 query_len = sliding_seq_len - sliding_context_len
@@ -536,7 +530,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
 
-                if self.use_vmm:  # new add for vmm
+                if self.use_vmm:
                     cache_batch_id = seq_data.cache_buffer_id
                     # NOTE: == -1 means it is profile run,
                     # all seq come from scheduler cache_buffer_id >= 0
@@ -618,9 +612,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         slot = block_number * self.block_size + block_offset
                         slot_mapping.append(slot)
 
-                # if use_vmm, no need to prepare block_tables & slot_mapping
-                # else:
-                #     pass
                 # Prepare input tensors for flashinfer
                 if self.attn_backend.get_name() == "flashinfer":
                     seq_len = seq_data.get_len()
@@ -1155,7 +1146,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_capture_context.stream
                     }
                     if self.has_seqlen_agnostic:
-                        # Only used by Mamba-based models CUDA graph atm (Jamba
+                        # Only used by Mamba-based models CUDA graph atm (Jamba)
                         capture_inputs.update({
                             "seqlen_agnostic_capture_inputs":
                             self.model.get_seqlen_agnostic_capture_inputs(

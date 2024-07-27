@@ -20,16 +20,16 @@ class CacheBufferAllocator:
         buffer_id = self.free_buffers.popleft()
         return buffer_id
 
-    def free(self, buffer_id: int):
+    def free(self, buffer_id: int) -> None:
         self.free_buffers.append(buffer_id)
 
-    def reset(self):
+    def reset(self) -> None:
         self.free_buffers = deque(range(self.num_cache_buffers))
 
-    def get_num_free_buffers(self):
+    def get_num_free_buffers(self) -> int:
         return len(self.free_buffers)
 
-    def get_num_total_buffers(self):
+    def get_num_total_buffers(self) -> int:
         return self.num_cache_buffers
 
 
@@ -58,7 +58,7 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
 
         self.num_free_gpu_blocks = num_gpu_blocks
         self.num_free_cpu_blocks = num_cpu_blocks
-        # num_cache_buffers == self.scheduler_config.max_num_seqs
+        # num_cache_buffers equal scheduler_config.max_num_seqs
         self.num_cache_buffers = num_cache_buffers
         # use to alloc cache buffer id for seq
         self.gpu_allocator = CacheBufferAllocator(num_cache_buffers)
@@ -91,9 +91,6 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
             self.waiting_free_buffers.append((buffer_id, 0))
             self.waiting_free_blocks += 1
         assert self.num_free_gpu_blocks > 0
-
-        # self.allocated_block_counts[0] = 1
-        # self.num_free_gpu_blocks -= 1
 
     def predict_gen_len(self, seq: Sequence) -> int:
         # TODO:this function is used to predict the generated content length,
@@ -175,13 +172,6 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         if allocated_num < need_blocks_num:
             self._allocate_extra_blocks(need_blocks_num - allocated_num)
             allocated_num = need_blocks_num
-        # If we reuse a buffer that's too long, we may need to free the memory
-        # that's more than we currently need (need_blocks_num)
-        # But now, frequent frees are an overhead, so we don't do it.
-        # TODO: Reduced overhead or asynchronous free
-        # else:
-        #     self.num_free_gpu_blocks += (allocated_num - need_blocks_num)
-        #     allocated_num = need_blocks_num
 
         return buffer_id, allocated_num
 
@@ -287,7 +277,6 @@ class BlockSpaceManagerVMM(BlockSpaceManager):
         self.gpu_allocator.reset()
 
     def get_block_table(self, seq: Sequence) -> List[int]:
-        # logger.warning("block table is not used in BlockSpaceManagerVMM now.")
         return []
 
     def get_num_free_gpu_blocks(self) -> int:

@@ -126,7 +126,6 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
-    # new add for vmm
     allocated_block_counts: Optional[Dict[int, int]] = None
     free_buffer_ids: Optional[List[int]] = None
 
@@ -145,7 +144,6 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
-            # new add for vmm
             allocated_block_counts=tensor_dict.pop("allocated_block_counts"),
             free_buffer_ids=tensor_dict.pop("free_buffer_ids"),
         )
@@ -161,7 +159,6 @@ class WorkerInput:
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
-            # new add for vmm
             "allocated_block_counts": self.allocated_block_counts,
             "free_buffer_ids": self.free_buffer_ids,
         }

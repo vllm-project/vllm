@@ -165,8 +165,6 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-
-        # new add for vmm
         use_vmm: bool = False,
     ) -> None:
         logger.info(
@@ -215,7 +213,6 @@ class LLMEngine:
         )
         # TODO(woosuk): Print more configs in debug mode.
 
-        # new add for vmm
         self.use_vmm = use_vmm
 
         self.model_config = model_config
@@ -422,8 +419,6 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
-
-            # new add for vmm
             use_vmm=engine_args.use_vmm,
         )
         return engine

@@ -5,9 +5,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // CacheDevicePtr class bind
   m.class_<CacheDevicePtr>("CacheDevicePtr")
       .def(torch::init<>())
-      // .def_readwrite("dptr", &CacheDevicePtr::dptr);
-      // dptr cann't bind success because of the type of dptr is
-      // CUdeviceptr(=unsigned long long), which is not supported in torch
       .def_readwrite("reservedPageNum", &CacheDevicePtr::reservedPageNum)
       .def_readwrite("allocatedPageNum", &CacheDevicePtr::allocatedPageNum);
 

@@ -242,7 +242,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "kv_cache_dtype) -> ()");
   cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
 
-// new add for vmm
+  // new add for vmm
   cache_ops.def(
       "reshape_and_cache_vmm(Tensor key, Tensor value,"
       "                        Tensor! key_cache,"
@@ -250,8 +250,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor cache_cow_mapping,"
       "                        Tensor cache_col_mapping,"
       "                        str kv_cache_dtype) -> ()");
-  cache_ops.impl("reshape_and_cache_vmm", torch::kCUDA,
-                 &reshape_and_cache_vmm);
+  cache_ops.impl("reshape_and_cache_vmm", torch::kCUDA, &reshape_and_cache_vmm);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

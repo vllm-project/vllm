@@ -41,30 +41,30 @@ class CacheAllocator:
     def __init__(self):
         self._allocator = torch.classes._vmm_C.CacheAllocator()
 
-    def set_page_size(self, page_size: int):
+    def set_page_size(self, page_size: int) -> int:
         return self._allocator.setPageSize(page_size)
 
-    def reserve_cache_ptr(self, ptr: CacheDevicePtr, page_num: int = 1):
+    def reserve_cache_ptr(self, ptr: CacheDevicePtr, page_num: int = 1) -> int:
         return self._allocator.reserveCachePtr(ptr._ptr, page_num)
 
     def alloc_cache_ptr(self,
                         ptr: CacheDevicePtr,
                         page_num: int = 1,
-                        offset: int = 0):
+                        offset: int = 0) -> int:
         return self._allocator.allocCachePtr(ptr._ptr, page_num, offset)
 
-    def free_cache_ptr(self, ptr: CacheDevicePtr):
+    def free_cache_ptr(self, ptr: CacheDevicePtr) -> int:
         return self._allocator.freeCachePtr(ptr._ptr)
 
     def release_cache_ptr(self,
                           ptr: CacheDevicePtr,
                           page_num: int = 0,
-                          offset: int = 0):
+                          offset: int = 0) -> int:
         return self._allocator.releaseCachePtr(ptr._ptr, page_num, offset)
 
 
 # other utils
 def wrap_cache_ptr_to_tensor(ptr: CacheDevicePtr, dtype_str: str,
-                             shape: Tuple[int, ...]):
+                             shape: Tuple[int, ...]) -> torch.Tensor:
     return torch.ops._vmm_C.wrap_cache_ptr_to_tensor(ptr._ptr, dtype_str,
                                                      shape)

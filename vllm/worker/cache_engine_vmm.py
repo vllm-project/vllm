@@ -128,15 +128,16 @@ class CacheEngineVMM:
     def _reserve_gpu_kv_cache(self) -> List[vmm.CacheDevicePtr]:
         key_ptr = vmm.CacheDevicePtr()
         value_ptr = vmm.CacheDevicePtr()
-        if ((self.device_cache_allocator.reserve_cache_ptr(
-                key_ptr, self.max_batch_size * self.cache_space_page_num) == 0)
-                and (self.device_cache_allocator.reserve_cache_ptr(
-                    value_ptr, self.max_batch_size * self.cache_space_page_num)
-                     == 0)):
-            # kv_cache_ptrs.append([key_ptr, value_ptr])
-            pass
-        else:
-            raise RuntimeError("Failed to reserve cache ptr.")
+
+        if (self.device_cache_allocator.reserve_cache_ptr(
+                key_ptr, self.max_batch_size * self.cache_space_page_num) !=
+                0):
+            raise RuntimeError("Failed to reserve key cache ptr.")
+
+        if (self.device_cache_allocator.reserve_cache_ptr(
+                value_ptr, self.max_batch_size * self.cache_space_page_num) !=
+                0):
+            raise RuntimeError("Failed to reserve value cache ptr.")
 
         return [key_ptr, value_ptr]
 
@@ -146,19 +147,18 @@ class CacheEngineVMM:
         alloc_dict = {}
         for i in range(self.max_batch_size):
             alloc_dict[i] = 1
-        # alloc_dict[0] = 1
-        self.alloc_seqs(alloc_dict, is_init=True)
+        self.alloc_seqs(alloc_dict)
 
-        _key_cache_ptr = self.gpu_cache_ptr[0]
-        _value_cache_ptr = self.gpu_cache_ptr[1]
+        key_cache_ptr = self.gpu_cache_ptr[0]
+        value_cache_ptr = self.gpu_cache_ptr[1]
 
         shape = (self.max_batch_size, self.max_seq_len, self.num_layers,
                  self.num_kv_heads, self.head_size)
         dtype = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
         key_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
-            _key_cache_ptr, dtype, shape)
+            key_cache_ptr, dtype, shape)
         value_cache_tensor: torch.Tensor = vmm.wrap_cache_ptr_to_tensor(
-            _value_cache_ptr, dtype, shape)
+            value_cache_ptr, dtype, shape)
 
         kv_cache_views = [[
             key_cache_tensor[:, :, i, :, :], value_cache_tensor[:, :, i, :, :]
@@ -203,9 +203,7 @@ class CacheEngineVMM:
         # single block bytes size * 2 (key and value)
         return (cache_config.block_bytes_size * 2)
 
-    def alloc_seqs(self,
-                   allocated_block_counts: Dict[int, int],
-                   is_init=False):
+    def alloc_seqs(self, allocated_block_counts: Dict[int, int]) -> None:
         """Allocate cache handles for the given number of blocks."""
         for buffer_id, num_blocks in allocated_block_counts.items():
             allocated_blocks = self.allocated_block_counts[buffer_id]
@@ -217,31 +215,23 @@ class CacheEngineVMM:
                 offset = (start_offset +
                           allocated_blocks * self.block_bytes_size)
                 self.alloc_one_seq(buffer_id, num_blocks, offset)
-                if not is_init:
-                    logger.info(
-                        "VMM Alloc: buffer_id: %d, num_blocks: %d, "
-                        "allocated_block_counts: %s", buffer_id, num_blocks,
-                        str(self.allocated_block_counts))
-
-            # But now, frequent frees are an overhead, so we don't do it.
-            # TODO: Reduced overhead or asynchronous free
-            # elif num_blocks < 0:    # release the extra blocks
-            #     offset = (start_offset + (allocated_blocks + num_blocks) *
-            #               self.block_bytes_size)
-            #     self.free_one_seq(buffer_id, -num_blocks, offset)
+                logger.info(
+                    "VMM Alloc: buffer_id: %d, num_blocks: %d, "
+                    "allocated_block_counts: %s", buffer_id, num_blocks,
+                    str(self.allocated_block_counts))
 
     def alloc_one_seq(self,
                       buffer_id: int,
                       num_blocks: int = 1,
-                      offset: int = 0):
+                      offset: int = 0) -> None:
         """Allocate cache handles for the given number of blocks."""
-        _key_cache_ptr = self.gpu_cache_ptr[0]
-        _value_cache_ptr = self.gpu_cache_ptr[1]
+        key_cache_ptr = self.gpu_cache_ptr[0]
+        value_cache_ptr = self.gpu_cache_ptr[1]
 
         status1 = self.device_cache_allocator.alloc_cache_ptr(
-            _key_cache_ptr, num_blocks, offset)
+            key_cache_ptr, num_blocks, offset)
         status2 = self.device_cache_allocator.alloc_cache_ptr(
-            _value_cache_ptr, num_blocks, offset)
+            value_cache_ptr, num_blocks, offset)
         if status1 != 0 or status2 != 0:
             logger.error(
                 "VMM Alloc: buffer_id: %d, num_blocks: %d, offset: %d",
@@ -251,7 +241,7 @@ class CacheEngineVMM:
 
         self.allocated_block_counts[buffer_id] += num_blocks
 
-    def free_seqs(self, free_buffer_ids: List[int]):
+    def free_seqs(self, free_buffer_ids: List[int]) -> None:
         """Free cache handles for the given buffer ids."""
         for buffer_id in free_buffer_ids:
             num_blocks = self.allocated_block_counts[buffer_id]
@@ -261,15 +251,15 @@ class CacheEngineVMM:
     def free_one_seq(self,
                      buffer_id: int,
                      num_blocks: int = 0,
-                     offset: int = 0):
+                     offset: int = 0) -> None:
         """Free cache handles for the given buffer id."""
-        _key_cache_ptr = self.gpu_cache_ptr[0]
-        _value_cache_ptr = self.gpu_cache_ptr[1]
+        key_cache_ptr = self.gpu_cache_ptr[0]
+        value_cache_ptr = self.gpu_cache_ptr[1]
 
         status1 = self.device_cache_allocator.release_cache_ptr(
-            _key_cache_ptr, num_blocks, offset)
+            key_cache_ptr, num_blocks, offset)
         status2 = self.device_cache_allocator.release_cache_ptr(
-            _value_cache_ptr, num_blocks, offset)
+            value_cache_ptr, num_blocks, offset)
         if status1 != 0 or status2 != 0:
             logger.error("VMM Free: buffer_id: %d, num_blocks: %d, offset: %d",
                          buffer_id, num_blocks, offset)

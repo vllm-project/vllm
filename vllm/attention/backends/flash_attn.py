@@ -120,10 +120,10 @@ class FlashAttentionMetadata(AttentionMetadata):
     use_cuda_graph: bool
 
     # new add for vmm
-    use_vmm: bool = False  # whether use vmm
-    # cache_batch_idx: # (batch_size, ) the index of batch in cache
-    # cache_cow_mapping: # (num_tokens,)  key/value cache cow in cache space
-    # cache_col_mapping: # (num_tokens,)  key/value cache col in cache space
+    use_vmm: bool = False
+    # cache_batch_idx (batch_size, ) the index of batch in cache
+    # cache_cow_mapping (num_tokens,)  key/value cache cow in cache space
+    # cache_col_mapping (num_tokens,)  key/value cache col in cache space
     cache_batch_idx: Optional[torch.Tensor] = None
     cache_cow_mapping: Optional[torch.Tensor] = None
     cache_col_mapping: Optional[torch.Tensor] = None
@@ -161,7 +161,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=None,
             use_cuda_graph=False,
-            use_vmm=self.use_vmm,  # new add for vmm
+            use_vmm=self.use_vmm,
             cache_batch_idx=None,
             cache_cow_mapping=None,
             cache_col_mapping=None,
@@ -172,18 +172,12 @@ class FlashAttentionMetadata(AttentionMetadata):
         # _decode_metadata
         if not self.use_vmm:
             assert self.block_tables is not None
-            # self._cached_prefill_metadata.slot_mapping = \
-            #     self.slot_mapping[:self.num_prefill_tokens]
             self._cached_prefill_metadata.block_tables = \
                 self.block_tables[:self.num_prefills]
 
         else:  # use_vmm
             self._cached_prefill_metadata.cache_batch_idx = \
                 self.cache_batch_idx[:self.num_prefills]  # type: ignore
-            # self._cached_prefill_metadata.cache_cow_mapping = \
-            #     self.cache_cow_mapping[:self.num_prefills]
-            # self._cached_prefill_metadata.cache_col_mapping = \
-            #     self.cache_col_mapping[:self.num_prefill_tokens]
 
         return self._cached_prefill_metadata
 
@@ -220,8 +214,6 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         if not self.use_vmm:
             assert self.block_tables is not None
-            # self._cached_decode_metadata.slot_mapping = \
-            #     self.slot_mapping[self.num_prefill_tokens:]
             self._cached_decode_metadata.block_tables = \
                 self.block_tables[self.num_prefills:]
 
@@ -229,10 +221,6 @@ class FlashAttentionMetadata(AttentionMetadata):
             self._cached_decode_metadata.use_cuda_graph = False
             self._cached_decode_metadata.cache_batch_idx = \
                 self.cache_batch_idx[self.num_prefills:]  # type: ignore
-            # self._cached_decode_metadata.cache_cow_mapping = \
-            #     self.cache_cow_mapping[self.num_prefills:]
-            # self._cached_decode_metadata.cache_col_mapping = \
-            #     self.cache_col_mapping[self.num_prefill_tokens:]
         return self._cached_decode_metadata
 
 
@@ -330,7 +318,6 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        # new add for vmm
         use_vmm = attn_metadata.use_vmm
 
         if kv_cache is not None:
@@ -349,12 +336,7 @@ class FlashAttentionImpl(AttentionImpl):
                     attn_metadata.slot_mapping.flatten(),
                     self.kv_cache_dtype,
                 )
-            else:
-                # advanced index cache write, little worse than cuda kernel
-                # key_cache[attn_metadata.cache_cow_mapping,
-                #           attn_metadata.cache_col_mapping] = key
-                # value_cache[attn_metadata.cache_cow_mapping,
-                #             attn_metadata.cache_col_mapping] = value
+            else:  # use vmm
                 ops.reshape_and_cache_vmm(
                     key,
                     value,

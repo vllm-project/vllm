@@ -40,7 +40,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
 }
 
-# new add for vmm (use in wrap ptr to tensor)
+# new add for vmm, use in wrap vmm cache ptr to tensor
 TORCH_DTYPE_TO_STR_DTYPE = {
     torch.double: "double",
     torch.float: "float",

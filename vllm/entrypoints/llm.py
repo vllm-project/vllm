@@ -557,8 +557,6 @@ class LLM:
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
-        spd = 0.0
-
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
@@ -577,10 +575,6 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
-
-        logger.info(
-            "Generate Over. total_out_toks: %d, "
-            "Average Generation Speed: %.5f toks/s", total_out_toks, spd)
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.
