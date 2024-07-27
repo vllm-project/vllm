@@ -157,7 +157,6 @@ def test_llm_generator(request, common_llm_kwargs, per_test_common_llm_kwargs,
 def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
                          per_test_common_llm_kwargs, distinct_llm_kwargs,
                          seed):
-    print("CREATE LLM GENERATOR")
     kwargs = {
         **common_llm_kwargs,
         **per_test_common_llm_kwargs,
