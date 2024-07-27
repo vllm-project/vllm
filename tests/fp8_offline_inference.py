@@ -5,7 +5,7 @@ def test_fp8_offline_inference():
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    # Create an LLM.
+    # Create an LLM
     llm = LLM(
             model="/data/models/llama-2-7b-chat-hf", 
             kv_cache_dtype="fp8", 
