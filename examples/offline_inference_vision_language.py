@@ -15,6 +15,7 @@ from vllm.utils import FlexibleArgumentParser
 image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 question = "What is the content of this image?"
 
+
 # LLaVA-1.5
 def run_llava(question):
 
@@ -24,13 +25,15 @@ def run_llava(question):
 
     return llm, prompt
 
+
 # LLaVA-1.6/LLaVA-NeXT
 def run_llava_next(question):
-    
+
     prompt = f"[INST] <image>\n{question} [/INST]"
     llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf")
-    
+
     return llm, prompt
+
 
 # Fuyu
 def run_fuyu(question):
@@ -39,6 +42,7 @@ def run_fuyu(question):
     llm = LLM(model="adept/fuyu-8b")
 
     return llm, prompt
+
 
 # Phi-3-Vision
 def run_phi3v(question):
@@ -57,22 +61,23 @@ def run_phi3v(question):
     )
     return llm, prompt
 
+
 # PaliGemma
 def run_paligemma(question):
 
     prompt = question
     llm = LLM(model="google/paligemma-3b-mix-224")
-    
+
     return llm, prompt
+
 
 # Chameleon
 def run_chameleon(question):
-    
+
     prompt = f"{question}<image>"
-    llm = LLM(
-        model="facebook/chameleon-7b",
-    )
+    llm = LLM(model="facebook/chameleon-7b", )
     return llm, prompt
+
 
 # MiniCPM-V
 def run_minicpmv(question):
@@ -84,21 +89,22 @@ def run_minicpmv(question):
 
     # 2.5
     model_name = "openbmb/MiniCPM-Llama3-V-2_5"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    llm = LLM(model=model_name,
-            trust_remote_code=True,
-            )
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+    )
 
     messages = [{
-        'role':
-        'user',
-        'content':
-        f'(<image>./</image>)\n{question}'
+        'role': 'user',
+        'content': f'(<image>./</image>)\n{question}'
     }]
     prompt = tokenizer.apply_chat_template(messages,
-                                        tokenize=False,
-                                        add_generation_prompt=True)
+                                           tokenize=False,
+                                           add_generation_prompt=True)
     return llm, prompt
+
 
 model_example_map = {
     "llava": run_llava,
@@ -110,6 +116,7 @@ model_example_map = {
     "minicpmv": run_minicpmv,
 }
 
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
@@ -118,16 +125,17 @@ def main(args):
     llm, prompt = model_example_map[model](question)
 
     sampling_params = SamplingParams(temperature=0.2, max_tokens=64)
-    
+
     assert args.num_prompts > 0
     if args.num_prompts == 1:
         # Single inference
         inputs = {
-                "prompt": prompt,
-                "multi_modal_data": {
-                    "image": image
-                },}
-    
+            "prompt": prompt,
+            "multi_modal_data": {
+                "image": image
+            },
+        }
+
     else:
         # Batch inference
         inputs = [{
@@ -137,18 +145,16 @@ def main(args):
             },
         } for _ in range(args.num_prompts)]
 
-    outputs = llm.generate(inputs,
-        sampling_params=sampling_params)
+    outputs = llm.generate(inputs, sampling_params=sampling_params)
 
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
-    
+
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description=
-        'Demo on using vLLM for offline inference with '
+        description='Demo on using vLLM for offline inference with '
         'vision language models')
     args = parser.parse_args()
     parser.add_argument('--model-type',
@@ -164,4 +170,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-
