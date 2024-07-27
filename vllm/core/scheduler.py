@@ -408,7 +408,7 @@ class Scheduler:
 
         Args:
             running_queue: The queue that contains running requests (i.e.,
-                decodes). The given arguments are NOT in-place modified.
+                decodes). The given arguments are in-place modified.
             budget: The scheduling budget. The argument is in-place updated
                 when any decodes are preempted.
             curr_loras: Currently batched lora request ids. The argument is
@@ -434,10 +434,7 @@ class Scheduler:
 
         # NOTE(woosuk): Preemption happens only when there is no available slot
         # to keep all the sequence groups in the RUNNING state.
-        # In this case, the policy is responsible for deciding which sequence
-        # groups to preempt.
-        now = time.time()
-        running_queue = policy.sort_by_priority(now, running_queue)
+
         while running_queue:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
@@ -527,7 +524,7 @@ class Scheduler:
 
         Args:
             swapped_queue: The queue that contains swapped out requests.
-                The given arguments are NOT in-place modified.
+                The given arguments are in-place modified.
             budget: The scheduling budget. The argument is in-place updated
                 when any requests are swapped in.
             curr_loras: Currently batched lora request ids. The argument is
@@ -547,8 +544,6 @@ class Scheduler:
         blocks_to_copy: List[Tuple[int, int]] = []
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
-        now = time.time()
-        swapped_queue = policy.sort_by_priority(now, swapped_queue)
         infeasible_seq_groups: List[SequenceGroup] = []
 
         leftover_swapped: Deque[SequenceGroup] = deque()
@@ -659,7 +654,7 @@ class Scheduler:
 
         Args:
             waiting_queue: The queue that contains prefill requests.
-                The given arguments are NOT in-place modified.
+                The given arguments are in-place modified.
             budget: The scheduling budget. The argument is in-place updated
                 when any requests are scheduled.
             curr_loras: Currently batched lora request ids. The argument is
@@ -675,9 +670,6 @@ class Scheduler:
         """
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[SequenceGroup] = []
-        # We don't sort waiting queue because we assume it is sorted.
-        # Copy the queue so that the input queue is not modified.
-        waiting_queue = deque([s for s in waiting_queue])
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
