@@ -75,7 +75,7 @@ def run_paligemma(question):
 def run_chameleon(question):
 
     prompt = f"{question}<image>"
-    llm = LLM(model="facebook/chameleon-7b", )
+    llm = LLM(model="facebook/chameleon-7b")
     return llm, prompt
 
 
