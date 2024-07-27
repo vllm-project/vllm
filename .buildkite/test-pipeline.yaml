@@ -220,7 +220,6 @@ steps:
 
 - label: Tensorizer Test
   #mirror_hardwares: [amd]
-  soft_fail: true
   fast_check: true
   commands:
     - apt-get install -y curl libsodium23
