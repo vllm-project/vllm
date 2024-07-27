@@ -94,7 +94,7 @@ def setup(app):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
-    # "aiohttp",
+    "aiohttp",
     "cpuinfo",
     "torch",
     "transformers",
