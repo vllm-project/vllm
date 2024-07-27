@@ -17,7 +17,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
-
 NORM2FN = {
     'rms_norm': RMSNorm,
     'layer_norm': nn.LayerNorm,
@@ -190,21 +189,24 @@ class InternVisionEncoder(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
         self.config = config
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
         self.layers = nn.ModuleList([
-            InternVisionEncoderLayer(config, quant_config=quant_config)
-            for _ in range(config.num_hidden_layers)
+            InternVisionEncoderLayer(config=config, quant_config=quant_config)
+            for _ in range(num_hidden_layers)
         ])
 
-    def forward(self,
-                inputs_embeds: torch.Tensor,
-                vision_feature_layer: int = -1):
-        hidden_states = inputs_embeds
+    def forward(self, inputs_embeds: torch.Tensor):
 
-        num_layer = len(self.layers) + vision_feature_layer + 1
-        for encoder_layer in self.layers[:num_layer]:
+        hidden_states = inputs_embeds
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
 
         return hidden_states
@@ -214,12 +216,16 @@ class InternVisionModel(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 num_hidden_layers_override: Optional[int] = None):
         super().__init__()
         self.config = config
 
         self.embeddings = InternVisionEmbeddings(config)
-        self.encoder = InternVisionEncoder(config, quant_config=quant_config)
+        self.encoder = InternVisionEncoder(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override)
 
     def resize_pos_embeddings(self, old_size, new_size, patch_size):
         pos_emb = self.embeddings.position_embedding
@@ -243,9 +249,8 @@ class InternVisionModel(nn.Module):
 
     def forward(
         self,
-        vision_feature_layer: int = -1,
-        pixel_values: Optional[torch.FloatTensor] = None,
-        pixel_embeds: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_embeds: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
         if pixel_values is None and pixel_embeds is None:
             raise ValueError(
@@ -260,8 +265,6 @@ class InternVisionModel(nn.Module):
                 raise ValueError(
                     f'wrong pixel_values size: {pixel_values.shape}')
 
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            vision_feature_layer=vision_feature_layer)
+        encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
         return encoder_outputs

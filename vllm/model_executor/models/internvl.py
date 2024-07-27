@@ -271,7 +271,15 @@ class InternVLChatModel(nn.Module, SupportsVision):
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
 
-        self.vision_model = InternVisionModel(config.vision_config)
+        vision_feature_layer = self.select_layer
+        if vision_feature_layer < 0:
+            num_hidden_layers = config.vision_config.num_hidden_layers \
+                + vision_feature_layer + 1
+        else:
+            num_hidden_layers = vision_feature_layer + 1
+        self.vision_model = InternVisionModel(
+            config.vision_config, num_hidden_layers_override=num_hidden_layers)
+
         llm_class = ModelRegistry.load_model_cls(
             config.text_config.architectures[0])
         self.language_model = llm_class(config.text_config, cache_config,
@@ -303,8 +311,7 @@ class InternVLChatModel(nn.Module, SupportsVision):
         return x
 
     def extract_feature(self, pixel_values):
-        vit_embeds = self.vision_model(vision_feature_layer=self.select_layer,
-                                       pixel_values=pixel_values)
+        vit_embeds = self.vision_model(pixel_values=pixel_values)
         vit_embeds = vit_embeds[:, 1:, :]
 
         h = w = int(vit_embeds.shape[1]**0.5)
