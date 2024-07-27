@@ -508,6 +508,12 @@ def create_kv_caches_with_random(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)

@@ -11,7 +11,7 @@ DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256]
+HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
 BLOCK_SIZES = [8, 16, 32]
 
 # Arbitrary values for testing
@@ -52,6 +52,8 @@ def test_copy_blocks(
     kv_cache_dtype: str,
     device: str,
 ) -> None:
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -124,6 +126,8 @@ def test_reshape_and_cache(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -324,6 +328,8 @@ def test_swap_blocks(
     kv_cache_dtype: str,
 ) -> None:
     if kv_cache_dtype == "fp8" and "cpu" in direction:
+        pytest.skip()
+    if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
