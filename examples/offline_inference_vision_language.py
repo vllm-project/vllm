@@ -106,6 +106,18 @@ def run_minicpmv(question):
     return llm, prompt
 
 
+# InternVL
+def run_internvl(question):
+
+    prompt = f"<image>\n{question}\n"
+    llm = LLM(
+        model="OpenGVLab/InternVL2-4B",
+        trust_remote_code=True,
+    )
+
+    return llm, prompt
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -114,6 +126,7 @@ model_example_map = {
     "paligemma": run_paligemma,
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
+    "internvl": run_internvl,
 }
 
 
