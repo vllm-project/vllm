@@ -73,7 +73,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptI
         generated_text = o.outputs[0].text
         print(generated_text)
 
-A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
+A code example can be found in `examples/offline_inference_vision_language.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language.py>`_.
 
 
 Online OpenAI Vision API Compatible Inference
