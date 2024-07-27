@@ -237,14 +237,19 @@ class OPTDecoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings(input_ids)
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
             inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -272,14 +277,22 @@ class OPTModel(nn.Module):
         super().__init__()
         self.decoder = OPTDecoder(config, cache_config, quant_config)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.decoder.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.decoder(input_ids, positions, kv_caches, attn_metadata)
+        return self.decoder(input_ids,
+                            positions,
+                            kv_caches,
+                            attn_metadata,
+                            inputs_embeds=inputs_embeds)
 
 
 class OPTForCausalLM(nn.Module):

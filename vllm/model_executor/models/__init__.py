@@ -16,6 +16,8 @@ _GENERATION_MODELS = {
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
+    "Blip2ForConditionalGeneration":
+    ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration":
     ("chameleon", "ChameleonForConditionalGeneration"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -56,8 +58,8 @@ _GENERATION_MODELS = {
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
-    "PaliGemmaForConditionalGeneration":
-    ("paligemma", "PaliGemmaForConditionalGeneration"),
+    "PaliGemmaForConditionalGeneration": ("paligemma",
+                                          "PaliGemmaForConditionalGeneration"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
