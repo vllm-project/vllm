@@ -50,8 +50,27 @@ STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
 STR_NOT_IMPL_ENC_DEC_CUDAGRAPH = \
     "Currently CUDAGraph is not supported for encoder/decoder models"
 
-STR_NOT_IMPL_ENC_DEC_BACKEND = \
-    "This backend is currently unsupported for encoder/decoder models:"
+STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
+    "Models with logits_soft_cap "
+    "require FlashInfer backend, which is "
+    "currently not supported for encoder/decoder "
+    "models.")
+
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+                             "supported with encoder/decoder "
+                             "models.")
+
+STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
+                           "currently supported with "
+                           "encoder/decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
+                           "supported with encoder/decoder "
+                           "models.")
+
+STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
+                                 "currently supported with encoder/"
+                                 "decoder models.")
 
 # Constants related to forcing the attention backend selection
 
@@ -68,9 +87,6 @@ STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
-
-# List of support backends for encoder/decoder models
-LIST_ENC_DEC_SUPPORTED_BACKENDS = [STR_XFORMERS_ATTN_VAL]
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,

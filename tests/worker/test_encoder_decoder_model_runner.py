@@ -3,17 +3,11 @@ from typing import List
 import pytest
 import torch
 
-from tests.kernels.utils import override_backend_env_variable
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import STR_XFORMERS_ATTN_VAL, is_cpu
+from vllm.utils import is_cpu
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
-
-# Backends under test
-#
-# Currently only XFormers is supported
-BACKEND_NAMES = [STR_XFORMERS_ATTN_VAL]
 
 # CUDA graph scenarios to test
 #
@@ -43,14 +37,10 @@ def _create_model_runner(model: str, *args,
                     reason="CPU backend is currently "
                     "unsupported for encoder/ "
                     "decoder models")
-@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
-def test_empty_seq_group(backend_name, enforce_eager, monkeypatch):
+def test_empty_seq_group(enforce_eager, ):
     """Verify prepare prompt and decode returns empty output
        for empty seq group list"""
-
-    # Force Attention wrapper backend
-    override_backend_env_variable(monkeypatch, backend_name)
 
     model_runner = _create_model_runner(
         "facebook/bart-base",
@@ -113,9 +103,11 @@ def test_empty_seq_group(backend_name, enforce_eager, monkeypatch):
                     "unsupported for encoder/ "
                     "decoder models")
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
-@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
-def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
+def test_prepare_prompt(
+    batch_size,
+    enforce_eager,
+):
     '''
     Test the ability of the encoder/decoder model runner subclass to
     produce prefill-phase model inputs & attention metadata.
@@ -135,9 +127,6 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
     * monkeypatch: PyTest monkeypatch instance which supports forcing
                    the attention backend via environment variable
     '''
-
-    # Force Attention wrapper backend
-    override_backend_env_variable(monkeypatch, backend_name)
 
     model_runner = _create_model_runner(
         "facebook/bart-base",
@@ -332,9 +321,11 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
                     "unsupported for encoder/ "
                     "decoder models")
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
-@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
-def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
+def test_prepare_decode(
+    batch_size,
+    enforce_eager,
+):
     '''
     Test the ability of the encoder/decoder model runner subclass to
     produce prefill-phase model inputs & attention metadata.
@@ -354,9 +345,6 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     * monkeypatch: PyTest monkeypatch instance which supports forcing
                    the attention backend via environment variable
     '''
-
-    # Force Attention wrapper backend
-    override_backend_env_variable(monkeypatch, backend_name)
 
     model_runner = _create_model_runner(
         "facebook/bart-base",
