@@ -25,6 +25,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
 
+import torch
+from torch.profiler import profile, record_function, ProfilerActivity
+
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
 
@@ -390,6 +393,18 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
+        # Add optional profiler for profiling
+        self._profiler = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
+            # only record 1/20 of the total run
+            schedule=torch.profiler.schedule(
+                wait=93,
+                warmup=2,
+                active=5,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
+            record_shapes=True)
+
     @classmethod
     def _get_executor_cls(
             cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
@@ -601,7 +616,11 @@ class AsyncLLMEngine:
             pipeline_parallel_size = \
                 self.engine.parallel_config.pipeline_parallel_size
         has_requests_in_progress = [False] * pipeline_parallel_size
+
+        self._profiler.start()
+
         while True:
+            self._profiler.step()
             if not any(has_requests_in_progress):
                 logger.debug("Waiting for new requests...")
                 # Stop the execute model loop in parallel workers until there
@@ -612,8 +631,8 @@ class AsyncLLMEngine:
                 # such as add/remove lora adapters.
                 if self.engine_use_ray:
                     await (self.engine.stop_remote_worker_execution_loop.
-                           remote()  # type: ignore
-                           )
+                        remote()  # type: ignore
+                        )
                 else:
                     await self.engine.stop_remote_worker_execution_loop_async()
                 await self._request_tracker.wait_for_new_requests()
@@ -639,9 +658,9 @@ class AsyncLLMEngine:
                     if self.engine_use_ray:
                         has_unfinished_requests = (
                             await (self.engine.
-                                   has_unfinished_requests_for_virtual_engine.
-                                   remote(  # type: ignore
-                                       virtual_engine)))
+                                has_unfinished_requests_for_virtual_engine.
+                                remote(  # type: ignore
+                                    virtual_engine)))
                     else:
                         has_unfinished_requests = (
                             self.engine.
