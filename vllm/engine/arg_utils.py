@@ -754,10 +754,14 @@ class EngineArgs:
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
                 use_spec_decode = self.speculative_model is not None
+                has_seqlen_agnostic_layers = (
+                    model_config.contains_seqlen_agnostic_layers(
+                        parallel_config))
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and not self.enable_prefix_caching):
+                        and not self.enable_prefix_caching
+                        and not has_seqlen_agnostic_layers):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
