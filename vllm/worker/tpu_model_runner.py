@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
+import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
@@ -127,7 +128,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xm.get_ordinal()
+        xm_tp_rank = xr.global_ordinal()
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
@@ -146,7 +147,17 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         xm.wait_device_ops()
 
         model = ModelWrapper(model)
-        self.model = torch.compile(model, backend="openxla", fullgraph=True)
+        # NOTE(woosuk): There are two stages of compilation: torch.compile and
+        # XLA compilation. Setting dynamic=True can reduce the torch.compile
+        # overhead by reusing the FX graph for different shapes.
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
+        # in the first run, but can be skipped afterwards as we cache the XLA
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        self.model = torch.compile(model,
+                                   backend="openxla",
+                                   fullgraph=True,
+                                   dynamic=True)
 
     def _dummy_run(
         self,

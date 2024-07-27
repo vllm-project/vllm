@@ -56,7 +56,7 @@ First, install the dependencies:
     $ pip uninstall torch torch-xla -y
 
     $ # Install PyTorch and PyTorch XLA.
-    $ export DATE="+20240713"
+    $ export DATE="+20240726"
     $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-nightly${DATE}-cp310-cp310-linux_x86_64.whl
     $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly${DATE}-cp310-cp310-linux_x86_64.whl
 
@@ -73,6 +73,13 @@ Next, build vLLM from source. This will only take a few seconds:
 .. code-block:: console
 
     $ VLLM_TARGET_DEVICE="tpu" python setup.py develop
+
+
+.. note::
+
+    Since TPU relies on XLA which requires static shapes, vLLM bucketizes the possible input shapes and compiles an XLA graph for each different shape.
+    The compilation time may take 20~30 minutes in the first run.
+    However, the compilation time reduces to ~5 minutes afterwards because the XLA graphs are cached in the disk (in :code:`VLLM_XLA_CACHE_PATH` or :code:`~/.cache/vllm/xla_cache` by default).
 
 
 .. tip::
