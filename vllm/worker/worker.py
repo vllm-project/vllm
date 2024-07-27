@@ -23,6 +23,7 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.multi_step_model_runner import MultiStepModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 
@@ -107,6 +108,26 @@ class Worker(LocalOrDistributedWorkerBase):
             observability_config=observability_config,
             **speculative_args,
         )
+
+        # for multi-step model, wrap the model runner with MultiStepModelRunner
+        if self.scheduler_config.is_multi_step:
+            base_model_runner = self.model_runner
+            self.model_runner = MultiStepModelRunner(
+                base_model_runner,
+                model_config,
+                parallel_config,
+                scheduler_config,
+                device_config,
+                cache_config,
+                load_config=load_config,
+                lora_config=self.lora_config,
+                kv_cache_dtype=self.cache_config.cache_dtype,
+                is_driver_worker=is_driver_worker,
+                prompt_adapter_config=prompt_adapter_config,
+                multimodal_config=multimodal_config,
+                **speculative_args,
+            )
+
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
