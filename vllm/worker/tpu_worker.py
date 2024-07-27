@@ -70,13 +70,13 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
-        self.device = xm.xla_device()
-        self.device_config.device = self.device
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
-        # NOTE(woosuk): This is just a hack to initialize the TP group.
-        # This cannot perform the actual communication ops.
+        # NOTE(woosuk): This is just to initialize the TP group and broadcast
+        # the input objects on CPU. The all-reduce and all-gather ops on TPU
+        # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
+        # own context.
         init_distributed_environment(
             world_size=self.parallel_config.world_size,
             rank=self.rank,
@@ -87,6 +87,11 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+
+        # Device initialization should happen after initializing the distributed
+        # runtime.
+        self.device = xm.xla_device()
+        self.device_config.device = self.device
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
@@ -200,8 +205,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     @property
     def do_metadata_broadcast(self) -> bool:
-        # TODO(woosuk): Support TP.
-        return False
+        return self.parallel_config.tensor_parallel_size > 1
 
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
