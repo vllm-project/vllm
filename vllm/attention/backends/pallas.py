@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
-import torch_xla.experimental.dynamo_set_buffer_donor
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
