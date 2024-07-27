@@ -20,5 +20,4 @@ def test_fp8_offline_inference():
 
     assert out == ( " England and the United Kingdom."
            " It is located in the southeastern part of")
-    #print(out)
 
