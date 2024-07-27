@@ -515,11 +515,10 @@ class Scheduler:
 
     def _schedule_swapped(
         self,
-        swapped_queue: deque,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
         enable_chunking: bool = False,
-    ) -> Tuple[deque, SchedulerSwappedInOutputs]:
+    ) -> SchedulerSwappedInOutputs:
         """Schedule sequence groups that are swapped out.
 
         It schedules swapped requests as long as it fits `budget` and
@@ -527,8 +526,6 @@ class Scheduler:
         `budget` and `curr_loras` are updated based on scheduled seq_groups.
 
         Args:
-            swapped_queue: The queue that contains swapped out requests.
-                The given arguments are in-place modified.
             budget: The scheduling budget. The argument is in-place updated
                 when any requests are swapped in.
             curr_loras: Currently batched lora request ids. The argument is
@@ -539,7 +536,6 @@ class Scheduler:
                 all tokens.
 
         Returns:
-            A tuple of remaining swapped_queue after scheduling and
             SchedulerSwappedInOutputs.
         """
         # Blocks that need to be swapped or copied before model execution.
@@ -548,6 +544,8 @@ class Scheduler:
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
         infeasible_seq_groups: List[SequenceGroup] = []
+
+        swapped_queue = self.swapped
 
         leftover_swapped: Deque[SequenceGroup] = deque()
         while swapped_queue:
@@ -613,7 +611,7 @@ class Scheduler:
 
         swapped_queue.extendleft(leftover_swapped)
 
-        return swapped_queue, SchedulerSwappedInOutputs(
+        return SchedulerSwappedInOutputs(
             decode_seq_groups=decode_seq_groups,
             prefill_seq_groups=prefill_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
@@ -778,8 +776,7 @@ class Scheduler:
 
         prefills = SchedulerPrefillOutputs.create_empty()
         running_scheduled = SchedulerRunningOutputs.create_empty()
-        remaining_swapped, swapped_in = (
-            self.swapped, SchedulerSwappedInOutputs.create_empty())
+        swapped_in = SchedulerSwappedInOutputs.create_empty()
 
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
@@ -799,8 +796,7 @@ class Scheduler:
             # group. because it means there's no slot for new running requests.
             if len(running_scheduled.preempted) + len(
                     running_scheduled.swapped_out) == 0:
-                remaining_swapped, swapped_in = self._schedule_swapped(
-                    self.swapped, budget, curr_loras)
+                swapped_in = self._schedule_swapped(budget, curr_loras)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -815,7 +811,6 @@ class Scheduler:
         self.running.extend(
             [s.seq_group for s in swapped_in.decode_seq_groups])
         # Update swapped requests.
-        self.swapped = remaining_swapped
         self.swapped.extend(running_scheduled.swapped_out)
         preempted = (len(running_scheduled.preempted) +
                      len(running_scheduled.swapped_out))
@@ -862,8 +857,7 @@ class Scheduler:
         curr_loras: Set[int] = set()
 
         prefills = SchedulerPrefillOutputs.create_empty()
-        remaining_swapped, swapped_in = (
-            self.swapped, SchedulerSwappedInOutputs.create_empty())
+        swapped_in = SchedulerSwappedInOutputs.create_empty()
 
         # Decoding should be always scheduled first by fcfs.
         running_scheduled = self._schedule_running(budget,
@@ -874,8 +868,7 @@ class Scheduler:
         # If preemption happens, it means we don't have space for swap-in.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
-            remaining_swapped, swapped_in = self._schedule_swapped(
-                self.swapped, budget, curr_loras)
+            swapped_in = self._schedule_swapped(budget, curr_loras)
 
         # Schedule new prefills.
         prefills = self._schedule_prefills(budget,
@@ -899,7 +892,6 @@ class Scheduler:
         self.running.extend(
             [s.seq_group for s in swapped_in.prefill_seq_groups])
         # Update swapped requests.
-        self.swapped = remaining_swapped
         self.swapped.extend(running_scheduled.swapped_out)
         return SchedulerOutputs(
             scheduled_seq_groups=(prefills.seq_groups +
