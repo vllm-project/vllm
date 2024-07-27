@@ -331,7 +331,7 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
     baseline_q = (scale_a * scale_b * cq + bias).to(dtype=out_dtype)
 
     # Hadamard is just the sum of the cols
-    azp_adj_i32 = bq_i32.sum(dim=0, keepdim=True).to(dtype=torch.int32)
+    azp_adj_i32 = bq_i32.sum(dim=0, keepdim=True, dtype=torch.int32)
     azp_i32 = azp_aq_i8.to(dtype=torch.int32)
     func_bias = bias if use_bias else None
 
