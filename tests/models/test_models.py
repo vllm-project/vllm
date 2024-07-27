@@ -6,6 +6,7 @@ test_big_models.py because it could use a larger instance to run tests.
 Run `pytest tests/models/test_models.py`.
 """
 import pytest
+
 from .utils import check_outputs_equal
 
 MODELS = [

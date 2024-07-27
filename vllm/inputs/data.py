@@ -1,9 +1,8 @@
 from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
                     TypedDict, Union, cast, overload)
 
-from typing_extensions import NotRequired
-
 import torch
+from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict

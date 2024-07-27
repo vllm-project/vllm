@@ -583,11 +583,12 @@ class LLMEngine:
             inputs = {"prompt": inputs}
 
         prompt_embeds = inputs.get("prompt_embeds")
+        model_runner = self.model_executor.driver_worker.model_runner
         if prompt_embeds is not None:
-            if not self.model_executor.driver_worker.model_runner.model_supports_input_embeds:
+            if not model_runner.model_supports_input_embeds:
                 raise ValueError(
-                    f"Model {self.model_config.model} does not support input embeddings, but prompt_embeds "
-                    "was provided.")
+                    f"Model {self.model_config.model} does not support input "
+                    "embeddings, but prompt_embeds was provided.")
             prompt_token_ids = []
 
         elif "prompt_token_ids" not in inputs:

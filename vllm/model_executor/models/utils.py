@@ -1,4 +1,4 @@
-from typing import Dict, List, Protocol, Tuple, Optional
+from typing import Dict, List, Optional, Protocol, Tuple
 
 import torch
 from torch.func import functional_call

@@ -1,12 +1,12 @@
 import dataclasses
 import gc
+import inspect
 import time
 import warnings
 import weakref
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
                     Tuple, Type, TypeVar, Union)
-import inspect
 
 import numpy as np
 import torch
@@ -407,6 +407,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
             if inter_data.input_embeds is not None:
                 inter_data.input_embeds = inter_data.input_embeds[context_len:]
+            if inter_data.input_embeds_mask is not None:
                 inter_data.input_embeds_mask = inter_data.input_embeds_mask[
                     context_len:]
 
@@ -773,7 +774,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                    scheduler_config=self.scheduler_config,
                                    cache_config=self.cache_config)
         model_forward_params = inspect.signature(self.model.forward).parameters
-        if "inputs_embeds" in model_forward_params and "inputs_embeds_masks" in model_forward_params:
+        if (
+            "inputs_embeds" in model_forward_params
+            and "inputs_embeds_masks" in model_forward_params
+        ):
             self.model_supports_input_embeds = True
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",

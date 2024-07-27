@@ -52,7 +52,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers, get_inputs_embeds
+from .utils import (PPMissingLayer, get_inputs_embeds, is_pp_missing_parameter,
+                    make_layers)
 
 
 class LlamaMLP(nn.Module):

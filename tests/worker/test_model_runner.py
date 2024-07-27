@@ -1,8 +1,9 @@
-from typing import List
 import itertools
+import random
+from typing import List
+
 import pytest
 import torch
-import random
 
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -200,7 +201,14 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
 
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    input_tokens, input_positions, input_embeds, input_embeds_masks, attn_metadata, slot_mapping = (
+    (
+        input_tokens,
+        input_positions,
+        input_embeds,
+        input_embeds_masks,
+        attn_metadata,
+        slot_mapping
+     ) = (
         model_input.input_tokens, model_input.input_positions,
         model_input.input_embeds, model_input.input_embeds_masks,
         model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
@@ -291,7 +299,13 @@ def test_empty_seq_group():
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    input_tokens, input_positions, input_embeds, input_embeds_masks, attn_metadata = (
+    (
+        input_tokens,
+        input_positions,
+        input_embeds,
+        input_embeds_masks,
+        attn_metadata
+    ) = (
         model_input.input_tokens,
         model_input.input_positions,
         model_input.input_embeds,
