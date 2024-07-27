@@ -11,9 +11,6 @@ from vllm.utils import make_tensor_with_pad
 STR_NOT_IMPL_ENC_DEC_ROCM_HIP = ("ROCm/HIP is not currently supported "
                                  "with encoder/decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_CPU = ("CPU backend is not current supported with "
-                            "encoder/decoder models.")
-
 PAD_SLOT_ID = -1
 
 if TYPE_CHECKING:
