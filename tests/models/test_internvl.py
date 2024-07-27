@@ -27,9 +27,10 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 models = [
-    snapshot_download("OpenGVLab/InternVL2-1B"),
-    snapshot_download("OpenGVLab/InternVL2-2B"),
-    # snapshot_download("OpenGVLab/InternVL2-4B"),  # broken
+    # snapshot_download("OpenGVLab/InternVL2-1B"),
+    # snapshot_download("OpenGVLab/InternVL2-2B"),
+    # # snapshot_download("OpenGVLab/InternVL2-4B"),  # broken
+    "/data/LLM-model/InternVL2-4B",
 ]
 
 
