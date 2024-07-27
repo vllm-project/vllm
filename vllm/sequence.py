@@ -3,6 +3,7 @@ import copy
 import enum
 import math
 from abc import ABC, abstractmethod
+from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
@@ -120,11 +121,11 @@ class SequenceData:
         prompt_embeds: Optional[torch.Tensor] = None,
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
-        self._prompt_token_ids: List[int] = list(prompt_token_ids)
+        self._prompt_token_ids = array('l', prompt_token_ids)
         self._prompt_embeds: Optional[List[torch.Tensor]] = prompt_embeds
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
-        self._output_token_ids: List[int] = (
-            list(output_token_ids) if output_token_ids is not None else [])
+        self._output_token_ids = array(
+            'l', output_token_ids if output_token_ids is not None else [])
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -134,8 +135,8 @@ class SequenceData:
         self._update_cached_all_tokens()
 
     def _update_cached_all_tokens(self):
-        self._cached_all_token_ids: List[int] = (self._prompt_token_ids +
-                                                 self._output_token_ids)
+        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
+                                                     self._output_token_ids)
 
     @property
     def prompt_token_ids(self) -> Tuple[int, ...]:
@@ -143,7 +144,7 @@ class SequenceData:
 
     @prompt_token_ids.setter
     def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        self._prompt_token_ids = list(new_prompt_token_ids)
+        self._prompt_token_ids = array('l', new_prompt_token_ids)
         self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
         self._update_cached_all_tokens()
 
@@ -155,14 +156,21 @@ class SequenceData:
     def prompt_embeds(self, new_prompt_embeds: Optional[torch.Tensor]) -> None:
         self._prompt_embeds = new_prompt_embeds
 
+    def prompt_token_ids_array(self) -> array:
+        return self._prompt_token_ids
+
     @property
     def output_token_ids(self) -> Tuple[int, ...]:
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
     def output_token_ids(self, new_output_token_ids) -> None:
-        self._output_token_ids = list(new_output_token_ids)
+        self._output_token_ids = array('l', new_output_token_ids)
         self._update_cached_all_tokens()
+
+    @property
+    def output_token_ids_array(self) -> array:
+        return self._output_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)

@@ -239,6 +239,9 @@ class OPTDecoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -248,7 +251,7 @@ class OPTDecoder(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        inputs_embeds = get_inputs_embeds(input_ids, self.embed_tokens,
+        inputs_embeds = get_inputs_embeds(input_ids, self.get_input_embeddings,
                                           inputs_embeds, inputs_embeds_masks)
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
@@ -276,6 +279,9 @@ class OPTModel(nn.Module):
     ):
         super().__init__()
         self.decoder = OPTDecoder(config, cache_config, quant_config)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.decoder.get_input_embeddings(input_ids)
 
     def forward(
         self,

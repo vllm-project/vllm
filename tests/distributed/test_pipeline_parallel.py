@@ -1,3 +1,10 @@
+"""
+WARNING: This test runs in both single-node (4 GPUs) and multi-node
+ (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
+ important to set the distributed backend to "mp" to avoid Ray scheduling
+ all workers in a node other than the head node, which can cause the test
+ to fail.
+"""
 import os
 
 import pytest
@@ -61,3 +68,27 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
         tp_args.append("--enforce-eager")
 
     compare_two_settings(MODEL_NAME, pp_args, tp_args)
+
+
+@pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [
+    (2, "JackFram/llama-160m"),
+])
+@pytest.mark.parametrize("ATTN_BACKEND", [
+    "FLASH_ATTN",
+    "FLASHINFER",
+])
+def test_pp_cudagraph(PP_SIZE, MODEL_NAME, ATTN_BACKEND):
+    cudagraph_args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "float16",
+        "--pipeline-parallel-size",
+        str(PP_SIZE),
+        "--distributed-executor-backend",
+        "mp",
+    ]
+    os.environ["VLLM_ATTENTION_BACKEND"] = ATTN_BACKEND
+
+    eager_args = cudagraph_args + ["--enforce-eager"]
+
+    compare_two_settings(MODEL_NAME, eager_args, cudagraph_args)

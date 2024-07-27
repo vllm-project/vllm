@@ -2,13 +2,12 @@ import asyncio
 import importlib
 import inspect
 import re
+from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
-import fastapi
-import uvicorn
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -37,6 +36,7 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
+from vllm.server import serve_http
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
@@ -56,7 +56,7 @@ _running_tasks: Set[asyncio.Task] = set()
 
 
 @asynccontextmanager
-async def lifespan(app: fastapi.FastAPI):
+async def lifespan(app: FastAPI):
 
     async def _force_log():
         while True:
@@ -74,7 +74,7 @@ async def lifespan(app: fastapi.FastAPI):
 router = APIRouter()
 
 
-def mount_metrics(app: fastapi.FastAPI):
+def mount_metrics(app: FastAPI):
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app())
     # Workaround for 307 Redirect for /metrics
@@ -164,8 +164,8 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-def build_app(args):
-    app = fastapi.FastAPI(lifespan=lifespan)
+def build_app(args: Namespace) -> FastAPI:
+    app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
 
@@ -213,11 +213,9 @@ def build_app(args):
     return app
 
 
-def run_server(args, llm_engine=None):
+async def init_app(args: Namespace,
+                   llm_engine: Optional[AsyncLLMEngine] = None) -> FastAPI:
     app = build_app(args)
-
-    logger.info("vLLM API server version %s", VLLM_VERSION)
-    logger.info("args: %s", args)
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
@@ -231,19 +229,7 @@ def run_server(args, llm_engine=None):
               if llm_engine is not None else AsyncLLMEngine.from_engine_args(
                   engine_args, usage_context=UsageContext.OPENAI_API_SERVER))
 
-    event_loop: Optional[asyncio.AbstractEventLoop]
-    try:
-        event_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        event_loop = None
-
-    if event_loop is not None and event_loop.is_running():
-        # If the current is instanced by Ray Serve,
-        # there is already a running event loop
-        model_config = event_loop.run_until_complete(engine.get_model_config())
-    else:
-        # When using single vLLM without engine_use_ray
-        model_config = asyncio.run(engine.get_model_config())
+    model_config = await engine.get_model_config()
 
     if args.disable_log_requests:
         request_logger = None
@@ -264,6 +250,7 @@ def run_server(args, llm_engine=None):
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         chat_template=args.chat_template,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_completion = OpenAIServingCompletion(
         engine,
@@ -272,6 +259,7 @@ def run_server(args, llm_engine=None):
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
@@ -289,22 +277,28 @@ def run_server(args, llm_engine=None):
     )
     app.root_path = args.root_path
 
-    logger.info("Available routes are:")
-    for route in app.routes:
-        if not hasattr(route, 'methods'):
-            continue
-        methods = ', '.join(route.methods)
-        logger.info("Route: %s, Methods: %s", route.path, methods)
+    return app
 
-    uvicorn.run(app,
-                host=args.host,
-                port=args.port,
-                log_level=args.uvicorn_log_level,
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-                ssl_keyfile=args.ssl_keyfile,
-                ssl_certfile=args.ssl_certfile,
-                ssl_ca_certs=args.ssl_ca_certs,
-                ssl_cert_reqs=args.ssl_cert_reqs)
+
+async def run_server(args: Namespace,
+                     llm_engine: Optional[AsyncLLMEngine] = None,
+                     **uvicorn_kwargs: Any) -> None:
+    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.info("args: %s", args)
+
+    app = await init_app(args, llm_engine)
+    await serve_http(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=args.uvicorn_log_level,
+        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        ssl_ca_certs=args.ssl_ca_certs,
+        ssl_cert_reqs=args.ssl_cert_reqs,
+        **uvicorn_kwargs,
+    )
 
 
 if __name__ == "__main__":
@@ -314,4 +308,5 @@ if __name__ == "__main__":
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
-    run_server(args)
+
+    asyncio.run(run_server(args))
