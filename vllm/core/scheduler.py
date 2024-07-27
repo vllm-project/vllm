@@ -566,6 +566,7 @@ class Scheduler:
                     "Failing the request %s because there's not enough kv "
                     "cache blocks to run the entire sequence.",
                     seq_group.request_id)
+                self._finished_requests_ids.append(seq_group.request_id)
                 for seq in seq_group.get_seqs():
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 infeasible_seq_groups.append(seq_group)
@@ -699,6 +700,7 @@ class Scheduler:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)
+                self._finished_requests_ids.append(seq_group.request_id)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -714,6 +716,7 @@ class Scheduler:
                     "Input prompt (%d tokens) is too long"
                     " and exceeds the capacity of block_manager",
                     num_new_tokens)
+                self._finished_requests_ids.append(seq_group.request_id)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -1058,13 +1061,16 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        for queue in [self.running, self.swapped, self.waiting]:
-            self._finished_requests_ids += [
-                seq_group.request_id for seq_group in queue
-                if seq_group.is_finished()
-            ]
-        self.running = deque(seq_group for seq_group in self.running
-                             if not seq_group.is_finished())
+        # finished requests in self.waiting and self.swapped are already
+        # appended to self._finished_requests_ids during the scheduling.
+        # the only new finished requests are in self.running.
+        remaining: Deque[SequenceGroup] = deque()
+        for seq_group in self.running:
+            if seq_group.is_finished():
+                self._finished_requests_ids.append(seq_group.request_id)
+            else:
+                remaining.append(seq_group)
+        self.running = remaining
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
