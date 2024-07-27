@@ -19,18 +19,17 @@ pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "<image>\nWhat's the content of the image?\n",
+    "<|im_start|>User\n<image>\nWhat's the content in the center of the image?<|im_end|>\n<|im_start|>Assistant\n",
     "cherry_blossom":
-    "<image>\nWhat is the season?\n",
+    "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",
 })
 
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 models = [
-    # snapshot_download("OpenGVLab/InternVL2-1B"),
-    # snapshot_download("OpenGVLab/InternVL2-2B"),
-    # # snapshot_download("OpenGVLab/InternVL2-4B"),  # broken
-    "/data/LLM-model/InternVL2-4B",
+    snapshot_download("OpenGVLab/InternVL2-1B"),
+    snapshot_download("OpenGVLab/InternVL2-2B"),
+    # snapshot_download("OpenGVLab/InternVL2-4B"),  # broken
 ]
 
 
