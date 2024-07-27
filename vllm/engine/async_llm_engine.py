@@ -281,7 +281,10 @@ class _AsyncLLMEngine(LLMEngine):
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 
-        if "prompt_token_ids" not in inputs:
+        prompt_embeds = inputs.get("prompt_embeds")
+        if prompt_embeds is not None:
+            prompt_token_ids = []
+        elif "prompt_token_ids" not in inputs:
             tokenizer = self.get_tokenizer_group("prompts must be None if "
                                                  "skip_tokenizer_init is True")
 
@@ -299,6 +302,7 @@ class _AsyncLLMEngine(LLMEngine):
                 prompt_token_ids
 
         llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
+                               prompt_embeds=prompt_embeds,
                                prompt=inputs.get("prompt"),
                                multi_modal_data=inputs.get("multi_modal_data"))
 
@@ -719,7 +723,7 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: Prompt Adapter request to use 
+            prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
 
         Yields:

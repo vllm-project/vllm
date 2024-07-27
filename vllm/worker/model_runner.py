@@ -6,6 +6,7 @@ import weakref
 from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
                     Tuple, Type, TypeVar, Union)
+import inspect
 
 import numpy as np
 import torch
@@ -86,6 +87,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
     additional fields.
     """
     input_tokens: Optional[torch.Tensor] = None
+    input_embeds: Optional[torch.Tensor] = None
+    input_embeds_masks: Optional[torch.BoolTensor] = None
     input_positions: Optional[torch.Tensor] = None
     seq_lens: Optional[List[int]] = None
     query_lens: Optional[List[int]] = None
@@ -102,6 +105,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
+            "input_embeds": self.input_embeds,
+            "input_embeds_masks": self.input_embeds_masks,
             "input_positions": self.input_positions,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
@@ -185,6 +190,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Input tokens and positions.
         input_tokens: List[List[int]] = field(default_factory=list)
         input_positions: List[List[int]] = field(default_factory=list)
+
+        # Input embeddings and masks.
+        input_embeds: Optional[torch.Tensor] = None
+        input_embeds_mask: Optional[torch.BoolTensor] = None
 
         # The sequence length (may be capped to the sliding window).
         seq_lens: List[int] = field(default_factory=list)
@@ -299,9 +308,19 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_len - 1
         seq_len = min(seq_len, context_len + token_chunk_size)
 
+        input_embeds = None
+        input_embeds_mask = None
         # Compute tokens.
         if inter_data.is_prompt:
-            tokens = seq_data.get_token_ids()[context_len:seq_len]
+            if seq_data.prompt_embeds is None:
+                tokens = seq_data.get_token_ids()[context_len:seq_len]
+                input_embeds_mask = torch.zeros(seq_len - context_len,
+                                                dtype=torch.bool)
+            else:
+                tokens = [0] * seq_len
+                input_embeds = seq_data.prompt_embeds[context_len:seq_len]
+                input_embeds_mask = torch.ones(seq_len - context_len,
+                                               dtype=torch.bool)
         else:
             # Optimization. get_token_ids requires the entire copy of
             # tokens.
@@ -314,6 +333,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.input_positions[seq_idx] = list(range(context_len, seq_len))
         inter_data.query_lens[
             seq_idx] = seq_len - context_len if inter_data.is_prompt else 1
+        inter_data.input_embeds = input_embeds
+        inter_data.input_embeds_mask = input_embeds_mask
 
     def _compute_for_prefix_cache_hit(
             self, inter_data: InterDataForSeqGroup, seq_idx: int,
@@ -335,8 +356,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 "chunked prefill cannot be used with prefix caching now.")
 
         # If prefix cache is hit, advance context length to bypass
-        # hit blocks. Accordingly, input tokens, position and query length
-        # have to be updated.
+        # hit blocks. Accordingly, input tokens, position, query length
+        # input_embeds, and input_embeds_mask have to be updated.
         if prefix_cache_hit:
             assert computed_block_nums is not None
             context_len = len(computed_block_nums) * self.block_size
@@ -347,6 +368,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             inter_data.context_lens[seq_idx] = context_len
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
+            if inter_data.input_embeds is not None:
+                inter_data.input_embeds = inter_data.input_embeds[context_len:]
+                inter_data.input_embeds_mask = inter_data.input_embeds_mask[
+                    context_len:]
 
     def _compute_for_sliding_window(self, inter_data: InterDataForSeqGroup,
                                     seq_idx: int,
@@ -474,6 +499,21 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             flatten_2d_lists(inter_data.input_positions)
             for inter_data in self.inter_data_list
         ])
+        input_embeds = [
+            inter_data.input_embeds for inter_data in self.inter_data_list
+            if inter_data.input_embeds is not None
+        ] or None
+        input_embeds_masks = [
+            inter_data.input_embeds_mask for inter_data in self.inter_data_list
+            if inter_data.input_embeds_mask is not None
+        ] or None
+        if input_embeds:
+            input_embeds = torch.cat(input_embeds).to(
+                device=self.runner.device,
+                dtype=self.runner.model_config.dtype)
+        if input_embeds_masks:
+            input_embeds_masks = torch.cat(input_embeds_masks).to(
+                self.runner.device)
         seq_lens = []
         max_decode_seq_len = 0
         for inter_data in self.inter_data_list:
@@ -575,6 +615,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
+            input_embeds=input_embeds,
+            input_embeds_masks=input_embeds_masks,
             attn_metadata=attn_metadata,
             seq_lens=seq_lens,
             query_lens=query_lens,
@@ -664,6 +706,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
+        self.model_supports_input_embeds = False  # Set after load_model
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
@@ -687,7 +730,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                    parallel_config=self.parallel_config,
                                    scheduler_config=self.scheduler_config,
                                    cache_config=self.cache_config)
-
+        model_forward_params = inspect.signature(self.model.forward).parameters
+        if "inputs_embeds" in model_forward_params and "inputs_embeds_masks" in model_forward_params:
+            self.model_supports_input_embeds = True
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
@@ -1311,14 +1356,18 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
-        hidden_or_intermediate_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **multi_modal_kwargs,
-            **seqlen_agnostic_kwargs)
+        model_params = dict(input_ids=model_input.input_tokens,
+                            positions=model_input.input_positions,
+                            kv_caches=kv_caches,
+                            attn_metadata=model_input.attn_metadata,
+                            intermediate_tensors=intermediate_tensors,
+                            **multi_modal_kwargs,
+                            **seqlen_agnostic_kwargs)
+        if self.model_supports_input_embeds:
+            model_params.update(
+                inputs_embeds=model_input.input_embeds,
+                inputs_embeds_masks=model_input.input_embeds_masks)
+        hidden_or_intermediate_states = model_executable(**model_params)
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:

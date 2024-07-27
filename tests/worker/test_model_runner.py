@@ -1,7 +1,8 @@
 from typing import List
-
+import itertools
 import pytest
 import torch
+import random
 
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -29,8 +30,10 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     return model_runner
 
 
-@pytest.mark.parametrize("batch_size", list(range(1, 257)))
-def test_prepare_prompt(batch_size):
+@pytest.mark.parametrize("batch_size, prompt_embeds_ratio",
+                         list(itertools.product(range(1, 257),
+                                                (0.0, 0.5, 1.0))))
+def test_prepare_prompt(batch_size, prompt_embeds_ratio):
     model_runner = _create_model_runner(
         "facebook/opt-125m",
         max_num_batched_tokens=100000,
@@ -41,11 +44,16 @@ def test_prepare_prompt(batch_size):
     seq_lens: List[int] = []
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     block_tables = {0: [1]}
+    input_embeds_len = 0
     for i in range(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        if random.random() < prompt_embeds_ratio:
+            seq_data = SequenceData([], prompt_embeds=torch.rand(seq_len, 10))
+            input_embeds_len += seq_len
+        else:
+            seq_data = SequenceData(list(range(seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -66,6 +74,8 @@ def test_prepare_prompt(batch_size):
         seq_group_metadata_list)
     input_tokens = model_input.input_tokens
     input_positions = model_input.input_positions
+    input_embeds = model_input.input_embeds
+    input_embeds_masks = model_input.input_embeds_masks
     attn_metadata = model_input.attn_metadata
     return_seq_lens = model_input.seq_lens
     slot_mapping = attn_metadata.slot_mapping
@@ -119,7 +129,12 @@ def test_prepare_prompt(batch_size):
 
     assert len(input_tokens) == sum(seq_lens)
     assert len(input_positions) == sum(seq_lens)
-    torch.testing.assert_close(input_tokens, input_positions)
+    assert len(input_embeds_masks) == sum(seq_lens)
+    if input_embeds_len == 0:
+        torch.testing.assert_close(input_tokens, input_positions)
+        assert input_embeds is None
+    else:
+        assert len(input_embeds) == input_embeds_len
 
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
@@ -144,7 +159,8 @@ def test_prepare_prompt(batch_size):
 
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
-def test_prepare_decode_cuda_graph(batch_size):
+@pytest.mark.parametrize("prompt_embeds_ratio", (0.0, 0.5, 1.0))
+def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
     model_runner = _create_model_runner(
         "facebook/opt-125m",
         seed=0,
@@ -158,11 +174,17 @@ def test_prepare_decode_cuda_graph(batch_size):
     context_lens: List[int] = []
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     # Assume each seq group finishes prefill.
+    input_embeds_len = 0
     for i in range(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = SequenceData(list(range(context_len)))
+        if random.random() < prompt_embeds_ratio:
+            seq_data = SequenceData([],
+                                    prompt_embeds=torch.rand(context_len, 10))
+            input_embeds_len += context_len
+        else:
+            seq_data = SequenceData(list(range(context_len)))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -178,9 +200,11 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    input_tokens, input_positions, attn_metadata, slot_mapping = (
+    input_tokens, input_positions, input_embeds, input_embeds_masks, attn_metadata, slot_mapping = (
         model_input.input_tokens, model_input.input_positions,
+        model_input.input_embeds, model_input.input_embeds_masks,
         model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
+
     assert len(slot_mapping) == len(input_tokens)
 
     expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
@@ -232,6 +256,8 @@ def test_prepare_decode_cuda_graph(batch_size):
     assert len(input_tokens) == expected_bs
     assert len(input_positions) == expected_bs
     torch.allclose(input_tokens, input_positions)
+    assert input_embeds is None
+    assert input_embeds_masks is None
 
     # Verify Sampling
     expected_selected_token_indices = []
@@ -264,14 +290,18 @@ def test_empty_seq_group():
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    input_tokens, input_positions, attn_metadata = (
+    input_tokens, input_positions, input_embeds, input_embeds_masks, attn_metadata = (
         model_input.input_tokens,
         model_input.input_positions,
+        model_input.input_embeds,
+        model_input.input_embeds_masks,
         model_input.attn_metadata,
     )
     assert input_tokens is None
     assert input_positions is None
     assert attn_metadata is None
+    assert input_embeds is None
+    assert input_embeds_masks is None
 
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
@@ -299,7 +329,9 @@ def distributed_init():
 
 @pytest.mark.parametrize("batch_size", list(range(2, 128)))
 @pytest.mark.parametrize("enforce_eager", [True, False])
-def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
+@pytest.mark.parametrize('prompt_embeds_ratio', [0.0, 0.5, 1.0])
+def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
+                        distributed_init):
     model_runner = _create_model_runner(
         "facebook/opt-125m",
         seed=0,
@@ -318,11 +350,16 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     block_tables = {0: [1]}
     prefill_batch_size = batch_size // 2
     decode_batch_size = batch_size - prefill_batch_size
+    input_embeds_len = 0
     for i in range(prefill_batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        if random.random() < prompt_embeds_ratio:
+            seq_data = SequenceData([], prompt_embeds=torch.rand(seq_len, 10))
+            input_embeds_len += seq_len
+        else:
+            seq_data = SequenceData(list(range(seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -338,8 +375,11 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     for i in range(prefill_batch_size, batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
-        prompt_toks = list(range(context_len))
-        seq_data = SequenceData(prompt_toks)
+        if random.random() < prompt_embeds_ratio:
+            seq_data = SequenceData([],
+                                    prompt_embeds=torch.rand(context_len, 10))
+        else:
+            seq_data = SequenceData(list(range(context_len)))
         seq_data.append_token_id(1, 0)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(
@@ -354,11 +394,14 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         decode_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner.prepare_model_input(seq_group_metadata_list)
-    (input_tokens, input_positions, attn_metadata) = (
-        model_input.input_tokens,
-        model_input.input_positions,
-        model_input.attn_metadata,
-    )
+    (input_tokens, input_positions, attn_metadata, input_embeds,
+     input_embeds_masks) = (
+         model_input.input_tokens,
+         model_input.input_positions,
+         model_input.attn_metadata,
+         model_input.input_embeds,
+         model_input.input_embeds_masks,
+     )
 
     prefill_meta_actual = attn_metadata.prefill_metadata
     decode_meta_actual = attn_metadata.decode_metadata
@@ -368,6 +411,11 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     assert attn_metadata.num_prefills == prefill_batch_size
     assert attn_metadata.num_decode_tokens == decode_batch_size
     assert attn_metadata.num_prefill_tokens == sum(seq_lens)
+    assert len(input_embeds_masks) == sum(seq_lens)
+    if input_embeds_len == 0:
+        assert input_embeds is None
+    else:
+        assert len(input_embeds) == input_embeds_len
 
     # Verify attn metadata is consistent. We don't need to test individual
     # values here because they are tested above.

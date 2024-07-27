@@ -83,6 +83,7 @@ class RequestOutput:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: List[int],
+        prompt_embeds_shape: Optional[Tuple[int, int]],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
@@ -92,6 +93,7 @@ class RequestOutput:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_embeds_shape = prompt_embeds_shape
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
@@ -136,6 +138,10 @@ class RequestOutput:
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
         prompt_token_ids = seq_group.prompt_token_ids
+        if (prompt_embeds := seq_group.prompt_embeds) is not None:
+            prompt_embeds_shape = tuple(prompt_embeds.shape)
+        else:
+            prompt_embeds_shape = None
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
@@ -143,6 +149,7 @@ class RequestOutput:
         return cls(seq_group.request_id,
                    prompt,
                    prompt_token_ids,
+                   prompt_embeds_shape,
                    prompt_logprobs,
                    outputs,
                    finished,
@@ -153,6 +160,7 @@ class RequestOutput:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
+                f"prompt_embeds_shape={self.prompt_embeds_shape}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "

@@ -91,13 +91,13 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        multimodal_config (Optional): The configuration related to multimodal 
+        multimodal_config (Optional): The configuration related to multimodal
             models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
-        prompt_adapter_config (Optional): The configuration related to serving 
+        prompt_adapter_config (Optional): The configuration related to serving
             prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
@@ -576,7 +576,15 @@ class LLMEngine:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 
-        if "prompt_token_ids" not in inputs:
+        prompt_embeds = inputs.get("prompt_embeds")
+        if prompt_embeds is not None:
+            if not self.model_executor.driver_worker.model_runner.model_supports_input_embeds:
+                raise ValueError(
+                    f"Model {self.model_config.model} does not support input embeddings, but prompt_embeds "
+                    "was provided.")
+            prompt_token_ids = []
+
+        elif "prompt_token_ids" not in inputs:
             tokenizer = self.get_tokenizer_group("prompts must be None if "
                                                  "skip_tokenizer_init is True")
 
@@ -592,6 +600,7 @@ class LLMEngine:
                          + prompt_token_ids
 
         llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
+                               prompt_embeds=prompt_embeds,
                                prompt=inputs.get("prompt"),
                                multi_modal_data=inputs.get("multi_modal_data"))
 

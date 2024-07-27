@@ -3,7 +3,7 @@ import gc
 import os
 import sys
 from collections import UserList
-from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar, Union
 
 import pytest
 import torch
@@ -18,7 +18,7 @@ from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
-from vllm.inputs import TextPrompt
+from vllm.inputs import EmbedsPrompt, TextPrompt
 from vllm.logger import init_logger
 from vllm.sequence import SampleLogprobs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
@@ -433,14 +433,18 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: List[str],
+        prompts_or_prompt_embeds: Union[List[str], List[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
-            assert len(prompts) == len(images)
+            assert len(prompts_or_prompt_embeds) == len(images)
 
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
+        inputs = [
+            EmbedsPrompt(prompt_embeds=prompt) if isinstance(
+                prompt, torch.Tensor) else TextPrompt(prompt=prompt)
+            for prompt in prompts_or_prompt_embeds
+        ]
         if images is not None:
             for i, image in enumerate(images):
                 inputs[i]["multi_modal_data"] = {"image": image}
@@ -458,7 +462,7 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append((prompt_str or "") + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -491,12 +495,14 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: List[str],
+        prompts_or_prompt_embeds: Union[List[str], List[torch.Tensor]],
         max_tokens: int,
         images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        outputs = self.generate(prompts, greedy_params, images=images)
+        outputs = self.generate(prompts_or_prompt_embeds,
+                                greedy_params,
+                                images=images)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 

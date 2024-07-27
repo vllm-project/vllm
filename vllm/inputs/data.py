@@ -3,6 +3,8 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 
 from typing_extensions import NotRequired
 
+import torch
+
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
 
@@ -33,6 +35,9 @@ def parse_and_batch_prompt(
 def parse_and_batch_prompt(
     prompt: Union[str, List[str], List[int], List[List[int]]],
 ) -> Union[Sequence[ParsedText], Sequence[ParsedTokens]]:
+    if len(prompt) == 0:
+        return []
+
     if isinstance(prompt, str):
         # case 1: a string
         return [ParsedText(content=prompt, is_tokens=False)]
@@ -92,7 +97,20 @@ class TokensPrompt(TypedDict):
     """
 
 
-PromptInputs = Union[str, TextPrompt, TokensPrompt]
+class EmbedsPrompt(TypedDict):
+    """Schema for a tokenized prompt."""
+
+    prompt_embeds: torch.Tensor
+    """Embeddings of the prompt to pass to the model."""
+
+    multi_modal_data: NotRequired["MultiModalDataDict"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
+
+
+PromptInputs = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 The inputs to the LLM, which can take one of the following forms:
 
@@ -112,6 +130,11 @@ class LLMInputs(TypedDict):
     prompt: NotRequired[Optional[str]]
     """
     The original prompt text corresponding to the token IDs, if available.
+    """
+
+    prompt_embeds: NotRequired[Optional[torch.Tensor]]
+    """
+    The embeddings of the prompt, if available.
     """
 
     multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]

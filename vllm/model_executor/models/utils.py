@@ -1,4 +1,4 @@
-from typing import Dict, List, Protocol, Tuple
+from typing import Dict, List, Protocol, Tuple, Optional
 
 import torch
 from torch.func import functional_call
@@ -176,3 +176,21 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         if name.startswith(missing_layer_name):
             return True
     return False
+
+
+def get_inputs_embeds(
+    input_ids: torch.Tensor,
+    embeddings: torch.nn.Module,
+    inputs_embeds: Optional[torch.Tensor] = None,
+    inputs_embeds_masks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Get the input embeddings from either `input_ids` and `inputs_embeds`."""
+    if inputs_embeds is not None:
+        if all(inputs_embeds_masks):
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = embeddings(input_ids)
+            hidden_states[inputs_embeds_masks] = inputs_embeds
+    else:
+        hidden_states = embeddings(input_ids)
+    return hidden_states
