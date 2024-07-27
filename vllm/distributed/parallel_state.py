@@ -360,7 +360,10 @@ class GroupCoordinator:
             output_tensor = None
         return output_tensor
 
-    def broadcast(self, input_: torch.Tensor, src: int = 0):
+    def broadcast(self,
+                  input_: torch.Tensor,
+                  src: int = 0,
+                  async_op: bool = False):
         """Broadcast the input tensor.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -372,7 +375,8 @@ class GroupCoordinator:
         # Broadcast.
         torch.distributed.broadcast(input_,
                                     src=self.ranks[src],
-                                    group=self.device_group)
+                                    group=self.device_group,
+                                    async_op=async_op)
         return input_
 
     def broadcast_object(self, obj: Optional[Any] = None, src: int = 0):

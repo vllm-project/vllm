@@ -81,8 +81,48 @@ def _add_sampling_metadata_broadcastable_dict(
             sampling_metadata.selected_token_indices)
 
 
+def _init_frozen_model_input_from_tensor_dict(
+        frozen_model_input_cls: Type["ModelRunnerInputBase"],
+        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Helper method to initialize a frozen ModelInput based on broadcastable
+    """
+    valid_tensor_kwargs = {}
+    for field in dataclasses.fields(frozen_model_input_cls):
+        val = tensor_dict.pop(field.name, None)
+        if val is not None:
+            valid_tensor_kwargs[field.name] = val
+
+    frozen_model_input = frozen_model_input_cls(**valid_tensor_kwargs)
+    tensor_dict["frozen_model_input"] = frozen_model_input
+    return tensor_dict
+
+
+class BroadcastableModelInput(ABC):
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+        """
+        Extract broadcastable fields. Override for fields that require some
+        custom deserialization.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_broadcasted_tensor_dict(
+        cls: Type[T],
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> T:
+        """
+        Pop fields from the given tensor_dict and populate a new instance of
+        ModelRunnerInputBase.
+        """
+        raise NotImplementedError
+
+
 @dataclasses.dataclass(frozen=True)
-class ModelRunnerInputBase(ABC):
+class ModelRunnerInputBase(BroadcastableModelInput):
     """Local inputs to each worker's model runner. May contain
     device-specific data. Different worker backends may have different methods
     of converting from the global ExecuteModelRequest produced by the LLM

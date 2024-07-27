@@ -14,6 +14,13 @@ import torch.distributed
 import torch.nn as nn
 
 try:
+    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+except ModuleNotFoundError:
+    # vllm_flash_attn is not installed, use the identical ROCm FA metadata
+    from vllm.attention.backends.rocm_flash_attn import (
+        ROCmFlashAttentionMetadata as FlashAttentionMetadata)
+
+try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
@@ -29,7 +36,8 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tp_group
+from vllm import _custom_ops as ops
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -50,7 +58,8 @@ from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+                           SequenceGroupMetadata, SequenceOutput,
+                           CompletionSequenceGroupOutput, Logprob)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available)
@@ -168,6 +177,10 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
         return cls(**tensor_dict)
+
+    @property
+    def is_multi_step(self):
+        return False
 
 
 class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
@@ -781,6 +794,54 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             finished_requests_ids=self.finished_requests_ids,
             prompt_adapter_mapping=prompt_adapter_mapping,
             prompt_adapter_requests=prompt_adapter_requests)
+
+
+@dataclasses.dataclass
+class ModelOutput:
+    """The output of a single model forward pass.
+
+    The sampler_output_ready_event is set when the tensors in
+    sampler_output are ready (the model+sampler forward pass has
+    completed). We use the event to synchronize the GPU->CPU transfer,
+    which we want to only run when the data has been written to the
+    GPU tensors. Until the event is ready, the tensors in sampler_output
+    will have garbage data.
+    """
+    sampler_output: SamplerOutput
+    sampler_output_ready_event: torch.cuda.Event
+    pythonized: bool = False
+
+    def pythonize(self, input_metadata: ModelInputForGPUWithSamplingMetadata,
+                  copy_stream: torch.cuda.Stream) -> None:
+        """Pythonize the output. Blocking."""
+        if not self.pythonized:
+            self._pythonize_sampler_output_wait_on_event(
+                input_metadata, copy_stream)
+            self.pythonized = True
+
+    def maybe_pythonize(self,
+                        input_metadata: ModelInputForGPUWithSamplingMetadata,
+                        copy_stream: torch.cuda.Stream) -> None:
+        """Pythonize the output if ready, else return None. Non-blocking."""
+        if not self.pythonized:
+            self.pythonized = self._pythonize_sampler_output_if_event_ready(
+                input_metadata, copy_stream)
+
+    def _pythonize_sampler_output_wait_on_event(
+            self, input_metadata: ModelInputForGPUWithSamplingMetadata,
+            copy_stream: torch.cuda.Stream) -> None:
+        self.sampler_output_ready_event.synchronize()
+        with torch.cuda.stream(copy_stream):
+            _pythonize_sampler_output(input_metadata, self.sampler_output)
+
+    def _pythonize_sampler_output_if_event_ready(
+            self, input_metadata: ModelInputForGPUWithSamplingMetadata,
+            copy_stream: torch.cuda.Stream) -> bool:
+        if self.sampler_output_ready_event.query():
+            with torch.cuda.stream(copy_stream):
+                _pythonize_sampler_output(input_metadata, self.sampler_output)
+            return True
+        return False
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
@@ -1432,6 +1493,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+        self.cached_seq_group_metadata_list = seq_group_metadata_list
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
@@ -1505,6 +1567,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     self.flashinfer_decode_wrapper
             model_input.attn_metadata.begin_forward()
 
+        if model_input.is_multi_step:
+            # if model_input.sampling_metadata is not None:
+            model_input.sampling_metadata.skip_sampler_cpu_output = True
+            # self.model.sampler.include_gpu_probs_tensor = True
+            if self.is_driver_worker and get_pp_group().is_last_rank:
+                for output in model_input.outputs:
+                    output.maybe_pythonize(model_input, self._copy_stream)
+        current_stream = torch.cuda.current_stream()
+
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -1534,38 +1605,216 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
             **seqlen_agnostic_kwargs)
+        # torch.cuda.synchronize()
+
+        if model_input.is_multi_step:
+            # print(f'=======step {model_input.current_step}=============')
+            model_input.record_step_event()
+
+        if get_pp_group().is_last_rank:
+            logits = self.model.compute_logits(hidden_or_intermediate_states,
+                                               model_input.sampling_metadata)
+            if self.is_driver_worker:
+                # Sample the next token.
+                output: SamplerOutput = self.model.sample(
+                    logits=logits,
+                    sampling_metadata=model_input.sampling_metadata,
+                )
+
+                if model_input.is_multi_step:
+                    output_ready_event = torch.cuda.Event()
+                    output_ready_event.record(current_stream)
+                    model_input.outputs.append(
+                        ModelOutput(output, output_ready_event, None))
+                if self.return_hidden_states:
+                    # we only need to pass hidden states of most recent token
+                    assert model_input.sampling_metadata is not None
+                    indices = model_input.sampling_metadata.selected_token_indices
+                    if model_input.is_prompt:
+                        hidden_states = hidden_or_intermediate_states.index_select(
+                            0, indices)
+                    elif decode_meta.use_cuda_graph:
+                        hidden_states = hidden_or_intermediate_states[:len(
+                            indices)]
+                    else:
+                        hidden_states = hidden_or_intermediate_states
+
+                    output.hidden_states = hidden_states
+
+        if model_input.is_multi_step and not model_input.is_last_step:
+            # print('updating step')
+            out = self._get_sampled_token_ids(model_input.outputs)
+            model_input.wait_previous_step()
+            model_input = self._advance_step(model_input, out)
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
 
-        logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                           model_input.sampling_metadata)
-
         if not self.is_driver_worker:
             return []
 
-        # Sample the next token.
-        output: SamplerOutput = self.model.sample(
-            logits=logits,
-            sampling_metadata=model_input.sampling_metadata,
-        )
+        # if model_input.is_multi_step:
+        # print(f'is_multi_step: {model_input.is_multi_step}')
+        # print(f'is_last_step: {model_input.is_last_step}')
+        # print(f'current_step: {model_input.current_step}')
+        if model_input.is_multi_step and model_input.is_last_step:
+            # model_input.outputs.append(ModelOutput(output, output.sampler_output_ready_event, None))
+            # print('pythonizing')
+            outputs = []
+            for output in model_input.outputs:
+                output.pythonize(model_input, self._copy_stream)
+                outputs.append(output.sampler_output)
+            return outputs
+        else:
+            return [output]
 
-        if self.return_hidden_states:
-            # we only need to pass hidden states of most recent token
-            assert model_input.sampling_metadata is not None
-            indices = model_input.sampling_metadata.selected_token_indices
-            if model_input.is_prompt:
-                hidden_states = hidden_or_intermediate_states.index_select(
-                    0, indices)
-            elif decode_meta.use_cuda_graph:
-                hidden_states = hidden_or_intermediate_states[:len(indices)]
+    def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
+                                    num_queries):
+        assert isinstance(attn_metadata, FlashAttentionMetadata)
+
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert attn_metadata.use_cuda_graph
+
+        assert attn_metadata.num_prefills == 0
+        assert attn_metadata.num_prefill_tokens == 0
+        assert attn_metadata.num_decode_tokens == num_seqs
+        assert attn_metadata.slot_mapping.shape == (num_seqs, )
+
+        assert len(attn_metadata.seq_lens) == num_seqs
+        assert attn_metadata.seq_lens_tensor.shape == (num_seqs, )
+        assert attn_metadata.max_query_len == 1
+        assert attn_metadata.max_prefill_seq_len == 0
+        assert attn_metadata.max_decode_seq_len == max(attn_metadata.seq_lens)
+
+        assert attn_metadata.query_start_loc.shape == (num_queries + 1, )
+        assert attn_metadata.seq_start_loc.shape == (num_seqs + 1, )
+
+        assert attn_metadata.context_lens_tensor.shape == (num_queries, )
+
+        assert attn_metadata.block_tables.shape[0] == num_seqs
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            attn_metadata.seq_lens[i] += 1
+        attn_metadata.max_decode_seq_len = max(attn_metadata.seq_lens)
+
+    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
+                                  num_queries):
+
+        assert sampling_metadata.num_prompts == 0
+        assert len(sampling_metadata.seq_groups) == num_queries
+        assert sampling_metadata.selected_token_indices.shape == (
+            num_queries, )
+        # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed # noqa: E501
+
+        # Verify that all sequences are decodes
+        for i in range(num_queries):
+            seq_group = sampling_metadata.seq_groups[i]
+
+            assert seq_group.is_prompt is False  # No prompt
+            assert seq_group.prompt_logprob_indices == []  # No prompt
+            assert seq_group.sample_indices == [i]  # Simple
+            assert seq_group.seq_len is None  # Decode
+            assert seq_group.query_len is None  # Decode
+
+    def _advance_step(
+            self, model_input: ModelInputForGPUWithSamplingMetadata,
+            out: SamplerOutput) -> ModelInputForGPUWithSamplingMetadata:
+        model_input.current_step += 1
+        assert model_input.sampling_metadata is not None
+        assert model_input.seq_lens is not None
+        assert model_input.query_lens is not None
+        assert model_input.attn_metadata is not None
+
+        # for seq_group_metadata, sequence_group_outputs in zip(
+        #     self.cached_seq_group_metadata_list, out.outputs):
+        #     seq_group_metadata.is_prompt = False
+
+        #     for seq_output in sequence_group_outputs.samples:
+        #         seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
+
+        #         token_id = seq_output.output_token
+        #         token_logprob = seq_output.logprobs[token_id]
+
+        #         seq.append_token_id(token_id, token_logprob.logprob)
+        #         seq.update_num_computed_tokens(1)
+
+        num_seqs = len(model_input.seq_lens)
+        num_queries = len(model_input.query_lens)
+        attn_metadata = model_input.attn_metadata
+        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        self._update_flash_attn_metadata(attn_metadata, num_seqs, num_queries)
+
+        # Update GPU tensors
+        ops.advance_step(num_seqs=num_seqs,
+                         num_queries=num_queries,
+                         block_size=self.block_size,
+                         input_tokens=model_input.input_tokens,
+                         sampled_token_ids=out.sampled_token_ids,
+                         input_positions=model_input.input_positions,
+                         seq_lens=attn_metadata.seq_lens_tensor,
+                         slot_mapping=attn_metadata.slot_mapping,
+                         block_tables=attn_metadata.block_tables)
+
+        # Update sampling_metadata
+        # model_input.seq_lens = attn_metadata.seq_lens
+        sampling_metadata = model_input.sampling_metadata
+        self._update_sampling_metadata(sampling_metadata, num_seqs,
+                                       num_queries)
+        for i in range(num_queries):
+            model_input.seq_lens[i] = attn_metadata.seq_lens[i]
+        model_input.sampling_metadata.reuse_sampling_tensors = True
+
+        return model_input
+
+    def _get_sampled_token_ids(
+            self, model_outputs: List[ModelOutput]) -> SamplerOutput:
+        if get_pp_group().is_last_rank:
+            # broadcast the sampled token to all pp stages
+            if self.is_driver_worker:
+                last_output = model_outputs[-1].sampler_output
+                # print('broadcasting from last rank driver')
+                pp_group = get_pp_group()
+                pp_group.broadcast_tensor_dict(
+                    {"sampled_token_ids": last_output.sampled_token_ids},
+                    src=pp_group.world_size - 1)
+
+                #src=get_pp_group().last_rank)
+                # pp_group.barrier()
+                get_tp_group().broadcast_tensor_dict(
+                    {"sampled_token_ids": last_output.sampled_token_ids})
+                # src=get_tp_group().first_rank)
+                out = last_output
+                # print('done broadcasting from last rank driver')
             else:
-                hidden_states = hidden_or_intermediate_states
+                # print('broadcasting from last rank worker')
+                output_dict = get_tp_group().broadcast_tensor_dict()
+                # src=get_tp_group().first_rank)
+                out = SamplerOutput(
+                    [], sampled_token_ids=output_dict["sampled_token_ids"])
+                # print('done broadcasting from last rank worker')
 
-            output.hidden_states = hidden_states
-
-        return [output]
+            # model_input = self._advance_step(model_input, out)
+        else:
+            # get next token from broadcast
+            # print('before  recv broadcasting from non last rank')
+            if self.is_driver_worker:
+                pp_group = get_pp_group()
+                output_dict = pp_group.broadcast_tensor_dict(
+                    src=pp_group.world_size - 1)
+                # src=get_pp_group().last_rank)
+                # get_pp_group().barrier()
+                get_tp_group().broadcast_tensor_dict(
+                    {"sampled_token_ids": output_dict["sampled_token_ids"]})
+            else:
+                output_dict = get_tp_group().broadcast_tensor_dict()
+            # print('after   recv broadcasting from non last rank')
+            out = SamplerOutput(
+                [], sampled_token_ids=output_dict["sampled_token_ids"])
+        return out
 
 
 class CUDAGraphRunner:
@@ -1737,3 +1986,59 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
+
+
+def _pythonize_sampler_output(
+        model_input: ModelInputForGPUWithSamplingMetadata,
+        output: SamplerOutput) -> SamplerOutput:
+
+    # samples generation should have been skipped
+    assert not output.outputs
+
+    # print shapes
+    # print('output.sampled_token_ids', output.sampled_token_ids.shape)
+    # print('output.logprobs', output.logprobs.shape)
+    samples = torch.empty(*output.sampled_token_ids.shape,
+                          dtype=output.sampled_token_ids.dtype,
+                          device="cpu",
+                          pin_memory=True)
+    logprobs = torch.empty(*output.logprobs.shape,
+                           dtype=output.logprobs.dtype,
+                           device="cpu",
+                           pin_memory=True)
+    # prompt_logprobs = torch.empty(
+    #     *output.prompt_logprobs.shape,
+    #     dtype=output.prompt_logprobs.dtype,
+    #     device="cpu",
+    #     pin_memory=True)
+
+    # CPU GPU sync
+    # logprobs = logprobs.copy_(output.logprobs, non_blocking=False)
+    samples = samples.copy_(output.sampled_token_ids, non_blocking=False)
+
+    samples = samples.tolist()
+    # logprobs = logprobs.tolist()
+    # print('samples', samples)
+    # print('logprobs', logprobs)
+
+    # from vllm.model_executor.layers.sampler import _get_logprobs
+
+    # output.sampled_token_ids = output.sampled_token_ids.cpu()
+    # token_ids = output.sampled_token_ids.tolist()
+    sampling_metadata = model_input.sampling_metadata
+
+    for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
+                                          samples):
+        seq_ids = seq_group.seq_ids
+        # next_token_ids, parent_ids = sample_result
+        next_token_ids = sample_result
+        parent_ids = [0]
+        seq_outputs: List[SequenceOutput] = []
+        for parent_id, next_token_id in zip(parent_ids, next_token_ids):
+            # print('SequenceOutput', seq_ids[parent_id], next_token_id)
+            seq_outputs.append(
+                SequenceOutput(seq_ids[parent_id], next_token_id,
+                               {next_token_id: Logprob(logprob=4)}))
+        # print('CompletionSequenceGroupOutput', seq_outputs)
+        output.outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
+    assert len(output.outputs) > 0
