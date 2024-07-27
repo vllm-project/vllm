@@ -18,6 +18,6 @@ def test_fp8_offline_inference():
     # Generate model response
     out = llm.generate(prompt, sampling_params)[0].outputs[0].text
 
-    assert out == ( " England and the United Kingdom."
-                    " It is located in the southeastern part of")
+    assert out == (" England and the United Kingdom."
+                   " It is located in the southeastern part of")
 
