@@ -343,6 +343,16 @@ class Scheduler:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
+    def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
+        # Add sequence groups to the running queue.
+        # Only for testing purposes.
+        self.running.append(seq_group)
+
+    def _add_seq_group_to_swapped(self, seq_group: SequenceGroup) -> None:
+        # Add sequence groups to the swapped queue.
+        # Only for testing purposes.
+        self.swapped.append(seq_group)
+
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a sequence group with the given ID.
 
@@ -632,11 +642,10 @@ class Scheduler:
 
     def _schedule_prefills(
         self,
-        waiting_queue: deque,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
         enable_chunking: bool = False,
-    ) -> Tuple[deque, SchedulerPrefillOutputs]:
+    ) -> SchedulerPrefillOutputs:
         """Schedule sequence groups that are in prefill stage.
 
         Note that the current scheduler treats PREEMPTED_FOR_RECOMPUTE
@@ -648,8 +657,6 @@ class Scheduler:
         `budget` and `curr_loras` are updated based on scheduled seq_groups.
 
         Args:
-            waiting_queue: The queue that contains prefill requests.
-                The given arguments are in-place modified.
             budget: The scheduling budget. The argument is in-place updated
                 when any requests are scheduled.
             curr_loras: Currently batched lora request ids. The argument is
@@ -660,11 +667,12 @@ class Scheduler:
                 all tokens.
 
         Returns:
-            A tuple of remaining waiting_queue after scheduling and
             SchedulerSwappedInOutputs.
         """
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[SequenceGroup] = []
+
+        waiting_queue = self.waiting
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
@@ -743,7 +751,7 @@ class Scheduler:
         if len(seq_groups) > 0:
             self.prev_prompt = True
 
-        return waiting_queue, SchedulerPrefillOutputs(
+        return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=True))
@@ -770,8 +778,7 @@ class Scheduler:
             seq_group.lora_int_id for seq_group in self.running
             if seq_group.lora_int_id > 0) if self.lora_enabled else None
 
-        remaining_waiting, prefills = (self.waiting,
-                                       SchedulerPrefillOutputs.create_empty())
+        prefills = SchedulerPrefillOutputs.create_empty()
         remaining_running, running_scheduled = (
             self.running, SchedulerRunningOutputs.create_empty())
         remaining_swapped, swapped_in = (
@@ -779,8 +786,9 @@ class Scheduler:
 
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
-            remaining_waiting, prefills = self._schedule_prefills(
-                self.waiting, budget, curr_loras, enable_chunking=False)
+            prefills = self._schedule_prefills(budget,
+                                               curr_loras,
+                                               enable_chunking=False)
 
         # Don't schedule decodes if prefills are scheduled.
         # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running
@@ -801,7 +809,6 @@ class Scheduler:
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
-        self.waiting = remaining_waiting
         self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
         self.running = remaining_running
@@ -857,8 +864,7 @@ class Scheduler:
         )
         curr_loras: Set[int] = set()
 
-        remaining_waiting, prefills = (self.waiting,
-                                       SchedulerPrefillOutputs.create_empty())
+        prefills = SchedulerPrefillOutputs.create_empty()
         remaining_running, running_scheduled = (
             self.running, SchedulerRunningOutputs.create_empty())
         remaining_swapped, swapped_in = (
@@ -876,15 +882,15 @@ class Scheduler:
                 self.swapped, budget, curr_loras)
 
         # Schedule new prefills.
-        remaining_waiting, prefills = self._schedule_prefills(
-            self.waiting, budget, curr_loras, enable_chunking=True)
+        prefills = self._schedule_prefills(budget,
+                                           curr_loras,
+                                           enable_chunking=True)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
-        self.waiting = remaining_waiting
         self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
         self.running = remaining_running
