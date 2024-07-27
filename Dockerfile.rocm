@@ -55,8 +55,8 @@ RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-6.1"*) \
             python3 -m pip uninstall -y torch torchvision \
             && python3 -m pip install --no-cache-dir --pre \
-                torch==2.5.0.dev20240710 \
-                torchvision==0.20.0.dev20240710 \
+                torch==2.5.0.dev20240726 \
+                torchvision==0.20.0.dev20240726 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
         *) ;; esac
 
