@@ -140,7 +140,6 @@ steps:
   working_dir: "/vllm-workspace/examples"
   mirror_hardwares: [amd]
   commands:
-    # install aws cli for llava_example.py
     # install tensorizer for tensorize_vllm_model.py
     - pip install awscli tensorizer
     - python3 offline_inference.py
