@@ -112,7 +112,7 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("scale", SCALE[2:]) # Fewer scales to reduce test time
+@pytest.mark.parametrize("scale", SCALE[2:])  # Reduce test time
 @pytest.mark.parametrize("azp", [-255, 54])
 @torch.inference_mode()
 def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
