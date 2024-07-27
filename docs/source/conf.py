@@ -94,6 +94,7 @@ def setup(app):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
+    "aiohttp",
     "cpuinfo",
     "torch",
     "transformers",
@@ -141,5 +142,6 @@ intersphinx_mapping = {
 }
 
 autodoc_preserve_defaults = True
+autodoc_warningiserror = True
 
 navigation_with_keys = False
