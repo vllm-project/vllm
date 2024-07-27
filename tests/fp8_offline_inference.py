@@ -1,4 +1,3 @@
-import pytest
 from vllm import LLM, SamplingParams
 
 
@@ -10,7 +9,8 @@ def test_fp8_offline_inference():
     llm = LLM(
             model="/data/models/llama-2-7b-chat-hf", 
             kv_cache_dtype="fp8", 
-            quantization_param_path="./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json"
+            quantization_param_path = \
+                    "./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json"
             )
     
     prompt = "London is the capital of"
@@ -18,6 +18,7 @@ def test_fp8_offline_inference():
     # Generate model response
     out = llm.generate(prompt, sampling_params)[0].outputs[0].text
 
-    assert out == " England and the United Kingdom. It is located in the southeastern part of"
+    assert out == ( " England and the United Kingdom."
+           " It is located in the southeastern part of")
     #print(out)
 
