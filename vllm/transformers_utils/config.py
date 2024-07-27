@@ -8,8 +8,8 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, NemotronConfi, RWConfig)
-
+                                             MPTConfig, NemotronConfig,
+                                             RWConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
