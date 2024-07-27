@@ -7,6 +7,8 @@ vLLM supports a variety of generative Transformer models in `HuggingFace Transfo
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
+----
+
 Decoder-only Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .. list-table::
@@ -186,6 +188,10 @@ Vision Language Models
     - Models
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
+  * - :code:`Blip2ForConditionalGeneration`
+    - BLIP-2
+    - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
+    -
   * - :code:`ChameleonForConditionalGeneration`
     - Chameleon
     - :code:`facebook/chameleon-7b` etc.
@@ -214,6 +220,8 @@ Vision Language Models
     - MiniCPM-V
     - :code:`openbmb/MiniCPM-V-2`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
     -
+
+----
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
