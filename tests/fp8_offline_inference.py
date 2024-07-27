@@ -1,5 +1,6 @@
 from vllm import LLM, SamplingParams
 
+
 def test_fp8_offline_inference():
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
