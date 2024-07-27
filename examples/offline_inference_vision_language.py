@@ -126,7 +126,7 @@ model_example_map = {
     "paligemma": run_paligemma,
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
-    "internvl": run_internvl,
+    "internvl_chat": run_internvl,
 }
 
 
