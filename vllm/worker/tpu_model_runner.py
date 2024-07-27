@@ -150,10 +150,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # NOTE(woosuk): There are two stages of compilation: torch.compile and
         # XLA compilation. Setting dynamic=True can reduce the torch.compile
         # overhead by reusing the FX graph for different shapes.
-        # However, the XLA graph will still require static shapes and need to be
-        # re-compiled for every different shapes. This overhead is inevitable
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
         # in the first run, but can be skipped afterwards as we cache the XLA
-        # graphs in the disk.
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
         self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
