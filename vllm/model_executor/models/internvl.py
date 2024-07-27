@@ -60,8 +60,7 @@ class InternVisionEmbeddings(nn.Module):
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
-        self.class_embedding = nn.Parameter(torch.randn(1, 1,
-                                                        self.embed_dim), )
+        self.class_embedding = nn.Parameter(torch.randn(1, 1, self.embed_dim))
 
         self.patch_embedding = nn.Conv2d(in_channels=3,
                                          out_channels=self.embed_dim,
@@ -138,8 +137,7 @@ class InternAttention(nn.Module):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads,
                                   C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(
-            0)  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv.unbind(0)
 
         if self.qk_normalization:
             B_, H_, N_, D_ = q.shape
@@ -148,11 +146,8 @@ class InternAttention(nn.Module):
             k = self.k_norm(k.transpose(1, 2).flatten(-2, -1)).view(
                 B_, N_, H_, D_).transpose(1, 2)
 
-        # x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        attn = ((q * self.scale) @ k.transpose(-2, -1))
-        attn = attn.softmax(dim=-1)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        x = x.transpose(1, 2).reshape(B, N, C)
 
         x = self.proj(x)
         return x
