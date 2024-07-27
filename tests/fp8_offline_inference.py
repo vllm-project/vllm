@@ -7,8 +7,8 @@ def test_fp8_offline_inference():
 
     # Create an LLM
     llm = LLM(
-            model="/data/models/llama-2-7b-chat-hf", 
-            kv_cache_dtype="fp8", 
+            model="/data/models/llama-2-7b-chat-hf",
+            kv_cache_dtype="fp8",
             quantization_param_path = \
                     "./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json"
             )
