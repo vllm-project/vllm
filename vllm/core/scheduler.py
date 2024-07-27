@@ -405,18 +405,15 @@ class Scheduler:
 
     def _schedule_running(
         self,
-        running_queue: deque,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
         enable_chunking: bool = False,
-    ) -> Tuple[deque, SchedulerRunningOutputs]:
+    ) -> SchedulerRunningOutputs:
         """Schedule sequence groups that are running.
 
         Running queue should include decode and chunked prefill requests.
 
         Args:
-            running_queue: The queue that contains running requests (i.e.,
-                decodes). The given arguments are in-place modified.
             budget: The scheduling budget. The argument is in-place updated
                 when any decodes are preempted.
             curr_loras: Currently batched lora request ids. The argument is
@@ -427,8 +424,7 @@ class Scheduler:
                 all tokens.
     
         Returns:
-            A tuple of remaining running queue (should be always 0) after
-            scheduling and SchedulerRunningOutputs.
+            SchedulerRunningOutputs.
         """
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_out: List[Tuple[int, int]] = []
@@ -441,6 +437,8 @@ class Scheduler:
 
         # NOTE(woosuk): Preemption happens only when there is no available slot
         # to keep all the sequence groups in the RUNNING state.
+
+        running_queue = self.running
 
         while running_queue:
             seq_group = running_queue[0]
@@ -505,7 +503,7 @@ class Scheduler:
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
-        return running_queue, SchedulerRunningOutputs(
+        return SchedulerRunningOutputs(
             decode_seq_groups=decode_seq_groups,
             prefill_seq_groups=prefill_seq_groups,
             preempted=preempted,
@@ -779,8 +777,7 @@ class Scheduler:
             if seq_group.lora_int_id > 0) if self.lora_enabled else None
 
         prefills = SchedulerPrefillOutputs.create_empty()
-        remaining_running, running_scheduled = (
-            self.running, SchedulerRunningOutputs.create_empty())
+        running_scheduled = SchedulerRunningOutputs.create_empty()
         remaining_swapped, swapped_in = (
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
@@ -794,8 +791,9 @@ class Scheduler:
         # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running
         # only contains decode requests, not chunked prefills.
         if len(prefills.seq_groups) == 0:
-            remaining_running, running_scheduled = self._schedule_running(
-                self.running, budget, curr_loras, enable_chunking=False)
+            running_scheduled = self._schedule_running(budget,
+                                                       curr_loras,
+                                                       enable_chunking=False)
 
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
@@ -811,7 +809,6 @@ class Scheduler:
         # Update waiting requests.
         self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
-        self.running = remaining_running
         self.running.extend([s.seq_group for s in prefills.seq_groups])
         self.running.extend(
             [s.seq_group for s in running_scheduled.decode_seq_groups])
@@ -865,14 +862,13 @@ class Scheduler:
         curr_loras: Set[int] = set()
 
         prefills = SchedulerPrefillOutputs.create_empty()
-        remaining_running, running_scheduled = (
-            self.running, SchedulerRunningOutputs.create_empty())
         remaining_swapped, swapped_in = (
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
         # Decoding should be always scheduled first by fcfs.
-        remaining_running, running_scheduled = self._schedule_running(
-            self.running, budget, curr_loras, enable_chunking=True)
+        running_scheduled = self._schedule_running(budget,
+                                                   curr_loras,
+                                                   enable_chunking=True)
 
         # Schedule swapped out requests.
         # If preemption happens, it means we don't have space for swap-in.
@@ -893,7 +889,6 @@ class Scheduler:
         # Update waiting requests.
         self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
-        self.running = remaining_running
         self.running.extend([s.seq_group for s in prefills.seq_groups])
         self.running.extend(
             [s.seq_group for s in running_scheduled.decode_seq_groups])
