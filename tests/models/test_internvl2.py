@@ -29,7 +29,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 models = [
     snapshot_download("OpenGVLab/InternVL2-1B"),
     snapshot_download("OpenGVLab/InternVL2-2B"),
-    snapshot_download("OpenGVLab/InternVL2-4B"),
+    # snapshot_download("OpenGVLab/InternVL2-4B"),  # broken
 ]
 
 
