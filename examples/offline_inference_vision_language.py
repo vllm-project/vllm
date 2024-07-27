@@ -106,6 +106,16 @@ def run_minicpmv(question):
     return llm, prompt
 
 
+# BLIP-2
+def run_blip2(question):
+
+    # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
+    # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
+    prompt = f"Question: {question} Answer:"
+    llm = LLM(model="Salesforce/blip2-opt-2.7b")
+    return llm, prompt
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -114,6 +124,7 @@ model_example_map = {
     "paligemma": run_paligemma,
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
+    "blip-2": run_blip2,
 }
 
 
