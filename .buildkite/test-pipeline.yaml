@@ -79,6 +79,10 @@ steps:
     - python3 llava_example.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmpvllm/facebook/opt-125m/v1/model.tensors
 
+- label: FP8 Test
+  mirror_hardwares: [amd]
+  command: pytest -v -s fp8_offline_inference.py
+  
 - label: Kernels Test %N
   #mirror_hardwares: [amd]
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
