@@ -194,12 +194,15 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
                                      trust_remote_code=True)
 
     prompt = llm_inputs["prompt"]
+    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    if prompt is None:
+        prompt = tokenizer.decode(prompt_token_ids)
     image_prompt = IMG_START + IMG_CONTEXT * (num_blocks +
                                               1) * num_patches + IMG_END
     new_prompt = prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
-    return LLMInputs(prompt=new_prompt,
+    return LLMInputs(prompt=prompt,
                      prompt_token_ids=new_prompt_token_ids,
                      multi_modal_data=multi_modal_data)
 
