@@ -108,8 +108,10 @@ def run_minicpmv(question):
 
 # InternVL
 def run_internvl(question):
-
+    # Generally, InternVL can use chatml template for conversation
+    TEMPLATE = "<|im_start|>User\n{prompt}<|im_end|>\n<|im_start|>Assistant\n"
     prompt = f"<image>\n{question}\n"
+    prompt = TEMPLATE.format(prompt=prompt)
     llm = LLM(
         model="OpenGVLab/InternVL2-4B",
         trust_remote_code=True,
