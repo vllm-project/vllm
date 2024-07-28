@@ -95,7 +95,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
 def _mcp_apply(x, bias, layer: QKVParallelLinearWithLora):
     """
     MergedColumnParallelLinearWithShardedLoRA and
-    QKVParallelLinearWithShardedLora share the same
+    MergedQKVParallelLinearWithShardedLora share the same
     LoRa weight application method.
     
     The main difference is the step by shard_size for lora_b which can
