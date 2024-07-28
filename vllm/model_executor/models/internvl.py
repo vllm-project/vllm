@@ -17,7 +17,9 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+from vllm.model_executor.models.internlm2 import InternLM2ForCausalLM
 from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
@@ -283,8 +285,15 @@ class InternVLChatModel(nn.Module, SupportsVision):
         self.vision_model = InternVisionModel(
             config.vision_config, num_hidden_layers_override=num_hidden_layers)
 
-        llm_class = ModelRegistry.load_model_cls(
-            config.text_config.architectures[0])
+        architecture = config.text_config.architectures[0]
+        if architecture in ("LlamaForCausalLM", "Phi3ForCausalLM"):
+            llm_class = LlamaForCausalLM
+        elif architecture == "Qwen2ForCausalLM":
+            llm_class = Qwen2ForCausalLM
+        elif architecture == "InternLM2ForCausalLM":
+            llm_class = InternLM2ForCausalLM
+        else:
+            raise ValueError(f"Unsupported architecture: {architecture}")
         self.language_model = llm_class(config.text_config, cache_config,
                                         quant_config)
 
