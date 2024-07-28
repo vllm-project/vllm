@@ -9,7 +9,36 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only OLMoE model compatible with HuggingFace weights."""
+"""Inference-only OLMoE model compatible with HuggingFace weights.
+
+from vllm import LLM
+llm = LLM(model="allenai/OLMoE-7B-A1B")
+print(llm.generate("Bitcoin is"))
+
+from vllm import LLM, SamplingParams
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+import torch
+from transformers import OlmoeForCausalLM, AutoTokenizer
+model = OlmoeForCausalLM.from_pretrained("allenai/OLMoE-7B-A1B", torch_dtype=torch.bfloat16).cuda()
+tokenizer = AutoTokenizer.from_pretrained("allenai/OLMoE-7B-A1B")
+inputs = tokenizer("Bitcoin is", return_tensors="pt")
+inputs = {k: v.cuda() for k, v in inputs.items()}
+out = model.generate(**inputs, max_length=64)
+print(tokenizer.decode(out[0]))
+"""
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -41,81 +70,51 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
 
 
-class OlmoeMLP(nn.Module):
+class OlmoeMoE(nn.Module):
+    """A tensor-parallel MoE implementation for Olmoe that shards each expert
+    across all ranks.
 
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
-        reduce_results: bool = True,
-    ) -> None:
+    Each expert's weights are sharded across all ranks and a fused MoE
+    kernel is used for the forward pass, and finally we reduce the outputs
+    across ranks.
+    """
+
+    def __init__(self,
+                 num_experts: int,
+                 top_k: int,
+                 hidden_size: int,
+                 intermediate_size: int,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 tp_size: Optional[int] = None,
+                 prefix: str = ""):
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           reduce_results=reduce_results)
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        self.hidden_size = hidden_size
 
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
-
-class OlmoeSparseMoeBlock(nn.Module):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
-        super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-
-        if self.tp_size > config.num_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}.")
-
-        self.experts = FusedMoE(num_experts=config.num_experts,
-                                top_k=config.num_experts_per_tok,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.moe_intermediate_size,
-                                reduce_results=False,
-                                renormalize=config.norm_topk_prob,
-                                quant_config=quant_config)
-
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.num_experts,
+        # Gate always runs at half / full precision for now.
+        self.gate = ReplicatedLinear(hidden_size,
+                                     num_experts,
                                      bias=False,
                                      quant_config=None)
 
+        self.experts = FusedMoE(num_experts=num_experts,
+                                top_k=top_k,
+                                hidden_size=hidden_size,
+                                intermediate_size=intermediate_size,
+                                reduce_results=True,
+                                renormalize=False,
+                                quant_config=quant_config,
+                                tp_size=tp_size)
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        #import pdb; pdb.set_trace()
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
-        hidden_dim = hidden_states.shape[-1]
-        hidden_states = hidden_states.view(-1, hidden_dim)
+        hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states,
-                                           router_logits=router_logits)
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
-
+        final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
-
 
 class OlmoeAttention(nn.Module):
 
@@ -126,7 +125,7 @@ class OlmoeAttention(nn.Module):
         num_kv_heads: int,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
+        max_position_embeddings: int = 4096,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
@@ -158,11 +157,11 @@ class OlmoeAttention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=True,
+            bias=False,
             quant_config=quant_config,
         )
-        self.q_layernorm = RMSNorm(hidden_size, eps=1e-5)
-        self.k_layernorm = RMSNorm(hidden_size, eps=1e-5)
+        self.q_norm = RMSNorm(hidden_size, eps=1e-5)
+        self.k_norm = RMSNorm(hidden_size, eps=1e-5)
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -176,6 +175,7 @@ class OlmoeAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
+            is_neox_style=True,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -191,8 +191,10 @@ class OlmoeAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        #import pdb; pdb.set_trace()
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.q_norm(q), self.k_norm(k)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -213,7 +215,9 @@ class OlmoeDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+                                          4096)
+        
+        #"""
         self.self_attn = OlmoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -224,10 +228,24 @@ class OlmoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
         )
+        #"""
+    
 
-        self.mlp = OlmoeSparseMoeBlock(config=config, quant_config=quant_config)
+
+        self.mlp = OlmoeMoE(
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+        )
+
         self.input_layernorm = RMSNorm(config.hidden_size, 1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, 1e-5)
+
+        #from transformers import OlmoeForCausalLM
+        #self.model = OlmoeForCausalLM.from_pretrained("allenai/OLMoE-7B-A1B", torch_dtype=torch.bfloat16).cuda()
+        self.layer_idx = layer_idx
 
     def forward(
         self,
@@ -237,6 +255,7 @@ class OlmoeDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        #import pdb; pdb.set_trace()
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -244,12 +263,21 @@ class OlmoeDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(
+        """
+        hidden_states_old = self.self_attn_old(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+        """
+        from transformers import OlmoeForCausalLM
+        model = OlmoeForCausalLM.from_pretrained("allenai/OLMoE-7B-A1B", torch_dtype=torch.bfloat16)
+        self_attn = model.model.layers[self.layer_idx].self_attn.cuda()
+        hidden_states = self_attn(
+            hidden_states=hidden_states.unsqueeze(0),
+            position_ids=torch.arange(hidden_states.size(0)).unsqueeze(0).cuda(),
+        )[0]
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -287,6 +315,7 @@ class OlmoeModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        #import pdb; pdb.set_trace()
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
@@ -360,8 +389,7 @@ class OlmoeForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
+            if "rotary_emb.inv_freq" in name: continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
