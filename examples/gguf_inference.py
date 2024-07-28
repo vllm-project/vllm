@@ -21,7 +21,6 @@ def run_gguf_inference(model_path):
     # Create an LLM.
     llm = LLM(model=model_path,
               tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-              enforce_eager=True,
               gpu_memory_utilization=0.95)
 
     outputs = llm.generate(prompts, sampling_params)

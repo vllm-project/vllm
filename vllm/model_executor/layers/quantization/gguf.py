@@ -43,7 +43,7 @@ class GGUFConfig(QuantizationConfig):
         return cls()
 
     def get_quant_method(
-        self, layer: torch.nn.Module
+        self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["GGUFLinearMethod", "GGUFEmbeddingMethod"]]:
         if isinstance(layer, LinearBase):
             return GGUFLinearMethod(self)
