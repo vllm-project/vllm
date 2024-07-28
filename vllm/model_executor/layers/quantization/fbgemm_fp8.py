@@ -141,11 +141,12 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                 size_k=layer.input_size_per_partition,
                 bias=bias)
 
-        return apply_fp8_linear(input=x,
-                                weight=layer.weight,
-                                weight_scale=layer.weight_scale,
-                                input_scale=None,
-                                input_scale_ub=layer.input_scale_ub,
-                                bias=bias,
-                                cutlass_fp8_supported=self.cutlass_fp8_supported,
-                                use_per_token_if_dynamic=True)
+        return apply_fp8_linear(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            input_scale=None,
+            input_scale_ub=layer.input_scale_ub,
+            bias=bias,
+            cutlass_fp8_supported=self.cutlass_fp8_supported,
+            use_per_token_if_dynamic=True)
