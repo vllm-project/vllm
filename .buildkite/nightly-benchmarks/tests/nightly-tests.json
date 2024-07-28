@@ -24,30 +24,5 @@
             "enable_torch_compile": "",
             "disable_radix_cache": ""
         }
-    },
-    {
-        "test_name": "llama70B_tp8",
-        "qps_list": [8],
-        "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
-            "tp": 8,
-            "dataset_name": "sonnet",
-            "dataset_path": "sonnet.txt",
-            "sonnet_input_len": 292,
-            "sonnet_output_len": 579,
-            "num_prompts": 1000,
-            "port": 8000
-        },
-        "vllm_server_parameters": {
-            "disable_log_stats": "",
-            "disable_log_requests": ""
-        },
-        "vllm_client_parameters": {
-        },
-        "sglang_server_parameters": {
-        },
-        "sglang_client_parameters": {
-            "disable_radix_cache": ""
-        }
     }
 ]
