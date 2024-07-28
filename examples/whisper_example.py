@@ -2,7 +2,6 @@ import vllm
 import torch
 import requests
 from vllm import LLM
-from vllm.multimodal.audio import AudioData
 from datasets import Audio
 
 
@@ -22,12 +21,12 @@ def main():
 
     output_lang = llm.generate({
         "prompt_token_ids": [50258],
-        "multi_modal_data": AudioData(y),
+        "whisper_data": y,
     }, sampling_params = SamplingParams(max_tokens = 1, temperature = 0))
 
     outputs = llm.generate({
         "prompt_token_ids": [50258, output_lang[0].outputs[0].token_ids[0], 50360],
-        "multi_modal_data": AudioData(y),
+        "whisper_data": y,
     }, sampling_params = SamplingParams(max_tokens = 100, temperature = 0))
 
     # ' without going to any such extreme as this we can easily see on reflection how vast an influence on the'
