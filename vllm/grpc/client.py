@@ -1,9 +1,7 @@
-import asyncio
 from vllm import AsyncLLMEngine
-import grpc
 
 # from vllm.grpc.server import UNIX_SOCKET
-from .pb import generate_pb2_grpc, generate_pb2
+# from .pb import generate_pb2_grpc, generate_pb2
 from typing import AsyncIterator, List, Optional, Mapping
 
 from vllm.inputs import PromptInputs
@@ -21,6 +19,8 @@ import zmq.asyncio
 import pickle
 
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+ADDRESS = "ipc:///tmp/zmqtest"
+# ADDRESS = "tcp://localhost:5570"
 
 @dataclass
 class RCPRequest:
@@ -74,7 +74,7 @@ class RPCClient(AsyncLLMEngine):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
         socket = self.context.socket(zmq.DEALER)
-        socket.connect('tcp://localhost:5570')
+        socket.connect(ADDRESS)
 
         await socket.send_multipart([
             pickle.dumps(

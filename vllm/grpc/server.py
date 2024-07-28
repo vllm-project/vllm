@@ -4,18 +4,18 @@ import pickle
 import zmq
 import zmq.asyncio
 
-MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
-
+from .client import MODEL, ADDRESS
 
 class RPCServer:
     def __init__(self):
         self.context = zmq.asyncio.Context()
         self.socket = self.context.socket(zmq.ROUTER)
-        self.socket.bind('tcp://*:5570')
+        self.socket.bind(ADDRESS)
 
         self.running_tasks = set()
         self.engine = AsyncLLMEngine.from_engine_args(
-            AsyncEngineArgs(model=MODEL))
+            AsyncEngineArgs(model=MODEL,
+                            enable_chunked_prefill=True))
 
     async def generate(self, identity, message):
         request = pickle.loads(message)
