@@ -133,6 +133,7 @@ class GroupCoordinator:
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
+        use_tpu_communicator: bool,
         use_message_queue_broadcaster: bool = False,
     ):
 
@@ -164,6 +165,7 @@ class GroupCoordinator:
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+        self.use_tpu_communicator = use_tpu_communicator
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -189,6 +191,12 @@ class GroupCoordinator:
             )
         else:
             self.ca_comm = None
+
+        from vllm.distributed.device_communicators.tpu_communicator import (
+            TpuCommunicator)
+        self.tpu_communicator: Optional[TpuCommunicator]
+        if use_tpu_communicator and self.world_size > 1:
+            self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
@@ -289,6 +297,12 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return input_
+
+        # For TPUs, use TPU communicator.
+        tpu_comm = self.tpu_communicator
+        if tpu_comm is not None and not tpu_comm.disabled:
+            return tpu_comm.all_reduce(input_)
+
         if ca_comm is not None:
             out = ca_comm.custom_all_reduce(input_)
             if out is not None:
@@ -310,6 +324,12 @@ class GroupCoordinator:
             return input_
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+
+        # For TPUs, use TPU communicator.
+        tpu_comm = self.tpu_communicator
+        if tpu_comm is not None and not tpu_comm.disabled:
+            return tpu_comm.all_gather(input_, dim)
+
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -727,6 +747,7 @@ def init_world_group(ranks: List[int], local_rank: int,
         torch_distributed_backend=backend,
         use_pynccl=False,
         use_custom_allreduce=False,
+        use_tpu_communicator=False,
     )
 
 
@@ -745,6 +766,7 @@ def init_model_parallel_group(
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
+        use_tpu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
     )
 
