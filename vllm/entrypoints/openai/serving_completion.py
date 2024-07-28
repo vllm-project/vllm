@@ -152,7 +152,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator: AsyncIterator[Tuple[
             int, RequestOutput]] = merge_async_iterators(*generators)
-        
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. In addition, we do not stream the results when use
@@ -190,6 +189,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     final_res.prompt = prompts[i]["prompt"]
+
             final_res_batch_checked = cast(List[RequestOutput],
                                            final_res_batch)
 
