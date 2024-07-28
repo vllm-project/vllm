@@ -31,9 +31,6 @@ logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
 
-# NOTE This value comes from vllm/worker/model_runner.py
-_MAX_BATCH_SIZE = 256
-
 
 @dataclass
 class LongContextLoRAContext:
@@ -318,7 +315,7 @@ class LoRAModelManager(AdapterModelManager):
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
-                                            max_batches=_MAX_BATCH_SIZE,
+                                            max_batches=self.max_num_seqs,
                                             device="cuda")
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
