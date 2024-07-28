@@ -486,7 +486,7 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
     },
-    cmdclass={"build_py": BuildPyAndGenerateGrpc, "build_ext": cmake_build_ext,} if _build_custom_ops() else {"build_py": BuildPyAndGenerateGrpc},
+    cmdclass={"build_ext": cmake_build_ext} if _build_custom_ops() else {},
     package_data=package_data,
     entry_points={
         "console_scripts": [
