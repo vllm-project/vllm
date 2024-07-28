@@ -9,6 +9,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.fp8 import cutlass_fp8_supported
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -145,5 +146,5 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                                 input_scale=None,
                                 input_scale_ub=layer.input_scale_ub,
                                 bias=bias,
-                                cutlass_fp8_supported=True,
+                                cutlass_fp8_supported=cutlass_fp8_supported(),
                                 use_per_token_if_dynamic=True)
