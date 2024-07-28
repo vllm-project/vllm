@@ -228,8 +228,8 @@ async def build_server(
 
     served_model_names = "meta-llama/Meta-Llama-3-8B-Instruct"
 
-    from vllm.grpc.client import TextGenerationClient
-    engine = TextGenerationClient()
+    from vllm.grpc.client import RPCClient
+    engine = RPCClient()
 
     # global engine, engine_args
 

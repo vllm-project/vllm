@@ -2,7 +2,7 @@ import asyncio
 from vllm import AsyncLLMEngine
 import grpc
 
-from vllm.grpc.server import UNIX_SOCKET
+# from vllm.grpc.server import UNIX_SOCKET
 from .pb import generate_pb2_grpc, generate_pb2
 from typing import AsyncIterator, List, Optional, Mapping
 
@@ -12,23 +12,34 @@ from vllm.outputs import RequestOutput
 from vllm.outputs import CompletionOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from transformers import AutoTokenizer
+from dataclasses import dataclass
 
 import time
+import zmq
+import zmq.asyncio
+import pickle
 
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
-class TextGenerationClient(AsyncLLMEngine):
+@dataclass
+class RCPRequest:
+    inputs: PromptInputs
+    sampling_params: SamplingParams
+    request_id: str
+
+
+class RPCClient(AsyncLLMEngine):
     def __init__(self):
-        # channel = grpc.aio.insecure_channel("localhost:5543")
-        channel = grpc.aio.insecure_channel(UNIX_SOCKET)
-        self.stub = generate_pb2_grpc.TextGenerationServiceStub(channel)
         self.engine_use_ray = False
         self.worker_use_ray = False
         self.log_requests = False
         self.engine = None
-
-        from transformers import AutoTokenizer
+        
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
+        self.context = zmq.asyncio.Context()
+        
 
     @property
     def is_running(self) -> bool:
@@ -42,16 +53,16 @@ class TextGenerationClient(AsyncLLMEngine):
     def errored(self) -> bool:
         return False
     
-    def start_background_loop(self):
-        # TODO something lol
-        pass
-    
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> "PreTrainedTokenizer":
         # TODO: what to return :/
         return self.tokenizer
+    
+    def start_background_loop(self):
+        # TODO something lol
+        pass
 
     async def generate(
         self,
@@ -62,56 +73,19 @@ class TextGenerationClient(AsyncLLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
-        
-        start = time.time()
-        first = True
-        
-        prompt: str = inputs.get('prompt', "")
-        prompt_token_ids: List[int] = inputs.get('prompt_token_ids', [])
+        socket = self.context.socket(zmq.DEALER)
+        socket.connect('tcp://localhost:5570')
 
-        generate_stream = self.stub.Generate(
-            generate_pb2.GenerateRequest(
-                prompt_inputs=generate_pb2.PromptInputs(
-                    prompt=prompt,
-                    prompt_token_ids=prompt_token_ids,
-                ),
-                request_id=request_id,
+        await socket.send_multipart([
+            pickle.dumps(
+                RCPRequest(
+                    inputs=inputs,
+                    sampling_params=sampling_params,
+                    request_id=request_id
+                ), pickle.HIGHEST_PROTOCOL
             )
-        )
+        ])
 
-        ttft = 0
-        tpots = []
-        text = ""
-        async for generate_response in generate_stream:
-            if first:
-                ttft = time.time() - start
-                first = False
-            else:
-                tpot = time.time() - last
-                tpots.append(tpot)
-            last = time.time()
-            text += "test_"
-            completion_outputs = [
-                CompletionOutput(
-                    index=output.index,
-                    # text=output.text,
-                    # text=self.tokenizer.decode(output.token_ids),
-                    text=text,
-                    token_ids=output.token_ids,
-                    cumulative_logprob=0.0,
-                    logprobs=None,
-                    finish_reason=output.finish_reason,
-                ) for output in generate_response.outputs
-            ]
-
-            yield RequestOutput(
-                request_id=request_id,
-                prompt_token_ids=[],
-                outputs=completion_outputs,
-                finished=(completion_outputs[0].finish_reason != ""),
-                prompt_logprobs=None,
-                prompt=prompt,
-            )
-
-        # print(f"TTFT: {ttft}")
-        # print(f"TPOT: {sum(tpots)/len(tpots)}")
+        while True:
+            message = await socket.recv()
+            yield pickle.loads(message)
