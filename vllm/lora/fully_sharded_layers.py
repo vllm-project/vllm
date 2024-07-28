@@ -130,6 +130,7 @@ def _mcp_apply(x, bias, layer):
             if bias is not None:
                 bias = bias.view(-1, bias.shape[-1])
                 bias = bias[layer.indices[:layer.indices_len[0]]]
+                bias[layer.indices == -1] = 0
                 output[:, left_offset:left_offset + shard_size] += bias
 
         left_offset += shard_size
@@ -327,6 +328,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         if self.bias_stacked is not None:
             bias = self.bias_stacked.view(-1, self.bias_stacked.shape[-1])
             bias = bias[self.indices[:self.indices_len[0]]]
+            bias[self.indices == -1] = 0
             output += bias
 
         output = output.view(*out_orig_shape)
