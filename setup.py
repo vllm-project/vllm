@@ -9,12 +9,6 @@ import warnings
 from shutil import which
 from typing import Dict, List
 
-from shlex import split
-from subprocess import CalledProcessError, check_call
-from textwrap import dedent
-from setuptools.command.build_py import build_py
-from setuptools.errors import SetupError
-
 import torch
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
@@ -32,38 +26,6 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
-
-
-class BuildPyAndGenerateGrpc(build_py):
-    """build python module using protoc to prepare generated files."""
-
-    proto_source = "vllm/grpc/pb/generate.proto"
-
-    def run(self):
-        print(f"Invoking protoc on {self.proto_source}")
-
-        # NOTE: imports in generated files will be broken unless some care is given in
-        # how --proto_path, --*_out and .proto paths are given.
-        #
-        # See https://github.com/grpc/grpc/issues/9575#issuecomment-293934506
-        try:
-            check_call(
-                split(
-                    dedent(
-                        f"""
-                        python -m grpc_tools.protoc \
-                            --proto_path=. \
-                            --python_out=. \
-                            --grpc_python_out=. \
-                            {self.proto_source}
-                      """,
-                    ),
-                )
-            )
-        except CalledProcessError as exc:
-            raise SetupError(f"protoc failed, exit code {exc.returncode}") from exc
-
-        super().run()
 
 
 def embed_commit_hash():
