@@ -158,6 +158,7 @@ class FusedMoE(torch.nn.Module):
         topk_group: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -181,7 +182,7 @@ class FusedMoE(torch.nn.Module):
             self.quant_method: Optional[QuantizeMethodBase] = (
                 UnquantizedFusedMoEMethod())
         else:
-            self.quant_method = quant_config.get_quant_method(self)
+            self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
 
         self.quant_method.create_weights(
