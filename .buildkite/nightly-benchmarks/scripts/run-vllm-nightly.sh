@@ -202,6 +202,8 @@ upload_to_buildkite() {
 
 main() {
 
+  export VLLM_SOURCE_CODE_LOC=$(pwd)
+
   check_gpus
   # enter vllm directory
   cd $VLLM_SOURCE_CODE_LOC/benchmarks
