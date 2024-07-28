@@ -127,8 +127,6 @@ class RPCServer:
                 pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL)
             ])
         
-        print("All done!")
-        
     async def run_loop(self):
         while True:
             identity, message = await self.socket.recv_multipart()

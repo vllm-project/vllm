@@ -88,4 +88,11 @@ class RPCClient(AsyncLLMEngine):
 
         while True:
             message = await socket.recv()
-            yield pickle.loads(message)
+            request_output = pickle.loads(message)
+
+            if request_output.finished:
+                break
+            yield request_output
+
+        socket.close()
+        yield request_output
