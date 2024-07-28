@@ -18,7 +18,7 @@ check_gpus() {
 kill_gpu_processes() {
   # kill all processes on GPU.
   pkill pt_main_thread
-  sleep 10
+  sleep 5
 
   # remove vllm config file
   rm -rf ~/.config/vllm

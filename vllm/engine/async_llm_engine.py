@@ -3,6 +3,7 @@ import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Mapping,
                     Optional, Set, Tuple, Type, Union)
+import cProfile
 
 from transformers import PreTrainedTokenizer
 
@@ -394,16 +395,8 @@ class AsyncLLMEngine:
         self._request_tracker: RequestTracker
 
         # Add optional profiler for profiling
-        self._profiler = profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
-            # only record 1/20 of the total run
-            schedule=torch.profiler.schedule(
-                wait=93,
-                warmup=2,
-                active=5,
-            ),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
-            record_shapes=True)
+        import cProfile
+        self._profiler = cProfile.Profile()
 
     @classmethod
     def _get_executor_cls(
@@ -617,10 +610,14 @@ class AsyncLLMEngine:
                 self.engine.parallel_config.pipeline_parallel_size
         has_requests_in_progress = [False] * pipeline_parallel_size
 
-        self._profiler.start()
+        
+        idx = 0
 
         while True:
-            self._profiler.step()
+
+            if idx % 10 == 9:
+                profiler = cProfile.Profile()
+                profiler.enable()
             if not any(has_requests_in_progress):
                 logger.debug("Waiting for new requests...")
                 # Stop the execute model loop in parallel workers until there
@@ -679,6 +676,12 @@ class AsyncLLMEngine:
                 self.set_errored(exc)
                 raise
             await asyncio.sleep(0)
+            
+            if idx % 10 == 9:
+                profiler.disable()
+                stats_filename = f'log/{idx}.lprof'
+                profiler.dump_stats(stats_filename)
+            idx = idx + 1
 
     async def add_request(
         self,
