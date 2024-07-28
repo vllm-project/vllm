@@ -203,6 +203,7 @@ upload_to_buildkite() {
 main() {
 
   export VLLM_SOURCE_CODE_LOC=$(pwd)
+  export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
   check_gpus
   # enter vllm directory
