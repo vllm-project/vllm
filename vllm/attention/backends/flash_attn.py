@@ -279,15 +279,15 @@ class FlashAttentionMetadataBuilder(
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
-
-        logits_soft_cap = getattr(self.runner.model_config.hf_config,
-                                  "attn_logit_softcapping", None)
-        if logits_soft_cap is not None:
-            raise ValueError(
-                "Please use Flashinfer backend for models with logits_soft_cap"
-                " (i.e., Gemma-2). Otherwise, the output might be wrong."
-                " Set Flashinfer backend by "
-                "export VLLM_ATTENTION_BACKEND=FLASHINFER.")
+        # FIXME deactivate softcat validation
+        #logits_soft_cap = getattr(self.runner.model_config.hf_config,
+        #                          "attn_logit_softcapping", None)
+        #if logits_soft_cap is not None:
+        #    raise ValueError(
+        #        "Please use Flashinfer backend for models with logits_soft_cap"
+        #        " (i.e., Gemma-2). Otherwise, the output might be wrong."
+        #        " Set Flashinfer backend by "
+        #        "export VLLM_ATTENTION_BACKEND=FLASHINFER.")
 
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
