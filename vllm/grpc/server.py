@@ -1,7 +1,7 @@
 from vllm import AsyncEngineArgs, AsyncLLMEngine
 import asyncio
 import pickle
-import zmq, zlib
+import zmq
 import zmq.asyncio
 
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
@@ -15,10 +15,10 @@ class RPCServer:
 
         self.running_tasks = set()
         self.engine = AsyncLLMEngine.from_engine_args(
-            AsyncEngineArgs(model=MODEL, enable_chunked_prefill=True))
+            AsyncEngineArgs(model=MODEL))
 
     async def generate(self, identity, message):
-        request = pickle.loads(zlib.decompress(message))
+        request = pickle.loads(message)
         results_generator = self.engine.generate(
             request.inputs, 
             sampling_params=request.sampling_params,
@@ -27,8 +27,7 @@ class RPCServer:
         async for request_output in results_generator:
             self.socket.send_multipart([
                 identity, 
-                zlib.compress(
-                    pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL))
+                pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL)
             ])
         
     async def run_loop(self):
