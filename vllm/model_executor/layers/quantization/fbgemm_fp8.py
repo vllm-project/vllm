@@ -73,6 +73,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
+        self.cutlass_fp8_supported = cutlass_fp8_supported()
 
     def create_weights(
         self,
@@ -146,5 +147,5 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                                 input_scale=None,
                                 input_scale_ub=layer.input_scale_ub,
                                 bias=bias,
-                                cutlass_fp8_supported=cutlass_fp8_supported(),
+                                cutlass_fp8_supported=self.cutlass_fp8_supported,
                                 use_per_token_if_dynamic=True)
