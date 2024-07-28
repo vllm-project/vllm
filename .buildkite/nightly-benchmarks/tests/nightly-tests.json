@@ -9,7 +9,7 @@
             "dataset_path": "sonnet.txt",
             "sonnet_input_len": 292,
             "sonnet_output_len": 579,
-            "num_prompts": 1000,
+            "num_prompts": 500,
             "port": 8000
         },
         "vllm_server_parameters": {
