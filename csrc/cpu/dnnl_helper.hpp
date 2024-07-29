@@ -38,6 +38,7 @@ constexpr inline dnnl::memory::data_type get_dnnl_type() {
 }
 };  // namespace
 
+template <bool InputNoScale>
 class DNNLPrimitiveHelper {
  public:
   // I8 input GEMM kernel (C = a_scales * A @ (b_scales * B^T) + bias)
@@ -64,12 +65,14 @@ class DNNLPrimitiveHelper {
     dnnl::memory::desc c_md({M, N}, OutputT, {N, 1});
 
     dnnl::primitive_attr attr;
-    if (MS == 1) {
-      // per-tensor
-      attr.set_scales_mask(DNNL_ARG_SRC, 0);
-    } else {
-      // per-token
-      TORCH_CHECK(false, "per-token quantization is unsupported.");
+    if constexpr (!InputNoScale) {
+      if (MS == 1) {
+        // per-tensor
+        attr.set_scales_mask(DNNL_ARG_SRC, 0);
+      } else {
+        // per-token
+        TORCH_CHECK(false, "per-token quantization is unsupported.");
+      }
     }
 
     if (NS == 1) {
@@ -102,27 +105,50 @@ class DNNLPrimitiveHelper {
                             (void*)b_scales);
 
     auto& stream = default_stream();
-    if (bias) {
-      dnnl::memory::desc bias_md({N}, BiasT, {1});
-      dnnl::memory bias_m(bias_md, engine, (void*)bias);
-      matmul.execute(stream,
-                     {
-                         {DNNL_ARG_SRC, a_m},
-                         {DNNL_ARG_WEIGHTS, b_m},
-                         {DNNL_ARG_BIAS, bias_m},
-                         {DNNL_ARG_DST, c_m},
-                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
-                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
-                     });
+    if constexpr (InputNoScale) {
+      if (bias) {
+        dnnl::memory::desc bias_md({N}, BiasT, {1});
+        dnnl::memory bias_m(bias_md, engine, (void*)bias);
+        matmul.execute(
+            stream, {
+                        {DNNL_ARG_SRC, a_m},
+                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_BIAS, bias_m},
+                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
+                    });
+      } else {
+        matmul.execute(
+            stream, {
+                        {DNNL_ARG_SRC, a_m},
+                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
+                    });
+      }
     } else {
-      matmul.execute(stream,
-                     {
-                         {DNNL_ARG_SRC, a_m},
-                         {DNNL_ARG_WEIGHTS, b_m},
-                         {DNNL_ARG_DST, c_m},
-                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
-                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
-                     });
+      if (bias) {
+        dnnl::memory::desc bias_md({N}, BiasT, {1});
+        dnnl::memory bias_m(bias_md, engine, (void*)bias);
+        matmul.execute(
+            stream, {
+                        {DNNL_ARG_SRC, a_m},
+                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_BIAS, bias_m},
+                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
+                        {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
+                    });
+      } else {
+        matmul.execute(
+            stream, {
+                        {DNNL_ARG_SRC, a_m},
+                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
+                        {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
+                    });
+      }
     }
     stream.wait();
   }

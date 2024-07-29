@@ -56,7 +56,109 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
     if (j + vec_elem_num == hidden_size) {
       elems_int8.save(output + i * hidden_size + j);
     } else {
-      elems_int8.save_low(output + i * hidden_size + j, hidden_size - j);
+      elems_int8.save(output + i * hidden_size + j, hidden_size - j);
+    }
+  }
+}
+
+template <typename scalar_t>
+void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
+                                    float* scale, const int num_tokens,
+                                    const int hidden_size) {
+  using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
+  using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
+  constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
+
+  #pragma omp parallel for
+  for (int i = 0; i < num_tokens; ++i) {
+    cvt_vec_t max_abs(0.0);
+    {
+      int j = 0;
+      for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
+        load_vec_t elems(input + i * hidden_size + j);
+        cvt_vec_t elems_fp32(elems);
+        max_abs = max_abs.max(elems_fp32.abs());
+      }
+
+      load_vec_t elems(input + i * hidden_size + j);
+      cvt_vec_t elems_fp32(elems);
+
+      if (j + vec_elem_num == hidden_size) {
+        max_abs = max_abs.max(elems_fp32.abs());
+      } else {
+        max_abs = max_abs.max(elems_fp32.abs(), hidden_size - j);
+      }
+    }
+
+    float scale_val = max_abs.reduce_max() / 127.0f;
+    scale[i] = scale_val;
+    const cvt_vec_t inv_scale(1.0 / scale_val);
+
+    {
+      int j = 0;
+      for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
+        load_vec_t elems(input + i * hidden_size + j);
+        cvt_vec_t elems_fp32(elems);
+        elems_fp32 = (elems_fp32 * inv_scale);
+        vec_op::INT8Vec16 elems_int8(elems_fp32);
+        elems_int8.save(output + i * hidden_size + j);
+      }
+
+      load_vec_t elems(input + i * hidden_size + j);
+      cvt_vec_t elems_fp32(elems);
+      elems_fp32 = (elems_fp32 * inv_scale);
+      vec_op::INT8Vec16 elems_int8(elems_fp32);
+
+      if (j + vec_elem_num == hidden_size) {
+        elems_int8.save(output + i * hidden_size + j);
+      } else {
+        elems_int8.save(output + i * hidden_size + j, hidden_size - j);
+      }
+    }
+  }
+}
+
+template <bool Bias, typename scalar_t>
+void dynamic_output_scale_impl(const float* input, scalar_t* output,
+                               const float* scale, const scalar_t* bias,
+                               const int num_tokens, const int hidden_size) {
+  using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
+  using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
+  constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
+
+  #pragma omp parallel for
+  for (int i = 0; i < num_tokens; ++i) {
+    int j = 0;
+    cvt_vec_t token_scale_vec(scale[i]);
+    for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
+      cvt_vec_t elems_fp32(input + i * hidden_size + j);
+      elems_fp32 = elems_fp32 * token_scale_vec;
+
+      if constexpr (Bias) {
+        load_vec_t bias_vec(bias + j);
+        cvt_vec_t bias_vec_fp32(bias_vec);
+        elems_fp32 = elems_fp32 + bias_vec_fp32;
+      }
+
+      load_vec_t elems_out(elems_fp32);
+      elems_out.save(output + i * hidden_size + j);
+    }
+
+    cvt_vec_t elems_fp32(input + i * hidden_size + j);
+    elems_fp32 = elems_fp32 * token_scale_vec;
+
+    if constexpr (Bias) {
+        load_vec_t bias_vec(bias + j);
+        cvt_vec_t bias_vec_fp32(bias_vec);
+        elems_fp32 = elems_fp32 + bias_vec_fp32;
+    }
+
+    load_vec_t elems_out(elems_fp32);
+
+    if (j + vec_elem_num == hidden_size) {
+      elems_out.save(output + i * hidden_size + j);
+    } else {
+      elems_out.save(output + i * hidden_size + j, hidden_size - j);
     }
   }
 }
@@ -66,6 +168,18 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
                                    const float* scale, const int num_tokens,
                                    const int hidden_size) {
   TORCH_CHECK(false, "static_scaled_int8_quant_impl requires AVX512 support.")
+}
+
+template <typename scalar_t>
+void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
+                                    float* scale, const int num_tokens,
+                                    const int hidden_size) {
+  TORCH_CHECK(false, "dynamic_scaled_int8_quant_impl requires AVX512 support.")
+}
+
+template <typename scalar_t>
+void dynamic_output_scale_impl() {
+  TORCH_CHECK(false, "dynamic_output_scale_impl requires AVX512 support.")
 }
 #endif
 }  // namespace
@@ -97,18 +211,41 @@ void cutlass_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(c.scalar_type(), "cutlass_scaled_mm", [&] {
-    if (bias.has_value()) {
-      DNNLPrimitiveHelper::gemm_s8s8_jit(
-          a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), c.data_ptr<scalar_t>(),
-          bias->data_ptr<scalar_t>(), a.size(0), b.size(1), a.size(1),
-          a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
-          a_scales.numel(), b_scales.numel());
+    if (a_scales.numel() != 1) {
+      // per-token
+      // Note: oneDNN doesn't support per-token activation quantization
+      torch::Tensor tmp_fp32_out =
+          torch::empty_like(c, ::at::ScalarType::Float);
+      DNNLPrimitiveHelper<true>::gemm_s8s8_jit(
+          a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
+          tmp_fp32_out.data_ptr<float>(), (void*)(0), a.size(0), b.size(1),
+          a.size(1), (float*)(0), b_scales.data_ptr<float>(), 0,
+          b_scales.numel());
+      if (bias.has_value()) {
+        dynamic_output_scale_impl<true>(
+            tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+            a_scales.data_ptr<float>(), bias->data_ptr<scalar_t>(), c.size(0),
+            c.size(1));
+      } else {
+        dynamic_output_scale_impl<false>(
+            tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+            a_scales.data_ptr<float>(), (scalar_t*)(0), c.size(0), c.size(1));
+      }
     } else {
-      DNNLPrimitiveHelper::gemm_s8s8_jit(
-          a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), c.data_ptr<scalar_t>(),
-          (void*)(0), a.size(0), b.size(1), a.size(1),
-          a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
-          a_scales.numel(), b_scales.numel());
+      // per-tensor
+      if (bias.has_value()) {
+        DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
+            a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), c.data_ptr<scalar_t>(),
+            bias->data_ptr<scalar_t>(), a.size(0), b.size(1), a.size(1),
+            a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+            a_scales.numel(), b_scales.numel());
+      } else {
+        DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
+            a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), c.data_ptr<scalar_t>(),
+            (void*)(0), a.size(0), b.size(1), a.size(1),
+            a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+            a_scales.numel(), b_scales.numel());
+      }
     }
   });
 }
@@ -133,7 +270,19 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
 
 // dynamic-per-token quantization.
 void dynamic_scaled_int8_quant(
-    torch::Tensor& output,       // [..., hidden_size]
+    torch::Tensor& out,          // [..., hidden_size]
     const torch::Tensor& input,  // [..., hidden_size]
     torch::Tensor& scale         // [..., 1]
-) {}
+) {
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
+
+  int const hidden_size = input.size(-1);
+  int const num_tokens = input.numel() / hidden_size;
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "dynamic_scaled_int8_quant_impl", [&] {
+        dynamic_scaled_int8_quant_impl(
+            input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
+            scale.data_ptr<float>(), num_tokens, hidden_size);
+      });
+}

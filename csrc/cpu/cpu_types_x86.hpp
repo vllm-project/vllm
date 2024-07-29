@@ -106,6 +106,12 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
   explicit BF16Vec16(const FP32Vec16 &);
 
   void save(void *ptr) const { *reinterpret_cast<__m256i *>(ptr) = reg; }
+
+  void save(void* ptr, const int elem_num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
+    _mm256_mask_storeu_epi16(ptr, mask, reg);
+  }
 };
 
 #ifdef __AVX512F__
@@ -313,11 +319,27 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(_mm512_div_ps(reg, b.reg));
   }
 
-  FP32Vec16 clamp(const FP32Vec16& min, const FP32Vec16& max) {
+  FP32Vec16 clamp(const FP32Vec16& min, const FP32Vec16& max) const {
     return FP32Vec16(_mm512_min_ps(max.reg, _mm512_max_ps(min.reg, reg)));
   }
 
+  FP32Vec16 max(const FP32Vec16& b) const {
+    return FP32Vec16(_mm512_max_ps(reg, b.reg));
+  }
+
+  FP32Vec16 max(const FP32Vec16& b, const int elem_num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
+    return FP32Vec16(_mm512_mask_max_ps(reg, mask, reg, b.reg));
+  }
+
+  FP32Vec16 abs() const {
+    return FP32Vec16(_mm512_abs_ps(reg));
+  } 
+
   float reduce_sum() const { return _mm512_reduce_add_ps(reg); }
+
+  float reduce_max() const { return _mm512_reduce_max_ps(reg); }
 
   template <int group_size> float reduce_sub_sum(int idx) {
     static_assert(VEC_ELEM_NUM % group_size == 0);
@@ -327,6 +349,12 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   void save(float *ptr) const { _mm512_storeu_ps(ptr, reg); }
+
+  void save(float* ptr, const int elem_num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
+    _mm512_mask_storeu_ps(ptr, mask, reg);
+  }
 };
 #else
 struct FP32Vec16 : public Vec<FP32Vec16> {
@@ -455,9 +483,9 @@ struct INT8Vec16: public Vec<INT8Vec16> {
     _mm_storeu_epi8(ptr, reg);
   }
 
-  void save_low(int8_t* ptr, const int num) const {
+  void save(int8_t* ptr, const int elem_num) const {
     constexpr uint32_t M = 0xFFFFFFFF;
-    __mmask16 mask = _cvtu32_mask16(M >> (32 - num));
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
     _mm_mask_storeu_epi8(ptr, mask, reg);
   }
 };

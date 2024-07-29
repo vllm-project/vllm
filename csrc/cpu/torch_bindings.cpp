@@ -94,6 +94,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> "
       "()");
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
+  // Compute int8 quantized tensor and scaling factor
+  ops.def(
+      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
+      "()");
+  ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
+           &dynamic_scaled_int8_quant);
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
   ops.def(
