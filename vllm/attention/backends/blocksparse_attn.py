@@ -328,6 +328,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
         kv_scale: float = 1.0,
+        sp_rank: Optional[int] = -1,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 

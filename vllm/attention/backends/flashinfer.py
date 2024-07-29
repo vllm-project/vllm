@@ -220,6 +220,7 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: FlashInferMetadata,
         kv_scale: float = 1.0,
+        sp_rank: Optional[int] = -1,
     ) -> torch.Tensor:
         assert kv_scale == 1.0
         num_tokens, hidden_size = query.shape

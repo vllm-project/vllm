@@ -108,23 +108,23 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # used for remote inference
     # reshape the output of model execution.
     # prefill:decode:longdecode-->prefill:decode
-    output_reshape_index: Optional[List[int]]
+    output_reshape_index: List[int]
     # list of sequence length per sequence respond to different ranks
-    seq_lens_remote: Optional[List[List[int]]]
+    seq_lens_remote: List[List[int]]
     # seq_lens_remote as list[tensor]
-    seq_lens_remote_tensor: Optional[List[torch.Tensor]]
+    seq_lens_remote_tensor: List[torch.Tensor]
     # number of sequence
-    num_remote_decode_tokens: Optional[List[int]]
+    num_remote_decode_tokens: List[int]
     # max length of sequence length
-    max_remote_decode_seq_len: Optional[List[int]]
+    max_remote_decode_seq_len: List[int]
     # block_tables_remote:
-    block_tables_remote: Optional[List[torch.Tensor]]
+    block_tables_remote: List[torch.Tensor]
     # For sequence group[0,1,2,3,4,5], q_remote_distribution [0,0,1,2,3,3] means
     # sequences 0 and 1 use the same q0 while sequences 4 and 5 use
     # the same q3. In this way, the max length of sequence is not limited to the
     # Max_number*gpu_number, where multi sequence blocks in one remote rank are
     # considered as the multi batched sequences with the same q.
-    q_remote_distirbution: Optional[List[List[int]]]
+    q_remote_distirbution: List[List[int]]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -172,13 +172,13 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             seq_start_loc=None,
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
-            output_reshape_index=None,
-            seq_lens_remote=None,
-            seq_lens_remote_tensor=None,
-            num_remote_decode_tokens=None,
-            max_remote_decode_seq_len=None,
-            block_tables_remote=None,
-            q_remote_distirbution=None,
+            output_reshape_index=[],
+            seq_lens_remote=[],
+            seq_lens_remote_tensor=[],
+            num_remote_decode_tokens=[],
+            max_remote_decode_seq_len=[],
+            block_tables_remote=[],
+            q_remote_distirbution=[],
             use_cuda_graph=False,
         )
         return self._cached_prefill_metadata
@@ -210,12 +210,12 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             output_reshape_index=self.output_reshape_index,
-            seq_lens_remote=None,
-            seq_lens_remote_tensor=None,
-            num_remote_decode_tokens=None,
-            max_remote_decode_seq_len=None,
-            block_tables_remote=None,
-            q_remote_distirbution=None,
+            seq_lens_remote=[],
+            seq_lens_remote_tensor=[],
+            num_remote_decode_tokens=[],
+            max_remote_decode_seq_len=[],
+            block_tables_remote=[],
+            q_remote_distirbution=[],
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
@@ -382,7 +382,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             )
 
             # Reshape the output tensor.
-            return fileter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits, q_remote_distribution, old_num_seqs)
+            return filter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits, q_remote_distribution, old_num_seqs)
         output = torch.empty_like(query)
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
