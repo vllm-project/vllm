@@ -7,8 +7,9 @@
 
 import torch
 import torch.nn as nn
-from vllm.utils import is_hpu
+
 from vllm.logger import init_logger
+from vllm.utils import is_hpu
 
 logger = init_logger(__name__)
 
@@ -49,7 +50,9 @@ class HpuRotaryEmbedding(nn.Module):
                                 device=self.inv_freq.device,
                                 dtype=torch.get_default_dtype())
         if FusedRoPE is None:
-            assert RoPEFallback is not None, "HPU FusedRoPE kernel could not be imported, and fallback RoPE implementation was not provided!"
+            assert RoPEFallback is not None, (
+                "HPU FusedRoPE kernel could not be imported, and "
+                "fallback RoPE implementation was not provided!")
             self.fallback_impl = RoPEFallback(head_size,
                                               rotary_dim,
                                               max_position_embeddings,
