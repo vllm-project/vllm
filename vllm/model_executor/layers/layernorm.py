@@ -6,13 +6,15 @@ import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.utils import is_hpu
-
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 if is_hpu():
     try:
-        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
+        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm as HPUFusedRMSNorm
     except ImportError:
-        print("Not using HPU fused kernel for RMSNorm")
-        FusedRMSNorm = None
+        logger.warning("Could not import HPU FusedRMSNorm kernel. "
+                       "vLLM will use forward_native implementation of RMSNorm.")
+        HPUFusedRMSNorm = None
 
 
 class RMSNorm(CustomOp):
@@ -80,37 +82,21 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm._ipex_ops import ipex_ops as ops
-
+        if HPUFusedRMSNorm is None:
+            return self.forward_native(x, residual)
         if residual is not None:
-            if x.device.type == "hpu" and FusedRMSNorm:
-                orig_dtype = x.dtype
-                orig_shape = x.shape
-                residual += x.view(residual.shape)
-                # Note: FusedRMSNorm requires 3D tensors as inputs
-                x = FusedRMSNorm.apply(residual.float(), self.weight.float(),
-                                       self.variance_epsilon)
-                return x.to(orig_dtype).view(orig_shape), residual
-            ops.fused_add_rms_norm(
-                x,
-                residual,
-                self.weight.data,
-                self.variance_epsilon,
-            )
-            return x, residual
-        if x.device.type == "hpu" and FusedRMSNorm:
             orig_dtype = x.dtype
-            x = FusedRMSNorm.apply(x.float(), self.weight.float(),
-                                   self.variance_epsilon)
-            return x.to(orig_dtype)
-        out = torch.empty_like(x)
-        ops.rms_norm(
-            out,
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
-        return out
+            orig_shape = x.shape
+            residual += x.view(residual.shape)
+            # Note: HPUFusedRMSNorm requires 3D tensors as inputs
+            x = HPUFusedRMSNorm.apply(residual.float(), self.weight.float(),
+                                    self.variance_epsilon)
+            return x.to(orig_dtype).view(orig_shape), residual
+    
+        orig_dtype = x.dtype
+        x = HPUFusedRMSNorm.apply(x.float(), self.weight.float(),
+                                self.variance_epsilon)
+        return x.to(orig_dtype)
 
     def forward_xpu(
         self,
