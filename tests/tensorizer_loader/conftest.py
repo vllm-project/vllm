@@ -1,6 +1,8 @@
 # isort: skip_file
 # ruff: noqa
 # yapf: disable
+# type: ignore
+
 
 import contextlib
 import gc

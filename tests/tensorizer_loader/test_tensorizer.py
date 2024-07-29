@@ -1,6 +1,8 @@
 # isort: skip_file
 # ruff: noqa
 # yapf: disable
+# type: ignore
+
 
 import json
 import os
