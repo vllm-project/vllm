@@ -3,20 +3,16 @@ from typing import List, Optional, Tuple, Union
 
 import pandas as pd
 import torch
-import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+import vllm._C
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
-
-try:  # NOQA: SIM105
-    from vllm._C import ops as vllm_ops
-except ImportError:
-    pass
 
 logger = init_logger(__name__)
 
@@ -26,7 +22,7 @@ class Fp8RocmConfig(QuantizationConfig):
     def __init__(self) -> None:
         self._tuned = {}
         gemm_type = os.getenv("FP8_GEMM", "fp8_16")
-        vllm_ops.create_workspace()
+        vllm._C.ops.create_workspace()
 
         self.shapes = []
         if os.getenv("TUNE_FP8") == "1" and os.path.isfile(
@@ -34,13 +30,17 @@ class Fp8RocmConfig(QuantizationConfig):
             self.shapes = pd.read_csv("/tmp/fp8_shapes.csv").values.tolist()
 
         if gemm_type == "fp8_8":
-            self.gemm_method = Fp8RocmLinearMethod.apply_fp8_8
+            self.gemm_out_type = torch.float8_e4m3fnuz
             tuned_filename = "/tmp/tuned_fp8_8.csv"
         elif gemm_type == "fp8_16":
-            self.gemm_method = Fp8RocmLinearMethod.apply_fp8_16
+            self.gemm_out_type = torch.float16
             tuned_filename = "/tmp/tuned_fp8_16.csv"
+        elif gemm_type == "fp8_b16":
+            self.gemm_out_type = torch.bfloat16
+            tuned_filename = "/tmp/tuned_fp8_b16.csv"
         else:
             raise ValueError(f"Unknown fp8 gemm type: {gemm_type}")
+
         try:
             df = pd.read_csv(tuned_filename)
         except pd.errors.ParserError as e:
@@ -221,81 +221,37 @@ class Fp8RocmLinearMethod(LinearMethodBase):
 
         return param[shard_id], loaded_weight
 
-    def apply_fp8_16(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        asf: torch.Tensor,
-        wsf: torch.Tensor,
-        osf: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert not bias
-        x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        vllm_ops.convert_fp8(x8, x, asf)
-        m = weight.shape[0]
-        n = x.shape[0]
-        k = x.shape[1]
-
-        algo = self._config._tuned.get((m, n, k))
-        if algo is None:
-            self._config.save_shape(m, n, k)
-            res, _ = torch._scaled_mm(x8,
-                                      weight.t(),
-                                      out_dtype=x.dtype,
-                                      scale_a=asf,
-                                      scale_b=wsf,
-                                      bias=bias)
-        else:
-            res = vllm_ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
-        return res
-
-    def apply_fp8_8(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        asf: torch.Tensor,
-        wsf: torch.Tensor,
-        osf: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert not bias
-        x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        vllm_ops.convert_fp8(x8, x, asf)
-        m = weight.shape[0]
-        n = x.shape[0]
-        k = x.shape[1]
-
-        algo = self._config._tuned.get((m, n, k))
-        if algo is None:
-            self._config.save_shape(m, n, k)
-            res, _ = torch._scaled_mm(x8,
-                                      weight.t(),
-                                      out_dtype=x8.dtype,
-                                      scale_a=asf,
-                                      scale_b=wsf,
-                                      scale_result=osf,
-                                      bias=bias)
-        else:
-            res = vllm_ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
-        res16 = torch.empty_like(res, dtype=torch.float16)
-        vllm_ops.convert_fp8(res16, res, 1 / osf)
-        return res16
-
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if layer.weight.dtype == torch.float8_e4m3fnuz:
+        weight: torch.Tensor = layer.weight
+        out_dtype = self._config.gemm_out_type
 
-            return self._config.gemm_method(self, x, layer.weight,
-                                            layer.activation_scaling_factor,
-                                            layer.weights_scaling_factor,
-                                            layer.output_scaling_factor)
+        asf: torch.Tensor = layer.activation_scaling_factor
+        wsf: torch.Tensor = layer.weights_scaling_factor
+        osf: Optional[torch.Tensor] = layer.output_scaling_factor \
+            if out_dtype == torch.float8_e4m3fnuz else None
 
-        return F.linear(x, layer.weight, bias)
+        x_quant = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
+        ops.convert_fp8(x_quant, x, asf)
+        m = weight.shape[0]
+        n = x.shape[0]
+        k = x.shape[1]
+
+        solidx = self._config._tuned.get((m, n, k), 0)
+        res = ops.fp8_mm(x_quant, weight.t(), out_dtype, asf, wsf, osf,
+                         int(solidx))
+
+        if osf is not None:
+            res_upscaled = torch.empty_like(res, dtype=x.dtype)
+            ops.convert_fp8(res_upscaled, res, 1 / osf)
+            res = res_upscaled
+        if bias is not None:
+            res += bias
+        return res
 
 
 def _per_tensor_quantize(tensor: torch.Tensor,

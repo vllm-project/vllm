@@ -117,13 +117,9 @@ void convert_fp8(torch::Tensor& dst_data, torch::Tensor& src_data,
                  torch::Tensor& scale);
 
 #ifdef USE_ROCM
-torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b,
-                       torch::Tensor& scaleA, torch::Tensor& scaleB,
-                       torch::Tensor& scaleD, int algo_idx);
-
-torch::Tensor fp8_gemm_16(torch::Tensor& a, torch::Tensor& b,
-                          torch::Tensor& scaleA, torch::Tensor& scaleB,
-                          int algo_idx);
+void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
+            torch::Tensor& scale_a, torch::Tensor& scale_b,
+            const c10::optional<torch::Tensor>& scale_result, int64_t algo_idx);
 
 void create_workspace();
 #endif

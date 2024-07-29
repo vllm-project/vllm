@@ -70,8 +70,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Convert the key and value cache to fp8 data type");
 
 #ifdef USE_ROCM
-  ops.def("fp8_gemm", &fp8_gemm, "fp8 GEMM with fp8 output");
-  ops.def("fp8_gemm_16", &fp8_gemm_16, "fp8 GEMM with fp16 output");
+  ops.def("fp8_mm", &fp8_mm, "fp8 GEMM with fp8 fp16 bf16 output type");
   ops.def("create_workspace", &create_workspace,
           "Create workspace for fp8 GEMM");
 #endif
