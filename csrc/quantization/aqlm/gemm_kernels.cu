@@ -602,8 +602,6 @@ torch::Tensor aqlm_gemm_meta(const torch::Tensor& input,
                              const torch::Tensor& scales,
                              const torch::Tensor& codebook_partition_sizes,
                              const std::optional<torch::Tensor>& bias) {
-
-
   auto out_features = codes.size(0) * codebooks.size(2);
   auto flat_input = input.reshape({-1, input.size(-1)});
   auto flat_output = torch::empty(

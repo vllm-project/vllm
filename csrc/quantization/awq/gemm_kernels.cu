@@ -533,7 +533,8 @@ torch::Tensor awq_gemm_meta(torch::Tensor _in_feats, torch::Tensor _kernel,
                      .dtype(_in_feats.dtype())
                      .device(_in_feats.device());
   return torch::empty({split_k_iters, num_in_feats, _kernel.size(1) * 8},
-                      options).sum(0);
+                      options)
+      .sum(0);
 }
 
 torch::Tensor awq_dequantize_meta(torch::Tensor _kernel,
