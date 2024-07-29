@@ -361,7 +361,10 @@ class FlashAttentionImpl(AttentionImpl):
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
         is_valid_rank = sp_rank is not None and sp_rank != -1
-        remote_metadata = attn_metadata.remote_metadata if is_valid_rank else None
+        if is_valid_rank:
+            remote_metadata = attn_metadata.remote_metadata
+        else:
+            remote_metadata=None
         if remote_metadata is not None and sp_rank is not None:
             q_dist = remote_metadata.q_remote_distirbution[sp_rank]
             query_remote = reshape_q(query, q_dist)

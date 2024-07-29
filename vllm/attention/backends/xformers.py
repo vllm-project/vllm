@@ -353,7 +353,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     dtype=torch.float32,
                     device=output.device,
                 )
-                max_logits = torch.empty(
+                max_log = torch.empty(
                     size=(num_seqs, num_heads),
                     dtype=torch.float32,
                     device=output.device,
@@ -361,7 +361,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
                 # Decoding run.
-                output[:], exp_sums[:], max_logits[:] = PagedAttention.forward_decode2(
+                output[:], exp_sums[:], max_log[:] = PagedAttention.forward_decode2(
                     decode_query,
                     key_cache,
                     value_cache,
@@ -378,7 +378,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
                 # Reshape the output tensor.
                 temp = output.view(-1, self.num_heads * self.head_size)
-                return filter_tensor(temp, exp_sums, max_logits, q_dist, old_num_seqs)
+                return filter_tensor(temp, exp_sums, max_log, q_dist, old_num_seqs)
         output = torch.empty_like(query)
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -411,7 +411,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             dtype=torch.float32,
             device=output.device,
         )
-        max_logits = torch.empty(
+        max_log= torch.empty(
             size=(num_seqs, num_heads),
             dtype=torch.float32,
             device=output.device,
@@ -458,7 +458,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if decode_meta := attn_metadata.decode_metadata:
             num=num_prefill_tokens
-            output[num:], exp_sums[:], max_logits[:] = PagedAttention.forward_decode_v2(
+            output[num:], exp_sums[:], max_log[:] = PagedAttention.forward_decode_v2(
                 decode_query,
                 key_cache,
                 value_cache,
@@ -474,7 +474,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         # Reshape the output tensor.
         temp = output.view(-1, self.num_heads * self.head_size)
-        return temp, exp_sums, max_logits
+        return temp, exp_sums, max_log
 
     def _run_memory_efficient_xformers_forward(
         self,

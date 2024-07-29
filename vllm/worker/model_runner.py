@@ -666,9 +666,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     #       or context_len == 0, (
                     #       "Prefix caching is currently not supported with "
                     #       "sliding window attention in V1 block manager")
-                    #   It is an optimization. When it is decoding, it is always
-                    #   0. When prefill, we use it to not write slots to kv cache
-                    #   to save memory.
+                    #   It is an optimization. When it is decoding, it is
+                    #   always 0. When prefill, we use it to not write
+                    #   slots to kv cache to save memory.
                     #   start_idx = max(0, query_len - self.sliding_window)
 
                     for i in range(context_len, seq_len):
@@ -1133,8 +1133,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         use_tensor_cores = False
                     decode_wrapper = \
                         CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-                            decode_workspace_buffer, indptr_buffer, indices_buffer,
-                            last_page_len_buffer, "NHD", use_tensor_cores)
+                            decode_workspace_buffer,
+                            indptr_buffer,
+                            indices_buffer,
+                            last_page_len_buffer,
+                            "NHD", use_tensor_cores)
                     kv_cache_dtype = get_kv_cache_torch_dtype(
                         self.kv_cache_dtype, self.model_config.dtype)
 
@@ -1392,7 +1395,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         )
 
         hidden_states_reshape = torch.empty_like(
-            hidden_states, dtype=hidden_states.dtype, device=hidden_states.device)
+            hidden_states,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device)
         indexs = model_input.output_reshape_index
         for i in range(len(indexs)):
             hidden_states_reshape[indexs[i]] = hidden_states[i]
