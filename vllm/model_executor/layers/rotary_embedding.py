@@ -765,8 +765,12 @@ def get_rope(
         return _ROPE_DICT[key]
     if rope_scaling is None:
         if is_hpu():
-            rotary_emb = HpuRotaryEmbedding(head_size, rotary_dim,
-                                            max_position, base, is_neox_style)
+            rotary_emb = HpuRotaryEmbedding(head_size,
+                                            rotary_dim,
+                                            max_position,
+                                            base,
+                                            is_neox_style,
+                                            RoPEFallback=RotaryEmbedding)
         else:
             rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position,
                                          base, is_neox_style, dtype)
