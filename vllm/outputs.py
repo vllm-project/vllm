@@ -29,7 +29,7 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: Tuple[int, ...]
-    cumulative_logprob: float
+    cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
@@ -124,13 +124,14 @@ class RequestOutput:
         include_logprobs = seq_group.sampling_params.logprobs is not None
         text_buffer_length = seq_group.sampling_params.output_text_buffer_length
         outputs = [
-            CompletionOutput(seqs.index(seq),
-                             seq.get_output_text_to_return(text_buffer_length),
-                             seq.get_output_token_ids(),
-                             seq.get_cumulative_logprob(),
-                             seq.output_logprobs if include_logprobs else None,
-                             SequenceStatus.get_finished_reason(seq.status),
-                             seq.stop_reason) for seq in top_n_seqs
+            CompletionOutput(
+                seqs.index(seq),
+                seq.get_output_text_to_return(text_buffer_length),
+                seq.get_output_token_ids(),
+                seq.get_cumulative_logprob() if include_logprobs else None,
+                seq.output_logprobs if include_logprobs else None,
+                SequenceStatus.get_finished_reason(seq.status),
+                seq.stop_reason) for seq in top_n_seqs
         ]
 
         # Every sequence in the sequence group should have the same prompt.
