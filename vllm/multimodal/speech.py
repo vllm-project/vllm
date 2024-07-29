@@ -16,21 +16,41 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from .base import MultiModalInputs, MultiModalPlugin
 import pybase16384 as b14
+import base64
+import pickle
+
+class FishSpeechPlugin(MultiModalPlugin):
+
+    def get_data_key(self) -> str:
+        return "audio1"
+
+    def _default_input_mapper(self, ctx: InputContext,
+                              data: object) -> MultiModalInputs:
+        if isinstance(data, str):
+            base64_decoded = base64.b64decode(data)
+            deserialized_data = pickle.loads(base64_decoded)
+            tensor = torch.from_numpy(deserialized_data)
+            return MultiModalInputs({"audio": tensor})
+        elif isinstance(data, torch.Tensor):
+            raise NotImplementedError("Embeddings input is not supported yet")
+
+        raise TypeError(f"Invalid image type: {type(data)}")
+
+    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
+        return 16
+
+    @staticmethod
+    def get_default_audio():
+        return 'a'
 
 class SpeechPlugin(MultiModalPlugin):
 
     def get_data_key(self) -> str:
-        return "speech"
+        return "audio"
 
     def _decode_spk_emb(self, spk_emb: str) -> np.ndarray:
-        return np.frombuffer(
-            lzma.decompress(
-                b14.decode_from_string(spk_emb),
-                format=lzma.FORMAT_RAW,
-                filters=[{"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME}],
-            ),
-            dtype=np.float16,
-        ).copy()
+        n = base64.b64decode(spk_emb)
+        return np.frombuffer(n, dtype=np.float16).copy()
 
     def _default_input_mapper(self, ctx: InputContext,
                               data: object) -> MultiModalInputs:
@@ -54,10 +74,6 @@ class SpeechPlugin(MultiModalPlugin):
 
     @staticmethod
     def sample_random_speaker() -> str:
-       return b14.encode_to_string(
-           lzma.compress(
-               np.random.randn(768).astype(np.float16).tobytes(),
-               format=lzma.FORMAT_RAW,
-               filters=[{"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME}]
-               )
-            )
+        n = np.random.randn(768).astype(np.float16)
+        s = base64.b64encode(n).decode("utf-8")
+        return s

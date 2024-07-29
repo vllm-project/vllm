@@ -8,7 +8,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -18,7 +18,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.speech import SpeechPlugin
+from vllm.multimodal.speech import SpeechPlugin,FishSpeechPlugin
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
@@ -32,7 +32,7 @@ def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int):
 
 
     dummy_seq_data = SequenceData([[0] * ctx.model_config.hf_config.num_output_head] * seq_len)
-    dummy_multi_modal_data = {"speech": SpeechPlugin.sample_random_speaker()}
+    dummy_multi_modal_data = {"audio": SpeechPlugin.sample_random_speaker()}
 
     return dummy_seq_data, dummy_multi_modal_data
 
@@ -46,19 +46,19 @@ class ChatTtsLlm(nn.Module):
         super().__init__()
         
         # static parameters, put them in config later
-        self.num_audio_tokens = 626
-        self.num_text_tokens = 21178
-        self.num_vq = 4
+        self.num_audio_tokens = config.num_audio_tokens
+        self.num_text_tokens = config.num_text_tokens
+        self.num_output_head = config.num_output_head
         self.spk_emb_token_id = 21143
 
         self.gpt = LlamaModel(config)
         self.model_dim = self.gpt.config.hidden_size
         self.emb_all = nn.ModuleList([
-            VocabParallelEmbedding(self.num_audio_tokens + self.num_text_tokens, self.model_dim) for _ in range(self.num_vq)
+            VocabParallelEmbedding(self.num_audio_tokens + self.num_text_tokens, self.model_dim) for _ in range(self.num_output_head)
         ])
         
         self.lm_head = nn.ModuleList([
-            nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_vq)
+            nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_output_head)
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
         self.sampler = Sampler()
@@ -97,7 +97,7 @@ class ChatTtsLlm(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         code_emb = [
             self.emb_all[i](input_ids[:,i])
-            for i in range(self.num_vq)
+            for i in range(self.num_output_head)
         ]
         emb = torch.stack(code_emb, 2).sum(2)
         return emb
@@ -106,7 +106,7 @@ class ChatTtsLlm(nn.Module):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = [
             self.logits_processor(self.lm_head[i], hidden_states, sampling_metadata)
-            for i in range(self.num_vq)
+            for i in range(self.num_output_head)
         ]
         logits = torch.stack(logits, 0).permute(1, 0, 2)
         return logits
@@ -118,14 +118,14 @@ class ChatTtsLlm(nn.Module):
     ) -> Optional[SamplerOutput]:
         head_logits = logits.permute(1, 0, 2)
         next_tokens = self.sampler(head_logits[0], sampling_metadata)
-        for i in range(self.num_vq - 1):
+        for i in range(self.num_output_head - 1):
             output = self.sampler(head_logits[i + 1], sampling_metadata)
             self.merge_sample_results(next_tokens, output)
 
         for output in next_tokens.outputs:
             for sample in output.samples:
                 sample.output_token += self.num_text_tokens
-                for i in range(self.num_vq):
+                for i in range(self.num_output_head):
                     sample.output_tokens[i] += self.num_text_tokens
                 dic = {}
                 for k,v in sample.logprobs.items():

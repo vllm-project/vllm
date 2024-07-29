@@ -85,7 +85,7 @@ class MultiModalRegistry:
 
         See :meth:`MultiModalPlugin.register_input_mapper` for more details.
         """
-        return self.register_input_mapper("speech", mapper)
+        return self.register_input_mapper("audio", mapper)
 
     def map_input(self, model_config: ModelConfig,
                   data: MultiModalDataDict) -> MultiModalInputs:
