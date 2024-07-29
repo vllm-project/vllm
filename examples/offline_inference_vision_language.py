@@ -115,6 +115,7 @@ def run_internvl(question):
     llm = LLM(
         model="OpenGVLab/InternVL2-4B",
         trust_remote_code=True,
+        max_num_seqs=5,
     )
     return llm, prompt
 
