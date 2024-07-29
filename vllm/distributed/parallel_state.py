@@ -1053,7 +1053,7 @@ def destroy_model_parallel():
     _PP = None
 
     # Destroy _SP
-    global _PP
+    global _SP
     if _SP:
         for sp in _SP:
             if sp:
