@@ -572,14 +572,16 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         attn_metadata: "XFormersMetadata",
     ) -> torch.Tensor:
-        if decode_meta := attn_metadata.decode_metadata:
+        if decode_meta := attn_metadata.decode_metadata :
             num_seqs = decode_meta.num_long_decode_tokens
-            seq_lens = decode_meta.seq_lens[-num_seqs:]
-            # to modify: seq_lens maybe need to be further designed
-            output = PagedAttention.sequence_block_reducer(
-                tmp_out, exp_sum, max_logits, query,
-                seq_lens, decode_meta.max_long_decode_seq_len)
-            return output
+            if decode_meta.seq_lens is not None:
+                seq_lens = decode_meta.seq_lens[-num_seqs:]
+                # to modify: seq_lens maybe need to be further designed
+                output = PagedAttention.sequence_block_reducer(
+                    tmp_out, exp_sum, max_logits, query,
+                    seq_lens, decode_meta.max_long_decode_seq_len)
+                return output
+            return tmp_out
         else:
             return tmp_out
 

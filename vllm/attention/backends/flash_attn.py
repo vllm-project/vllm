@@ -367,7 +367,7 @@ class FlashAttentionImpl(AttentionImpl):
             query_remote = reshape_q(query, q_dist)
             output = torch.empty_like(query_remote)
             query = query_remote.view(-1, self.num_heads, self.head_size)
-            num_rem_dec = remote_metadata.num_long_decode_tokens[sp_rank]
+            num_rem_dec = remote_metadata.num_remote_decode_tokens[sp_rank]
             decode_query = query[:]
             assert decode_query.shape[0] == num_rem_dec
             num_seqs = decode_query.size(0)
