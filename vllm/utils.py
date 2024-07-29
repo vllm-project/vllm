@@ -299,7 +299,8 @@ def merge_async_iterators(
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
     """
-    queue: asyncio.Queue[Union[Tuple[int, T], Exception]] = asyncio.Queue()
+    queue: asyncio.Queue[Union[Tuple[int, T], ProducerFinished,
+                               Exception]] = asyncio.Queue()
 
     finished = [False] * len(iterators)
 
