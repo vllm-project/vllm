@@ -453,6 +453,8 @@ __global__ void Marlin(
       }
       // Only fetch scales if this tile starts a new group
       if constexpr (group_blocks != -1) {
+        // This assumes group_blocks >= thread_k_blocks
+        // and would need to be modified to support smaller groups.
         static_assert(group_blocks >= thread_k_blocks);
         if (pipe % (group_blocks / thread_k_blocks) == 0) {
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
@@ -484,8 +486,8 @@ __global__ void Marlin(
     // theoretically better attempts have lead to bad instruction ordering by
     // the compiler and correspondingly a noticeable drop in performance.
     if constexpr (group_blocks != -1) {
-      // This code assumes group_blocks >= thread_k_blocks
-      // and may need to be modified to support smaller groups
+      // This assumes group_blocks >= thread_k_blocks
+      // and would need to be modified to support smaller groups.
       static_assert(group_blocks >= thread_k_blocks);
       int4* sh_s_stage =
           sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
