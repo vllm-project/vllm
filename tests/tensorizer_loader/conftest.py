@@ -1,4 +1,6 @@
 # isort: skip_file
+# ruff: noqa
+# yapf: disable
 
 import contextlib
 import gc

@@ -1,4 +1,7 @@
 # isort: skip_file
+# ruff: noqa
+# yapf: disable
+
 import json
 import os
 import pathlib
