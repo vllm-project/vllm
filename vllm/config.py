@@ -39,6 +39,7 @@ _PP_SUPPORTED_MODELS = [
     "Phi3ForCausalLM",
     "GPT2LMHeadModel",
     "MixtralForCausalLM",
+    "NemotronForCausalLM",
 ]
 
 
@@ -281,6 +282,10 @@ class ModelConfig:
                 or parallel_config.pipeline_parallel_size > 1):
             raise ValueError(
                 "BitAndBytes quantization with TP or PP is not supported yet.")
+
+        if self.quantization == "bitsandbytes" and self.enforce_eager is False:
+            raise ValueError(
+                "BitAndBytes with enforce_eager = False is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
