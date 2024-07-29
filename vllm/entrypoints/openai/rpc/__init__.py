@@ -11,6 +11,7 @@ VLLM_GENERATE_RPC_PATH = "tcp://localhost:5570"
 VLLM_GET_DATA_RPC_PATH = "tcp://localhost:5571"
 VLLM_IS_READY_RPC_PATH = "tcp://localhost:5572"
 
+
 @dataclass
 class GenerateRequest:
     inputs: PromptInputs

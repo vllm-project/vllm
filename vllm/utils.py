@@ -290,6 +290,7 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
 class ProducerFinished:
     pass
 
+
 def merge_async_iterators(
         *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
     """Merge multiple asynchronous iterators into a single iterator.

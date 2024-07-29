@@ -7,7 +7,7 @@ from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.entrypoints.openai.rpc import (VLLM_GENERATE_RPC_PATH,
-                                         VLLM_GET_DATA_RPC_PATH, 
+                                         VLLM_GET_DATA_RPC_PATH,
                                          VLLM_IS_READY_RPC_PATH,
                                          GenerateRequest, GetDataRequest)
 
@@ -17,6 +17,7 @@ import pickle
 
 
 class RPCClient:
+
     def __init__(self):
         self.context = zmq.asyncio.Context()
 
@@ -62,7 +63,7 @@ class RPCClient:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
-        
+
         # Connect to RPC socket for Request-Reply pattern,
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
@@ -72,15 +73,13 @@ class RPCClient:
         # Send GenerateRequest to the RPC Server.
         await socket.send_multipart([
             pickle.dumps(
-                GenerateRequest(
-                    inputs=inputs,
-                    sampling_params=sampling_params,
-                    request_id=request_id,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request
-                ), pickle.HIGHEST_PROTOCOL
-            )
+                GenerateRequest(inputs=inputs,
+                                sampling_params=sampling_params,
+                                request_id=request_id,
+                                lora_request=lora_request,
+                                trace_headers=trace_headers,
+                                prompt_adapter_request=prompt_adapter_request),
+                pickle.HIGHEST_PROTOCOL)
         ])
 
         # Stream back the results from the RPC Server.

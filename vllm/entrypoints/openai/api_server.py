@@ -226,7 +226,7 @@ async def build_server(
         served_model_names = args.served_model_name
     else:
         served_model_names = [args.model]
-    
+
     rpc_client = RPCClient()
     await rpc_client.wait_for_server()
     logger.info("RPC Client connected to RPC server.")
@@ -304,12 +304,12 @@ async def build_server(
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
-    
+
     logger.info("Starting RPC Server.")
-    rpc_server_process = Process(target=run_rpc_server, 
-                                 args=(AsyncEngineArgs.from_cli_args(args),))
+    rpc_server_process = Process(target=run_rpc_server,
+                                 args=(AsyncEngineArgs.from_cli_args(args), ))
     rpc_server_process.start()
-    
+
     server = await build_server(
         args,
         **uvicorn_kwargs,
@@ -333,7 +333,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         print("Gracefully stopping http server")
         await server.shutdown()
         rpc_server_process.join()
-            
+
 
 if __name__ == "__main__":
     # NOTE(simon):
