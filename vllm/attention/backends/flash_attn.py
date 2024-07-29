@@ -680,6 +680,7 @@ class FlashAttentionImpl(AttentionImpl):
                     causal=True,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
+                    block_table=None,
                     softcap=self.logits_soft_cap,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
