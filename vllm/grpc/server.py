@@ -42,18 +42,10 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
         results_generator = self.engine.generate(
             inputs, 
             sampling_params=SamplingParams(max_tokens=MAX_TOKENS, 
-                                           temperature=TEMPERATURE,
-                                           detokenize=False),
+                                           temperature=TEMPERATURE,),
             request_id=request.request_id)
         
         async for request_output in results_generator:
-            if first:
-                ttft = time.time() - start
-                first = False
-            else:
-                tpot = time.time() - last
-                tpots.append(tpot)
-            last = time.time()
 
             outputs = [ 
                 generate_pb2.CompletionOutput(

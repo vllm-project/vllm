@@ -63,8 +63,6 @@ class TextGenerationClient(AsyncLLMEngine):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
         
-        start = time.time()
-        first = True
         
         prompt: str = inputs.get('prompt', "")
         prompt_token_ids: List[int] = inputs.get('prompt_token_ids', [])
@@ -79,24 +77,11 @@ class TextGenerationClient(AsyncLLMEngine):
             )
         )
 
-        ttft = 0
-        tpots = []
-        text = ""
         async for generate_response in generate_stream:
-            if first:
-                ttft = time.time() - start
-                first = False
-            else:
-                tpot = time.time() - last
-                tpots.append(tpot)
-            last = time.time()
-            text += "test_"
             completion_outputs = [
                 CompletionOutput(
                     index=output.index,
-                    # text=output.text,
-                    # text=self.tokenizer.decode(output.token_ids),
-                    text=text,
+                    text=output.text,
                     token_ids=output.token_ids,
                     cumulative_logprob=0.0,
                     logprobs=None,
