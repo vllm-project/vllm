@@ -30,22 +30,28 @@ class RPCClient:
         self.get_data_socket = self.context.socket(zmq.REQ)
         self.get_data_socket.connect(VLLM_GET_DATA_RPC_PATH)
 
-    
     async def wait_for_server(self):
         await self.is_ready_socket.recv()
-
 
     async def get_model_config(self) -> ModelConfig:
         self.get_data_socket.send(pickle.dumps(GetDataRequest.MODEL_CONFIG))
         model_config = await self.get_data_socket.recv()
         return pickle.loads(model_config)
 
+    async def get_tokenizer(self, lora_request: LoRARequest):
+        # TODO: handle this via get data?
+        pass
+
+    async def get_decoding_config(self, lora_request: LoRARequest):
+        # TODO: handle this via get data?
+        pass
 
     async def abort(self, request_id: str):
+        # TODO: actually handle this with a new socket.
         pass
 
-    async def get_tokenizer(self, lora_request: LoRARequest):
-        pass
+    async def is_tracing_enabled(self):
+        return False
 
     async def generate(
         self,
