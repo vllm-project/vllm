@@ -329,9 +329,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         # Copy the data.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
 
-        # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here, so
-        # we're using a workaround. Remove this when fixed in HPU PT bridge.
         if is_hpu():
+            # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
+            # so we're using a workaround. Remove this when fixed in
+            # HPU PT bridge.
             padded_weight = torch.cat([
                 loaded_weight,
                 torch.zeros(param.shape[0] - loaded_weight.shape[0],

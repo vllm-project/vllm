@@ -1,8 +1,7 @@
-vLLM with Intel® Gaudi® 2 AI Accelerators
+vLLM with Intel® Gaudi® AI Accelerators
 =========================================
 
-This README provides instructions on running vLLM with Intel Gaudi
-devices.
+This README provides instructions on running vLLM with Intel Gaudi devices.
 
 Requirements and Installation
 =============================
@@ -13,17 +12,13 @@ to set up the environment. To achieve the best performance, please
 follow the methods outlined in the `Optimizing Training Platform
 Guide <https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html>`__.
 
-.. note:: 
-   In this release (1.16.0), we are only targeting functionality
-   and accuracy. Performance will be improved in next releases.
-
 Requirements
 ------------
 
 -  OS: Ubuntu 22.04 LTS
 -  Python: 3.10
--  Intel Gaudi 2 accelerator
--  Intel Gaudi software version 1.16.0
+-  Intel Gaudi accelerator
+-  Intel Gaudi software version 1.16.0 or newer
 
 To verify that the Intel Gaudi software was correctly installed, run:
 
@@ -49,20 +44,30 @@ Use the following commands to run a Docker image:
 
 .. code:: console
 
-   $ docker pull vault.habana.ai/gaudi-docker/1.16.0/ubuntu22.04/habanalabs/pytorch-installer-2.2.0:latest
-   $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.16.0/ubuntu22.04/habanalabs/pytorch-installer-2.2.0:latest
+   $ docker pull vault.habana.ai/gaudi-docker/1.16.2/ubuntu22.04/habanalabs/pytorch-installer-2.2.2:latest
+   $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.16.2/ubuntu22.04/habanalabs/pytorch-installer-2.2.2:latest
 
-Build and Install vLLM-fork
+Build and Install vLLM
 ---------------------------
 
-To build and install vLLM-fork from source, run:
+To build and install vLLM from source, run:
+
+.. code:: console
+
+   $ git clone https://github.com/vllm-project/vllm.git
+   $ cd vllm
+   $ python setup.py develop
+
+
+Currently, the latest features and performance optimizations are developed in Gaudi's `vLLM-fork <https://github.com/HabanaAI/vllm-fork>`__ and we periodically upstream them to vLLM main repo. To install latest `HabanaAI/vLLM-fork <https://github.com/HabanaAI/vllm-fork>`__, run the following:
 
 .. code:: console
 
    $ git clone https://github.com/HabanaAI/vllm-fork.git
    $ cd vllm-fork
-   # git checkout v0.4.2-Gaudi-1.16.0
-   $ pip install -e .  # This may take 5-10 minutes.
+   $ git checkout habana_main
+   $ python setup.py develop
+
 
 Supported Features
 ==================
@@ -72,13 +77,12 @@ Supported Features
 -  Online inference via `OpenAI-Compatible
    Server <https://docs.vllm.ai/en/latest/getting_started/quickstart.html#openai-compatible-server>`__
 -  HPU autodetection - no need to manually select device within vLLM
--  Paged KV cache with algorithms enabled for Intel Gaudi 2 accelerators
+-  Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 -  Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
    prefill attention, Root Mean Square Layer Normalization, Rotary
    Positional Encoding
 -  Tensor parallelism support for multi-card inference
--  Inference with `HPU
-   Graphs <https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html>`__
+-  Inference with `HPU Graphs <https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html>`__
    for accelerating low-batch latency and throughput
 
 Unsupported Features
@@ -94,7 +98,7 @@ Supported Configurations
 ========================
 
 The following configurations have been validated to be function with
-Gaudi devices. Configurations that are not listed may or may not work.
+Gaudi2 devices. Configurations that are not listed may or may not work.
 
 -  `meta-llama/Llama-2-7b <https://huggingface.co/meta-llama/Llama-2-7b>`__
    on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
@@ -102,12 +106,24 @@ Gaudi devices. Configurations that are not listed may or may not work.
 -  `meta-llama/Llama-2-7b-chat-hf <https://huggingface.co/meta-llama/Llama-2-7b-chat-hf>`__
    on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
    datatype with random or greedy sampling
+-  `meta-llama/Meta-Llama-3-8B <https://huggingface.co/meta-llama/Meta-Llama-3-8B>`__
+   on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
+   datatype with random or greedy sampling
+-  `meta-llama/Meta-Llama-3-8B-Instruct <https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct>`__
+   on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
+   datatype with random or greedy sampling
 -  `meta-llama/Llama-2-70b <https://huggingface.co/meta-llama/Llama-2-70b>`__
-   with tensor parallelism on 8x HPU, BF16 datatype with random or
-   greedy sampling
+   with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
 -  `meta-llama/Llama-2-70b-chat-hf <https://huggingface.co/meta-llama/Llama-2-70b-chat-hf>`__
-   with tensor parallelism 8x HPU, BF16 datatype with random or greedy
-   sampling
+   with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
+-  `meta-llama/Meta-Llama-3-70B <https://huggingface.co/meta-llama/Meta-Llama-3-70B>`__
+   with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
+-  `meta-llama/Meta-Llama-3-70B-Instruct <https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct>`__
+   with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
+-  `mistralai/Mistral-7B-Instruct-v0.3 <https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3>`__
+   on single HPU or with tensor parallelism on 2x HPU, BF16 datatype with random or greedy sampling
+-  `mistralai/Mixtral-8x7B-Instruct-v0.1 <https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1>`__
+   with tensor parallelism on 2x HPU, BF16 datatype with random or greedy sampling
 
 Performance Tips
 ================
