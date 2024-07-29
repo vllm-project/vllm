@@ -3,7 +3,6 @@
 # yapf: disable
 # type: ignore
 
-
 import json
 import os
 import pathlib
@@ -28,7 +27,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          tensorize_vllm_model)
 
 from ..conftest import VllmRunner
-from .conftest import cleanup, retry_until_skip
+from .conftest import retry_until_skip
 from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
@@ -348,7 +347,3 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
         # noqa: E501
 
         assert outputs == deserialized_outputs
-
-
-
-
