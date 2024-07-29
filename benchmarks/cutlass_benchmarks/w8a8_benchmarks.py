@@ -13,7 +13,7 @@ from weight_shapes import WEIGHT_SHAPES
 from vllm import _custom_ops as ops
 from vllm.utils import FlexibleArgumentParser
 
-DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())[1:]
+DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
 DEFAULT_TP_SIZES = [1]
 
