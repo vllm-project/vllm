@@ -213,13 +213,13 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
-    imgae_token_id = tokenizer.encode(IMG_CONTEXT,
+    image_token_id = tokenizer.encode(IMG_CONTEXT,
                                       add_special_tokens=False,
                                       return_tensors="pt")[0]
 
     return MultiModalInputs({
         "pixel_values": data,
-        "image_token_id": imgae_token_id
+        "image_token_id": image_token_id
     })
 
 
@@ -268,7 +268,6 @@ class InternVLChatModel(nn.Module, SupportsVision):
         patch_size = config.vision_config.patch_size
         self.patch_size = patch_size
         self.select_layer = config.select_layer
-        self.template = config.template
         self.num_image_token = int(
             (image_size // patch_size)**2 * (config.downsample_ratio**2))
         self.downsample_ratio = config.downsample_ratio
