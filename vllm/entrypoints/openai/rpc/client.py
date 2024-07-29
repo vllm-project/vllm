@@ -1,26 +1,20 @@
 from vllm import AsyncLLMEngine
-
-# from vllm.grpc.server import UNIX_SOCKET
-# from .pb import generate_pb2_grpc, generate_pb2
-from typing import AsyncIterator, List, Optional, Mapping
+from typing import AsyncIterator, Optional, Mapping
 
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
-from vllm.outputs import CompletionOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from transformers import AutoTokenizer
 from dataclasses import dataclass
 
-import time
 import zmq
 import zmq.asyncio
 import pickle
 
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 ADDRESS = "ipc:///tmp/zmqtest"
-# ADDRESS = "tcp://localhost:5570"
 
 @dataclass
 class RCPRequest:
