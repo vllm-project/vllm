@@ -5,9 +5,9 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData, SequenceGroupMetadata
+from vllm.triton_utils.sample import get_num_triton_sampler_splits
 from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
                         make_tensor_with_pad, maybe_expand_dim)
 
