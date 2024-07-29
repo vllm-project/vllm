@@ -40,6 +40,7 @@ _PP_SUPPORTED_MODELS = [
     "GPT2LMHeadModel",
     "MixtralForCausalLM",
     "NemotronForCausalLM",
+    "Qwen2ForCausalLM",
 ]
 
 
