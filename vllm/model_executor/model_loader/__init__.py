@@ -1,6 +1,6 @@
 from typing import Optional
 
-from torch import nn
+import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig)
@@ -8,6 +8,10 @@ from vllm.model_executor.model_loader.loader import (BaseModelLoader,
                                                      get_model_loader)
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name, get_model_architecture)
+
+# Bump up cache limits for CUDA graphs (for now)
+torch._dynamo.config.cache_size_limit = 128
+torch._dynamo.config.accumulated_cache_size_limit = 128
 
 
 def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
