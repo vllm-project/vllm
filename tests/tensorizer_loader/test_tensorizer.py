@@ -1,3 +1,4 @@
+# isort: skip_file
 import json
 import os
 import pathlib
@@ -8,6 +9,7 @@ import openai
 import pytest
 import torch
 from tensorizer import EncryptionParams
+import gc
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
@@ -189,9 +191,11 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
 
 def test_load_without_tensorizer_load_format(vllm_runner):
     with pytest.raises(ValueError):
-        vllm_runner(
+        model = vllm_runner(
             model_ref,
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
+    del model
+    gc.collect()
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
@@ -233,10 +237,12 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
 
 def test_raise_value_error_on_invalid_load_format(vllm_runner):
     with pytest.raises(ValueError):
-        vllm_runner(
+        model = vllm_runner(
             model_ref,
             load_format="safetensors",
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
+    del model
+    gc.collect()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
