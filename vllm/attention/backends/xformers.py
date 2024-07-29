@@ -339,11 +339,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if sp_rank != -1:
             old_num_seqs = query.size(0)
             if remote_metadata := attn_metadata.remote_metadata:
-                q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
+                q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank][:]
                 query_remote = reshape_q(query, q_remote_distribution)
                 output = torch.empty_like(query_remote)
                 query = query_remote.view(-1, self.num_heads, self.head_size)
-                num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
+                num_decode_tokens = remote_metadata.num_remote_decode_tokens[sp_rank]
                 decode_query = query[:]
                 assert decode_query.shape[0] == num_decode_tokens
                 num_seqs = decode_query.size(0)
@@ -367,7 +367,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     remote_metadata.block_tables_remote[sp_rank],
                     remote_metadata.seq_lens_remote_tensor[sp_rank],
                     remote_metadata.max_remote_decode_seq_len[sp_rank],
-                    remote_metadata.q_remote_distirbution[sp_rank],
+                    remote_metadata.q_remote_distirbution[sp_rank][:],
                     self.kv_cache_dtype,
                     self.num_kv_heads,
                     self.scale,

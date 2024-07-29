@@ -106,14 +106,14 @@ class FlashAttentionMetadata(AttentionMetadata):
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
-    query_start_loc: Optional[torch.Tensor]
+    query_start_loc: Optional[torch.Tensor] = None
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
-    seq_start_loc: Optional[torch.Tensor]
+    seq_start_loc: Optional[torch.Tensor] = None
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
-    context_lens_tensor: Optional[torch.Tensor]
+    context_lens_tensor: Optional[torch.Tensor] = None
 
     # used for remote inference
     # reshape the output of model execution.
@@ -151,7 +151,7 @@ class FlashAttentionMetadata(AttentionMetadata):
 
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
-    _cached_long_decode_metadata: Optional["FlashAttentionMetadata"] = None
+    _cached_remote_metadata: Optional["FlashAttentionMetadata"] = None
 
     @property
     def prefill_metadata(self) -> Optional["FlashAttentionMetadata"]:
