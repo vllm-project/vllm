@@ -118,23 +118,23 @@ class FlashAttentionMetadata(AttentionMetadata):
     # used for remote inference
     # reshape the output of model execution.
     # prefill:decode:longdecode-->prefill:decode
-    output_reshape_index: List[int]
+    output_reshape_index: List[int] = []
     # list of sequence length per sequence respond to different ranks
-    seq_lens_remote: List[List[int]]
+    seq_lens_remote: List[List[int]] = []
     # seq_lens_remote as list[tensor]
-    seq_lens_remote_tensor: List[torch.Tensor]
+    seq_lens_remote_tensor: List[torch.Tensor] = []
     # number of sequence
-    num_remote_decode_tokens: List[int]
+    num_remote_decode_tokens: List[int] = []
     # max length of sequence length
-    max_remote_decode_seq_len: List[int]
+    max_remote_decode_seq_len: List[int] = []
     # block_tables_remote:
-    block_tables_remote: List[torch.Tensor]
+    block_tables_remote: List[torch.Tensor] = []
     # For sequence group[0,1,2,3,4,5], q_remote_distribution [0,0,1,2,3,3] means
     # sequences 0 and 1 use the same q0 while sequences 4 and 5 use
     # the same q3. In this way, the max length of sequence is not limited to the
     # Max_number*gpu_number, where multi sequence blocks in one remote rank are
     # considered as the multi batched sequences with the same q.
-    q_remote_distirbution: List[torch.Tensor]
+    q_remote_distirbution: List[torch.Tensor] = []
 
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
@@ -142,12 +142,12 @@ class FlashAttentionMetadata(AttentionMetadata):
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
-    block_tables: Optional[torch.Tensor]
+    block_tables: Optional[torch.Tensor] = None
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
-    use_cuda_graph: bool
+    use_cuda_graph: bool = False
 
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None

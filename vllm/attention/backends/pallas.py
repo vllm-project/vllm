@@ -129,7 +129,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
+        kv_cache: Optional[torch.Tensor],
         attn_metadata: PallasMetadata,
         kv_scale: float = 1.0,
         sp_rank: Optional[int] = -1,
@@ -155,7 +155,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         if kv_cache[0] is not None:
             slot_mapping = attn_metadata.slot_mapping
-            key_cache, value_cache = kv_cache
+            key_cache, value_cache = kv_cache[0],kv_cache[1]
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale

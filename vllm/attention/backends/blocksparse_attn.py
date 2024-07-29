@@ -180,6 +180,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
         "BlocksparseFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None
+    _cache_remote_metadata: Optional[
+        "BlocksparseFlashAttentionMetadata"] = None
 
     @property
     def prefill_metadata(
@@ -245,9 +247,9 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-        @property
-        def remote_metadata(self) -> Optional["BlocksparseFlashAttentionMetadata"]:
-            return None
+    @property
+    def remote_metadata(self) -> Optional["BlocksparseFlashAttentionMetadata"]:
+        return None
 
 
 class BlocksparseFlashAttentionImpl(AttentionImpl):
