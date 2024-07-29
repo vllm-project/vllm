@@ -63,7 +63,7 @@ class ExecutorBase(ABC):
     @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int,
-                         num_remote_gpu_blocks: int=1) -> None:
+                         num_remote_gpu_blocks: int = 1) -> None:
         """Initialize the KV cache with the given size in blocks.
         """
         raise NotImplementedError

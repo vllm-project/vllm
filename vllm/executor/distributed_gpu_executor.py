@@ -44,14 +44,14 @@ class DistributedGPUExecutor(GPUExecutor):
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
 
-        
-        num_remote_blocks=[num_block for num_block in num_blocks if num_block[1]<0]
-        num_remote_gpu_blocks=min(b[0] for b in num_remote_blocks)
+        num_remote_blocks = [
+            num_block for num_block in num_blocks if num_block[1] < 0]
+        num_remote_gpu_blocks = min(b[0] for b in num_remote_blocks)
         return num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int,
-                         num_remote_gpu_blocks: int=1) -> None:
+                         num_remote_gpu_blocks: int = 1) -> None:
         """Initialize the KV cache in all workers.
         """
 

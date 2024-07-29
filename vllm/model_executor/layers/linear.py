@@ -524,7 +524,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.output_sizes = [
             self.num_heads * self.head_size * tp_size,  # q_proj
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
+            self.num_kv_heads * self.head_size * tp_size,  # v_proj
         ]
 
         super().__init__(input_size=input_size,
@@ -656,27 +656,29 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
-######modify
-#used for q broastcast and output reduce of sequence parallel 
+# modify
+# used for q broastcast and output reduce of sequence parallel
+
+
 class SequenceParallelLinearForBroastcast:
-    
+
     def __init__(self,
-                from_rank:Optional[int]):
+                 from_rank: Optional[int]):
         # Divide the weight matrix along the last dimension.
-        self.tp_rank=get_tensor_model_parallel_rank()
+        self.tp_rank = get_tensor_model_parallel_rank()
         if from_rank is None:
-            self.from_rank=-1
+            self.from_rank = -1
         else:
-            self.from_rank=from_rank
+            self.from_rank = from_rank
+
     def forward(self, input_):
         # Set up backprop all-reduce.
 
-        
-        if self.tp_rank!=-1:
-            output=input_
-            get_sp_group(self.tp_rank).broadcast(input_,0)
+        if self.tp_rank != -1:
+            output = input_
+            get_sp_group(self.tp_rank).broadcast(input_, 0)
         else:
-            output=get_sp_group(self.from_rank).broadcast(0)
+            output = get_sp_group(self.from_rank).broadcast(0)
 
         return output
 
@@ -684,32 +686,36 @@ class SequenceParallelLinearForBroastcast:
         s = f", tp_size={self.sp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
-class SequenceParallelLinearForGather:
-    
-    def __init__(self,
-                from_rank:Optional[int]):
-        # Divide the weight matrix along the last dimension.
-        self.tp_rank=get_tensor_model_parallel_rank()
-        if from_rank is None:
-            self.from_rank=-1
-        else:
-            self.from_rank=from_rank
 
-    def forward(self, input_,input_2,input_3):
+
+class SequenceParallelLinearForGather:
+
+    def __init__(self,
+                 from_rank: Optional[int]):
+        # Divide the weight matrix along the last dimension.
+        self.tp_rank = get_tensor_model_parallel_rank()
+        if from_rank is None:
+            self.from_rank = -1
+        else:
+            self.from_rank = from_rank
+
+    def forward(self, input_, input_2, input_3):
         # Set up backprop all-reduce.
-    
-            #########
-        #gather(input_,dst,dim),dim is untest.output need be the shape [num_seqs, num_heads, num_sequece_block, head_size]
-        output=get_sp_group(self.tp_rank).gather(input_,0,-1)
-        output2=get_sp_group(self.tp_rank).gather(input_2,0,-1)
-        output3=get_sp_group(self.tp_rank).gather(input_3,0,-1)
-            
-        return output,output2,output3
+
+        #########
+        # gather(input_,dst,dim),dim is untest.output need be the shape [num_seqs, num_heads, num_sequece_block, head_size]
+        output = get_sp_group(self.tp_rank).gather(input_, 0, -1)
+        output2 = get_sp_group(self.tp_rank).gather(input_2, 0, -1)
+        output3 = get_sp_group(self.tp_rank).gather(input_3, 0, -1)
+
+        return output, output2, output3
 
     def extra_repr(self) -> str:
         s = f", tp_size={self.sp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
+
+
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
 

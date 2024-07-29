@@ -394,9 +394,9 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
-        block_migrate_size: int=1024,
-        block_migrate_threshold: int=6144,
-        block_migrate_start: int=4096,
+        block_migrate_size: int = 1024,
+        block_migrate_threshold: int = 6144,
+        block_migrate_start: int = 4096,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -416,9 +416,9 @@ class CacheConfig:
 
         # 4096 tokens per chunk
         # self.chunk_size = 4096 / block_size
-        self.block_migrate_threshold=block_migrate_threshold
-        self.block_migrate_start=block_migrate_start
-        self.block_migrate_size=block_migrate_size
+        self.block_migrate_threshold = block_migrate_threshold
+        self.block_migrate_start = block_migrate_start
+        self.block_migrate_size = block_migrate_size
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -635,9 +635,10 @@ class ParallelConfig:
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
 
-        # When SP is enable, i.e., SP > 0, the world should contains 
+        # When SP is enable, i.e., SP > 0, the world should contains
         # pipeline_parallel_size * self.tensor_parallel_size GPUs as master and SP GPUs.
-        self.world_size = pipeline_parallel_size * tensor_parallel_size + sequence_parallel_size - 1
+        self.world_size = pipeline_parallel_size * \
+            tensor_parallel_size + sequence_parallel_size - 1
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
@@ -1054,7 +1055,7 @@ class SpeculativeConfig:
         """
         if speculative_draft_tensor_parallel_size is None:
             speculative_draft_tensor_parallel_size = \
-                  target_parallel_config.tensor_parallel_size
+                target_parallel_config.tensor_parallel_size
         elif speculative_draft_tensor_parallel_size != 1:
             # TODO(wooyeon): allow tp values larger than 1
             raise ValueError(
@@ -1237,7 +1238,7 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
-    #TODO(ywang96): make this a cached property once we refactor the
+    # TODO(ywang96): make this a cached property once we refactor the
     # VisionLanguageConfig class.
     def get_image_token_text(
             self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
@@ -1389,7 +1390,7 @@ def _get_and_verify_max_len(
     # The correct one should be "longrope", kept "su" here
     # to be backward compatible
     if rope_scaling is not None and rope_scaling["type"] != "su" \
-        and rope_scaling["type"] != "longrope":
+            and rope_scaling["type"] != "longrope":
         if disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.

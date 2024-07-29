@@ -566,8 +566,8 @@ template <typename scalar_t, int HEAD_SIZE, int NUM_THREADS,
           int PARTITION_SIZE>
 __global__ void paged_attention_v3_reduce_kernel(
     scalar_t* __restrict__ out,            // [num_seqs, num_heads, head_size]
-    float* __restrict__ out_exp_sums,           // [num_seqs, num_heads, float]
-    float* __restrict__ out_max_logits,         // [num_seqs, num_heads, float]
+    float* __restrict__ out_exp_sums,      // [num_seqs, num_heads, float]
+    float* __restrict__ out_max_logits,    // [num_seqs, num_heads, float]
     const float* __restrict__ exp_sums,    // [num_seqs, num_heads,
                                            // max_num_partitions]
     const float* __restrict__ max_logits,  // [num_seqs, num_heads,
@@ -581,7 +581,7 @@ __global__ void paged_attention_v3_reduce_kernel(
   const int seq_idx = blockIdx.y;
   const int seq_len = seq_lens[seq_idx];
   const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
-  const int len=sizeof(float);
+  const int len = sizeof(float);
   if (num_partitions == 1) {
     // No need to reduce. Only copy tmp_out to out.
     scalar_t* out_ptr =
@@ -589,14 +589,14 @@ __global__ void paged_attention_v3_reduce_kernel(
     const scalar_t* tmp_out_ptr =
         tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
         head_idx * max_num_partitions * HEAD_SIZE;
-    float* out_exp_sums_ptr=out_exp_sums+seq_idx * num_heads*len;
-    const float* exp_sums_ptr=exp_sums+seq_idx * num_heads*len;
-    float* out_max_logits_ptr=out_max_logits+seq_idx * num_heads*len;
-    const float* max_logits_ptr=max_logits+seq_idx * num_heads*len;
+    float* out_exp_sums_ptr = out_exp_sums + seq_idx * num_heads * len;
+    const float* exp_sums_ptr = exp_sums + seq_idx * num_heads * len;
+    float* out_max_logits_ptr = out_max_logits + seq_idx * num_heads * len;
+    const float* max_logits_ptr = max_logits + seq_idx * num_heads * len;
     for (int i = threadIdx.x; i < HEAD_SIZE; i += blockDim.x) {
       out_ptr[i] = tmp_out_ptr[i];
-      out_exp_sums[i]=exp_sums_ptr[i];
-      out_max_logits_ptr[i]=max_logits_ptr[i];
+      out_exp_sums[i] = exp_sums_ptr[i];
+      out_max_logits_ptr[i] = max_logits_ptr[i];
     }
     // Terminate the thread block.
     return;
@@ -666,12 +666,12 @@ __global__ void paged_attention_v3_reduce_kernel(
       head_idx * max_num_partitions * HEAD_SIZE;
   scalar_t* out_ptr =
       out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
-  float* out_exp_sums_ptr=out_exp_sums+seq_idx * num_heads*len;
-  float* out_max_logits_ptr=out_max_logits+seq_idx * num_heads*len;
+  float* out_exp_sums_ptr = out_exp_sums + seq_idx * num_heads * len;
+  float* out_max_logits_ptr = out_max_logits + seq_idx * num_heads * len;
 #pragma unroll
   for (int i = threadIdx.x; i < HEAD_SIZE; i += NUM_THREADS) {
-    out_exp_sums_ptr[i]=global_exp_sum;
-    out_max_logits_ptr[i]=max_logit;
+    out_exp_sums_ptr[i] = global_exp_sum;
+    out_max_logits_ptr[i] = max_logit;
     float acc = 0.0f;
     for (int j = 0; j < num_partitions; ++j) {
       acc += to_float(tmp_out_ptr[j * HEAD_SIZE + i]) * shared_exp_sums[j] *
@@ -894,18 +894,21 @@ __global__ void sequence_block_reduce_kernel(
 
 }  // namespace vllm
 //@###################modifiy
-//the launcher of sequence block reduce kernel
-#define LAUNCH_SEQUENCE_BLOCK_REDUCER(HEAD_SIZE)                                   \
-  vllm::sequence_block_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
-                                         PARTITION_SIZE>                       \
-      <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                \
-          out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr,    \
+// the launcher of sequence block reduce kernel
+#define LAUNCH_SEQUENCE_BLOCK_REDUCER(HEAD_SIZE)                            \
+  vllm::sequence_block_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,             \
+                                     PARTITION_SIZE>                        \
+      <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(             \
+          out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr, \
           max_num_partitions);
 
-template <typename T,int NUM_THREADS = 128, int PARTITION_SIZE = 8192>
-void sequence_block_reducer_launcher(
-    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
-    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& seq_lens, int max_seq_len) {
+template <typename T, int NUM_THREADS = 128, int PARTITION_SIZE = 8192>
+void sequence_block_reducer_launcher(torch::Tensor& out,
+                                     torch::Tensor& exp_sums,
+                                     torch::Tensor& max_logits,
+                                     torch::Tensor& tmp_out,
+                                     torch::Tensor& query,
+                                     torch::Tensor& seq_lens, int max_seq_len) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -956,8 +959,9 @@ void sequence_block_reducer_launcher(
   }
 }
 
-#define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T)   \
-  sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out,query, seq_lens, max_seq_len);
+#define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T)                          \
+  sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out, \
+                                     query, seq_lens, max_seq_len);
 
 void sequence_block_reducer(
     torch::Tensor& out,         // [num_seqs, num_heads, head_size]
@@ -965,12 +969,9 @@ void sequence_block_reducer(
     torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
         tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
-    torch::Tensor& query,  // [num_seqs, num_heads, head_size]
-    torch::Tensor& seq_lens,      // [num_seqs]
-    int64_t max_seq_len) {
-  CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(query.dtype())
-}
-
+    torch::Tensor& query,     // [num_seqs, num_heads, head_size]
+    torch::Tensor& seq_lens,  // [num_seqs]
+    int64_t max_seq_len){CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(query.dtype())}
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
       ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,        \
@@ -1290,9 +1291,8 @@ void paged_attention_v2(
                              CALL_V2_LAUNCHER_BLOCK_SIZE)
 }
 
-
-//#################modify
-//return output max_logit  exp_sum
+// #################modify
+// return output max_logit  exp_sum
 #define LAUNCH_PAGED_ATTENTION_V3(HEAD_SIZE)                                   \
   vllm::paged_attention_v2_kernel<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE,           \
                                   NUM_THREADS, KV_DTYPE, IS_BLOCK_SPARSE,      \
@@ -1307,20 +1307,20 @@ void paged_attention_v2(
   vllm::paged_attention_v3_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
                                          PARTITION_SIZE>                       \
       <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                \
-          out_ptr, out_exp_sums_ptr, out_max_logits_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr,    \
-          max_num_partitions);
+          out_ptr, out_exp_sums_ptr, out_max_logits_ptr, exp_sums_ptr,         \
+          max_logits_ptr, tmp_out_ptr, seq_lens_ptr, max_num_partitions);
 
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
           vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
           int NUM_THREADS = 128, int PARTITION_SIZE = 512>
 void paged_attention_v3_launcher(
-    torch::Tensor& out, torch::Tensor& out_exp_sums, torch::Tensor& out_max_logits,
-    torch::Tensor& exp_sums, torch::Tensor& max_logits,
-    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens, int max_seq_len,
-    const c10::optional<torch::Tensor>& alibi_slopes, float kv_scale,
-    const int tp_rank, const int blocksparse_local_blocks,
+    torch::Tensor& out, torch::Tensor& out_exp_sums,
+    torch::Tensor& out_max_logits, torch::Tensor& exp_sums,
+    torch::Tensor& max_logits, torch::Tensor& tmp_out, torch::Tensor& query,
+    torch::Tensor& key_cache, torch::Tensor& value_cache, int num_kv_heads,
+    float scale, torch::Tensor& block_tables, torch::Tensor& seq_lens,
+    int max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    float kv_scale, const int tp_rank, const int blocksparse_local_blocks,
     const int blocksparse_vert_stride, const int blocksparse_block_size,
     const int blocksparse_head_sliding_step) {
   int num_seqs = query.size(0);
@@ -1344,7 +1344,8 @@ void paged_attention_v3_launcher(
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
   float* out_exp_sums_ptr = reinterpret_cast<float*>(out_exp_sums.data_ptr());
-  float* out_max_logits_ptr = reinterpret_cast<float*>(out_max_logits.data_ptr());
+  float* out_max_logits_ptr =
+      reinterpret_cast<float*>(out_max_logits.data_ptr());
   T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
@@ -1398,13 +1399,14 @@ void paged_attention_v3_launcher(
   }
 }
 
-#define CALL_V3_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE)   \
-  paged_attention_v3_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,               \
-                              IS_BLOCK_SPARSE>(                               \
-      out, out_exp_sums, out_max_logits, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,      \
-      num_kv_heads, scale, block_tables, seq_lens, max_seq_len, alibi_slopes, \
-      kv_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,   \
-      blocksparse_block_size, blocksparse_head_sliding_step);
+#define CALL_V3_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE)    \
+  paged_attention_v3_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,                \
+                              IS_BLOCK_SPARSE>(                                \
+      out, out_exp_sums, out_max_logits, exp_sums, max_logits, tmp_out, query, \
+      key_cache, value_cache, num_kv_heads, scale, block_tables, seq_lens,     \
+      max_seq_len, alibi_slopes, kv_scale, tp_rank, blocksparse_local_blocks,  \
+      blocksparse_vert_stride, blocksparse_block_size,                         \
+      blocksparse_head_sliding_step);
 
 #define CALL_V3_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
   switch (is_block_sparse) {                                               \
@@ -1435,11 +1437,11 @@ void paged_attention_v3_launcher(
   }
 
 void paged_attention_v3(
-    torch::Tensor& out,         // [num_seqs, num_heads, head_size]
-    torch::Tensor& out_exm_sums, // [num_seqs, num_heads, float]
-    torch::Tensor& out_max_logit, //[num_seqs, num_heads, float]
-    torch::Tensor& exp_sums,    // [num_seqs, num_heads, max_num_partitions]
-    torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& out,            // [num_seqs, num_heads, head_size]
+    torch::Tensor& out_exm_sums,   // [num_seqs, num_heads, float]
+    torch::Tensor& out_max_logit,  //[num_seqs, num_heads, float]
+    torch::Tensor& exp_sums,       // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& max_logits,     // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
         tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
     torch::Tensor& query,  // [num_seqs, num_heads, head_size]

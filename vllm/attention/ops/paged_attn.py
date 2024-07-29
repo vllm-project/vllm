@@ -41,9 +41,9 @@ class PagedAttention:
         head_size: int,
     ) -> Tuple[int, ...]:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
-    
+
     @staticmethod
-    def get_blocks(kv_cache: torch.Tensor, 
+    def get_blocks(kv_cache: torch.Tensor,
                    start: int,
                    step: int) -> torch.Tensor:
         return kv_cache[:, start:start+step]
@@ -83,6 +83,7 @@ class PagedAttention:
             kv_cache_dtype,
             kv_scale,
         )
+
     @staticmethod
     def sequence_block_reducer(
         tmp_out: torch.Tensor,
@@ -91,11 +92,12 @@ class PagedAttention:
         query: torch.Tensor,
         seq_lens: torch.Tensor,
         max_seq_len: int,
-    )->torch.Tensor:
+    ) -> torch.Tensor:
         output = torch.empty_like(query)
-        ops.sequence_block_reducer(output, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
+        ops.sequence_block_reducer(
+            output, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
         return output
-        
+
     @staticmethod
     def forward_decode(
         query: torch.Tensor,
@@ -199,9 +201,9 @@ class PagedAttention:
             )
 
         return output
-    
-    ########modify
-    #return output output_exp_sum output_max_sums
+
+    # modify
+    # return output output_exp_sum output_max_sums
     @staticmethod
     def forward_decode_v2(
         query: torch.Tensor,
@@ -220,7 +222,7 @@ class PagedAttention:
         blocksparse_vert_stride: int = 0,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
-    ) -> Tuple[torch.tensor,torch.Tensor,torch.Tensor]:
+    ) -> Tuple[torch.tensor, torch.Tensor, torch.Tensor]:
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
@@ -231,15 +233,15 @@ class PagedAttention:
 
         output = torch.empty_like(query)
         out_exp_sums = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
+            size=(num_seqs, num_heads),
+            dtype=torch.float32,
+            device=output.device,
+        )
         out_max_logits = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
+            size=(num_seqs, num_heads),
+            dtype=torch.float32,
+            device=output.device,
+        )
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
@@ -251,47 +253,47 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        
+
         # Run PagedAttention V3.
         assert _PARTITION_SIZE % block_size == 0
         tmp_output = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions, head_size),
-                dtype=output.dtype,
-                device=output.device,
-            )
+            size=(num_seqs, num_heads, max_num_partitions, head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
         exp_sums = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions),
-                dtype=torch.float32,
-                device=output.device,
-            )
+            size=(num_seqs, num_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
         max_logits = torch.empty_like(exp_sums)
         ops.paged_attention_v3(
-                output,
-                out_exp_sums,
-                out_max_logits,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                kv_scale,
-                tp_rank,
-                blocksparse_local_blocks,
-                blocksparse_vert_stride,
-                blocksparse_block_size,
-                blocksparse_head_sliding_step,
-            )
+            output,
+            out_exp_sums,
+            out_max_logits,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale,
+            block_tables,
+            seq_lens,
+            block_size,
+            max_seq_len,
+            alibi_slopes,
+            kv_cache_dtype,
+            kv_scale,
+            tp_rank,
+            blocksparse_local_blocks,
+            blocksparse_vert_stride,
+            blocksparse_block_size,
+            blocksparse_head_sliding_step,
+        )
 
-        return output,out_exp_sums,out_max_logits
+        return output, out_exp_sums, out_max_logits
 
     @staticmethod
     def forward_prefix(
@@ -350,6 +352,5 @@ class PagedAttention:
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
-        
     def get_blocks(self, layer: int, start: int, step: int) -> torch.Tensor:
         self.attn_backend.get_blocks(self.gpu_cache[i], start, step)

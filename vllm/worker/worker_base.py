@@ -12,7 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
                         update_environment_variables)
-from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase,_add_attn_metadata_broadcastable_dict
+from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase, _add_attn_metadata_broadcastable_dict
 logger = init_logger(__name__)
 
 
@@ -159,7 +159,7 @@ class WorkerInput:
         }
 
         return tensor_dict
-    
+
     @classmethod
     def from_broadcasted_sp_tensor_dict(
         cls: Type["WorkerInput"],
@@ -183,7 +183,6 @@ class WorkerInput:
         }
 
         return tensor_dict
-    
 
 
 class LocalOrDistributedWorkerBase(WorkerBase):
@@ -210,7 +209,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         single-worker execution, then this method should return False.
         """
         raise NotImplementedError
-    
+
     @property
     @abstractmethod
     def do_metadata_sp_broadcast(self) -> bool:
@@ -248,7 +247,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         Process an execution request.
         """
         raise NotImplementedError
-    
+
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
@@ -256,16 +255,16 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         if self.is_driver_worker:
-            # Note: the driver broadcasts the original `worker_input` to all 
-            # workers in the tp_pp_world (only its tp_group in current version). 
+            # Note: the driver broadcasts the original `worker_input` to all
+            # workers in the tp_pp_world (only its tp_group in current version).
             # For SP, the driver also broadcast the new `sp_worker_input` to
             # all workers in its SP group.
             if execute_model_req is None:
-                    # This signals that there's no more requests to process for
-                    # now. All workers are running infinite loop with
-                    # broadcast_tensor_dict, and it stops the loop when the
-                    # driver broadcasts an empty input. Send an empty input to
-                    # notify all other workers to stop their execution loop.
+                # This signals that there's no more requests to process for
+                # now. All workers are running infinite loop with
+                # broadcast_tensor_dict, and it stops the loop when the
+                # driver broadcasts an empty input. Send an empty input to
+                # notify all other workers to stop their execution loop.
                 if self.do_metadata_broadcast:
                     broadcast_tensor_dict({}, src=0)
                 if self.do_metadata_sp_broadcast:
@@ -318,8 +317,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input = (
                 self.model_runner.
                 make_model_input_from_broadcasted_tensor_dict(broadcast_data))
-           
-            
+
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.

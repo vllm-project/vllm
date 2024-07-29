@@ -138,10 +138,10 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: T,
         kv_scale: float = 1.0,
-        sp_rank:Optional[int]=-1,
+        sp_rank: Optional[int] = -1,
     ) -> torch.Tensor:
         raise NotImplementedError
-    
+
     @abstractmethod
     def reducer(
         self,

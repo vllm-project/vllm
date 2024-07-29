@@ -624,7 +624,7 @@ class SequenceGroupMetadata:
         self.seq_data = seq_data
         self.sampling_params = sampling_params
         self.block_tables = block_tables
-        self.block_tables_remote_rank=block_tables_remote_rank
+        self.block_tables_remote_rank = block_tables_remote_rank
         self.pooling_params = pooling_params
         self.lora_request = lora_request
         self.computed_block_nums = computed_block_nums
@@ -875,7 +875,7 @@ class ExecuteModelRequest:
     blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to migrate. list of GPU -> [GPU, rank].
     blocks_to_migrate: List[Tuple[int, int, int]] = field(default_factory=list)
- 	# Dest superblock idx and rank. Note: we only set 1 superblock in master
+    # Dest superblock idx and rank. Note: we only set 1 superblock in master
     superblock_to_migrate: Optional[Tuple[int, int]] = None
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int = 0

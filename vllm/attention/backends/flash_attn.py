@@ -8,7 +8,7 @@ from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from utils import reshape_q,filter_tensor
+from utils import reshape_q, filter_tensor
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -41,12 +41,11 @@ class FlashAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_blocks(kv_cache: torch.Tensor, 
+    def get_blocks(kv_cache: torch.Tensor,
                    start: int,
                    step: int
-    ) -> torch.Tensor:
+                   ) -> torch.Tensor:
         return kv_cache[:, start:start+step]
-
 
     @staticmethod
     def swap_blocks(
@@ -103,7 +102,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Maximum sequence length among decode batch. 0 if there are prefill
     # requests only.
     max_decode_seq_len: int
-    max_long_decode_seq_len:Optional[int]=0
+    max_long_decode_seq_len: Optional[int] = 0
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -116,27 +115,27 @@ class FlashAttentionMetadata(AttentionMetadata):
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
 
-    #used for remote inference
-    #reshape the output of model execution. 
-    #prefill:decode:longdecode-->prefill:decode
+    # used for remote inference
+    # reshape the output of model execution.
+    # prefill:decode:longdecode-->prefill:decode
     output_reshape_index: Optional[List[int]]
-    #list of sequence length per sequence respond to different ranks
+    # list of sequence length per sequence respond to different ranks
     seq_lens_remote: Optional[List[List[int]]]
-    #seq_lens_remote as list[tensor]
+    # seq_lens_remote as list[tensor]
     seq_lens_remote_tensor: Optional[List[torch.Tensor]]
-    #number of sequence
-    num_remote_decode_tokens:Optional[List[int]]
-    #max length of sequence length
-    max_remote_decode_seq_len:Optional[List[int]]
-    #block_tables_remote:
-    block_tables_remote:Optional[List[torch.Tensor]]
-    #For sequence group[0,1,2,3,4,5], q_remote_distribution [0,0,1,2,3,3] means
+    # number of sequence
+    num_remote_decode_tokens: Optional[List[int]]
+    # max length of sequence length
+    max_remote_decode_seq_len: Optional[List[int]]
+    # block_tables_remote:
+    block_tables_remote: Optional[List[torch.Tensor]]
+    # For sequence group[0,1,2,3,4,5], q_remote_distribution [0,0,1,2,3,3] means
     # sequences 0 and 1 use the same q0 while sequences 4 and 5 use
-    # the same q3. In this way, the max length of sequence is not limited to the 
-    # Max_number*gpu_number, where multi sequence blocks in one remote rank are 
+    # the same q3. In this way, the max length of sequence is not limited to the
+    # Max_number*gpu_number, where multi sequence blocks in one remote rank are
     # considered as the multi batched sequences with the same q.
-    q_remote_distirbution:Optional[List[torch.Tensor]]
-    
+    q_remote_distirbution: Optional[List[torch.Tensor]]
+
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -232,6 +231,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
+
     @property
     def remote_metadata(self) -> Optional["FlashAttentionMetadata"]:
         if self.num_long_decode_tokens == 0:
@@ -345,7 +345,7 @@ class FlashAttentionImpl(AttentionImpl):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: "FlashAttentionMetadata",
         kv_scale: float = 1.0,
-        sp_rank:Optional[int]=-1,
+        sp_rank: Optional[int] = -1,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -360,18 +360,18 @@ class FlashAttentionImpl(AttentionImpl):
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
-        if sp_rank!=-1:
-            
-            remote_metadata=attn_metadata.remote_metadata
-            q_remote_distribution=remote_metadata.q_remote_distirbution[sp_rank]
-            query_remote=reshape_q(query,q_remote_distribution)
+        if sp_rank != -1:
+
+            remote_metadata = attn_metadata.remote_metadata
+            q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
+            query_remote = reshape_q(query, q_remote_distribution)
             output = torch.empty_like(query_remote)
             query = query_remote.view(-1, self.num_heads, self.head_size)
             num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
             decode_query = query[:]
             assert decode_query.shape[0] == num_decode_tokens
-            num_seqs=decode_query.size(0)
-            num_heads=decode_query.size(1)
+            num_seqs = decode_query.size(0)
+            num_heads = decode_query.size(1)
             num_tokens, hidden_size = query.shape
             out_exp_sums = torch.empty(
                 size=(num_seqs, num_heads),
@@ -383,7 +383,7 @@ class FlashAttentionImpl(AttentionImpl):
                 dtype=torch.float32,
                 device=output.device,
             )
-            
+
             # Decoding run.
             output[:] = flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
@@ -395,11 +395,9 @@ class FlashAttentionImpl(AttentionImpl):
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
             ).squeeze(1)
-            
 
             # Reshape the output tensor.
-            return filter_tensor(output.view(-1, self.num_heads * self.head_size),out_exp_sums,out_max_logits)
-
+            return filter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits)
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -430,15 +428,15 @@ class FlashAttentionImpl(AttentionImpl):
 
         output = torch.empty_like(query)
         out_exp_sums = torch.empty(
-                size=1,
-                dtype=torch.float32,
-                device=output.device,
-            )
+            size=1,
+            dtype=torch.float32,
+            device=output.device,
+        )
         out_max_logits = torch.empty(
-                size=1,
-                dtype=torch.float32,
-                device=output.device,
-            )
+            size=1,
+            dtype=torch.float32,
+            device=output.device,
+        )
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
@@ -503,4 +501,4 @@ class FlashAttentionImpl(AttentionImpl):
             ).squeeze(1)
 
         # Reshape the output tensor.
-        return output.view(num_tokens, hidden_size),out_exp_sums,out_max_logits
+        return output.view(num_tokens, hidden_size), out_exp_sums, out_max_logits

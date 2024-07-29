@@ -81,8 +81,10 @@ def sequence_block_reducer(
 ) -> None:
     torch.ops._C.sequence_block_reducer(
         out, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
-    
+
 # page attention ops
+
+
 def paged_attention_v1(
     out: torch.Tensor,
     query: torch.Tensor,
@@ -140,6 +142,7 @@ def paged_attention_v2(
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
 
+
 def paged_attention_v3(
     out: torch.Tensor,
     out_exp_sum: torch.Tensor,
@@ -166,12 +169,13 @@ def paged_attention_v3(
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
     torch.ops._C.paged_attention_v3(
-        out, out_exp_sum, out_max_logits, exp_sum, max_logits, tmp_out, 
-        query, key_cache, value_cache,num_kv_heads, scale, block_tables, 
+        out, out_exp_sum, out_max_logits, exp_sum, max_logits, tmp_out,
+        query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
+
 
 def sequence_block_reducer(
     out: torch.Tensor,
@@ -184,7 +188,6 @@ def sequence_block_reducer(
 ) -> None:
     torch.ops._C.sequence_block_reducer(
         out, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
-
 
 
 # pos encoding ops
@@ -568,7 +571,7 @@ for k, v in names_and_values.items():
     if isinstance(v, fn_type) \
         and v.__code__.co_filename == __file__ \
         and any(arg is torch.Tensor or arg == "torch.Tensor"
-                   for arg in v.__annotations__.values()):
+                for arg in v.__annotations__.values()):
         names_and_values_to_update[k] = hint_on_error(v)
 
 names_and_values.update(names_and_values_to_update)

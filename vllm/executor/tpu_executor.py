@@ -70,7 +70,7 @@ class TPUExecutor(ExecutorBase):
         self,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        num_remote_gpu_blocks: int=1
+        num_remote_gpu_blocks: int = 1
     ) -> None:
         """Initialize the KV cache by invoking the underlying worker."""
         # NOTE: This is logged in the executor because there can be >1 worker
@@ -78,13 +78,14 @@ class TPUExecutor(ExecutorBase):
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# TPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks)
+        self.driver_worker.initialize_cache(
+            num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks)
 
     def determine_num_available_blocks(self) -> Tuple[int, int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        return self.driver_worker.determine_num_available_blocks(),0
+        return self.driver_worker.determine_num_available_blocks(), 0
 
     def execute_model(
         self,

@@ -738,12 +738,12 @@ if triton.__version__ >= "2.1.0":
                 k_cache.stride(3),
                 k_cache.stride(
                     4
-                ),  #[num_blocks, num_kv_heads, head_size/x, block_size, x]
+                ),  # [num_blocks, num_kv_heads, head_size/x, block_size, x]
                 v_cache.stride(0),
                 v_cache.stride(1),
                 v_cache.stride(2),
                 v_cache.stride(
-                    3),  #[num_blocks, num_kv_heads, head_size, block_size]
+                    3),  # [num_blocks, num_kv_heads, head_size, block_size]
                 num_queries_per_kv=num_queries_per_kv,
                 BLOCK_M=BLOCK,
                 BLOCK_DMODEL=Lk,
@@ -787,12 +787,12 @@ if triton.__version__ >= "2.1.0":
             k_cache.stride(2),
             k_cache.stride(3),
             k_cache.stride(
-                4),  #[num_blocks, num_kv_heads, head_size/x, block_size, x]
+                4),  # [num_blocks, num_kv_heads, head_size/x, block_size, x]
             v_cache.stride(0),
             v_cache.stride(1),
             v_cache.stride(2),
             v_cache.stride(
-                3),  #[num_blocks, num_kv_heads, head_size, block_size]
+                3),  # [num_blocks, num_kv_heads, head_size, block_size]
             num_queries_per_kv=num_queries_per_kv,
             BLOCK_M=BLOCK,
             BLOCK_DMODEL=Lk,

@@ -417,7 +417,7 @@ def _generate_random_fp8(
     # to generate random data for fp8 data.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
-    #-----|-------------|-------------------
+    # -----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
     from vllm import _custom_ops as ops
@@ -597,35 +597,44 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             "String must be a series of integers separated by commas "
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
-def reshape_list(x:List[int],pattern:List[int])->List[int]:
-    length=len(pattern)
-    target_length=len(x)
-    result=x.copy()
-    assert target_length==length
+
+def reshape_list(x: List[int], pattern: List[int]) -> List[int]:
+    length = len(pattern)
+    target_length = len(x)
+    result = x.copy()
+    assert target_length == length
     for i in range(length):
-        value=x[i]
-        result[pattern[i]]=value
-    return result
-def reshape_q(q:torch.tensor,pattern:List[int])->torch.tensor:
-    result=torch.empty([len(pattern),len(q[0])],dtype=q.dtype,device=q.device)
-    for i in range(len(pattern)):
-        result[i]=q[pattern[i]]
+        value = x[i]
+        result[pattern[i]] = value
     return result
 
-def filter_tensor(output:torch.tensor,out_exp_sums:torch.tensor,out_max_logits:torch.tensor, pattern: List[int], length: int)->Tuple[torch.tensor,torch.tensor,torch.tensor]:
-    result=torch.empty(length*output[0],dtype=output.dtype,device=output.device)
-    result_exp_sums=torch.empty(length*out_exp_sums[0],dtype=out_exp_sums.dtype,device=out_exp_sums.device)
-    result_max_logits=torch.empty(length*out_max_logits[0],dtype=out_max_logits.dtype,device=out_max_logits.device)
-    index=0
-    old_i=-1
+
+def reshape_q(q: torch.tensor, pattern: List[int]) -> torch.tensor:
+    result = torch.empty([len(pattern), len(q[0])],
+                         dtype=q.dtype, device=q.device)
+    for i in range(len(pattern)):
+        result[i] = q[pattern[i]]
+    return result
+
+
+def filter_tensor(output: torch.tensor, out_exp_sums: torch.tensor, out_max_logits: torch.tensor, pattern: List[int], length: int) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
+    result = torch.empty(
+        length*output[0], dtype=output.dtype, device=output.device)
+    result_exp_sums = torch.empty(
+        length*out_exp_sums[0], dtype=out_exp_sums.dtype, device=out_exp_sums.device)
+    result_max_logits = torch.empty(
+        length*out_max_logits[0], dtype=out_max_logits.dtype, device=out_max_logits.device)
+    index = 0
+    old_i = -1
     for i in pattern:
-        if old_i!=i:
-            result[index]=output[i]
-            result_exp_sums=out_exp_sums[i]
-            result_max_logits=out_max_logits[i]
-            index+=1
-            old_i=i
-    return result,result_exp_sums,result_max_logits
+        if old_i != i:
+            result[index] = output[i]
+            result_exp_sums = out_exp_sums[i]
+            result_max_logits = out_max_logits[i]
+            index += 1
+            old_i = i
+    return result, result_exp_sums, result_max_logits
+
 
 def make_tensor_with_pad(
     x: List[List[int]],
@@ -835,7 +844,7 @@ def _cuda_device_count_stateless(
 def cuda_device_count_stateless() -> int:
     """Get number of CUDA devices, caching based on the value of
     CUDA_VISIBLE_DEVICES at the time of call.
-    
+
     This should be used instead of torch.cuda.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
     value."""
@@ -845,7 +854,7 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
-#From: https://stackoverflow.com/a/4104188/2749989
+# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f):
 
     def wrapper(*args, **kwargs) -> Any:

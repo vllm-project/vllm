@@ -74,9 +74,9 @@ class GPUExecutor(ExecutorBase):
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        return self.driver_worker.determine_num_available_blocks(),0
+        return self.driver_worker.determine_num_available_blocks(), 0
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks, num_remote_gpu_blocks: int=1) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks, num_remote_gpu_blocks: int = 1) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
@@ -85,7 +85,8 @@ class GPUExecutor(ExecutorBase):
         logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
 
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks,num_remote_gpu_blocks)
+        self.driver_worker.initialize_cache(
+            num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest

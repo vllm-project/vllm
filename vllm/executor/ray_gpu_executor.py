@@ -59,7 +59,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         """Return worker init args for a given rank."""
         assert distributed_init_method is not None
 
-         # Get the final model config.
+        # Get the final model config.
         if rank < self.parallel_config.tensor_parallel_size * self.parallel_config.pipeline_parallel_size:
             model_config = self.model_config
             is_sp_worker = False
@@ -81,8 +81,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
             vision_language_config=self.vision_language_config,
             speculative_config=self.speculative_config,
             is_driver_worker=rank == 0,
-            is_sp_worker = is_sp_worker
-        )        
+            is_sp_worker=is_sp_worker
+        )
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:

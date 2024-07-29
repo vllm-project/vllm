@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
-from utils import reshape_q,filter_tensor
+from utils import reshape_q, filter_tensor
 
 logger = init_logger(__name__)
 
@@ -105,26 +105,26 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
 
-    #used for remote inference
-    #reshape the output of model execution. 
-    #prefill:decode:longdecode-->prefill:decode
+    # used for remote inference
+    # reshape the output of model execution.
+    # prefill:decode:longdecode-->prefill:decode
     output_reshape_index: Optional[List[int]]
-    #list of sequence length per sequence respond to different ranks
+    # list of sequence length per sequence respond to different ranks
     seq_lens_remote: Optional[List[List[int]]]
-    #seq_lens_remote as list[tensor]
+    # seq_lens_remote as list[tensor]
     seq_lens_remote_tensor: Optional[List[torch.Tensor]]
-    #number of sequence
-    num_remote_decode_tokens:Optional[List[int]]
-    #max length of sequence length
-    max_remote_decode_seq_len:Optional[List[int]]
-    #block_tables_remote:
-    block_tables_remote:Optional[List[torch.Tensor]]
-    #For sequence group[0,1,2,3,4,5], q_remote_distribution [0,0,1,2,3,3] means
+    # number of sequence
+    num_remote_decode_tokens: Optional[List[int]]
+    # max length of sequence length
+    max_remote_decode_seq_len: Optional[List[int]]
+    # block_tables_remote:
+    block_tables_remote: Optional[List[torch.Tensor]]
+    # For sequence group[0,1,2,3,4,5], q_remote_distribution [0,0,1,2,3,3] means
     # sequences 0 and 1 use the same q0 while sequences 4 and 5 use
-    # the same q3. In this way, the max length of sequence is not limited to the 
-    # Max_number*gpu_number, where multi sequence blocks in one remote rank are 
+    # the same q3. In this way, the max length of sequence is not limited to the
+    # Max_number*gpu_number, where multi sequence blocks in one remote rank are
     # considered as the multi batched sequences with the same q.
-    q_remote_distirbution:Optional[List[List[int]]]
+    q_remote_distirbution: Optional[List[List[int]]]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -219,7 +219,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
-    
+
     @property
     def remote_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_long_decode_tokens == 0:
@@ -328,7 +328,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: "XFormersMetadata",
         kv_scale: float = 1.0,
-        sp_rank: Optional[int]=-1,
+        sp_rank: Optional[int] = -1,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -341,20 +341,19 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        
 
-        if sp_rank!=-1:
-            old_num_seqs=query.size(0)
-            remote_metadata=attn_metadata.remote_metadata
-            q_remote_distribution=remote_metadata.q_remote_distirbution[sp_rank]
-            query_remote=reshape_q(query,q_remote_distribution)
+        if sp_rank != -1:
+            old_num_seqs = query.size(0)
+            remote_metadata = attn_metadata.remote_metadata
+            q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
+            query_remote = reshape_q(query, q_remote_distribution)
             output = torch.empty_like(query_remote)
             query = query_remote.view(-1, self.num_heads, self.head_size)
             num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
             decode_query = query[:]
             assert decode_query.shape[0] == num_decode_tokens
-            num_seqs=decode_query.size(0)
-            num_heads=decode_query.size(1)
+            num_seqs = decode_query.size(0)
+            num_heads = decode_query.size(1)
             out_exp_sums = torch.empty(
                 size=(num_seqs, num_heads),
                 dtype=torch.float32,
@@ -367,7 +366,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             )
 
             # Decoding run.
-            output[:],out_exp_sums[:],out_max_logits[:] = PagedAttention.forward_decode2(
+            output[:], out_exp_sums[:], out_max_logits[:] = PagedAttention.forward_decode2(
                 decode_query,
                 kv_cache[0],
                 kv_cache[1],
@@ -381,9 +380,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.alibi_slopes,
                 kv_scale,
             )
-           
+
             # Reshape the output tensor.
-            return fileter_tensor(output.view(-1, self.num_heads * self.head_size),out_exp_sums,out_max_logits,q_remote_distribution,old_num_seqs)
+            return fileter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits, q_remote_distribution, old_num_seqs)
         output = torch.empty_like(query)
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -409,18 +408,18 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
         # out_exp_sums and out_max_logits for decode
-        num_seqs=decode_query.size(0)
-        num_heads=decode_query.size(1)
+        num_seqs = decode_query.size(0)
+        num_heads = decode_query.size(1)
         out_exp_sums = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
+            size=(num_seqs, num_heads),
+            dtype=torch.float32,
+            device=output.device,
+        )
         out_max_logits = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
+            size=(num_seqs, num_heads),
+            dtype=torch.float32,
+            device=output.device,
+        )
         # QKV for prefill.
         query = query[:num_prefill_tokens]
         key = key[:num_prefill_tokens]
@@ -462,7 +461,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
-            output[num_prefill_tokens:],out_exp_sums[:],out_max_logits[:]= PagedAttention.forward_decode_v2(
+            output[num_prefill_tokens:], out_exp_sums[:], out_max_logits[:] = PagedAttention.forward_decode_v2(
                 decode_query,
                 key_cache,
                 value_cache,
@@ -477,7 +476,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             )
 
         # Reshape the output tensor.
-        return output.view(-1, self.num_heads * self.head_size),out_exp_sums,out_max_logits
+        return output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits
 
     def _run_memory_efficient_xformers_forward(
         self,
@@ -566,6 +565,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             output[start:end].copy_(out.view_as(original_query[start:end]))
             start += seq_len
         return output
+
     def reducer(
         self,
         tmp_out: torch.Tensor,
@@ -575,8 +575,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         attn_metadata: "XFormersMetadata",
     ) -> torch.Tensor:
         decode_meta = attn_metadata.long_decode_metadata
-        output=PagedAttention.sequence_block_reducer(tmp_out,exp_sum,max_logits,query,decode_meta.seq_lens,decode_meta.max_long_decode_seq_len)  
+        output = PagedAttention.sequence_block_reducer(
+            tmp_out, exp_sum, max_logits, query, decode_meta.seq_lens, decode_meta.max_long_decode_seq_len)
         return output
+
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,

@@ -31,9 +31,10 @@ def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
         return tensor_dict
     return get_tp_group().broadcast_tensor_dict(tensor_dict, src)
 
+
 def broadcast_sp_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
-                                                                Any]]] = None,
-                          src: int = 0):
+                                                                   Any]]] = None,
+                             src: int = 0):
     if not torch.distributed.is_initialized():
         return tensor_dict
     return get_sp_group(src).broadcast_tensor_dict(tensor_dict, src)
@@ -44,6 +45,7 @@ def send_sp_tensor(tensor: torch.Tensor = None, sp_group: int = 0, dst: int = 0)
     if not torch.distributed.is_initialized():
         return tensor_model_parallel_all_reduce
     return get_sp_group(sp_group).send_tensor(tensor, dst)
+
 
 def recv_sp_tensor(tensor: torch.Tensor = None, sp_group: int = 0, src: int = 0):
     # `src` is the local rank.

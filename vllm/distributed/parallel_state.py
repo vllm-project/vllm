@@ -678,7 +678,6 @@ class GroupCoordinator:
         else:
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
-    
 
     def send_tensor(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
@@ -693,8 +692,8 @@ class GroupCoordinator:
             torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
     def recv_tensor(self,
-             tensor: torch.Tensor,
-             src: Optional[int] = None) -> torch.Tensor:
+                    tensor: torch.Tensor,
+                    src: Optional[int] = None) -> torch.Tensor:
         """Receives a tensor from the src rank in the specified tensor buffer."""
         """NOTE: `src` is the local rank of the destination rank."""
         if src is None:
@@ -706,7 +705,6 @@ class GroupCoordinator:
         else:
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
-
 
     def destroy(self):
         if self.device_group is not None:
@@ -785,6 +783,7 @@ def get_sp_group(rank: int) -> GroupCoordinator:
     assert _SP[rank] is not None, (
         f"sequence parallel group of rank {rank} is not initialized")
     return _SP[rank]
+
 
 @contextmanager
 def graph_capture():
@@ -894,7 +893,7 @@ def initialize_model_parallel(
     """
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
-    world_size: int =  torch.distributed.get_world_size()
+    world_size: int = torch.distributed.get_world_size()
     tp_pp_world_size: int = world_size - sequence_parallel_size + 1
     sp_world_size: int = sequence_parallel_size
     backend = backend or torch.distributed.get_backend(
@@ -929,11 +928,12 @@ def initialize_model_parallel(
         "pipeline model parallel group is already initialized")
     group_ranks = []
     for i in range(num_pipeline_model_parallel_groups):
-        ranks = list(range(i, tp_pp_world_size, num_pipeline_model_parallel_groups))
+        ranks = list(range(i, tp_pp_world_size,
+                     num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank, backend)
-    
+
     # Build the sequence-parallel groups.
     # Each tp or sp rank should have a sequence parallel group
     num_sequence_parallel_groups: int = tp_pp_world_size
@@ -942,10 +942,11 @@ def initialize_model_parallel(
         "sequence parallel groups are already initialized")
     _SP = [None] * num_sequence_parallel_groups
     for i in range(num_sequence_parallel_groups):
-        ranks = [i] + list(range(tp_pp_world_size, tp_pp_world_size + sp_world_size))
+        ranks = [i] + list(range(tp_pp_world_size,
+                           tp_pp_world_size + sp_world_size))
         if get_world_group().rank in ranks:
             _SP[i] = init_model_parallel_group([ranks],
-                                    get_world_group().local_rank, backend)
+                                               get_world_group().local_rank, backend)
 
 
 def ensure_model_parallel_initialized(
@@ -962,7 +963,7 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, 
+                                  pipeline_model_parallel_size,
                                   sequence_parallel_size,
                                   backend)
         return
@@ -1018,18 +1019,20 @@ def get_tensor_model_parallel_world_size():
 
 
 def get_tensor_model_parallel_rank():
-    global_rank=get_world_group().rank_in_group
-    if global_rank<get_tp_group().world_size:
+    global_rank = get_world_group().rank_in_group
+    if global_rank < get_tp_group().world_size:
         """Return my rank for the tensor model parallel group."""
         return get_tp_group().rank_in_group
     else:
         return -1
+
+
 def get_sequence_parallel_rank():
     """Return my rank for the tensor model parallel group."""
-    global_rank=get_world_group().rank_in_group
-    if global_rank>=get_tp_group().world_size:
+    global_rank = get_world_group().rank_in_group
+    if global_rank >= get_tp_group().world_size:
         return get_tp_group(0).rank_in_group-1
-    else: 
+    else:
         return -1
 
 

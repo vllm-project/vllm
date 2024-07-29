@@ -92,18 +92,19 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata,
         sp_rank: Optional[int],
     ) -> torch.Tensor:
-        
+
         return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                 self._kv_scale,sp_rank)
+                                 self._kv_scale, sp_rank)
+
     def reducer(
         self,
-         tmp_out: torch.Tensor,
+        tmp_out: torch.Tensor,
         exp_sum: torch.Tensor,
         max_logits: torch.Tensor,
         query: torch.Tensor,
-        attn_metadata:AttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        return self.impl.reducer(tmp_out,exp_sum,max_logits,query,attn_metadata)
+        return self.impl.reducer(tmp_out, exp_sum, max_logits, query, attn_metadata)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
