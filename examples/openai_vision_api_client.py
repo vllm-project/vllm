@@ -42,6 +42,7 @@ chat_completion_from_url = client.chat.completions.create(
         ],
     }],
     model=model,
+    max_tokens=64,
 )
 
 result = chat_completion_from_url.choices[0].message.content
@@ -78,6 +79,7 @@ chat_completion_from_base64 = client.chat.completions.create(
         ],
     }],
     model=model,
+    max_tokens=64,
 )
 
 result = chat_completion_from_base64.choices[0].message.content
