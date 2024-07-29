@@ -70,17 +70,17 @@ def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_quick(out, x)
 
 
-def sequence_block_reducer(
-    out: torch.Tensor,
-    exp_sum: torch.Tensor,
-    max_logits: torch.Tensor,
-    tmp_out: torch.Tensor,
-    query: torch.Tensor,
-    seq_lens: torch.Tensor,
-    max_seq_len: int,
-) -> None:
-    torch.ops._C.sequence_block_reducer(
-        out, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
+# def sequence_block_reducer(
+#     out: torch.Tensor,
+#     exp_sum: torch.Tensor,
+#     max_logits: torch.Tensor,
+#     tmp_out: torch.Tensor,
+#     query: torch.Tensor,
+#     seq_lens: torch.Tensor,
+#     max_seq_len: int,
+# ) -> None:
+#     torch.ops._C.sequence_block_reducer(
+#         out, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
 
 # page attention ops
 

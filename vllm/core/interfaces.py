@@ -122,7 +122,9 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_kvcache_migrate_block(self,mapping:List[Tuple[int,int,int]])->None:
+    def get_kvcache_migrate_block(
+        self,
+        mapping:List[Tuple[int,int,int]])->None:
         pass
 
     @abstractmethod
@@ -130,5 +132,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def format_kvcache_migrate_blocks(self,blocks_to_migrate:List[Tuple[int,int,int]],blocks_to_copy:List[Tuple[int, int]])->None:
+    def format_kvcache_migrate_blocks(
+        self,
+        blocks_to_migrate:List[Tuple[int,int,int]],
+        blocks_to_copy:List[Tuple[int, int]])->None:
         pass

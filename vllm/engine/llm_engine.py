@@ -294,7 +294,10 @@ class LLMEngine:
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = Scheduler(
-            scheduler_config, cache_config, lora_config, parallel_config.sequece_parallel_size)
+            scheduler_config, 
+            cache_config, 
+            lora_config, 
+            parallel_config.sequence_parallel_size)
 
         # Metric Logging.
         if self.log_stats:

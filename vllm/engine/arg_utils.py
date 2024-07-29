@@ -542,7 +542,8 @@ class EngineArgs:
             '--speculative-model',
             type=nullable_str,
             default=EngineArgs.speculative_model,
-            help='The name of the draft model to be used in speculative decoding.')
+            help='The name of the draft model to be used in speculative'
+            'decoding.')
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,

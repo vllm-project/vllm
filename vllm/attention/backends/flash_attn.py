@@ -360,16 +360,16 @@ class FlashAttentionImpl(AttentionImpl):
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
-        if sp_rank != -1:
+        if sp_rank is not None and sp_rank != -1:
 
-            if remote_metadata := attn_metadata.remote_metadata and sp_rank is not None:
-                q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
-                query_remote = reshape_q(query, q_remote_distribution)
+            if remote_metadata := attn_metadata.remote_metadata:
+                q_dist = remote_metadata.q_remote_distirbution[sp_rank]
+                query_remote = reshape_q(query, q_dist)
                 output = torch.empty_like(query_remote)
                 query = query_remote.view(-1, self.num_heads, self.head_size)
-                num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
+                num_rem_dec = remote_metadata.num_long_decode_tokens[sp_rank]
                 decode_query = query[:]
-                assert decode_query.shape[0] == num_decode_tokens
+                assert decode_query.shape[0] == num_rem_dec
                 num_seqs = decode_query.size(0)
                 num_heads = decode_query.size(1)
                 num_tokens, hidden_size = query.shape
@@ -383,21 +383,25 @@ class FlashAttentionImpl(AttentionImpl):
                     dtype=torch.float32,
                     device=output.device,
                 )
-
-                # Decoding run.
-                output[:] = flash_attn_with_kvcache(
-                    decode_query.unsqueeze(1),
-                    key_cache,
-                    value_cache,
-                    block_table=remote_metadata.block_tables_remote[sp_rank],
-                    cache_seqlens=remote_metadata.seq_lens_remote_tensor[sp_rank],
-                    softmax_scale=self.scale,
-                    causal=True,
-                    alibi_slopes=self.alibi_slopes,
-                ).squeeze(1)
+                if kv_cache is not None:
+                    key_cache = kv_cache[0]
+                    value_cache = kv_cache[1]
+                    # Decoding run.
+                    output[:] = flash_attn_with_kvcache(
+                        decode_query.unsqueeze(1),
+                        key_cache,
+                        value_cache,
+                        block_table=remote_metadata.block_tables_remote[sp_rank],
+                        cache_seqlens=remote_metadata.seq_lens_remote_tensor[sp_rank],
+                        softmax_scale=self.scale,
+                        causal=True,
+                        alibi_slopes=self.alibi_slopes,
+                    ).squeeze(1)
 
                 # Reshape the output tensor.
-                return filter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits)
+                temp=output.view(-1, self.num_heads * self.head_size)
+                return filter_tensor(temp, out_exp_sums, out_max_logits,q_dist,num_seqs)
+                
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -501,4 +505,5 @@ class FlashAttentionImpl(AttentionImpl):
             ).squeeze(1)
 
         # Reshape the output tensor.
-        return output.view(num_tokens, hidden_size), out_exp_sums, out_max_logits
+        temp=output.view(-1,num_tokens, hidden_size)
+        return temp, out_exp_sums, out_max_logits

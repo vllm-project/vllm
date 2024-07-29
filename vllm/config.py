@@ -637,8 +637,10 @@ class ParallelConfig:
 
         # When SP is enable, i.e., SP > 0, the world should contains
         # pipeline_parallel_size * self.tensor_parallel_size GPUs as master and SP GPUs.
-        self.world_size = pipeline_parallel_size * \
-            tensor_parallel_size + sequence_parallel_size - 1
+        pp_size = pipeline_parallel_size
+        tp_size = tensor_parallel_size
+        sp_size = sequence_parallel_size
+        self.world_size = pp_size * tp_size + sp_size - 1
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"

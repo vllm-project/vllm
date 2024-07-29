@@ -38,8 +38,11 @@ from vllm.model_executor.models.interfaces import supports_lora
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad, reshape_list)
+from vllm.utils import (CudaMemoryProfiler,
+                        get_kv_cache_torch_dtype,
+                        is_hip,
+                        is_pin_memory_available,
+                        make_tensor_with_pad, reshape_list)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -364,7 +367,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         old_index = 0
 
         sequence_parallel_size = self.parallel_config.sequece_parallel_size
-        # superblock_size=self.cache_config.block_migrate_size/self.cache_config.block_size
+        # superblock_size：
+        # self.cache_config.block_migrate_size/self.cache_config.block_size
         # to be modified
         max_sequence_length = self.model_config.max_model_len
         max_block_size = max_sequence_length/self.cache_config.block_size
@@ -424,8 +428,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 remote_len = 0
-                block_tables_remote_rank = seq_group_metadata.block_tables_remote_rank[seq_id]
-                for rank in block_tables_remote_rank:
+                block_ranks = seq_group_metadata.block_tables_remote_rank[seq_id]
+                for rank in block_ranks:
                     if rank > 0:
                         remote_len += self.block_size
 
@@ -506,7 +510,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         # chunked prefill or decode
                         block_table_filter = seq_group_metadata.block_tables[seq_id]
                         block_table = []
-                        for block_number, block_rank in zip(block_table_filter, block_tables_remote_rank):
+                        for block_number, block_rank in zip(block_table_filter, block_ranks):
                             if block_rank == 0:
                                 block_table.append(block_number)
                         if curr_sliding_window_blocks is not None:
@@ -519,7 +523,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # Prefill without chunked prefill or memory profiling.
                     block_table = []
 
-                # currently, distirbuted inference is only performed for decode stage.
+                # currently, distirbuted inference is only performed
+                # for decode stage.
                 if remote_len == 0 or is_prompt:
                     block_tables.append(block_table)
                     seq_lens.append(sliding_seq_len-remote_len)
@@ -542,7 +547,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             "seq_len: {}, context_len: {}, query_len: {}".format(
                                 seq_len, context_len, query_len))
                         num_decode_tokens += query_len
-                        decode_seq_lens.append(sliding_seq_len-remote_len)
+                        local_len = sliding_seq_len-remote_len
+                        decode_seq_lens.append(local_len)
 
                     if lora_id > 0:
                         lora_requests.add(seq_group_metadata.lora_request)
@@ -583,8 +589,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     start_idx = 0
                     if self.sliding_window is not None:
                         if is_prompt:
-                            assert self.scheduler_config.use_v2_block_manager \
-                                or context_len == 0, (
+                            use_v2=self.scheduler_config.use_v2_block_manager
+                            assert  use_v2 or context_len == 0, (
                                     "Prefix caching is currently not supported with "
                                     "sliding window attention in V1 block manager")
                         # It is an optimization. When it is decoding, it is always
@@ -674,16 +680,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         slot_mapping_long.append(slot)
 
                     # prepare remote metadata of long decoding.
-                    #   sequence        |         distribution           |      q_index         |   length
-                    ###############################################################################################
-                    # aaabbbbbbbba       |aaaa    bbbb    pad     pad     |0       0       0     |4      0       0
-                    #                   |        bbbb                    |0                     |4
-                    # aabbbbcccca        |aaa     bbbb    cccc    pad     |1       1       1     |4      4       0
-                    # adddda             |aa      pad     pad     dddd    |2       2       2     |0      0       4
+                    #sequence|distribution|q_index|length
+                    #############################################
+                    # aaabbbbbbbba|aaaa bbbb pad pad |0 0 0|4 0 0
+                    #             |     bbbb         |  0  |4
+                    # aabbbbcccca |aaa  bbbb cccc pad|1 1 1|4 4 0
+                    # adddda      |aa   pad  pad dddd|2 2 2|0 0 4
                     block_table_remote: List[List[int]] = []
                     for i in range(sequence_parallel_size):
                         block_table_remote.append([])
-                    for block_number, block_rank in zip(block_table, block_tables_remote_rank):
+                    for block_number, block_rank in zip(block_table, block_ranks):
                         if block_rank > 0:
                             block_table_remote[block_rank -
                                                1].append(block_number)

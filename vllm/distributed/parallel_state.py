@@ -679,7 +679,10 @@ class GroupCoordinator:
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
-    def send_tensor(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
+    def send_tensor(
+            self, 
+            tensor: torch.Tensor, 
+            dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
@@ -945,8 +948,8 @@ def initialize_model_parallel(
         ranks = [i] + list(range(tp_pp_world_size,
                            tp_pp_world_size + sp_world_size))
         if get_world_group().rank in ranks:
-            _SP[i] = init_model_parallel_group([ranks],
-                                               get_world_group().local_rank, backend)
+            local_rank=get_world_group().local_rank
+            _SP[i] = init_model_parallel_group([ranks],local_rank, backend)
 
 
 def ensure_model_parallel_initialized(

@@ -37,7 +37,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
         if ray_usage != "1":
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
-         # Get the model config for the only attn in SP from the input model config.
+         # Get the model config for the only attn in SP
+         # from the input model config.
         if (self.parallel_config.sequence_parallel_size > 1):
             self.only_attn_model_config = copy.deepcopy(self.model_config)
             self.only_attn_model_config.model = "only_attn"
@@ -58,9 +59,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
             distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
         """Return worker init args for a given rank."""
         assert distributed_init_method is not None
-
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
         # Get the final model config.
-        if rank < self.parallel_config.tensor_parallel_size * self.parallel_config.pipeline_parallel_size:
+        if rank < tp_size*pp_size:
             model_config = self.model_config
             is_sp_worker = False
         else:

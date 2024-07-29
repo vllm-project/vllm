@@ -151,8 +151,8 @@ class LlamaAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
-        self.sequence_parallel_broastcaster = SequenceParallelLinearForBroastcast()
-        self.sequence_parallel_gather = SequenceParallelLinearForGather()
+        self.broastcaster = SequenceParallelLinearForBroastcast()
+        self.parallel_gather = SequenceParallelLinearForGather()
 
     def forward(
         self,
@@ -166,17 +166,21 @@ class LlamaAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         num_long_decode_tokens = attn_metadata.num_long_decode_tokens
         if not num_long_decode_tokens:
-            q[-num_long_decode_tokens:] = self.sequence_parallel_broastcaster(
+            q[-num_long_decode_tokens:] = self.broastcaster(
                 q[-num_long_decode_tokens:])
         attn_output, out_exp_sum, out_max_sums = self.attn(
             q, k, v, kv_cache, attn_metadata)
-        # gather output: shape[num_seqs, num_heads, max_num_partitions, head_size]
+        # gather output: 
+        # shape[num_seqs, num_heads, max_num_partitions, head_size]
         if not num_long_decode_tokens:
-            attn_to_reduce, exp_sum_to_reduce, max_logits_to_reduce = self.sequence_parallel_gather(
-                attn_output[-num_long_decode_tokens:], out_exp_sum, out_max_sums)
+            num = num_long_decode_tokens
+            attn, exp_sum, max_logits = self.parallel_gather(attn_output[-num:],
+                                                             out_exp_sum, out_max_sums)
+
             # reduce sequence block result
-            attn_output[-attn_metadata.num_long_decode_tokens:] = self.attn.reducer(
-                attn_to_reduce, exp_sum_to_reduce, max_logits_to_reduce, q[-num_long_decode_tokens:], attn_metadata)
+
+            attn_output[-num:] = self.attn.reducer(
+                attn, exp_sum, max_logits, q[-num:], attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 

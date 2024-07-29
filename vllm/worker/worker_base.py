@@ -12,7 +12,8 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
                         update_environment_variables)
-from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase, _add_attn_metadata_broadcastable_dict
+from vllm.worker.model_runner_base import (ModelRunnerBase, 
+                                           ModelRunnerInputBase)
 logger = init_logger(__name__)
 
 
@@ -125,7 +126,7 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     # blocks_to_migrate: Optional[torch.Tensor] = None
-    chunk_to_migrate: Optional[torch.Tensor] = None
+    superblock_to_migrate: Optional[torch.Tensor] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -142,7 +143,7 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             # blocks_to_migrate=tensor_dict.pop("blocks_to_migrate"),
-            chunk_to_migrate=tensor_dict.pop("chunk_to_migrate"),
+            superblock_to_migrate=tensor_dict.pop("superblock_to_migrate"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -155,7 +156,7 @@ class WorkerInput:
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
-            "chunk_to_migrate": self.chunk_to_migrate,
+            "superblock_to_migrate": self.chunk_to_migrate,
         }
 
         return tensor_dict

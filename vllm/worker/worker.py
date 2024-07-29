@@ -208,10 +208,7 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         if self.is_sp_worker:
-            if num_cpu_blocks == 0:
-                num_cpu_blocks = -1
-            else:
-                num_cpu_blocks = -num_cpu_blocks
+            num_cpu_blocks = -1 if num_cpu_blocks == 0 else -num_cpu_blocks
 
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
@@ -372,9 +369,9 @@ class Worker(LocalOrDistributedWorkerBase):
         # Note sequence parallel requires master workers (in sp and tp)
         # to first copy blocks their chunck memories, and then migrate
         # the chunk to the tgt sp worker
-        if (worker_input.chunk_to_migrate is not None
-                and worker_input.chunk_to_migrate.numel() > 0):
-            chunk_to_migrate = chunk_to_migrate.tolist()
+        if (worker_input.superblock_to_migrate is not None
+                and worker_input.superblock_to_migrate.numel() > 0):
+            chunk_to_migrate = worker_input.superblock_to_migrate.tolist()
             self.migrate_chunk(dst_chunk=chunk_to_migrate[0],
                                dst_rank=chunk_to_migrate[1])
 

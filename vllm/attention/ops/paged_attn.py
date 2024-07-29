@@ -46,7 +46,7 @@ class PagedAttention:
     def get_blocks(kv_cache: torch.Tensor,
                    start: int,
                    step: int) -> torch.Tensor:
-        return kv_cache[:, start:start+step]
+        return kv_cache[:, start:start+step,:]
 
     @staticmethod
     def split_kv_cache(
@@ -231,17 +231,7 @@ class PagedAttention:
                 (f"{blocksparse_block_size=} needs to be a multiple of"
                  f"{block_size=} used in block_tables.")
 
-        output = torch.empty_like(query)
-        out_exp_sums = torch.empty(
-            size=(num_seqs, num_heads),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        out_max_logits = torch.empty(
-            size=(num_seqs, num_heads),
-            dtype=torch.float32,
-            device=output.device,
-        )
+        
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
@@ -253,6 +243,17 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
+        output = torch.empty_like(query)
+        out_exp_sums = torch.empty(
+            size=(num_seqs, num_heads),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        out_max_logits = torch.empty(
+            size=(num_seqs, num_heads),
+            dtype=torch.float32,
+            device=output.device,
+        )
 
         # Run PagedAttention V3.
         assert _PARTITION_SIZE % block_size == 0
@@ -352,5 +353,5 @@ class PagedAttention:
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
-    def get_blocks(self, layer: int, start: int, step: int) -> torch.Tensor:
-        self.attn_backend.get_blocks(self.gpu_cache[i], start, step)
+    # def get_blocks(self, layer: int, start: int, step: int) -> torch.Tensor:
+    #     self.attn_backend.get_blocks(self.gpu_cache[layer], start, step)

@@ -42,7 +42,11 @@ from .interfaces import SupportsLoRA
 
 
 class broastcastlayer:
-    def __init__(self, tp_size: int, hidden_size: int, dtype: Optional[torch.dtype] = None) -> None:
+    def __init__(self,
+                 tp_size: int,
+                 hidden_size: int,
+                 dtype: Optional[torch.dtype] = None
+                 ) -> None:
         self.tp_size = tp_size
         self.broastcast_streams = [torch.cuda.Stream() for _ in range(tp_size)]
         self.broatcasters = [SequenceParallelLinearForBroastcast(
@@ -67,13 +71,17 @@ class gatherlayer:
             i) for i in range[self.tp_size]]
         self.num_heads = num_heads/self.tp_size
 
-    def forward(self, attn_to_reduce: torch.Tensor, exp_sum_to_reduce: torch.Tensor, max_logits_to_reduce: torch.Tensor) -> None:
+    def forward(self,
+                attn_to_reduce: torch.Tensor,
+                exp_sum_to_reduce: torch.Tensor,
+                max_logits_to_reduce: torch.Tensor) -> None:
         for i in range(self.tp_size):
             with torch.cuda.stream(self.gather_streams[i]):
                 start = i*self.num_heads
                 end = (i+1)*self.num_heads
-                self.gather[i](attn_to_reduce[:, start:end, :], exp_sum_to_reduce[:,
-                               start:end], max_logits_to_reduce[:, start:end])
+                self.gather[i](attn_to_reduce[:, start:end, :],
+                               exp_sum_to_reduce[:, start:end],
+                               max_logits_to_reduce[:, start:end])
 
 
 class OnlyAttention(nn.Module):
@@ -252,7 +260,8 @@ class OnlyAttentionModel(nn.Module, SupportsLoRA):
     ) -> None:
         self.model(kv_caches, attn_metadata)
 
-    def compute_logits(self, hidden_states: torch.Tensor,
+    def compute_logits(self,
+                       hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
         pass
 

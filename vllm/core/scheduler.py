@@ -989,8 +989,8 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
-                block_tables_remote_rank[seq_id] = self.block_manager.get_block_table_remote_rank(
-                    seq)
+                remote_rank=self.block_manager.get_block_table_remote_rank(seq)
+                block_tables_remote_rank[seq_id] = remote_rank
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             common_computed_block_nums = (

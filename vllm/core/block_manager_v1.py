@@ -158,7 +158,9 @@ class CachedBlockAllocator(BlockAllocatorBase):
 
     def get_migrate_blocks(self) -> List[int]:
         blocks_number = []
-        for block_number in range(self.num_blocks, self.num_blocks+self.blocks_for_migrate):
+        start = self.num_blocks
+        end = start+self.blocks_for_migrate
+        for block_number in range(start, end):
             blocks_number.append(block_number)
         return blocks_number
 
@@ -258,17 +260,20 @@ class RemoteAllocator:
 
     def get_used_rank(self, block_number: int) -> int:
         used_rank = self.last_used_rank
-        if self.selection_policy == SelectionPolicy.ONLYAPPEND or self.selection_policy == SelectionPolicy.MEANAPPEND:
+        onlyappend = self.selection_policy == SelectionPolicy.ONLYAPPEND
+        meanappend = self.selection_policy == SelectionPolicy.MEANAPPEND
+        if onlyappend or meanappend:
             if self.selection_policy == SelectionPolicy.MEANAPPEND:
                 used_rank = used_rank % self.remote_allocator+1
             find = False
+            total_number = self.remote_allocator
             while not find:
                 allocator = self.allocator_group[used_rank-1]
                 free_block = allocator.get_num_free_blocks()
                 if free_block > block_number:
                     find = True
                 else:
-                    used_rank = used_rank % self.remote_allocator+1
+                    used_rank = used_rank % total_number + 1
                     if used_rank == self.last_used_rank:
                         break
             if not find:
@@ -844,7 +849,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def add_kvcache_migrate_block(self, seq: Sequence) -> None:
         len = seq.get_len()
         remain = (len-self.block_migrate_start) % self.block_migrate_size
-        if len >= self.block_migrate_threshold and remain == 0 and seq.status == SequenceStatus.RUNNING:
+        is_running = seq.status == SequenceStatus.RUNNING
+        maybe_to_migrate = len >= self.block_migrate_threshold
+        if maybe_to_migrate and remain == 0 and is_running:
             block_table = self.block_tables[seq.seq_id]
             start = self.block_migrate_start
             migrate_set = set(self.migrate_list)
@@ -856,7 +863,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 start += self.block_migrate_size
             self.migrate_list = List(migrate_set)
 
-    def get_kvcache_migrate_block(self, mapping: List[Tuple[int, int, int]]) -> None:
+    def get_kvcache_migrate_block(self, 
+                                  mapping: List[Tuple[int, int, int]]) -> None:
         length = len(self.migrate_list)
         if length > 0:
             migrate_block = self.migrate_list[0]
@@ -865,11 +873,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self.block_migrate_size/self.block_size)
             remote_rank = to_blocks[0].remote_rank
             block_table = self.block_tables[migrate_block.seq_id]
-            for index in range(migrate_block.start, migrate_block.start+migrate_block.block_size):
+            start=migrate_block.start
+            end=migrate_block.start+migrate_block.block_size
+            for index in range(start, end):
                 self.gpu_allocator.free(block_table[index])
                 to_block = to_blocks[index-migrate_block.start]
-                mapping.append(
-                    Tuple(block_table[index].block_number, remote_rank, to_block.block_number))
+                mapping_item=Tuple(block_table[index].block_number, 
+                                   remote_rank, to_block.block_number)
+                mapping.append(mapping_item)
                 block_table[index] = to_block
             self.block_tables[migrate_block.seq_id] = block_table
 
@@ -880,7 +891,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 if self.migrate_list[i].seq_id == seq_id:
                     del [self.migrate_list[i]]
 
-    def format_kvcache_migrate_blocks(self, blocks_to_migrate: List[Tuple[int, int, int]], blocks_to_copy: List[Tuple[int, int]]) -> None:
+    def format_kvcache_migrate_blocks(
+            self, 
+            blocks_to_migrate: List[Tuple[int, int, int]], 
+            blocks_to_copy: List[Tuple[int, int]]) -> None:
         dest_blocks = self.gpu_allocator.get_migrate_blocks()
         for from_info, dest_block in zip(blocks_to_migrate, dest_blocks):
             blocks_to_copy.append(Tuple(from_info[0], dest_block))
