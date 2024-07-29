@@ -72,7 +72,7 @@ class OpenAIServing:
     ):
         super().__init__()
 
-        self.rcp_client = rpc_client
+        self.rpc_client = rpc_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 

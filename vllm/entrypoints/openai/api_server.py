@@ -17,6 +17,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
+from transformers import AutoTokenizer
+
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -227,7 +229,8 @@ async def build_server(
     else:
         served_model_names = [args.model]
 
-    rpc_client = RPCClient()
+    # TODO: figure out a way around passing the token
+    rpc_client = RPCClient(tokenizer=AutoTokenizer.from_pretrained(args.model))
     await rpc_client.wait_for_server()
     logger.info("RPC Client connected to RPC server.")
     model_config = await rpc_client.get_model_config()
@@ -254,7 +257,7 @@ async def build_server(
     #     return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     # )
     openai_serving_completion = OpenAIServingCompletion(
-        engine,
+        rpc_client,
         model_config,
         served_model_names,
         lora_modules=args.lora_modules,
@@ -305,7 +308,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
-    logger.info("Starting RPC Server.")
     rpc_server_process = Process(target=run_rpc_server,
                                  args=(AsyncEngineArgs.from_cli_args(args), ))
     rpc_server_process.start()

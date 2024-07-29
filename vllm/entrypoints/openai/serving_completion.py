@@ -8,7 +8,6 @@ from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -129,7 +128,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = await self.rcp_client.is_tracing_enabled()
+                is_tracing_enabled = await self.rpc_client.is_tracing_enabled()
                 trace_headers = None
                 if is_tracing_enabled:
                     trace_headers = extract_trace_headers(raw_request.headers)

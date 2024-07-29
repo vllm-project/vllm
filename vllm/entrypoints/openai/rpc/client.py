@@ -1,6 +1,6 @@
 from typing import AsyncIterator, Optional, Mapping
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, DecodingConfig
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -17,11 +17,14 @@ import pickle
 
 
 class RPCClient:
-
-    def __init__(self):
+    
+    # TODO: check if opening all these sockets is an antipattern?
+    def __init__(self, tokenizer):
         self.context = zmq.asyncio.Context()
-
-        # TODO: check if opening all these is an antipattern?
+        
+        # TODO: do the tokenizer properly.
+        self.tokenizer = tokenizer
+        self.decoding_config = DecodingConfig()
 
         # Socket to check if the RPC server is ready.
         self.is_ready_socket = self.context.socket(zmq.REP)
@@ -40,12 +43,12 @@ class RPCClient:
         return pickle.loads(model_config)
 
     async def get_tokenizer(self, lora_request: LoRARequest):
-        # TODO: handle this via get data?
-        pass
+        # TODO: handle this via get data? - or avoid doing via RPC
+        return self.tokenizer
 
-    async def get_decoding_config(self, lora_request: LoRARequest):
-        # TODO: handle this via get data?
-        pass
+    async def get_decoding_config(self):
+        # TODO: handle this via get data? -  or avoid doing via RPC
+        return self.decoding_config
 
     async def abort(self, request_id: str):
         # TODO: actually handle this with a new socket.
