@@ -27,13 +27,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
-        self.group_size = group_size
+        self.group_size = -1 if group_size is None else group_size
 
-        if self.group_size is None and self.strategy != "channel":
-            raise ValueError(
-                "Marlin kernels require group quantization or "
-                "channelwise quantization, but found no group "
-                "size and strategy is not channelwise.")
+        if self.group_size == -1 and self.strategy != "channel":
+            raise ValueError("Marlin kernels require group quantization or "
+                             "channelwise quantization, but found no group "
+                             "size and strategy is not channelwise.")
 
         # Verify supported on platform.
         verify_gptq_marlin_supported(num_bits=self.num_bits,
@@ -53,9 +52,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         output_size_per_partition = sum(output_partition_sizes)
 
-        # If group_size is None, we are in channelwise case.
-        channelwise = self.group_size is None
-        group_size = self.group_size if group_size is not None else input_size
+        # If group_size is -1, we are in channelwise case.
+        channelwise = self.group_size == -1
+        group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = (input_size != input_size_per_partition)
         # In the case of channelwise quantization, we need to replicate the
         # scales across all gpus.
@@ -95,13 +94,13 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 dtype=params_dtype,
             )
         }
-        if self.group_size is not None:
+        if self.group_size == -1:
+            weight_scale = ChannelQuantScaleParameter(output_dim=0,
+                                                      **weight_scale_args)
+        else:
             weight_scale = GroupQuantScaleParameter(output_dim=0,
                                                     input_dim=1,
                                                     **weight_scale_args)
-        else:
-            weight_scale = ChannelQuantScaleParameter(output_dim=0,
-                                                      **weight_scale_args)
 
         # A 2D array defining the original shape of the weights
         # before packing
