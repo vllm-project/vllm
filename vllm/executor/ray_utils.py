@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import get_ip, is_hip, is_tpu, is_hpu, is_xpu
+from vllm.utils import get_ip, is_hip, is_hpu, is_tpu, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -87,18 +87,17 @@ def initialize_ray_cluster(
                  ignore_reinit_error=True,
                  num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True)
+        ray.init(address=ray_address, ignore_reinit_error=True)
 
     if parallel_config.placement_group:
         # Placement group is already set.
         return
 
-    device_str = "GPU" 
+    device_str = "GPU"
     if is_tpu():
         device_str = "TPU"
     elif is_hpu():
-        device_str = "HPU" 
+        device_str = "HPU"
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
