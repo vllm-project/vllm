@@ -23,15 +23,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.is_static_input_scheme = is_static_input_scheme
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
-        # On Lovelace, fail for now if channelwise.
-        # TODO: (@tms) fallback
-        if (not self.cutlass_fp8_supported
-                and self.strategy == QuantizationStrategy.CHANNEL):
-            raise ValueError(
-                "Channelwise fp8 quantization requires vLLM's custom "
-                "cutlass kernels, which are not supported on your device."
-                "Consider quantizing with per tensor scales or upgrading "
-                "to Hopper.")
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # lovelace and up
+        return 89
 
     def process_weights_after_loading(self, layer) -> None:
         # If per tensor, when we have a fused module (e.g. QKV) with per
@@ -49,7 +44,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.strategy == QuantizationStrategy.CHANNEL:
-            assert self.cutlass_fp8_supported
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
 
@@ -84,19 +78,20 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         })
 
         # WEIGHT SCALE
+        layer_kwargs = {"weight_loader": weight_loader}
         if self.strategy == QuantizationStrategy.CHANNEL:
             weight_scale = create_per_channel_scale_param(
-                output_partition_sizes, weight_loader=weight_loader)
+                output_partition_sizes, **layer_kwargs)
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
             weight_scale = create_per_tensor_scale_param(
-                output_partition_sizes, weight_loader=weight_loader)
+                output_partition_sizes, **layer_kwargs)
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
         if self.is_static_input_scheme:
             input_scale = create_per_tensor_scale_param(
-                output_partition_sizes, weight_loader=weight_loader)
+                output_partition_sizes, **layer_kwargs)
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self,
@@ -110,4 +105,5 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight_scale=layer.weight_scale,
             input_scale=layer.input_scale,
             bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported)
+            cutlass_fp8_supported=self.cutlass_fp8_supported,
+            use_per_token_if_dynamic=True)

@@ -3,9 +3,11 @@ import copy
 import enum
 import math
 from abc import ABC, abstractmethod
+from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
+from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
+                    Union)
 
 import torch
 
@@ -118,10 +120,10 @@ class SequenceData:
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
-        self._prompt_token_ids: List[int] = list(prompt_token_ids)
+        self._prompt_token_ids = array('l', prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
-        self._output_token_ids: List[int] = (
-            list(output_token_ids) if output_token_ids is not None else [])
+        self._output_token_ids = array(
+            'l', output_token_ids if output_token_ids is not None else [])
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -131,8 +133,8 @@ class SequenceData:
         self._update_cached_all_tokens()
 
     def _update_cached_all_tokens(self):
-        self._cached_all_token_ids: List[int] = (self._prompt_token_ids +
-                                                 self._output_token_ids)
+        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
+                                                     self._output_token_ids)
 
     @property
     def prompt_token_ids(self) -> Tuple[int, ...]:
@@ -140,9 +142,13 @@ class SequenceData:
 
     @prompt_token_ids.setter
     def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        self._prompt_token_ids = list(new_prompt_token_ids)
+        self._prompt_token_ids = array('l', new_prompt_token_ids)
         self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
         self._update_cached_all_tokens()
+
+    @property
+    def prompt_token_ids_array(self) -> array:
+        return self._prompt_token_ids
 
     @property
     def output_token_ids(self) -> Tuple[int, ...]:
@@ -150,8 +156,12 @@ class SequenceData:
 
     @output_token_ids.setter
     def output_token_ids(self, new_output_token_ids) -> None:
-        self._output_token_ids = list(new_output_token_ids)
+        self._output_token_ids = array('l', new_output_token_ids)
         self._update_cached_all_tokens()
+
+    @property
+    def output_token_ids_array(self) -> array:
+        return self._output_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -438,7 +448,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.request_id = request_id
@@ -457,24 +467,25 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        self._first_seq = next(iter(self.seqs_dict.values()))
 
     @property
     def prompt(self) -> Optional[str]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).prompt
+        return self._first_seq.prompt
 
     @property
     def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).prompt_token_ids
+        return self._first_seq.prompt_token_ids
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).multi_modal_data
+        return self._first_seq.multi_modal_data
 
     @property
     def lora_int_id(self) -> int:
