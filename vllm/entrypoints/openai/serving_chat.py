@@ -8,6 +8,7 @@ from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
+from vllm.engine.protocol import VLLMBackend
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          load_chat_template,
                                          parse_chat_message_content)
@@ -19,7 +20,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     FunctionCall, ToolCall, UsageInfo)
-from vllm.entrypoints.openai.rpc.client import RPCClient
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
@@ -41,7 +41,7 @@ class OpenAIServingChat(OpenAIServing):
 
     def __init__(
         self,
-        rpc_client: RPCClient,
+        vllm_backend: VLLMBackend,
         model_config: ModelConfig,
         served_model_names: List[str],
         response_role: str,
@@ -52,7 +52,7 @@ class OpenAIServingChat(OpenAIServing):
         chat_template: Optional[str],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(rpc_client=rpc_client,
+        super().__init__(vllm_backend=vllm_backend,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -91,7 +91,7 @@ class OpenAIServingChat(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             model_config = self.model_config
-            tokenizer = await self.rpc_client.get_tokenizer(lora_request)
+            tokenizer = await self.vllm_backend.get_tokenizer(lora_request)
 
             conversation: List[ConversationMessage] = []
             mm_futures: List[Awaitable[MultiModalDataDict]] = []
@@ -135,7 +135,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id = f"chat-{random_uuid()}"
         try:
             sampling_params = request.to_sampling_params()
-            decoding_config = await self.rpc_client.get_decoding_config()
+            decoding_config = await self.vllm_backend.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logits_processor = (
@@ -168,7 +168,7 @@ class OpenAIServingChat(OpenAIServing):
             if mm_data is not None:
                 engine_inputs["multi_modal_data"] = mm_data
 
-            is_tracing_enabled = await self.rpc_client.is_tracing_enabled()
+            is_tracing_enabled = await self.vllm_backend.is_tracing_enabled()
             trace_headers = None
             if is_tracing_enabled and raw_request:
                 trace_headers = extract_trace_headers(raw_request.headers)
@@ -176,7 +176,7 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
 
-            result_generator = self.rpc_client.generate(
+            result_generator = self.vllm_backend.generate(
                 engine_inputs,
                 sampling_params,
                 request_id,
@@ -448,7 +448,7 @@ class OpenAIServingChat(OpenAIServing):
         async for res in result_generator:
             if raw_request is not None and await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
-                await self.rpc_client.abort(request_id)
+                await self.vllm_backend.abort(request_id)
                 return self.create_error_response("Client disconnected")
             final_res = res
         assert final_res is not None

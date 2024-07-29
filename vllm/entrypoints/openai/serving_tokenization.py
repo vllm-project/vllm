@@ -1,9 +1,9 @@
 from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
+from vllm.engine.protocol import VLLMBackend
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          load_chat_template,
                                          parse_chat_message_content)
@@ -15,7 +15,6 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               TokenizeRequest,
                                               TokenizeResponse)
 # yapf: enable
-from vllm.entrypoints.openai.rpc.client import RPCClient
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.utils import random_uuid
@@ -25,7 +24,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
     def __init__(
         self,
-        rpc_client: RPCClient,
+        vllm_backend: VLLMBackend,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -33,7 +32,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
     ):
-        super().__init__(rpc_client=rpc_client,
+        super().__init__(vllm_backend=vllm_backend,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -58,7 +57,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.rpc_client.get_tokenizer(lora_request)
+        tokenizer = await self.vllm_backend.get_tokenizer(lora_request)
 
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
@@ -114,7 +113,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.rpc_client.get_tokenizer(lora_request)
+        tokenizer = await self.vllm_backend.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,

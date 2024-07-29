@@ -6,7 +6,7 @@ import numpy as np
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import VLLMBackend
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
@@ -56,13 +56,13 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
+        vllm_backend: VLLMBackend,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
         request_logger: Optional[RequestLogger],
     ):
-        super().__init__(engine=engine,
+        super().__init__(vllm_backend=vllm_backend,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=None,
@@ -99,7 +99,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine.get_tokenizer(lora_request)
+            tokenizer = await self.vllm_backend.get_tokenizer(lora_request)
 
             pooling_params = request.to_pooling_params()
 
@@ -124,7 +124,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                         "Prompt adapter is not supported "
                         "for embedding models")
 
-                generator = self.engine.encode(
+                generator = self.vllm_backend.encode(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     pooling_params,
                     request_id_item,
@@ -146,7 +146,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
                     # Abort the request if the client disconnects.
-                    await self.engine.abort(f"{request_id}-{i}")
+                    await self.vllm_backend.abort(f"{request_id}-{i}")
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
 

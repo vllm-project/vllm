@@ -6,7 +6,7 @@ import signal
 from contextlib import asynccontextmanager
 from multiprocessing import Process
 from http import HTTPStatus
-from typing import Optional, Set
+from typing import Set
 
 import fastapi
 import uvicorn
@@ -19,9 +19,10 @@ from starlette.routing import Mount
 
 from transformers import AutoTokenizer
 
+from vllm.engine.protocol import VLLMBackend
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+# from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 # yapf conflicts with isort for this block
@@ -48,13 +49,12 @@ from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
-engine: AsyncLLMEngine
 engine_args: AsyncEngineArgs
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
-rpc_client: RPCClient
+backend: VLLMBackend
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -67,7 +67,7 @@ async def lifespan(app: fastapi.FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(10)
-            await engine.do_log_stats()
+            await backend.do_log_stats()
 
     # if not engine_args.disable_log_stats:
     #     task = asyncio.create_task(_force_log())
@@ -91,7 +91,7 @@ def mount_metrics(app: fastapi.FastAPI):
 @router.get("/health")
 async def health() -> Response:
     """Health check."""
-    await openai_serving_chat.engine.check_health()
+    await backend.check_health()
     return Response(status_code=200)
 
 
@@ -231,11 +231,11 @@ async def build_server(
         served_model_names = [args.model]
 
     # TODO: figure out a way around passing the token
-    global rpc_client
-    rpc_client = RPCClient(tokenizer=AutoTokenizer.from_pretrained(args.model))
-    await rpc_client.wait_for_server()
+    global backend
+    backend = RPCClient(tokenizer=AutoTokenizer.from_pretrained(args.model))
+    await backend.wait_for_server()
     logger.info("RPC Client connected to RPC server.")
-    model_config = await rpc_client.get_model_config()
+    model_config = await backend.get_model_config()
 
     if args.disable_log_requests:
         request_logger = None
@@ -248,7 +248,7 @@ async def build_server(
     global openai_serving_tokenization
 
     openai_serving_chat = OpenAIServingChat(
-        rpc_client,
+        backend,
         model_config,
         served_model_names,
         args.response_role,
@@ -259,7 +259,7 @@ async def build_server(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_completion = OpenAIServingCompletion(
-        rpc_client,
+        backend,
         model_config,
         served_model_names,
         lora_modules=args.lora_modules,
@@ -275,7 +275,7 @@ async def build_server(
     #     request_logger=request_logger,
     # )
     openai_serving_tokenization = OpenAIServingTokenization(
-        rpc_client,
+        backend,
         model_config,
         served_model_names,
         lora_modules=args.lora_modules,
@@ -341,7 +341,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         await server.shutdown()
     finally:
         logger.info("Cleaning up ZMQ client context")
-        rpc_client.close()
+        backend.close()
         rpc_server_process.join()
 
 

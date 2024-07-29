@@ -9,10 +9,10 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
+from vllm.engine.protocol import VLLMBackend
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.rpc.client import RPCClient
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
@@ -61,7 +61,7 @@ class OpenAIServing:
 
     def __init__(
         self,
-        rpc_client: RPCClient,
+        vllm_backend: VLLMBackend,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -72,7 +72,7 @@ class OpenAIServing:
     ):
         super().__init__()
 
-        self.rpc_client = rpc_client
+        self.vllm_backend = vllm_backend
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 

@@ -82,7 +82,7 @@ class RPCServer:
                 [identity, pickle.dumps(e, pickle.HIGHEST_PROTOCOL)])
 
     async def run_loop(self):
-        # Notify the RPC client that we are ready to recieve requests.
+        # Notify the RPC client that we are ready to receive requests.
         await self.is_ready_socket.send_string("Ready!")
         self.is_ready_socket.close()
 

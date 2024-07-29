@@ -8,6 +8,7 @@ from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
+from vllm.engine.protocol import VLLMBackend
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -19,7 +20,6 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionStreamResponse,
                                               UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.rpc.client import RPCClient
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
@@ -44,7 +44,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(
         self,
-        rpc_client: RPCClient,
+        vllm_backend: VLLMBackend,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -53,7 +53,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(rpc_client=rpc_client,
+        super().__init__(vllm_backend=vllm_backend,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -93,10 +93,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.rpc_client.get_tokenizer(lora_request)
+            tokenizer = await self.vllm_backend.get_tokenizer(lora_request)
 
             sampling_params = request.to_sampling_params()
-            decoding_config = await self.rpc_client.get_decoding_config()
+            decoding_config = await self.vllm_backend.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logit_processor = (
@@ -128,7 +128,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = await self.rpc_client.is_tracing_enabled()
+                is_tracing_enabled = await self.vllm_backend.is_tracing_enabled(
+                )
                 trace_headers = None
                 if is_tracing_enabled:
                     trace_headers = extract_trace_headers(raw_request.headers)
@@ -136,7 +137,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         raw_request.headers):
                     log_tracing_disabled_warning()
 
-                generator = self.rpc_client.generate(
+                generator = self.vllm_backend.generate(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     sampling_params,
                     request_id_item,
@@ -177,7 +178,7 @@ class OpenAIServingCompletion(OpenAIServing):
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
                     # Abort the request if the client disconnects.
-                    await self.rpc_client.abort(f"{request_id}-{i}")
+                    await self.vllm_backend.abort(f"{request_id}-{i}")
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
 
@@ -239,7 +240,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 # Abort the request if the client disconnects.
                 if await raw_request.is_disconnected():
-                    await self.rpc_client.abort(f"{request_id}-{prompt_idx}")
+                    await self.vllm_backend.abort(f"{request_id}-{prompt_idx}")
                     raise StopAsyncIteration()
 
                 for output in res.outputs:
