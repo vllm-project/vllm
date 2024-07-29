@@ -358,12 +358,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     dtype=torch.float32,
                     device=output.device,
                 )
-
+                key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
                 # Decoding run.
                 output[:], exp_sums[:], max_logits[:] = PagedAttention.forward_decode2(
                     decode_query,
-                    kv_cache[0],
-                    kv_cache[1],
+                    key_cache,
+                    value_cache,
                     remote_metadata.block_tables_remote[sp_rank],
                     remote_metadata.seq_lens_remote_tensor[sp_rank],
                     remote_metadata.max_remote_decode_seq_len[sp_rank],
@@ -571,15 +572,16 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         attn_metadata: "XFormersMetadata",
     ) -> torch.Tensor:
-        decode_meta = attn_metadata.decode_metadata
-        num_seqs = decode_meta.num_long_decode_tokens
-        seq_lens = decode_meta.seq_lens[-num_seqs:]
-        # to modify: seq_lens maybe need to be further designed
-        output = PagedAttention.sequence_block_reducer(
-            tmp_out, exp_sum, max_logits, query,
-            seq_lens, decode_meta.max_long_decode_seq_len)
-        return output
-
+        if decode_meta := attn_metadata.decode_metadata:
+            num_seqs = decode_meta.num_long_decode_tokens
+            seq_lens = decode_meta.seq_lens[-num_seqs:]
+            # to modify: seq_lens maybe need to be further designed
+            output = PagedAttention.sequence_block_reducer(
+                tmp_out, exp_sum, max_logits, query,
+                seq_lens, decode_meta.max_long_decode_seq_len)
+            return output
+        else:
+            return tmp_out
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,

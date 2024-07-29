@@ -362,8 +362,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
         is_valid_rank = sp_rank is not None and sp_rank != -1
         remote_metadata = attn_metadata.remote_metadata if is_valid_rank else None
-        if remote_metadata is not None and is_valid_rank:
-
+        if remote_metadata is not None and sp_rank is not None:
             q_dist = remote_metadata.q_remote_distirbution[sp_rank]
             query_remote = reshape_q(query, q_dist)
             output = torch.empty_like(query_remote)
