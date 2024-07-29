@@ -228,9 +228,9 @@ async def build_server(
         served_model_names = [args.model]
     
     rpc_client = RPCClient()
-    rpc_client.wait_for_server()
+    await rpc_client.wait_for_server()
     logger.info("RPC Client connected to RPC server.")
-    model_config = rpc_client.get_model_config()
+    model_config = await rpc_client.get_model_config()
 
     if args.disable_log_requests:
         request_logger = None

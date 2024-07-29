@@ -9,10 +9,10 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
+from vllm.entrypoints.openai.rpc.client import RPCClient
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
@@ -61,8 +61,8 @@ class OpenAIServing:
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
-        # model_config: ModelConfig,
+        rpc_client: RPCClient,
+        model_config: ModelConfig,
         served_model_names: List[str],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
@@ -72,11 +72,9 @@ class OpenAIServing:
     ):
         super().__init__()
 
-        self.engine = engine
-        # self.model_config = model_config
-        # self.max_model_len = model_config.max_model_len
-        self.max_model_len = 4096
-
+        self.rcp_client = rpc_client
+        self.model_config = model_config
+        self.max_model_len = model_config.max_model_len
         self.served_model_names = served_model_names
 
         self.lora_requests = []

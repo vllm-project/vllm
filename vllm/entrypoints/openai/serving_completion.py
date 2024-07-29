@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionStreamResponse,
                                               UsageInfo)
 # yapf: enable
+from vllm.entrypoints.openai.rpc.client import RPCClient
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
@@ -44,7 +45,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
+        rpc_client: RPCClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -53,7 +54,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(engine=engine,
+        super().__init__(rpc_client=rpc_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -93,21 +94,21 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine.get_tokenizer(lora_request)
+            tokenizer = await self.rpc_client.get_tokenizer(lora_request)
 
             sampling_params = request.to_sampling_params()
-            # decoding_config = await self.engine.get_decoding_config()
-            # guided_decoding_backend = request.guided_decoding_backend \
-            #     or decoding_config.guided_decoding_backend
-            # guided_decode_logit_processor = (
-            #     await
-            #     get_guided_decoding_logits_processor(guided_decoding_backend,
-            #                                          request, tokenizer))
-            # if guided_decode_logit_processor is not None:
-            #     if sampling_params.logits_processors is None:
-            #         sampling_params.logits_processors = []
-            #     sampling_params.logits_processors.append(
-            #         guided_decode_logit_processor)
+            decoding_config = await self.rpc_client.get_decoding_config()
+            guided_decoding_backend = request.guided_decoding_backend \
+                or decoding_config.guided_decoding_backend
+            guided_decode_logit_processor = (
+                await
+                get_guided_decoding_logits_processor(guided_decoding_backend,
+                                                     request, tokenizer))
+            if guided_decode_logit_processor is not None:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logit_processor)
 
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
@@ -128,21 +129,21 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                # is_tracing_enabled = await self.engine.is_tracing_enabled()
-                # trace_headers = None
-                # if is_tracing_enabled:
-                #     trace_headers = extract_trace_headers(raw_request.headers)
-                # if not is_tracing_enabled and contains_trace_headers(
-                #         raw_request.headers):
-                #     log_tracing_disabled_warning()
+                is_tracing_enabled = await self.rcp_client.is_tracing_enabled()
+                trace_headers = None
+                if is_tracing_enabled:
+                    trace_headers = extract_trace_headers(raw_request.headers)
+                if not is_tracing_enabled and contains_trace_headers(
+                        raw_request.headers):
+                    log_tracing_disabled_warning()
 
-                generator = self.engine.generate(
+                generator = self.rpc_client.generate(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     sampling_params,
                     request_id_item,
                     lora_request=lora_request,
                     prompt_adapter_request=prompt_adapter_request,
-                    # trace_headers=trace_headers,
+                    trace_headers=trace_headers,
                 )
 
                 generators.append(generator)
@@ -177,7 +178,7 @@ class OpenAIServingCompletion(OpenAIServing):
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
                     # Abort the request if the client disconnects.
-                    await self.engine.abort(f"{request_id}-{i}")
+                    await self.rcp_client.abort(f"{request_id}-{i}")
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
 
@@ -239,7 +240,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 # Abort the request if the client disconnects.
                 if await raw_request.is_disconnected():
-                    await self.engine.abort(f"{request_id}-{prompt_idx}")
+                    await self.rpc_client.abort(f"{request_id}-{prompt_idx}")
                     raise StopAsyncIteration()
 
                 for output in res.outputs:

@@ -19,10 +19,17 @@ import pickle
 class RPCClient:
     def __init__(self):
         self.context = zmq.asyncio.Context()
-        self.is_ready_socket = self.context.socket(zmq.PULL)
-        self.is_ready_socket.connect(VLLM_GET_DATA_RPC_PATH)
+
+        # TODO: check if opening all these is an antipattern?
+
+        # Socket to check if the RPC server is ready.
+        self.is_ready_socket = self.context.socket(zmq.REP)
+        self.is_ready_socket.connect(VLLM_IS_READY_RPC_PATH)
+
+        # Socket to query data (e.g. get_model_config)
         self.get_data_socket = self.context.socket(zmq.REQ)
         self.get_data_socket.connect(VLLM_GET_DATA_RPC_PATH)
+
 
     async def wait_for_server(self):
         await self.is_ready_socket.recv()
@@ -30,7 +37,8 @@ class RPCClient:
 
     async def get_model_config(self) -> ModelConfig:
         self.get_data_socket.send(pickle.dumps(GetDataRequest.MODEL_CONFIG))
-        return pickle.loads(await self.get_data_socket.recv())
+        model_config = await self.get_data_socket.recv()
+        return pickle.loads(model_config)
 
 
     async def generate(
