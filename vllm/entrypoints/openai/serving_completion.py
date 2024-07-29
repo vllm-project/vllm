@@ -287,7 +287,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
-                    # finish_reason = None if output.finish_reason == "" else output.finish_reason
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
