@@ -30,7 +30,7 @@ class RPCClient:
         self.get_data_socket = self.context.socket(zmq.REQ)
         self.get_data_socket.connect(VLLM_GET_DATA_RPC_PATH)
 
-
+    
     async def wait_for_server(self):
         await self.is_ready_socket.recv()
 
@@ -40,6 +40,12 @@ class RPCClient:
         model_config = await self.get_data_socket.recv()
         return pickle.loads(model_config)
 
+
+    async def abort(self, request_id: str):
+        pass
+
+    async def get_tokenizer(self, lora_request: LoRARequest):
+        pass
 
     async def generate(
         self,
