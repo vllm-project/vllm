@@ -1855,19 +1855,24 @@ void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
       q_weight.size(0) * 32 / bit, q_weight.size(1), bit);
 }
 
+// may also need to do: aqlm_gemm_meta, awq_gemm_meta
 torch::Tensor gptq_gemm_meta(torch::Tensor a, torch::Tensor b_q_weight,
                              torch::Tensor b_gptq_qzeros,
                              torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
                              bool use_exllama, int64_t bit) {
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-#if 0
-   // TODO: this might not be quite right, add check for symbolic dims and only
-   // use when needed?
-   auto const m = a.sym_size(0);
-   auto const n = b_q_weight.sym_size(1);
-   auto res = torch::empty_symint({m, n}, options);
-#else
-  auto res = torch::empty({a.size(0), b_q_weight.size(1)}, options);
-#endif
-  return res;
+  bool const sym_rows = a.sym_sizes()[0].is_symbolic();
+  bool const sym_cols = b_q_weight.sym_sizes()[1].is_symbolic();
+
+  // Is the first one sufficient?
+  if (sym_rows && sym_cols) {
+    return torch::empty_symint({a.sym_size(0), b_q_weight.sym_size(1)},
+                               options);
+  } else if (sym_rows) {
+    return torch::empty_symint({a.sym_size(0), b_q_weight.size(1)}, options);
+  } else if (sym_cols) {
+    return torch::empty_symint({a.size(0), b_q_weight.sym_size(1)}, options);
+  } else {
+    return torch::empty({a.size(0), b_q_weight.size(1)}, options);
+  }
 }

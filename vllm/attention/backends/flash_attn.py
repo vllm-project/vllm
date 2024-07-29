@@ -67,8 +67,8 @@ def _flash_attn_varlen_func(
     )
 
 
-@torch.library.impl_abstract("vllm::flash_attn_varlen_func")
-def _flash_attn_varlen_func_meta(
+@torch.library.register_fake("vllm::flash_attn_varlen_func")
+def _flash_attn_varlen_func_fake(
     out_shape,
     q,
     k,
@@ -83,7 +83,6 @@ def _flash_attn_varlen_func_meta(
     alibi_slopes,
     block_table,
 ):
-    # TODO: is this always correct?
     return torch.empty(out_shape,
                        dtype=q.dtype,
                        layout=q.layout,
@@ -126,8 +125,8 @@ def _flash_attn_with_kvcache(
     )
 
 
-@torch.library.impl_abstract("vllm::flash_attn_with_kvcache")
-def _flash_attn_with_kvcache_meta(
+@torch.library.register_fake("vllm::flash_attn_with_kvcache")
+def _flash_attn_with_kvcache_fake(
     out_shape,
     decode_query,
     key_cache,
