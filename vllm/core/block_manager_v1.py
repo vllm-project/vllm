@@ -247,7 +247,7 @@ class RemoteAllocator:
             remote_allocator: int,
             selection_policy: SelectionPolicy = SelectionPolicy.ONLYAPPEND,
     ) -> None:
-        self.block_size = block_size,
+        self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.remote_allocator = remote_allocator
         self.selection_policy = selection_policy
@@ -870,8 +870,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             while start < len:
                 block = block_table[start]
                 if block.remote_rank == 0:
-                    migrate_set.update(SequenceSuperBlock(
-                        seq.seq_id, self.block_migrate_size, start))
+                    migrate_set.update(
+                        [SequenceSuperBlock(
+                            seq.seq_id, self.block_migrate_size, start)])
                 start = start + self.block_migrate_size
             self.migrate_list = List(migrate_set)
 
@@ -881,8 +882,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if length > 0:
             migrate_block = self.migrate_list[0]
             self.migrate_list.pop(0)
-            to_blocks = self.remote_allocator.allocate(
-                self.block_migrate_size/self.block_size)
+            num_blocks = int(self.block_migrate_size/self.block_size)
+            to_blocks = self.remote_allocator.allocate(num_blocks)
             remote_rank = to_blocks[0].remote_rank
             block_table = self.block_tables[migrate_block.seq_id]
             start = migrate_block.start
@@ -890,8 +891,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for index in range(start, end):
                 self.gpu_allocator.free(block_table[index])
                 to_block = to_blocks[index-migrate_block.start]
-                mapping_item = Tuple(block_table[index].block_number,
-                                     remote_rank, to_block.block_number)
+                mapping_item = [block_table[index].block_number,
+                                remote_rank,
+                                to_block.block_number]
                 mapping.append(mapping_item)
                 block_table[index] = to_block
             self.block_tables[migrate_block.seq_id] = block_table
@@ -909,4 +911,4 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             blocks_to_copy: List[Tuple[int, int]]) -> None:
         dest_blocks = self.gpu_allocator.get_migrate_blocks()
         for from_info, dest_block in zip(blocks_to_migrate, dest_blocks):
-            blocks_to_copy.append(Tuple(from_info[0], dest_block))
+            blocks_to_copy.append([from_info[0], dest_block])

@@ -817,14 +817,15 @@ class Scheduler:
         self.swapped.extend(running_scheduled.swapped_out)
         preempted = (len(running_scheduled.preempted) +
                      len(running_scheduled.swapped_out))
-        blocks_to_migrate = []
-        blocks_to_copy_for_migration = []
+        blocks_to_migrate: List[Tuple[int, int, int]] = []
+        blocks_to_copy_for_migration: List[Tuple[int, int]] = []
         self.block_manager.get_kvcache_migrate_block(blocks_to_migrate)
         self.block_manager.format_kvcache_migrate_blocks(
             blocks_to_migrate, blocks_to_copy_for_migration)
         superblock_size = len(blocks_to_migrate)
-        superblock_to_migrate = Tuple(
-            blocks_to_migrate[0][2] % superblock_size, blocks_to_migrate[0][1])
+        superblock_to_migrate = [
+            blocks_to_migrate[0][2] % superblock_size,
+            blocks_to_migrate[0][1]]
         # There should be no prefill from running queue because this policy
         # doesn't allow chunked prefills.
         assert len(running_scheduled.prefill_seq_groups) == 0
@@ -930,6 +931,8 @@ class Scheduler:
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=running_scheduled.blocks_to_copy +
             swapped_in.blocks_to_copy,
+            blocks_to_migrate=[],
+            superblock_to_migrate=[],
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
@@ -989,7 +992,8 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
-                remote_rank=self.block_manager.get_block_table_remote_rank(seq)
+                remote_rank = self.block_manager.get_block_table_remote_rank(
+                    seq)
                 block_tables_remote_rank[seq_id] = remote_rank
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
