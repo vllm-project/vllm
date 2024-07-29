@@ -228,12 +228,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # TODO @dsikka: clean-up conditions
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                self._check_scheme_supported(
-                    CompressedTensorsW8A8Fp8.get_min_capability(), error=True)
-                return CompressedTensorsW8A8Fp8(
-                    strategy=weight_quant.strategy,
-                    is_static_input_scheme=(input_quant
-                                            and not input_quant.dynamic))
+                is_fp8_w8a8_supported = self._check_scheme_supported(
+                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False)
+                if is_fp8_w8a8_supported:
+                    return CompressedTensorsW8A8Fp8(
+                        strategy=weight_quant.strategy,
+                        is_static_input_scheme=(input_quant
+                                                and not input_quant.dynamic))
+                else:
+                    return CompressedTensorsW8A16Fp8(
+                        strategy=weight_quant.strategy,
+                        is_static_input_scheme=(input_quant
+                                                and not input_quant.dynamic))
+
             if self._is_fp8_w8a16(weight_quant, input_quant):
                 return CompressedTensorsW8A16Fp8(
                     strategy=weight_quant.strategy,

@@ -94,7 +94,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             input_scale = PerTensorScaleParameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
                                                   weight_loader=weight_loader)
-            input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self,
