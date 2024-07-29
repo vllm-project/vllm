@@ -30,7 +30,7 @@ namespace gptq {
 #define MAX_ALT_GEMM_ROWS 8
 #define THREADS_X 32
 #define THREADS_Y 32
-#define DIVIDE(x, size) (((x) + (size)-1) / (size))
+#define DIVIDE(x, size) (((x) + (size) - 1) / (size))
 
 #if defined(USE_ROCM)
   #include <hipblas/hipblas.h>
