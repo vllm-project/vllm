@@ -92,11 +92,12 @@ class SamplingParams:
         min_tokens: Minimum number of tokens to generate per output sequence
             before EOS or stop_token_ids can be generated
         logprobs: Number of log probabilities to return per output token.
-            Note that the implementation follows the OpenAI API: The return
-            result includes the log probabilities on the `logprobs` most likely
-            tokens, as well the chosen tokens. The API will always return the
-            log probability of the sampled token, so there  may be up to
-            `logprobs+1` elements in the response.
+            When set to None, no probability is returned. If set to a non-None
+            value, the result includes the log probabilities of the specified
+            number of most likely tokens, as well as the chosen tokens.
+            Note that the implementation follows the OpenAI API: The API will
+            always return the log probability of the sampled token, so there
+            may be up to `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
         detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
@@ -168,8 +169,8 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.min_tokens = min_tokens
-        self.logprobs = logprobs
-        self.prompt_logprobs = prompt_logprobs
+        self.logprobs = 1 if logprobs is True else logprobs
+        self.prompt_logprobs = 1 if prompt_logprobs is True else prompt_logprobs
         # NOTE: This parameter is only exposed at the engine level for now.
         # It is not exposed in the OpenAI API server, as the OpenAI API does
         # not support returning only a list of token IDs.
