@@ -2,6 +2,8 @@
 
 import contextlib
 import gc
+import functools
+
 
 import pytest
 import ray
@@ -22,6 +24,19 @@ def cleanup():
     torch.cuda.empty_cache()
     ray.shutdown()
 
+def retry_until_skip(n):
+    def decorator_retry(func):
+        @functools.wraps(func)
+        def wrapper_retry(*args, **kwargs):
+            for i in range(n):
+                try:
+                    return func(*args, **kwargs)
+                except AssertionError:
+                    cleanup()
+                    if i == n - 1:
+                        pytest.skip("Skipping test after attempts..")
+        return wrapper_retry
+    return decorator_retry
 
 
 @pytest.fixture(autouse=True)

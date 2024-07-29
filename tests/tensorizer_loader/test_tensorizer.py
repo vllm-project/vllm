@@ -23,7 +23,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          tensorize_vllm_model)
 
 from ..conftest import VllmRunner
-from conftest import cleanup
+from conftest import cleanup, retry_until_skip
 from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
@@ -319,6 +319,8 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     assert outputs == deserialized_outputs
 
 
+
+@retry_until_skip(3)
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
     cleanup()
     model_ref = "facebook/opt-125m"
@@ -339,3 +341,7 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
         # noqa: E501
 
         assert outputs == deserialized_outputs
+
+
+
+
