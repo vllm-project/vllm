@@ -332,11 +332,14 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     try:
         await server_task
-        rpc_server_process.join()
+        # If the frontend server exited on its own, then terminate the
+        # backend server too
+        rpc_server_process.terminate()
     except asyncio.CancelledError:
-        print("Gracefully stopping http server")
+        logger.info("Gracefully stopping http server")
         await server.shutdown()
-        print("Cleaning up ZMQ client context")
+    finally:
+        logger.info("Cleaning up ZMQ client context")
         rpc_client.close()
         rpc_server_process.join()
 

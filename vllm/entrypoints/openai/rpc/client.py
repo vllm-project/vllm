@@ -17,11 +17,11 @@ import pickle
 
 
 class RPCClient:
-    
+
     # TODO: check if opening all these sockets is an antipattern?
     def __init__(self, tokenizer):
         self.context = zmq.asyncio.Context()
-        
+
         # TODO: do the tokenizer properly.
         self.tokenizer = tokenizer
         self.decoding_config = DecodingConfig()

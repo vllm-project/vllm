@@ -78,11 +78,8 @@ class RPCServer:
                 ])
         except Exception as e:
             ### Notify client of all failures
-            self.generate_socket.send_multipart([
-                    identity,
-                    pickle.dumps(e, pickle.HIGHEST_PROTOCOL)
-                ])
-
+            self.generate_socket.send_multipart(
+                [identity, pickle.dumps(e, pickle.HIGHEST_PROTOCOL)])
 
     async def run_loop(self):
         # Notify the RPC client that we are ready to recieve requests.
@@ -122,6 +119,7 @@ async def run_server(server: RPCServer):
     loop = asyncio.get_running_loop()
 
     server_task = loop.create_task(server.run_loop())
+
     def signal_handler() -> None:
         # Kill the server on interrupt / terminate
         server_task.cancel()
