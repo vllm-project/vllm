@@ -2,6 +2,7 @@ import asyncio
 import pickle
 import zmq
 import zmq.asyncio
+import signal
 
 from vllm import AsyncLLMEngine
 from vllm.usage.usage_lib import UsageContext
@@ -9,6 +10,9 @@ from vllm.entrypoints.openai.rpc import (VLLM_GENERATE_RPC_PATH,
                                          VLLM_GET_DATA_RPC_PATH,
                                          VLLM_IS_READY_RPC_PATH,
                                          GetDataRequest)
+from vllm.logger import init_logger
+
+logger = init_logger('vllm.entrypoints.openai.rpc.server')
 
 
 class RPCServer:
@@ -40,6 +44,13 @@ class RPCServer:
         self.poller.register(self.generate_socket, zmq.POLLIN)
         self.poller.register(self.get_data_socket, zmq.POLLIN)
 
+    def cleanup(self):
+        """Shuts down the zmq context and closes all sockets"""
+        self.context.destroy()
+        del self.get_data_socket
+        del self.generate_socket
+        del self.is_ready_socket
+
     async def get_data(self, message):
         request_type = pickle.loads(message)
 
@@ -52,18 +63,26 @@ class RPCServer:
             [pickle.dumps(data, pickle.HIGHEST_PROTOCOL)])
 
     async def generate(self, identity, message):
-        request = pickle.loads(message)
+        try:
+            request = pickle.loads(message)
 
-        results_generator = self.engine.generate(
-            request.inputs,
-            sampling_params=request.sampling_params,
-            request_id=request.request_id)
+            results_generator = self.engine.generate(
+                request.inputs,
+                sampling_params=request.sampling_params,
+                request_id=request.request_id)
 
-        async for request_output in results_generator:
+            async for request_output in results_generator:
+                self.generate_socket.send_multipart([
+                    identity,
+                    pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL)
+                ])
+        except Exception as e:
+            ### Notify client of all failures
             self.generate_socket.send_multipart([
-                identity,
-                pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL)
-            ])
+                    identity,
+                    pickle.dumps(e, pickle.HIGHEST_PROTOCOL)
+                ])
+
 
     async def run_loop(self):
         # Notify the RPC client that we are ready to recieve requests.
@@ -73,11 +92,8 @@ class RPCServer:
         # Avoid GC of running tasks.
         running_tasks = set()
         while True:
-            try:
-                socks = dict(await self.poller.poll())
-            except KeyboardInterrupt:
-                # TODO: should there be some other exception here?
-                break
+            self.poll_future = self.poller.poll()
+            socks = dict(await self.poll_future)
 
             task = None
             if self.generate_socket in socks:
@@ -99,6 +115,30 @@ class RPCServer:
         # TODO: Do I need to close the generate / get_data sockets?
 
 
+async def run_server(server: RPCServer):
+    # Run with proper interrupt handling
+    logger.info("Booting up vLLM zmq backend")
+
+    loop = asyncio.get_running_loop()
+
+    server_task = loop.create_task(server.run_loop())
+    def signal_handler() -> None:
+        # Kill the server on interrupt / terminate
+        server_task.cancel()
+
+    loop.add_signal_handler(signal.SIGINT, signal_handler)
+    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        logger.info("ZMQ Backend was interrupted")
+    finally:
+        # Clean up all the zmq resources before exiting
+        server.cleanup()
+    logger.info("vLLM ZMQ Backend shut down")
+
+
 def run_rpc_server(async_engine_args):
     server = RPCServer(async_engine_args=async_engine_args)
-    asyncio.run(server.run_loop())
+    asyncio.run(run_server(server))

@@ -37,6 +37,10 @@ class RPCClient:
     async def wait_for_server(self):
         await self.is_ready_socket.recv()
 
+    def close(self):
+        """Destroy the zmq context and close all sockets"""
+        self.context.destroy()
+
     async def get_model_config(self) -> ModelConfig:
         self.get_data_socket.send(pickle.dumps(GetDataRequest.MODEL_CONFIG))
         model_config = await self.get_data_socket.recv()
@@ -90,9 +94,13 @@ class RPCClient:
             message = await socket.recv()
             request_output = pickle.loads(message)
 
+            if isinstance(request_output, Exception):
+                socket.close()
+                raise request_output
+
             if request_output.finished:
                 break
             yield request_output
 
-        socket.close()
         yield request_output
+        socket.close()

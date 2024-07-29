@@ -54,6 +54,7 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
+rpc_client: RPCClient
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -230,6 +231,7 @@ async def build_server(
         served_model_names = [args.model]
 
     # TODO: figure out a way around passing the token
+    global rpc_client
     rpc_client = RPCClient(tokenizer=AutoTokenizer.from_pretrained(args.model))
     await rpc_client.wait_for_server()
     logger.info("RPC Client connected to RPC server.")
@@ -334,6 +336,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     except asyncio.CancelledError:
         print("Gracefully stopping http server")
         await server.shutdown()
+        print("Cleaning up ZMQ client context")
+        rpc_client.close()
         rpc_server_process.join()
 
 
