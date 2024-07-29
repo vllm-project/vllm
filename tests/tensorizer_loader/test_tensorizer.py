@@ -20,7 +20,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          serialize_vllm_model,
                                                          tensorize_vllm_model)
 
-from ..conftest import VllmRunner, cleanup
+from ..conftest import VllmRunner
 from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
@@ -100,7 +100,6 @@ def test_can_deserialize_s3(vllm_runner):
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
         vllm_runner, tmp_path):
-    cleanup()
     with vllm_runner(model_ref) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
         key_path = tmp_path / (model_ref + ".key")
@@ -265,16 +264,13 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
                                                                     tmp_path):
     model_ref = "EleutherAI/pythia-1.4b"
     # record outputs from un-sharded un-tensorized model
-    base_model = vllm_runner(
+    with vllm_runner(
         model_ref,
         disable_custom_all_reduce=True,
         enforce_eager=True,
-    )
-    outputs = base_model.generate(prompts, sampling_params)
-
-    base_model.model.llm_engine.model_executor.shutdown()
-    del base_model
-    cleanup()
+    ) as base_model:
+        outputs = base_model.generate(prompts, sampling_params)
+        base_model.model.llm_engine.model_executor.shutdown()
 
     # load model with two shards and serialize with encryption
     model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
@@ -296,23 +292,21 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     )
     assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
     assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
-    cleanup()
 
-    loaded_vllm_model = vllm_runner(
+    with vllm_runner(
         model_ref,
         tensor_parallel_size=2,
         load_format="tensorizer",
         disable_custom_all_reduce=True,
         enforce_eager=True,
-        model_loader_extra_config=tensorizer_config)
+        model_loader_extra_config=tensorizer_config) as loaded_vllm_model:
 
-    deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
+        deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
     assert outputs == deserialized_outputs
 
 
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
-    cleanup()
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(tensorizer_uri=str(model_path))
