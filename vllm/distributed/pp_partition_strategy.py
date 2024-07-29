@@ -37,6 +37,7 @@ def get_partition_strategy_names():
 
 
 def get_current_partition_strategy():
+    assert envs.VLLM_PIPELINE_PARTITION_STRATEGY is not None
     return get_partition_strategy(envs.VLLM_PIPELINE_PARTITION_STRATEGY)
 
 
