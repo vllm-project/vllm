@@ -1,9 +1,5 @@
-import asyncio
 from vllm import AsyncLLMEngine
-import grpc
-
-# from vllm.grpc.server import UNIX_SOCKET
-from .pb import generate_pb2_grpc, generate_pb2
+from vllm.grpc.pb import generate_pb2
 from typing import AsyncIterator, List, Optional, Mapping
 
 from vllm.inputs import PromptInputs

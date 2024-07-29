@@ -1,9 +1,8 @@
 from vllm import AsyncEngineArgs, AsyncLLMEngine
 import asyncio
-import pickle
 import zmq
 import zmq.asyncio
-from .pb import generate_pb2
+from vllm.grpc.pb import generate_pb2
 from vllm import SamplingParams
 from vllm.inputs.data import TextPrompt, TokensPrompt
 
