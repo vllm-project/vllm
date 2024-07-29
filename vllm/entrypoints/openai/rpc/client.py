@@ -27,11 +27,11 @@ class RPCClient:
         self.decoding_config = DecodingConfig()
 
         # Socket to check if the RPC server is ready.
-        self.is_ready_socket = self.context.socket(zmq.REP)
+        self.is_ready_socket = self.context.socket(zmq.constants.REP)
         self.is_ready_socket.connect(VLLM_IS_READY_RPC_PATH)
 
         # Socket to query data (e.g. get_model_config)
-        self.get_data_socket = self.context.socket(zmq.REQ)
+        self.get_data_socket = self.context.socket(zmq.constants.REQ)
         self.get_data_socket.connect(VLLM_GET_DATA_RPC_PATH)
 
     async def wait_for_server(self):
@@ -74,7 +74,7 @@ class RPCClient:
         # Connect to RPC socket for Request-Reply pattern,
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
-        socket = self.context.socket(zmq.DEALER)
+        socket = self.context.socket(zmq.constants.DEALER)
         socket.connect(VLLM_GENERATE_RPC_PATH)
 
         # Send GenerateRequest to the RPC Server.

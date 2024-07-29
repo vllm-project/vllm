@@ -26,23 +26,23 @@ class RPCServer:
         self.context = zmq.asyncio.Context()
 
         # Init socket for readiness state.
-        self.is_ready_socket = self.context.socket(zmq.REQ)
+        self.is_ready_socket = self.context.socket(zmq.constants.REQ)
         self.is_ready_socket.bind(VLLM_IS_READY_RPC_PATH)
 
         # Init socket for generation.
-        self.generate_socket = self.context.socket(zmq.ROUTER)
+        self.generate_socket = self.context.socket(zmq.constants.ROUTER)
         self.generate_socket.bind(VLLM_GENERATE_RPC_PATH)
 
         # TODO: add socket for generation without streaming
 
         # Init socket for simple data requests.
-        self.get_data_socket = self.context.socket(zmq.REP)
+        self.get_data_socket = self.context.socket(zmq.constants.REP)
         self.get_data_socket.bind(VLLM_GET_DATA_RPC_PATH)
 
         # Setup polling so we can listen on both sockets.
         self.poller = zmq.asyncio.Poller()
-        self.poller.register(self.generate_socket, zmq.POLLIN)
-        self.poller.register(self.get_data_socket, zmq.POLLIN)
+        self.poller.register(self.generate_socket, zmq.constants.POLLIN)
+        self.poller.register(self.get_data_socket, zmq.constants.POLLIN)
 
     def cleanup(self):
         """Shuts down the zmq context and closes all sockets"""
