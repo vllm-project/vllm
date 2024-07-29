@@ -267,20 +267,21 @@ async def build_server(
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
+    # TODO: emebddings should probably just run with a local AsyncLLMEmgine
     # openai_serving_embedding = OpenAIServingEmbedding(
     #     engine,
     #     model_config,
     #     served_model_names,
     #     request_logger=request_logger,
     # )
-    # openai_serving_tokenization = OpenAIServingTokenization(
-    #     engine,
-    #     model_config,
-    #     served_model_names,
-    #     lora_modules=args.lora_modules,
-    #     request_logger=request_logger,
-    #     chat_template=args.chat_template,
-    # )
+    openai_serving_tokenization = OpenAIServingTokenization(
+        rpc_client,
+        model_config,
+        served_model_names,
+        lora_modules=args.lora_modules,
+        request_logger=request_logger,
+        chat_template=args.chat_template,
+    )
     app.root_path = args.root_path
 
     logger.info("Available routes are:")

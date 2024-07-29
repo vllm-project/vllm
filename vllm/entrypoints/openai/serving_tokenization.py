@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               TokenizeRequest,
                                               TokenizeResponse)
 # yapf: enable
+from vllm.entrypoints.openai.rpc.client import RPCClient
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.utils import random_uuid
@@ -24,7 +25,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
+        rpc_client: RPCClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -32,7 +33,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
     ):
-        super().__init__(engine=engine,
+        super().__init__(rpc_client=rpc_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -57,7 +58,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine.get_tokenizer(lora_request)
+        tokenizer = await self.rpc_client.get_tokenizer(lora_request)
 
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
@@ -113,7 +114,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine.get_tokenizer(lora_request)
+        tokenizer = await self.rpc_client.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,
