@@ -36,8 +36,10 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   *rms = s_rms;
 }
 
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
-__device__ void compute_dynamic_per_token_scales(
+template <typename scalar_t,
+          typename scalar_out_t,
+          bool has_residual = false>
+__device__ void compute_dynamic_per_token_symmetric_quant_qparams(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
@@ -75,6 +77,54 @@ __device__ void compute_dynamic_per_token_scales(
 
   *token_scale = s_token_scale;
 }
+
+template <typename scalar_t,
+          typename scalar_out_t,
+          bool has_residual = false>
+__device__ void compute_dynamic_per_token_asymmetric_quant_qparams(
+    float* __restrict__ token_scale, float* __restrict__ all_token_scales,
+    int32_t* __restrict__ token_azp, int32_t* __restrict__ all_token_azps,
+    scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
+    float const rms, float const* __restrict__ scale_ub,
+    float const min_scaling_factor, int const hidden_size,
+    scalar_t const* __restrict__ residual = nullptr) {
+  int const token_offset = blockIdx.x * hidden_size;
+  constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
+  constexpr float flt_max{std::numeric_limits<float>::max()};
+  constexpr float flt_min{std::numeric_limits<float>::min()};
+
+  float block_max_maybe{flt_min} ;
+  float block_min_maybe{flt_max};
+  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+    float x = static_cast<float>(input[token_offset + i]);
+    if constexpr (has_residual) {
+      x += static_cast<float>(residual[token_offset + i]);
+    }
+
+    x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+    block_max_maybe = fmaxf(block_max_maybe, x);
+    block_min_maybe = fminf(block_min_maybe, x);
+  }
+  block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
+
+  __shared__ float s_token_scale;
+  if (threadIdx.x == 0) {
+    float scale = 0.0f;
+    if (scale_ub) {
+      scale = min(block_absmax_val_maybe, *scale_ub);
+    } else {
+      scale = block_absmax_val_maybe;
+    }
+    // token scale computation
+    scale = max(scale / qmax, min_scaling_factor);
+    s_token_scale = scale;                 // Shared memory store
+    all_token_scales[blockIdx.x] = scale;  // Global output store
+  }
+  __syncthreads();
+
+  *token_scale = s_token_scale;
+}
+
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false>
@@ -158,10 +208,12 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   *rms = s_rms;
 }
 
-// Vectorized version of vllm::compute_dynamic_per_token_scales
+// Vectorized version of vllm::compute_dynamic_per_token_symmetric_quant_qparams
 // hidden_size must be a multiple of 4
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
-__device__ void compute_dynamic_per_token_scales(
+template <typename scalar_t,
+          typename scalar_out_t,
+          bool has_residual = false>
+__device__ void compute_dynamic_per_token_symmetric_quant_qparams(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,

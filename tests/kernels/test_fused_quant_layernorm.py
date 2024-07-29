@@ -37,13 +37,11 @@ def quant_dtype_from_quant_type(qtype : QuantType) -> torch.dtype:
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_TYPES = [QuantType.SymmetricFP8DynamicPerTokenQuant,
                QuantType.SymmetricInt8DynamicPerTokenQuant,
-               QuantType.ASymmetricFP8DynamicPerTokenQuant,
                QuantType.ASymmetricInt8DynamicPerTokenQuant]
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
                 8193]  # Arbitrary values for testing
 HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
-AZPS = [True, False] #  With and without AZP (i.e. asymmetric and symmetric quantization) 
 ADD_RESIDUAL = [True, False] # With and without fused residual add
 SCALE_UBS = [True, False] # With and without scale_ub
 SEEDS = [0]
@@ -99,7 +97,8 @@ def ref_asymmetric_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
                             x: torch.Tensor,
                             quant_dtype: torch.dtype,
                             residual: Optional[torch.Tensor]) \
-                -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+                -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+                        Optional[torch.Tensor]]:
 
     # Only support int8 for now
     assert quant_dtype == torch.int8
@@ -109,7 +108,8 @@ def ref_asymmetric_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
 
     # Quant
     # TODO Switch to GPU reference when it becomes available.
-    torch_out, scales, azps = quant_utils.ref_asymmetric_dynamic_per_token_quant(x, quant_dtype)
+    torch_out, scales, azps = \
+            quant_utils.ref_asymmetric_dynamic_per_token_quant(x, quant_dtype)
 
     return torch_out, scales, azps, residual
 
@@ -118,15 +118,17 @@ def ref_impl(rms_norm_layer: RMSNorm,
              quant_type: QuantType,
              residual: Optional[torch.Tensor],
              scale_ub: Optional[torch.Tensor]) \
-           -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+           -> Tuple[torch.Tensor, torch.Tensor,
+                   Optional[torch.Tensor], torch.Tensor]:
 
     quant_dtype = quant_dtype_from_quant_type(quant_type)
 
     out, scales, azps, residual = (None, None, None, None)
     
     if is_symmetric_quant(quant_type):
-        out, scales, residual = ref_symmetric_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype,
-                                       residual, scale_ub)
+        out, scales, residual = \
+                ref_symmetric_dynamic_per_token_quant(rms_norm_layer, x,
+                        quant_dtype, residual, scale_ub)
     else:
         assert is_asymmetric_quant(quant_type)
         out, scales, azps, residual = ref_asymmetric_dynamic_per_token_quant(
@@ -136,17 +138,22 @@ def ref_impl(rms_norm_layer: RMSNorm,
 
 def ops_dynamic_per_token_quant(weight: torch.Tensor,
                             x: torch.Tensor,
-                            quant_dtype: torch.dtype,
+                            quant_type: QuantType,
                             residual: Optional[torch.Tensor],
                             scale_ub: Optional[torch.Tensor]) \
-                -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+                -> Tuple[torch.Tensor, torch.Tensor,
+                        Optional[torch.Tensor],
+                        Optional[torch.Tensor]]:
+
 
     if residual is not None:
         residual = residual.clone()
-    out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
-                                                       quant_dtype, scale_ub,
-                                                       residual)
-    return out, scales, residual
+    out, scales, azps = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
+                                                       quant_dtype_from_quant_type(quant_type),
+                                                       scale_ub,
+                                                       residual,
+                                                       is_asymmetric_quant(quant_type))
+    return out, scales, azps, residual
 
 def ops_impl(weight: torch.Tensor,
              x: torch.Tensor,

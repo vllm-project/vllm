@@ -36,7 +36,8 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor& scales,
                                       double const epsilon,
                                       std::optional<torch::Tensor> scale_ub,
-                                      std::optional<torch::Tensor> residual);
+                                      std::optional<torch::Tensor> residual,
+                                      std::optional<torch::Tensor> azps);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       torch::Tensor& key, int64_t head_size,
