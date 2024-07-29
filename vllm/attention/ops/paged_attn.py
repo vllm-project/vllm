@@ -4,7 +4,10 @@ from typing import List, Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -31,7 +34,7 @@ class PagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [64, 80, 96, 112, 128, 192, 256]
+        return [64, 80, 96, 112, 120, 128, 192, 256]
 
     @staticmethod
     def get_kv_cache_shape(

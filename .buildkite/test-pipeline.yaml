@@ -17,11 +17,10 @@ steps:
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
 
-- label: Tensorizer, Metrics, Tracing Test
+- label: Metrics, Tracing Test
   fast_check: true
   fast_check_only: true
   commands:
-  - apt-get install -y curl libsodium23 && pytest -v -s tensorizer_loader # Tensorizer
   - pytest -v -s metrics # Metrics
   - "pip install \
       opentelemetry-sdk \
@@ -141,14 +140,13 @@ steps:
   working_dir: "/vllm-workspace/examples"
   mirror_hardwares: [amd]
   commands:
-    # install aws cli for llava_example.py
     # install tensorizer for tensorize_vllm_model.py
     - pip install awscli tensorizer
     - python3 offline_inference.py
     - python3 cpu_offload.py
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
-    - python3 llava_example.py
+    - python3 offline_inference_vision_language.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
 
 - label: Inputs Test
@@ -221,6 +219,7 @@ steps:
 
 - label: Tensorizer Test
   #mirror_hardwares: [amd]
+  fast_check: true
   commands:
     - apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
