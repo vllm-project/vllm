@@ -1,62 +1,31 @@
-from vllm import AsyncLLMEngine
 from typing import AsyncIterator, Optional, Mapping
 
+from vllm.config import ModelConfig
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from transformers import AutoTokenizer
-from dataclasses import dataclass
+from vllm.entrypoints.openai.rpc import (
+    VLLM_GENERATE_RPC_PATH, VLLM_GET_DATA_RPC_PATH, GenerateRequest, GetDataRequest)
 
 import zmq
 import zmq.asyncio
 import pickle
 
-MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
-ADDRESS = "ipc:///tmp/zmqtest"
 
-@dataclass
-class RCPRequest:
-    inputs: PromptInputs
-    sampling_params: SamplingParams
-    request_id: str
-
-
-class RPCClient(AsyncLLMEngine):
+class RPCClient:
     def __init__(self):
-        self.engine_use_ray = False
-        self.worker_use_ray = False
-        self.log_requests = False
-        self.engine = None
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL)
-
         self.context = zmq.asyncio.Context()
-        
+        self.is_ready_socket = self.context.socket(zmq.REP)
+        self.get_data_socket = self.context.socket(zmq.REQ)
+        self.get_data_socket.connect(VLLM_GET_DATA_RPC_PATH)
+    
 
-    @property
-    def is_running(self) -> bool:
-        return True
-    
-    @property
-    def is_stopped(self) -> bool:
-        return False
+    async def get_model_config(self) -> ModelConfig:
+        self.get_data_socket.send(pickle.dumps(GetDataRequest.MODEL_CONFIG))
+        return pickle.loads(await self.get_data_socket.recv())
 
-    @property
-    def errored(self) -> bool:
-        return False
-    
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> "PreTrainedTokenizer":
-        # TODO: what to return :/
-        return self.tokenizer
-    
-    def start_background_loop(self):
-        # TODO something lol
-        pass
 
     async def generate(
         self,
@@ -67,19 +36,28 @@ class RPCClient(AsyncLLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
+        
+        # Connect to RPC socket for Request-Reply pattern,
+        # Note that we use DEALER to enable asynchronous communication
+        # to enable streaming.
         socket = self.context.socket(zmq.DEALER)
-        socket.connect(ADDRESS)
+        socket.connect(VLLM_GENERATE_RPC_PATH)
 
+        # Send GenerateRequest to the RPC Server.
         await socket.send_multipart([
             pickle.dumps(
-                RCPRequest(
+                GenerateRequest(
                     inputs=inputs,
                     sampling_params=sampling_params,
-                    request_id=request_id
+                    request_id=request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request
                 ), pickle.HIGHEST_PROTOCOL
             )
         ])
 
+        # Stream back the results from the RPC Server.
         while True:
             message = await socket.recv()
             request_output = pickle.loads(message)

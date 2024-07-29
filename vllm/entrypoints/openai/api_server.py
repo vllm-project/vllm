@@ -4,6 +4,7 @@ import inspect
 import re
 import signal
 from contextlib import asynccontextmanager
+from multiprocessing import Process
 from http import HTTPStatus
 from typing import Optional, Set
 
@@ -37,8 +38,9 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
+from vllm.entrypoints.openai.rpc.client import RPCClient
+from vllm.entrypoints.openai.rpc.server import run_rpc_server
 from vllm.logger import init_logger
-from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -216,29 +218,19 @@ def build_app(args):
 
 async def build_server(
     args,
-    llm_engine: Optional[AsyncLLMEngine] = None,
     **uvicorn_kwargs,
 ) -> uvicorn.Server:
     app = build_app(args)
 
-    # if args.served_model_name is not None:
-    #     served_model_names = args.served_model_name
-    # else:
-    #     served_model_names = [args.model]
-
-    served_model_names = "meta-llama/Meta-Llama-3-8B-Instruct"
-
-    from vllm.grpc.client import RPCClient
-    engine = RPCClient()
-
-    # global engine, engine_args
-
-    # engine_args = AsyncEngineArgs.from_cli_args(args)
-    # engine = (llm_engine
-    #           if llm_engine is not None else AsyncLLMEngine.from_engine_args(
-    #               engine_args, usage_context=UsageContext.OPENAI_API_SERVER))
-
-    # model_config = await engine.get_model_config()
+    if args.served_model_name is not None:
+        served_model_names = args.served_model_name
+    else:
+        served_model_names = [args.model]
+    
+    print("HERE")
+    rpc_client = RPCClient()
+    model_config = await rpc_client.get_model_config()
+    print("HERE2")
 
     if args.disable_log_requests:
         request_logger = None
@@ -309,13 +301,17 @@ async def build_server(
     return uvicorn.Server(config)
 
 
-async def run_server(args, llm_engine=None, **uvicorn_kwargs) -> None:
+async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
-
+    
+    logger.info("Starting RPC Server")
+    rpc_server_process = Process(target=run_rpc_server, 
+                                 args=(AsyncEngineArgs.from_cli_args(args),))
+    rpc_server_process.start()
+    
     server = await build_server(
         args,
-        llm_engine,
         **uvicorn_kwargs,
     )
 
@@ -332,10 +328,12 @@ async def run_server(args, llm_engine=None, **uvicorn_kwargs) -> None:
 
     try:
         await server_task
+        rpc_server_process.join()
     except asyncio.CancelledError:
         print("Gracefully stopping http server")
         await server.shutdown()
-
+        rpc_server_process.join()
+            
 
 if __name__ == "__main__":
     # NOTE(simon):
