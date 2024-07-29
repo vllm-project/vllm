@@ -97,6 +97,7 @@ class Worker(LocalOrDistributedWorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            is_sp_worker=is_sp_worker,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -205,6 +206,12 @@ class Worker(LocalOrDistributedWorkerBase):
                              cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+        if self.is_sp_worker:
+            if num_cpu_blocks==0:
+                num_cpu_blocks=-1
+            else:
+                num_cpu_blocks=-num_cpu_blocks
+
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
         gc.collect()
@@ -212,7 +219,8 @@ class Worker(LocalOrDistributedWorkerBase):
         return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
         This also warms up the model, which may record CUDA graphs.
@@ -223,6 +231,10 @@ class Worker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.cache_config.num_remote_gpu_blocks=num_remote_gpu_blocks
+        if self.is_sp_worker:
+            self.cache_config.num_gpu_blocks=num_remote_gpu_blocks
+            self.cache_config.num_cpu_blocks=0
 
         self._init_cache_engine()
         self._warm_up_model()

@@ -597,6 +597,35 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             "String must be a series of integers separated by commas "
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
+def reshape_list(x:List[int],pattern:List[int])->List[int]:
+    length=len(pattern)
+    target_length=len(x)
+    result=x.copy()
+    assert target_length==length
+    for i in range(length):
+        value=x[i]
+        result[pattern[i]]=value
+    return result
+def reshape_q(q:torch.tensor,pattern:List[int])->torch.tensor:
+    result=torch.empty([len(pattern),len(q[0])],dtype=q.dtype,device=q.device)
+    for i in range(len(pattern)):
+        result[i]=q[pattern[i]]
+    return result
+
+def filter_tensor(output:torch.tensor,out_exp_sums:torch.tensor,out_max_logits:torch.tensor, pattern: List[int], length: int)->Tuple[torch.tensor,torch.tensor,torch.tensor]:
+    result=torch.empty(length*output[0],dtype=output.dtype,device=output.device)
+    result_exp_sums=torch.empty(length*out_exp_sums[0],dtype=out_exp_sums.dtype,device=out_exp_sums.device)
+    result_max_logits=torch.empty(length*out_max_logits[0],dtype=out_max_logits.dtype,device=out_max_logits.device)
+    index=0
+    old_i=-1
+    for i in pattern:
+        if old_i!=i:
+            result[index]=output[i]
+            result_exp_sums=out_exp_sums[i]
+            result_max_logits=out_max_logits[i]
+            index+=1
+            old_i=i
+    return result,result_exp_sums,result_max_logits
 
 def make_tensor_with_pad(
     x: List[List[int]],

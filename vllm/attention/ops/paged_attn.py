@@ -220,7 +220,7 @@ class PagedAttention:
         blocksparse_vert_stride: int = 0,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.tensor,torch.Tensor,torch.Tensor]:
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)

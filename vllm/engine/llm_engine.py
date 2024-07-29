@@ -293,7 +293,7 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config,parallel_config.sequece_parallel_size)
 
         # Metric Logging.
         if self.log_stats:
@@ -340,7 +340,7 @@ class LLMEngine:
         The workers will determine the number of blocks in both the GPU cache
         and the swap CPU cache.
         """
-        num_gpu_blocks, num_cpu_blocks = (
+        num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks = (
             self.model_executor.determine_num_available_blocks())
 
         if self.cache_config.num_gpu_blocks_override is not None:
@@ -353,8 +353,9 @@ class LLMEngine:
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.cache_config.num_remote_gpu_blocks = num_remote_gpu_blocks
 
-        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks,num_remote_gpu_blocks)
 
     @classmethod
     def from_engine_args(
@@ -821,6 +822,7 @@ class LLMEngine:
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 blocks_to_migrate=scheduler_outputs.blocks_to_migrate,
+                superblock_to_migrate=scheduler_outputs.superblock_to_migrate,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
             )

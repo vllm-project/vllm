@@ -12,8 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
                         update_environment_variables)
-from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
-
+from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase,_add_attn_metadata_broadcastable_dict
 logger = init_logger(__name__)
 
 
@@ -47,7 +46,8 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
         """
         raise NotImplementedError
@@ -155,7 +155,6 @@ class WorkerInput:
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
-            "blocks_to_migrate": self.blocks_to_migrate,
             "chunk_to_migrate": self.chunk_to_migrate,
         }
 
@@ -291,6 +290,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             # broadcast inputs for all workers in its sp_group.
             if self.do_sp_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_sp_tensor_dict()
+                broadcast_data.update(
+                    model_input.as_broadcastable_tensor_dict())
                 broadcast_data["num_steps"] = num_steps
                 broadcast_sp_tensor_dict(broadcast_data, src=0)
 

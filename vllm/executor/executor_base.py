@@ -45,7 +45,7 @@ class ExecutorBase(ABC):
         pass
 
     @abstractmethod
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
@@ -62,7 +62,8 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int=1) -> None:
         """Initialize the KV cache with the given size in blocks.
         """
         raise NotImplementedError

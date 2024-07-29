@@ -593,7 +593,7 @@ def test_determine_num_available_blocks(available_gpu_blocks: int,
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     target_worker.determine_num_available_blocks.return_value = (
-        available_gpu_blocks, available_cpu_blocks)
+        available_gpu_blocks, available_cpu_blocks,_)
     target_worker.get_cache_block_size_bytes.return_value = (
         target_cache_block_size_bytes)
     draft_worker.get_cache_block_size_bytes.return_value = draft_kv_size_bytes
@@ -601,7 +601,7 @@ def test_determine_num_available_blocks(available_gpu_blocks: int,
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    num_gpu_blocks, num_cpu_blocks = worker.determine_num_available_blocks()
+    num_gpu_blocks, num_cpu_blocks,_ = worker.determine_num_available_blocks()
 
     target_worker.determine_num_available_blocks.assert_called_once()
     assert num_cpu_blocks == available_cpu_blocks

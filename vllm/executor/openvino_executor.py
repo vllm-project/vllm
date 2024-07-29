@@ -54,14 +54,15 @@ class OpenVINOExecutor(ExecutorBase):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        return self.driver_worker.determine_num_available_blocks()
+        return self.driver_worker.determine_num_available_blocks(),0
 
     def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int) -> None:
         """Initialize the KV cache by invoking the underlying worker."""
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors
@@ -70,7 +71,7 @@ class OpenVINOExecutor(ExecutorBase):
         # referred as `gpu block`. Because we want to reuse the existing block
         # management procedure.
         logger.info("# CPU blocks: %d", num_gpu_blocks)
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks)
 
     def execute_model(
             self,

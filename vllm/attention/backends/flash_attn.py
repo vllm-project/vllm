@@ -8,6 +8,7 @@ from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
+from utils import reshape_q,filter_tensor
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -115,6 +116,27 @@ class FlashAttentionMetadata(AttentionMetadata):
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
 
+    #used for remote inference
+    #reshape the output of model execution. 
+    #prefill:decode:longdecode-->prefill:decode
+    output_reshape_index: Optional[List[int]]
+    #list of sequence length per sequence respond to different ranks
+    seq_lens_remote: Optional[List[List[int]]]
+    #seq_lens_remote as list[tensor]
+    seq_lens_remote_tensor: Optional[List[torch.Tensor]]
+    #number of sequence
+    num_remote_decode_tokens:Optional[List[int]]
+    #max length of sequence length
+    max_remote_decode_seq_len:Optional[List[int]]
+    #block_tables_remote:
+    block_tables_remote:Optional[List[torch.Tensor]]
+    #For sequence group[0,1,2,3,4,5], q_remote_distribution [0,0,1,2,3,3] means
+    # sequences 0 and 1 use the same q0 while sequences 4 and 5 use
+    # the same q3. In this way, the max length of sequence is not limited to the 
+    # Max_number*gpu_number, where multi sequence blocks in one remote rank are 
+    # considered as the multi batched sequences with the same q.
+    q_remote_distirbution:Optional[List[torch.Tensor]]
+    
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -151,16 +173,25 @@ class FlashAttentionMetadata(AttentionMetadata):
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
+            num_long_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
+            max_long_decode_seq_len=0,
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
             seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
+            output_reshape_index=None,
+            seq_lens_remote=None,
+            seq_lens_remote_tensor=None,
+            num_remote_decode_tokens=None,
+            max_remote_decode_seq_len=None,
+            block_tables_remote=None,
+            q_remote_distirbution=None,
             use_cuda_graph=False,
         )
         return self._cached_prefill_metadata
@@ -179,46 +210,66 @@ class FlashAttentionMetadata(AttentionMetadata):
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
+            num_long_decode_tokens=self.num_long_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
+            max_long_decode_seq_len=self.max_long_decode_seq_len,
             query_start_loc=None,
             seq_start_loc=None,
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
+            output_reshape_index=self.output_reshape_index,
+            seq_lens_remote=None,
+            seq_lens_remote_tensor=None,
+            num_remote_decode_tokens=None,
+            max_remote_decode_seq_len=None,
+            block_tables_remote=None,
+            q_remote_distirbution=None,
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
     @property
-    def long_decode_metadata(self) -> Optional["FlashAttentionMetadata"]:
-        if self.num_decode_tokens == 0:
+    def remote_metadata(self) -> Optional["FlashAttentionMetadata"]:
+        if self.num_long_decode_tokens == 0:
             return None
 
-        if self._cached_decode_metadata is not None:
-            return self._cached_decode_metadata
-        assert self.block_tables is not None
-        assert self.seq_lens_tensor is not None
+        if self._cached_remote_metadata is not None:
+            return self._cached_remote_metadata
+        assert self.seq_lens_remote is not None
+        assert self.seq_lens_remote_tensor is not None
+        assert self.block_tables_remote is not None
+        assert self.q_remote_distirbution is not None
 
-        self._cached_long_decode_metadata = FlashAttentionMetadata(
+        self._cached_remote_metadata = FlashAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
-            num_decode_tokens=self.num_long_decode_tokens,
-            slot_mapping=self.slot_mapping[-self.num_long_decode_tokens:],
+            num_decode_tokens=0,
+            num_long_decode_tokens=0,
+            slot_mapping=None,
             seq_lens=None,
-            seq_lens_tensor=self.seq_lens_tensor[-self.num_long_decode_tokens:],
+            seq_lens_tensor=None,
             max_query_len=None,
             max_prefill_seq_len=0,
-            max_decode_seq_len=self.max_long_decode_seq_len,
+            max_decode_seq_len=0,
+            max_long_decode_seq_len=0,
             query_start_loc=None,
             seq_start_loc=None,
             context_lens_tensor=None,
-            block_tables=self.block_tables[-self.num_long_decode_tokens:],
+            block_tables=None,
+            output_reshape_index=self.output_reshape_index,
+            seq_lens_remote=self.seq_lens_remote,
+            seq_lens_remote_tensor=self.seq_lens_remote_tensor,
+            num_remote_decode_tokens=self.num_remote_decode_tokens,
+            max_remote_decode_seq_len=self.max_remote_decode_seq_len,
+            block_tables_remote=self.block_tables_remote,
+            q_remote_distirbution=self.q_remote_distirbution,
             use_cuda_graph=self.use_cuda_graph,
         )
-        return self._cached_decode_metadata
+        return self._cached_remote_metadata
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -289,12 +340,12 @@ class FlashAttentionImpl(AttentionImpl):
     def forward(
         self,
         query: torch.Tensor,
-        key: Optional[torch.Tensor],
-        value: Optional[torch.Tensor],
+        key: torch.Tensor,
+        value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: "FlashAttentionMetadata",
         kv_scale: float = 1.0,
-        generate_kv_cache:Optional[bool]=True,
+        sp_rank:Optional[int]=-1,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -309,37 +360,45 @@ class FlashAttentionImpl(AttentionImpl):
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
-        if not generate_kv_cache:
-            num_tokens, hidden_size = query.shape
-            query = query.view(-1, self.num_heads, self.head_size)
-            num_decode_tokens = attn_metadata.num_long_decode_tokens
+        if sp_rank!=-1:
+            
+            remote_metadata=attn_metadata.remote_metadata
+            q_remote_distribution=remote_metadata.q_remote_distirbution[sp_rank]
+            query_remote=reshape_q(query,q_remote_distribution)
+            output = torch.empty_like(query_remote)
+            query = query_remote.view(-1, self.num_heads, self.head_size)
+            num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
             decode_query = query[:]
-            output = torch.empty_like(query)
+            assert decode_query.shape[0] == num_decode_tokens
+            num_seqs=decode_query.size(0)
+            num_heads=decode_query.size(1)
+            num_tokens, hidden_size = query.shape
             out_exp_sums = torch.empty(
-                size=1,
+                size=(num_seqs, num_heads),
                 dtype=torch.float32,
                 device=output.device,
             )
             out_max_logits = torch.empty(
-                size=1,
+                size=(num_seqs, num_heads),
                 dtype=torch.float32,
                 device=output.device,
             )
-            if decode_meta := attn_metadata.long_decode_metadata:
-                # Decoding run.
-                output[:] = flash_attn_with_kvcache(
-                    decode_query.unsqueeze(1),
-                    key_cache,
-                    value_cache,
-                    block_table=decode_meta.block_tables,
-                    cache_seqlens=decode_meta.seq_lens_tensor,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    alibi_slopes=self.alibi_slopes,
-                ).squeeze(1)
+            
+            # Decoding run.
+            output[:] = flash_attn_with_kvcache(
+                decode_query.unsqueeze(1),
+                key_cache,
+                value_cache,
+                block_table=remote_metadata.block_tables_remote[sp_rank],
+                cache_seqlens=remote_metadata.seq_lens_remote_tensor[sp_rank],
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+            ).squeeze(1)
+            
 
             # Reshape the output tensor.
-            return output.view(num_tokens, hidden_size),out_exp_sums,out_max_logits
+            return filter_tensor(output.view(-1, self.num_heads * self.head_size),out_exp_sums,out_max_logits)
 
 
         num_tokens, hidden_size = query.shape

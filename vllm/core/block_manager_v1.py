@@ -754,6 +754,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_table = self.block_tables[seq.seq_id]
         return [block.block_number for block in block_table]
+    def get_block_table_remote_rank(self,seq:Sequence)-> List[int]:
+        block_table = self.block_tables[seq.seq_id]
+        return [block.remote_rank for block in block_table]
 
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
         block_table = self.cross_block_tables[seq_group.request_id]

@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -29,28 +29,43 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.distributed import (get_sequence_parallel_rank,get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import (SequenceParallelLinearForBroastcast,SequenceParallelLinearForGather)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-from vllm.utils import is_hip, print_warning_once
 
 from .interfaces import SupportsLoRA
 
 
-
+class broastcastlayer:
+    def __init__(self,tp_size:int,hidden_size:int,dtype:Optional[torch.dtype]=None)->None:
+        self.tp_size=tp_size
+        self.broastcast_streams = [torch.cuda.Stream() for _ in range(tp_size)]
+        self.broatcasters=[SequenceParallelLinearForBroastcast(i) for i in range[self.tp_size]]
+        self.hidden_size=hidden_size
+        self.q_size=self.hidden_size/self.tp_size
+        self.dtype=dtype
+    def forward(self,num_seqs:int)->torch.Tensor:
+        output=torch.empty([self.tp_size,num_seqs,self.hidden_size])
+        for i in range(self.tp_size):
+            with torch.cuda.stream(self.broastcast_streams[i]):
+                output[i]=self.broatcasters[i]()
+        return output
+    
+class gatherlayer:
+    def __init__(self,tp_size:int,num_heads:int)->None:
+        self.tp_size=tp_size
+        self.gather_streams = [torch.cuda.Stream() for _ in range(tp_size)]
+        self.gathers=[SequenceParallelLinearForGather(i) for i in range[self.tp_size]]
+        self.num_heads=num_heads/self.tp_size
+    def forward(self,attn_to_reduce:torch.Tensor,exp_sum_to_reduce:torch.Tensor,max_logits_to_reduce:torch.Tensor)->None:  
+        for i in range(self.tp_size):
+            with torch.cuda.stream(self.gather_streams[i]):
+                start=i*self.num_heads
+                end=(i+1)*self.num_heads
+                self.gather[i](attn_to_reduce[:,start:end,:],exp_sum_to_reduce[:,start:end],max_logits_to_reduce[:,start:end])
 
 
 class OnlyAttention(nn.Module):
@@ -65,7 +80,8 @@ class OnlyAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        tp_size = 1
+        self.tp_size= get_tensor_model_parallel_world_size()
+        tp_size =self.tp_size
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -88,6 +104,10 @@ class OnlyAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
+        
+        self.sp_rank=get_sequence_parallel_rank()
+        self.broastcastlayer=broastcastlayer(self.tp_size,self.hidden_size)
+        self.gatherlayer=gatherlayer(self.tp_size,self.total_num_heads)
     #     def __init__(
     #     self,
     #     num_heads: int,
@@ -102,12 +122,14 @@ class OnlyAttention(nn.Module):
 
     def forward(
         self,
-        q: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        attn_output = self.attn(q, kv_cache, attn_metadata)
-        return attn_output
+        sp_rank:int,
+    ) -> None:
+        q=self.broastcastlayer(attn_metadata.num_long_decode_tokens)
+        attn_to_reduce,exp_sum_to_reduce,max_logits_to_reduce=self.attn(q, kv_cache, attn_metadata,sp_rank)
+        self.gatherlayer(attn_to_reduce,exp_sum_to_reduce,max_logits_to_reduce)
+        
 
 
 class OnlyAttentionLayer(nn.Module):
@@ -128,8 +150,7 @@ class OnlyAttentionLayer(nn.Module):
             quant_config=quant_config,
             cache_config=cache_config,
         )
-        self.sequence_parallel_broastcaster=SequenceParallelLinearForBroastcast()
-        self.sequence_parallel_gather=SequenceParallelLinearForGather()
+       
         
 
     def forward(
@@ -138,9 +159,8 @@ class OnlyAttentionLayer(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> None:
         # Self Attention
-        q=self.sequence_parallel_broastcaster()
-        attn_output,out_exp_sum,out_max_logits=self.self_attn(q,kv_cache,attn_metadata)
-        self.sequence_parallel_gather(attn_output,out_exp_sum,out_max_logits)
+        self.self_attn(kv_cache,attn_metadata)
+        
 
 
 class AttentionModel(nn.Module):

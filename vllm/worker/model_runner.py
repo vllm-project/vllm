@@ -39,7 +39,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad)
+                        is_pin_memory_available, make_tensor_with_pad,reshape_list)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
+_PAD_BLOCK_NUMBER=-1
 LORA_WARMUP_RANK = 8
 _BATCH_SIZE_ALIGNMENT = 8
 # Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
@@ -77,6 +78,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     input_positions: Optional[torch.Tensor] = None
     seq_lens: Optional[List[int]] = None
     query_lens: Optional[List[int]] = None
+    output_reshape_index: Optional[List[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
     lora_requests: Optional[Set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
@@ -159,6 +161,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        is_sp_worker: bool=False,
         return_hidden_states: bool = False,
     ):
         self.model_config = model_config
@@ -170,6 +173,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.is_sp_worker=is_sp_worker
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
@@ -343,6 +347,41 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         num_prefill_tokens = 0
         num_decode_tokens = 0
 
+        input_tokens_long: List[int] = []
+        input_positions_long: List[int] = []
+        slot_mapping_long: List[int] = []
+
+        seq_lens_long: List[int] = []
+        decode_seq_lens_long: List[int] = []
+        context_lens_long: List[int] = []
+        query_lens_long: List[int] = []
+        block_tables_long: List[List[int]] = []
+        output_reshape_index:List[int]=[]
+        output_reshape_index_long:List[int]=[]
+        num_remote_decode_tokens: List[int]=[]
+        max_remote_decode_seq_len: List[int]=[]
+        num_decode_tokens_long = 0
+        old_index=0
+        
+
+        sequence_parallel_size=self.parallel_config.sequece_parallel_size
+        #superblock_size=self.cache_config.block_migrate_size/self.cache_config.block_size
+        #to be modified 
+        max_sequence_length=self.model_config.max_model_len
+        max_block_size=max_sequence_length/self.cache_config.block_size
+        seq_lens_remote: List[List[int]]=[]
+        block_tables_remote: List[List[List[int]]]=[]
+        q_remote_distribution: List[List[int]]=[]
+        q_index=0
+        for i in range(sequence_parallel_size):
+            seq_lens_remote.append([])
+            block_tables_remote.append([])
+            q_remote_distribution.append([])
+            num_remote_decode_tokens.append(0)
+            max_remote_decode_seq_len.append(0)
+        padding_mapping=[]
+        padding_mapping.extend([_PAD_BLOCK_NUMBER]*max_block_size)
+
         # The following fields are only for flashinfer
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.
@@ -385,6 +424,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "now.")
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
+                remote_len = 0
+                block_tables_remote_rank=seq_group_metadata.block_tables_remote_rank[seq_id]
+                for rank in block_tables_remote_rank:
+                    if rank>0:
+                        remote_len+=self.block_size
+                
                 if is_prompt:
                     context_len = seq_data.get_num_computed_tokens()
                 else:
@@ -433,6 +478,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     else:
                         sliding_seq_len = min(seq_len, self.sliding_window)
                     sliding_context_len = sliding_seq_len - 1
+                
 
                 # TODO(sang): Combine chunked prefill and prefix caching by
                 # only allowing multiple of block_size chunk size.
@@ -460,7 +506,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                       or not is_prompt):
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
-                        block_table = seq_group_metadata.block_tables[seq_id]
+                        block_table_filter = seq_group_metadata.block_tables[seq_id]
+                        block_table=[]
+                        for block_number,block_rank in zip(block_table_filter,block_tables_remote_rank):
+                            if block_rank==0:
+                                block_table.append(block_number)
                         if curr_sliding_window_blocks is not None:
                             block_table = block_table[
                                 -curr_sliding_window_blocks:]
@@ -470,113 +520,211 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 else:
                     # Prefill without chunked prefill or memory profiling.
                     block_table = []
-                block_tables.append(block_table)
 
-                seq_lens.append(sliding_seq_len)
-                context_lens.append(sliding_context_len)
-                query_len = sliding_seq_len - sliding_context_len
-                query_lens.append(query_len)
-                input_tokens.extend(tokens)
-                input_positions.extend(list(range(context_len, seq_len)))
-                lora_id = seq_group_metadata.lora_int_id
+                #currently, distirbuted inference is only performed for decode stage.
+                if remote_len==0 or is_prompt:
+                    block_tables.append(block_table)
+                    seq_lens.append(sliding_seq_len-remote_len)
+                    context_lens.append(sliding_context_len-remote_len)
+                    query_len = sliding_seq_len - sliding_context_len
+                    query_lens.append(query_len)
+                    input_tokens.extend(tokens)
+                    input_positions.extend(list(range(context_len, seq_len)))
+                    lora_id = seq_group_metadata.lora_int_id
+                    output_reshape_index.append(old_index)
 
-                if is_prompt:
-                    assert len(seq_ids) == 1
-                    num_prefills += 1
-                    num_prefill_tokens += len(tokens)
-                    decode_only = False
-                    prefill_seq_lens.append(seq_len)
+                    if is_prompt:
+                        assert len(seq_ids) == 1
+                        num_prefills += 1
+                        num_prefill_tokens += len(tokens)
+                        decode_only = False
+                        prefill_seq_lens.append(seq_len)
+                    else:
+                        assert query_len == 1, (
+                            "seq_len: {}, context_len: {}, query_len: {}".format(
+                                seq_len, context_len, query_len))
+                        num_decode_tokens += query_len
+                        decode_seq_lens.append(sliding_seq_len-remote_len)
+
+                    if lora_id > 0:
+                        lora_requests.add(seq_group_metadata.lora_request)
+
+                    lora_index_mapping += [lora_id] * query_len
+                    lora_prompt_mapping.extend(
+                        [lora_id] *
+                        (query_len if seq_group_metadata.sampling_params
+                        and seq_group_metadata.sampling_params.prompt_logprobs
+                        is not None else 1))
+
+                    mm_data = seq_group_metadata.multi_modal_data
+                    if mm_data is not None:
+                        # Process multi-modal data
+                        mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                        for k, v in mm_kwargs.items():
+                            multi_modal_kwargs_list[k].append(v)
+
+                    is_profile_run = _is_block_tables_empty(
+                        seq_group_metadata.block_tables)
+                    if is_profile_run:
+                        # During memory profiling, the block tables are not
+                        # initialized yet. In this case, we just use a dummy
+                        # slot mapping.
+                        # In embeddings, the block tables are {seq_id: None}.
+                        slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+                        continue
+
+                    # Compute the slot mapping.
+                    block_table = seq_group_metadata.block_tables[seq_id]
+
+                    # Mask the [0, start_idx) tokens of the prompt with
+                    # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
+                    # sliding_window). For example, if the prompt len is 10,
+                    # sliding window is 8, and block size is 4, the first two
+                    # tokens are masked and the slot mapping will be
+                    # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+                    start_idx = 0
+                    if self.sliding_window is not None:
+                        if is_prompt:
+                            assert self.scheduler_config.use_v2_block_manager \
+                                or context_len == 0, (
+                                "Prefix caching is currently not supported with "
+                                "sliding window attention in V1 block manager")
+                        # It is an optimization. When it is decoding, it is always
+                        # 0. When prefill, we use it to not write slots to kv cache
+                        # to save memory.
+                        start_idx = max(0, query_len - self.sliding_window)
+
+                    for i in range(context_len, seq_len):
+                        if i < start_idx:
+                            slot_mapping.append(_PAD_SLOT_ID)
+                            continue
+
+                        block_number = block_table[i // self.block_size]
+                        block_offset = i % self.block_size
+                        slot = block_number * self.block_size + block_offset
+                        slot_mapping.append(slot)
+
+                    # Prepare input tensors for flashinfer
+                    if self.attn_backend.get_name() == "flashinfer":
+                        seq_len = seq_data.get_len()
+                        # Get the number of valid blocks based on sequence length.
+                        # If seq_len = 16, block_size = 16,
+                        # block_table_bound is 1 with 1 valid block.
+                        # If seq_len = 15, block_size = 16,
+                        # block_table_bound is 0 + 1 with 1 valid block.
+                        block_table_bound = seq_len // self.block_size + 1 \
+                                            if seq_len % self.block_size != 0 \
+                                            else seq_len // self.block_size
+
+                        paged_kv_indices.extend(block_table[:block_table_bound])
+                        paged_kv_indptr.append(paged_kv_indptr[-1] +
+                                            block_table_bound)
+
+                        last_page_len = seq_len % self.block_size
+                        if last_page_len == 0:
+                            last_page_len = self.block_size
+                        paged_kv_last_page_len.append(last_page_len)
                 else:
+                    ##long decoding
+                    ##prepare lead-node metadata of long decoding 
+                    block_tables_long.append(block_table)
+                    seq_lens_long.append(sliding_seq_len-remote_len)
+                    context_lens_long.append(sliding_context_len-remote_len)
+                    query_len_long= sliding_seq_len - sliding_context_len
+                    query_lens_long.append(query_len_long)
+                    input_tokens_long.extend(tokens)
+                    input_positions_long.extend(list(range(context_len, seq_len)))
+
                     assert query_len == 1, (
                         "seq_len: {}, context_len: {}, query_len: {}".format(
                             seq_len, context_len, query_len))
-                    num_decode_tokens += query_len
-                    decode_seq_lens.append(sliding_seq_len)
+                    num_decode_tokens_long += query_len
+                    decode_seq_lens_long.append(sliding_seq_len-remote_len)
+                    output_reshape_index_long.append(old_index)
 
-                if lora_id > 0:
-                    lora_requests.add(seq_group_metadata.lora_request)
+                     # Compute the slot mapping.
+                    block_table = seq_group_metadata.block_tables[seq_id]
 
-                lora_index_mapping += [lora_id] * query_len
-                lora_prompt_mapping.extend(
-                    [lora_id] *
-                    (query_len if seq_group_metadata.sampling_params
-                     and seq_group_metadata.sampling_params.prompt_logprobs
-                     is not None else 1))
+                    # Mask the [0, start_idx) tokens of the prompt with
+                    # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
+                    # sliding_window). For example, if the prompt len is 10,
+                    # sliding window is 8, and block size is 4, the first two
+                    # tokens are masked and the slot mapping will be
+                    # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+                    start_idx = 0
+                    # if self.sliding_window is not None:
+                    #     if is_prompt:
+                    #         assert self.scheduler_config.use_v2_block_manager \
+                    #             or context_len == 0, (
+                    #             "Prefix caching is currently not supported with "
+                    #             "sliding window attention in V1 block manager")
+                    #     # It is an optimization. When it is decoding, it is always
+                    #     # 0. When prefill, we use it to not write slots to kv cache
+                    #     # to save memory.
+                    #     start_idx = max(0, query_len - self.sliding_window)
 
-                mm_data = seq_group_metadata.multi_modal_data
-                if mm_data is not None:
-                    # Process multi-modal data
-                    mm_kwargs = self.multi_modal_input_mapper(mm_data)
-                    for k, v in mm_kwargs.items():
-                        multi_modal_kwargs_list[k].append(v)
+                    for i in range(context_len, seq_len):
+                        if i < start_idx:
+                            slot_mapping_long.append(_PAD_SLOT_ID)
+                            continue
 
-                is_profile_run = _is_block_tables_empty(
-                    seq_group_metadata.block_tables)
-                if is_profile_run:
-                    # During memory profiling, the block tables are not
-                    # initialized yet. In this case, we just use a dummy
-                    # slot mapping.
-                    # In embeddings, the block tables are {seq_id: None}.
-                    slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
-                    continue
+                        block_number = block_table[i // self.block_size]
+                        block_offset = i % self.block_size
+                        slot = block_number * self.block_size + block_offset
+                        slot_mapping_long.append(slot)
 
-                # Compute the slot mapping.
-                block_table = seq_group_metadata.block_tables[seq_id]
+                    #prepare remote metadata of long decoding.
+                    #   sequence        |         distribution           |      q_index         |   length
+                    ###############################################################################################
+                    #aaabbbbbbbba       |aaaa    bbbb    pad     pad     |0       0       0     |4      0       0
+                    #                   |        bbbb                    |0                     |4
+                    #aabbbbcccca        |aaa     bbbb    cccc    pad     |1       1       1     |4      4       0
+                    #adddda             |aa      pad     pad     dddd    |2       2       2     |0      0       4
+                    block_table_remote: List[List[int]]=[]
+                    for i in range(sequence_parallel_size):
+                        block_table_remote.append([])
+                    for block_number,block_rank in zip(block_table,block_tables_remote_rank):
+                        if block_rank>0:
+                            block_table_remote[block_rank-1].append(block_number)
+                    for i in range(sequence_parallel_size):
+                        table=block_table_remote[i]
+                        length=len(table)
+                        if length==0:
+                            seq_lens_remote[i].append(0)
+                            block_tables_remote[i].extend(padding_mapping)
+                            q_remote_distribution[i].append(q_index)
+                        else:
+                            start_idx=0
+                            while(length-start_idx>=max_block_size):
+                                seq_lens_remote[i].append(max_sequence_length)
+                                block_tables_remote[i].extend(block_table_remote[start_idx:start_idx+max_block_size])
+                                q_remote_distribution[i].append(q_index)
+                                start_idx=start_idx+max_block_size
 
-                # Mask the [0, start_idx) tokens of the prompt with
-                # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
-                # sliding_window). For example, if the prompt len is 10,
-                # sliding window is 8, and block size is 4, the first two
-                # tokens are masked and the slot mapping will be
-                # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-                start_idx = 0
-                if self.sliding_window is not None:
-                    if is_prompt:
-                        assert self.scheduler_config.use_v2_block_manager \
-                            or context_len == 0, (
-                            "Prefix caching is currently not supported with "
-                            "sliding window attention in V1 block manager")
-                    # It is an optimization. When it is decoding, it is always
-                    # 0. When prefill, we use it to not write slots to kv cache
-                    # to save memory.
-                    start_idx = max(0, query_len - self.sliding_window)
+                    q_index=q_index+1
+                #Prepare the remote metadata 
+                old_index=old_index+1
 
-                for i in range(context_len, seq_len):
-                    if i < start_idx:
-                        slot_mapping.append(_PAD_SLOT_ID)
-                        continue
-
-                    block_number = block_table[i // self.block_size]
-                    block_offset = i % self.block_size
-                    slot = block_number * self.block_size + block_offset
-                    slot_mapping.append(slot)
-
-                # Prepare input tensors for flashinfer
-                if self.attn_backend.get_name() == "flashinfer":
-                    seq_len = seq_data.get_len()
-                    # Get the number of valid blocks based on sequence length.
-                    # If seq_len = 16, block_size = 16,
-                    # block_table_bound is 1 with 1 valid block.
-                    # If seq_len = 15, block_size = 16,
-                    # block_table_bound is 0 + 1 with 1 valid block.
-                    block_table_bound = seq_len // self.block_size + 1 \
-                                        if seq_len % self.block_size != 0 \
-                                        else seq_len // self.block_size
-
-                    paged_kv_indices.extend(block_table[:block_table_bound])
-                    paged_kv_indptr.append(paged_kv_indptr[-1] +
-                                           block_table_bound)
-
-                    last_page_len = seq_len % self.block_size
-                    if last_page_len == 0:
-                        last_page_len = self.block_size
-                    paged_kv_last_page_len.append(last_page_len)
-
+        #append long-decoding metadata to the tail of list.      
+        if num_decode_tokens_long>0:
+            block_tables.extend(block_tables_long)
+            seq_lens.extend(seq_lens_long)
+            context_lens.extend(context_lens_long)
+            query_lens.extend(query_lens_long)
+            input_tokens.extend(input_tokens_long)
+            input_positions.extend(input_positions_long)
+            slot_mapping.extend(slot_mapping_long)
+            decode_seq_lens.extend(decode_seq_lens_long)
+            num_decode_tokens+=num_decode_tokens_long
+            output_reshape_index.extend(output_reshape_index_long)
+            for i in range(sequence_parallel_size):
+                max_remote_decode_seq_len=max(seq_lens_remote[i],0)
+                num_remote_decode_tokens=len(seq_lens_remote)
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
-
+        max_long_decode_seq_len= max(decode_seq_lens[-num_decode_tokens_long:],default=0)
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
         # vLLM uses cuda graph only for decoding requests.
@@ -630,6 +778,27 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
                                        device=self.device)
+        
+        #remote
+        block_tables_remote_list: List[torch.tensor]=[]
+        seq_lens_remote_tensor_list:List[torch.tensor]=[]
+        for i in range(sequence_parallel_size):
+            seq_lens_remote_tensor=torch.tensor(seq_lens_remote[i],
+                                                dtype=torch.int,
+                                                device=self.device)
+            seq_lens_remote_tensor_list.append(seq_lens_remote_tensor)
+
+            max_block_table_len_remote = max(
+                len(block_table) for block_table in block_tables_remote_rank[i])
+            block_tables_remote = make_tensor_with_pad(
+                block_tables_remote_rank[i],
+                max_len=max_block_table_len_remote,
+                pad=0,
+                dtype=torch.int,
+                device=self.device,
+            )
+            block_tables_remote_rank.append(block_tables_remote)
+
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
                                          device=self.device)
@@ -699,8 +868,34 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 data_type=kv_cache_dtype,
                 use_cuda_graph=use_captured_graph)
 
-        else:
+        elif self.attn_backend.get_name() == "flash_attn" or self.attn_backend.get_name() == "xformers":
             attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=num_prefills,
+                slot_mapping=slot_mapping_tensor,
+                num_prefill_tokens=num_prefill_tokens,
+                num_decode_tokens=num_decode_tokens,
+                num_long_decode_tokens=num_decode_tokens_long,
+                seq_lens=seq_lens,
+                seq_lens_tensor=seq_lens_tensor,
+                max_query_len=max_query_len,
+                max_prefill_seq_len=max_prefill_seq_len,
+                max_decode_seq_len=max_decode_seq_len,
+                max_long_decode_seq_len=max_long_decode_seq_len,
+                query_start_loc=query_start_loc,
+                seq_start_loc=seq_start_loc,
+                context_lens_tensor=context_lens_tensor,
+                block_tables=block_tables,
+                output_reshape_index=output_reshape_index,
+                seq_lens_remote=seq_lens_remote,
+                seq_lens_remote_tensor=seq_lens_remote_tensor_list,
+                num_remote_decode_tokens=num_remote_decode_tokens,
+                max_remote_decode_seq_len=max_remote_decode_seq_len,
+                block_tables_remote=block_tables_remote_list,
+                q_remote_distribution=q_remote_distribution,
+                use_cuda_graph=use_captured_graph,
+            )
+        else:
+             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
                 slot_mapping=slot_mapping_tensor,
                 num_prefill_tokens=num_prefill_tokens,
@@ -716,6 +911,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 block_tables=block_tables,
                 use_cuda_graph=use_captured_graph,
             )
+
 
         if self.lora_config:
             lora_mapping = LoRAMapping(
@@ -736,6 +932,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             attn_metadata=attn_metadata,
             seq_lens=seq_lens,
             query_lens=query_lens,
+            output_reshape_index=output_reshape_index,
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_kwargs=multi_modal_kwargs,
@@ -965,6 +1162,47 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         decode_wrapper=decode_wrapper,
                         prefill_wrapper=None)
                     attn_metadata.begin_forward()
+                elif self.attn_backend.get_name() == "flash_attn" or self.attn_backend.get_name() == "xformers":
+                    output_reshape_index=[i for i in range(batch_size)]
+                    seq_lens_tensor=seq_lens[:batch_size]
+                    block_tables=block_tables[:batch_size]
+                    
+                    sp_size=self.parallel_config.sequence_parallel_size
+                    seq_lens_remote_tensor_list=[]
+                    num_remote_decode_tokens=[]
+                    max_remote_decode_seq_len=[]
+                    block_tables_remote_list=[]
+                    
+                    for i in range(sp_size):
+                        seq_lens_remote_tensor_list.append(seq_lens_tensor)
+                        num_remote_decode_tokens.append(batch_size)
+                        max_remote_decode_seq_len.append(self.max_seq_len_to_capture)
+                        block_tables_remote_list.append(block_tables)
+
+                    attn_metadata = self.attn_backend.make_metadata(
+                        num_prefills=0,
+                        slot_mapping=slot_mapping[:batch_size],
+                        num_prefill_tokens=0,
+                        num_decode_tokens=batch_size,
+                        num_long_decode_tokens=batch_size,
+                        seq_lens=None,
+                        seq_lens_tensor=seq_lens[:batch_size],
+                        max_query_len=None,
+                        max_prefill_seq_len=0,
+                        max_decode_seq_len=self.max_seq_len_to_capture,
+                        max_long_decode_seq_len=self.max_seq_len_to_capture,
+                        query_start_loc=None,
+                        seq_start_loc=None,
+                        context_lens_tensor=None,
+                        block_tables=block_tables[:batch_size],
+                        output_reshape_index=output_reshape_index,
+                        seq_lens_remote=None,
+                        seq_lens_remote_tensor=seq_lens_remote_tensor_list,
+                        num_remote_decode_tokens=num_remote_decode_tokens,
+                        max_remote_decode_seq_len=max_remote_decode_seq_len,
+                        block_tables_remote=block_tables_remote_list,
+                        use_cuda_graph=True,
+                    )
                 else:
                     attn_metadata = self.attn_backend.make_metadata(
                         num_prefills=0,
@@ -1063,9 +1301,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list)
+        seq_lens=reshape_list(model_input.seq_lens,model_input.output_reshape_index)
+        query_lens=reshape_list(model_input.query_lens,model_input.output_reshape_index)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     model_input.seq_lens,
-                                                     model_input.query_lens,
+                                                     seq_lens,
+                                                     query_lens,
                                                      self.device,
                                                      self.pin_memory)
         is_prompt = (seq_group_metadata_list[0].is_prompt
@@ -1139,9 +1379,14 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             attn_metadata=model_input.attn_metadata,
             **multi_modal_kwargs,
         )
+        
+        hidden_states_reshape=torch.empty_like(hidden_states,dtype=hidden_states.dtype,device=hidden_states.device)
+        indexs=model_input.output_reshape_index
+        for i in range(len(indexs)):
+            hidden_states_reshape[indexs[i]]=hidden_states[i]
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
+        logits = self.model.compute_logits(hidden_states_reshape,
                                            model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.

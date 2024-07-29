@@ -90,11 +90,11 @@ class Attention(nn.Module):
         value: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        generate_kv_cache: Optional[bool],
+        sp_rank: Optional[int],
     ) -> torch.Tensor:
         
         return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                 self._kv_scale,generate_kv_cache)
+                                 self._kv_scale,sp_rank)
     def reducer(
         self,
          tmp_out: torch.Tensor,

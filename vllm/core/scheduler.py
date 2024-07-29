@@ -125,8 +125,8 @@ class SchedulerOutputs:
     blocks_to_copy: List[Tuple[int, int]]
     # Blocks to migrate. list of GPU -> [GPU, rank].
     blocks_to_migrate: List[Tuple[int, int, int]]
-	# Dest chunk idx and rank. Note: we only set 1 chunk in master
-    chunk_to_migrate: Tuple[int, int]
+	# Dest superblock idx and rank. Note: we only set 1 superblock in master
+    superblock_to_migrate: Tuple[int, int]
     # Sequence groups that are going to be ignored.
     ignored_seq_groups: List[SequenceGroup]
     # The number of slots for lookahead decoding.
@@ -182,8 +182,6 @@ class SchedulerRunningOutputs:
     blocks_to_swap_out: List[Tuple[int, int]]
     # The blocks to copy.
     blocks_to_copy: List[Tuple[int, int]]
-    # Blocks to migrate. list of GPU -> [GPU, rank].
-    blocks_to_migrate: List[Tuple[int, int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
 
@@ -262,6 +260,7 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        remote_allocator:Optional[int]=0,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -286,6 +285,7 @@ class Scheduler:
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching,
+            remote_allocator=remote_allocator,
             block_migrate_size=self.cache_config.block_migrate_size,
             block_migrate_threshold=self.cache_config.block_migrate_threshold,
             block_migrate_start=self.cache_config.block_migrate_start)
@@ -820,6 +820,8 @@ class Scheduler:
         blocks_to_copy_for_migration=[]
         self.block_manager.get_kvcache_migrate_block(blocks_to_migrate)
         self.block_manager.format_kvcache_migrate_blocks(blocks_to_migrate,blocks_to_copy_for_migration)
+        superblock_size=len(blocks_to_migrate)
+        superblock_to_migrate=Tuple(blocks_to_migrate[0][2]%superblock_size,blocks_to_migrate[0][1])
         # There should be no prefill from running queue because this policy
         # doesn't allow chunked prefills.
         assert len(running_scheduled.prefill_seq_groups) == 0
@@ -835,6 +837,7 @@ class Scheduler:
             blocks_to_copy=running_scheduled.blocks_to_copy +
             swapped_in.blocks_to_copy+ blocks_to_copy_for_migration,
             blocks_to_migrate=blocks_to_migrate,
+            superblock_to_migrate=superblock_to_migrate,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
@@ -977,11 +980,13 @@ class Scheduler:
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+            block_tables_remote_rank: Dict[int, List[int]] = {}
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                block_tables_remote_rank[seq_id]=self.block_manager.get_block_table_remote_rank(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             common_computed_block_nums = (
@@ -1011,6 +1016,7 @@ class Scheduler:
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
+                block_tables_remote_rank=block_tables_remote_rank,
                 do_sample=do_sample,
                 pooling_params=seq_group.pooling_params,
                 token_chunk_size=token_chunk_size,

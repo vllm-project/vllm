@@ -9,7 +9,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce)
+                              tensor_model_parallel_all_reduce,
+                              get_sp_group)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -659,19 +660,23 @@ class QKVParallelLinear(ColumnParallelLinear):
 #used for q broastcast and output reduce of sequence parallel 
 class SequenceParallelLinearForBroastcast:
     
-    def __init__(self):
+    def __init__(self,
+                from_rank:Optional[int]):
         # Divide the weight matrix along the last dimension.
-        self.sp_size = get_sequence_model_parallel_world_size
-
+        self.tp_rank=get_tensor_model_parallel_rank()
+        if from_rank is None:
+            self.from_rank=-1
+        else:
+            self.from_rank=from_rank
     def forward(self, input_):
         # Set up backprop all-reduce.
-        sp_rank=get_sequence_model_parallel_rank()
+
         
-        if sp_rank==get_sp_group().first_rank:
+        if self.tp_rank!=-1:
             output=input_
-            get_sp_group().broadcast(input_,0)
+            get_sp_group(self.tp_rank).broadcast(input_,0)
         else:
-            output=get_sp_group().broadcast(0)
+            output=get_sp_group(self.from_rank).broadcast(0)
 
         return output
 
@@ -681,18 +686,23 @@ class SequenceParallelLinearForBroastcast:
         return s
 class SequenceParallelLinearForGather:
     
-    def __init__(self,):
+    def __init__(self,
+                from_rank:Optional[int]):
         # Divide the weight matrix along the last dimension.
-        self.sp_size = get_sequence_model_parallel_world_size
+        self.tp_rank=get_tensor_model_parallel_rank()
+        if from_rank is None:
+            self.from_rank=-1
+        else:
+            self.from_rank=from_rank
 
     def forward(self, input_,input_2,input_3):
         # Set up backprop all-reduce.
     
             #########
         #gather(input_,dst,dim),dim is untest.output need be the shape [num_seqs, num_heads, num_sequece_block, head_size]
-        output=get_sp_group().gather(input_,0,-1)
-        output2=get_sp_group().gather(input_2,0,-1)
-        output3=get_sp_group().gather(input_3,0,-1)
+        output=get_sp_group(self.tp_rank).gather(input_,0,-1)
+        output2=get_sp_group(self.tp_rank).gather(input_2,0,-1)
+        output3=get_sp_group(self.tp_rank).gather(input_3,0,-1)
             
         return output,output2,output3
 

@@ -103,7 +103,9 @@ class RayXPUExecutor(DistributedGPUExecutor):
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
 
-        return num_gpu_blocks, num_cpu_blocks
+        num_remote_blocks=[num_block for num_block in num_blocks if num_block[1]<0]
+        num_remote_gpu_blocks=min(b[0] for b in num_remote_blocks)
+        return num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -212,7 +214,8 @@ class RayXPUExecutor(DistributedGPUExecutor):
         )
 
     def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int) -> None:
         """Initialize the KV cache in all workers.
         """
 
@@ -227,7 +230,8 @@ class RayXPUExecutor(DistributedGPUExecutor):
 
         self._run_workers("initialize_cache",
                           num_gpu_blocks=num_gpu_blocks,
-                          num_cpu_blocks=num_cpu_blocks)
+                          num_cpu_blocks=num_cpu_blocks,
+                          num_remote_gpu_blocks=num_remote_gpu_blocks)
 
     def _driver_execute_model(
         self,

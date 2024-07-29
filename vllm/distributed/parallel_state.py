@@ -894,8 +894,8 @@ def initialize_model_parallel(
     """
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
-    word_size: int =  torch.distributed.get_world_size()
-    tp_pp_world_size: int = word_size - sequence_parallel_size + 1
+    world_size: int =  torch.distributed.get_world_size()
+    tp_pp_world_size: int = world_size - sequence_parallel_size + 1
     sp_world_size: int = sequence_parallel_size
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
@@ -1018,8 +1018,19 @@ def get_tensor_model_parallel_world_size():
 
 
 def get_tensor_model_parallel_rank():
+    global_rank=get_world_group().rank_in_group
+    if global_rank<get_tp_group().world_size:
+        """Return my rank for the tensor model parallel group."""
+        return get_tp_group().rank_in_group
+    else:
+        return -1
+def get_sequence_parallel_rank():
     """Return my rank for the tensor model parallel group."""
-    return get_tp_group().rank_in_group
+    global_rank=get_world_group().rank_in_group
+    if global_rank>=get_tp_group().world_size:
+        return get_tp_group(0).rank_in_group-1
+    else: 
+        return -1
 
 
 def destroy_model_parallel():

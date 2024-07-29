@@ -412,11 +412,13 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+        self.num_remote_gpu_blocks = None
 
         # 4096 tokens per chunk
         # self.chunk_size = 4096 / block_size
         self.block_migrate_threshold=block_migrate_threshold
         self.block_migrate_start=block_migrate_start
+        self.block_migrate_size=block_migrate_size
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -625,7 +627,7 @@ class ParallelConfig:
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.sequece_parallel_size = sequence_parallel_size
+        self.sequence_parallel_size = sequence_parallel_size
         self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
