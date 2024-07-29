@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
-VLLM_DEFAULT_GPU_MEMORY_UTILIZATION = 0.80
+VLLM_DEFAULT_GPU_MEMORY_UTILIZATION = 0.90
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
