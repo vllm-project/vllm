@@ -247,17 +247,17 @@ async def build_server(
     global openai_serving_embedding
     global openai_serving_tokenization
 
-    # openai_serving_chat = OpenAIServingChat(
-    #     engine,
-    #     model_config,
-    #     served_model_names,
-    #     args.response_role,
-    #     lora_modules=args.lora_modules,
-    #     prompt_adapters=args.prompt_adapters,
-    #     request_logger=request_logger,
-    #     chat_template=args.chat_template,
-    #     return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    # )
+    openai_serving_chat = OpenAIServingChat(
+        rpc_client,
+        model_config,
+        served_model_names,
+        args.response_role,
+        lora_modules=args.lora_modules,
+        prompt_adapters=args.prompt_adapters,
+        request_logger=request_logger,
+        chat_template=args.chat_template,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+    )
     openai_serving_completion = OpenAIServingCompletion(
         rpc_client,
         model_config,

@@ -177,7 +177,7 @@ class OpenAIServingCompletion(OpenAIServing):
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
                     # Abort the request if the client disconnects.
-                    await self.rcp_client.abort(f"{request_id}-{i}")
+                    await self.rpc_client.abort(f"{request_id}-{i}")
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
 
