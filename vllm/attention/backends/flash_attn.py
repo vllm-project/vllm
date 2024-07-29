@@ -362,42 +362,42 @@ class FlashAttentionImpl(AttentionImpl):
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
         if sp_rank != -1:
 
-            remote_metadata = attn_metadata.remote_metadata
-            q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
-            query_remote = reshape_q(query, q_remote_distribution)
-            output = torch.empty_like(query_remote)
-            query = query_remote.view(-1, self.num_heads, self.head_size)
-            num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
-            decode_query = query[:]
-            assert decode_query.shape[0] == num_decode_tokens
-            num_seqs = decode_query.size(0)
-            num_heads = decode_query.size(1)
-            num_tokens, hidden_size = query.shape
-            out_exp_sums = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
-            out_max_logits = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
+            if remote_metadata := attn_metadata.remote_metadata:
+                q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
+                query_remote = reshape_q(query, q_remote_distribution)
+                output = torch.empty_like(query_remote)
+                query = query_remote.view(-1, self.num_heads, self.head_size)
+                num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
+                decode_query = query[:]
+                assert decode_query.shape[0] == num_decode_tokens
+                num_seqs = decode_query.size(0)
+                num_heads = decode_query.size(1)
+                num_tokens, hidden_size = query.shape
+                out_exp_sums = torch.empty(
+                    size=(num_seqs, num_heads),
+                    dtype=torch.float32,
+                    device=output.device,
+                )
+                out_max_logits = torch.empty(
+                    size=(num_seqs, num_heads),
+                    dtype=torch.float32,
+                    device=output.device,
+                )
 
-            # Decoding run.
-            output[:] = flash_attn_with_kvcache(
-                decode_query.unsqueeze(1),
-                key_cache,
-                value_cache,
-                block_table=remote_metadata.block_tables_remote[sp_rank],
-                cache_seqlens=remote_metadata.seq_lens_remote_tensor[sp_rank],
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-            ).squeeze(1)
+                # Decoding run.
+                output[:] = flash_attn_with_kvcache(
+                    decode_query.unsqueeze(1),
+                    key_cache,
+                    value_cache,
+                    block_table=remote_metadata.block_tables_remote[sp_rank],
+                    cache_seqlens=remote_metadata.seq_lens_remote_tensor[sp_rank],
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                ).squeeze(1)
 
-            # Reshape the output tensor.
-            return filter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits)
+                # Reshape the output tensor.
+                return filter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits)
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.

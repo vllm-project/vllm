@@ -227,12 +227,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
         if self._cached_remote_metadata is not None:
             return self._cached_remote_metadata
-        assert self.seq_lens_remote is not None
-        assert self.seq_lens_remote_tensor is not None
-        assert self.num_remote_decode_tokens is not None
-        assert self.max_remote_decode_seq_len is not None
-        assert self.block_tables_remote is not None
-        assert self.q_remote_distirbution is not None
 
         self._cached_remote_metadata = XFormersMetadata(
             num_prefills=0,
@@ -344,45 +338,45 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if sp_rank != -1:
             old_num_seqs = query.size(0)
-            remote_metadata = attn_metadata.remote_metadata
-            q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
-            query_remote = reshape_q(query, q_remote_distribution)
-            output = torch.empty_like(query_remote)
-            query = query_remote.view(-1, self.num_heads, self.head_size)
-            num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
-            decode_query = query[:]
-            assert decode_query.shape[0] == num_decode_tokens
-            num_seqs = decode_query.size(0)
-            num_heads = decode_query.size(1)
-            out_exp_sums = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
-            out_max_logits = torch.empty(
-                size=(num_seqs, num_heads),
-                dtype=torch.float32,
-                device=output.device,
-            )
+            if remote_metadata := attn_metadata.remote_metadata:
+                q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank]
+                query_remote = reshape_q(query, q_remote_distribution)
+                output = torch.empty_like(query_remote)
+                query = query_remote.view(-1, self.num_heads, self.head_size)
+                num_decode_tokens = remote_metadata.num_decode_tokens[sp_rank]
+                decode_query = query[:]
+                assert decode_query.shape[0] == num_decode_tokens
+                num_seqs = decode_query.size(0)
+                num_heads = decode_query.size(1)
+                out_exp_sums = torch.empty(
+                    size=(num_seqs, num_heads),
+                    dtype=torch.float32,
+                    device=output.device,
+                )
+                out_max_logits = torch.empty(
+                    size=(num_seqs, num_heads),
+                    dtype=torch.float32,
+                    device=output.device,
+                )
 
-            # Decoding run.
-            output[:], out_exp_sums[:], out_max_logits[:] = PagedAttention.forward_decode2(
-                decode_query,
-                kv_cache[0],
-                kv_cache[1],
-                remote_metadata.block_tables_remote[sp_rank],
-                remote_metadata.seq_lens_remote_tensor[sp_rank],
-                remote_metadata.max_remote_decode_seq_len[sp_rank],
-                remote_metadata.q_remote_distirbution[sp_rank],
-                self.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                kv_scale,
-            )
+                # Decoding run.
+                output[:], out_exp_sums[:], out_max_logits[:] = PagedAttention.forward_decode2(
+                    decode_query,
+                    kv_cache[0],
+                    kv_cache[1],
+                    remote_metadata.block_tables_remote[sp_rank],
+                    remote_metadata.seq_lens_remote_tensor[sp_rank],
+                    remote_metadata.max_remote_decode_seq_len[sp_rank],
+                    remote_metadata.q_remote_distirbution[sp_rank],
+                    self.kv_cache_dtype,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                    kv_scale,
+                )
 
-            # Reshape the output tensor.
-            return filter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits, q_remote_distribution, old_num_seqs)
+                # Reshape the output tensor.
+                return filter_tensor(output.view(-1, self.num_heads * self.head_size), out_exp_sums, out_max_logits, q_remote_distribution, old_num_seqs)
         output = torch.empty_like(query)
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
