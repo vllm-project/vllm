@@ -1,26 +1,39 @@
 import asyncio
+import multiprocessing
 import re
+import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional, Union
+from typing import Dict
 
-import torch
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.routing import Mount
 from prometheus_client import make_asgi_app
-from pydantic import BaseModel, Field
-from typing_extensions import Annotated
 
 from vllm import FastSyncLLM as LLM
-from vllm import SamplingParams
+from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.sync_openai.protocol import (CompletionRequest,
+                                                   CompletionResponse,
+                                                   CompletionResponseChoice,
+                                                   UsageInfo)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
-logger = init_logger(__name__)
+mp = multiprocessing.get_context(envs.VLLM_WORKER_MULTIPROC_METHOD)
+
+logger = init_logger("api_server.py")
+
+
+def put_in_queue(queue, item, loop):
+    try:
+        asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+    except Exception as e:
+        logger.error("Exception in put_in_queue: %s", e)
+        raise e
 
 
 class BackgroundRunner:
@@ -28,205 +41,67 @@ class BackgroundRunner:
     def __init__(self):
         self.value = 0
         self.engine_args = None
+        self.input_queue: multiprocessing.Queue = mp.Queue()
+        self.result_queue: multiprocessing.Queue = mp.Queue()
+        self.result_queues: Dict[str, asyncio.Queue] = {}
+        self.t: threading.Thread = threading.Thread(target=self.thread_proc)
+        self.loop = None
+        self.llm: LLM
+        self.proc: multiprocessing.Process
 
     def set_engine_args(self, engine_args):
         self.engine_args = engine_args
 
+    def add_result_queue(self, id, queue):
+        self.result_queues[id] = queue
+
+    def remove_result_queues(self, ids):
+        for id in ids:
+            assert id in self.result_queues
+            del self.result_queues[id]
+        logger.debug("Removed result queue from %d ids. %d remaining",
+                     len(ids), len(self.result_queues))
+
+    def thread_proc(self):
+        while True:
+            req_id, result, stats = self.result_queue.get()
+            put_in_queue(self.result_queues[req_id], (req_id, result, stats),
+                         self.loop)
+
     async def run_main(self):
-        self.input_queue: asyncio.Queue = asyncio.Queue()
         self.llm = LLM(
             engine_args=self.engine_args,
             input_queue=self.input_queue,
+            result_queue=self.result_queue,
         )
-
-        await self.llm.run_engine()
+        self.loop = asyncio.get_event_loop()
+        self.proc = mp.Process(target=self.llm.run_engine)
+        self.t.start()
+        self.proc.start()
 
     async def add_request(self, prompt, sampling_params):
         result_queue: asyncio.Queue = asyncio.Queue()
         ids = []
         if isinstance(prompt, str) or (isinstance(prompt, list)
                                        and isinstance(prompt[0], int)):
+            prompt = [prompt]
+        for p in prompt:
             id = random_uuid()
-            self.input_queue.put_nowait(
-                (id, prompt, sampling_params, result_queue))
+            self.add_result_queue(id, result_queue)
+            self.input_queue.put_nowait((id, p, sampling_params))
             ids.append(id)
-        else:
-            for p in prompt:
-                id = random_uuid()
-                self.input_queue.put_nowait(
-                    (id, p, sampling_params, result_queue))
-                ids.append(id)
-
         return ids, result_queue
 
 
 runner = BackgroundRunner()
 
 
-class UsageInfo(BaseModel):
-    prompt_tokens: int = 0
-    total_tokens: int = 0
-    completion_tokens: int = 0
-
-
-class CompletionLogProbs(BaseModel):
-    text_offset: List[int] = Field(default_factory=list)
-    token_logprobs: List[Optional[float]] = Field(default_factory=list)
-    tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
-
-
-class CompletionResponseChoice(BaseModel):
-    index: int
-    text: str
-    logprobs: Optional[CompletionLogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = Field(
-        default=None,
-        description=(
-            "The stop string or token id that caused the completion "
-            "to stop, None if the completion finished for some other reason "
-            "including encountering the EOS token"),
-    )
-
-
-class CompletionResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
-    object: str = "text_completion"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
-    choices: List[CompletionResponseChoice]
-    usage: Optional[UsageInfo] = Field(default=None)
-
-
-class CompletionRequest(BaseModel):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/completions/create
-    model: str
-    prompt: Union[List[int], List[List[int]], str, List[str]]
-    best_of: Optional[int] = None
-    echo: Optional[bool] = False
-    frequency_penalty: Optional[float] = 0.0
-    logit_bias: Optional[Dict[str, float]] = None
-    logprobs: Optional[int] = None
-    max_tokens: Optional[int] = 16
-    n: int = 1
-    presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = Field(None,
-                                ge=torch.iinfo(torch.long).min,
-                                le=torch.iinfo(torch.long).max)
-    stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
-    stream: Optional[bool] = False
-    suffix: Optional[str] = None
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
-    user: Optional[str] = None
-
-    # doc: begin-completion-sampling-params
-    use_beam_search: Optional[bool] = False
-    top_k: Optional[int] = -1
-    min_p: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.0
-    length_penalty: Optional[float] = 1.0
-    early_stopping: Optional[bool] = False
-    stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-    ignore_eos: Optional[bool] = False
-    min_tokens: Optional[int] = 0
-    skip_special_tokens: Optional[bool] = True
-    spaces_between_special_tokens: Optional[bool] = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-    # doc: end-completion-sampling-params
-
-    # doc: begin-completion-extra-params
-    include_stop_str_in_output: Optional[bool] = Field(
-        default=False,
-        description=(
-            "Whether to include the stop string in the output. "
-            "This is only applied when the stop or stop_token_ids is set."),
-    )
-    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
-        default=None,
-        description=("If specified, the output will follow the JSON schema."),
-    )
-    guided_regex: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the regex pattern."),
-    )
-    guided_choice: Optional[List[str]] = Field(
-        default=None,
-        description=(
-            "If specified, the output will be exactly one of the choices."),
-    )
-    guided_grammar: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the context free grammar."),
-    )
-    guided_decoding_backend: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"))
-    guided_whitespace_pattern: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."))
-
-    # doc: end-completion-extra-params
-
-    def to_sampling_params(self):
-        echo_without_generation = self.echo and self.max_tokens == 0
-
-        logits_processors = None
-        if self.logit_bias:
-
-            def logit_bias_logits_processor(
-                    token_ids: List[int],
-                    logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
-                for token_id, bias in self.logit_bias.items():
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    bias = min(100, max(-100, bias))
-                    logits[int(token_id)] += bias
-                return logits
-
-            logits_processors = [logit_bias_logits_processor]
-
-        return SamplingParams(
-            n=self.n,
-            best_of=self.best_of,
-            presence_penalty=self.presence_penalty,
-            frequency_penalty=self.frequency_penalty,
-            repetition_penalty=self.repetition_penalty,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            min_p=self.min_p,
-            seed=self.seed,
-            stop=self.stop,
-            stop_token_ids=self.stop_token_ids,
-            ignore_eos=self.ignore_eos,
-            max_tokens=self.max_tokens if not echo_without_generation else 1,
-            min_tokens=self.min_tokens,
-            logprobs=self.logprobs,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
-            prompt_logprobs=self.logprobs if self.echo else None,
-            skip_special_tokens=self.skip_special_tokens,
-            spaces_between_special_tokens=(self.spaces_between_special_tokens),
-            include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
-            logits_processors=logits_processors,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    runner.result_queues["Ready"] = asyncio.Queue()
     asyncio.create_task(runner.run_main())
+    await runner.result_queues["Ready"].get()
+    del runner.result_queues["Ready"]
     yield
 
 
@@ -239,7 +114,8 @@ route.path_regex = re.compile('^/metrics(?P<path>.*)$')
 app.routes.append(route)
 
 
-async def completion_generator(model, result_queue, choices, created_time):
+async def completion_generator(model, result_queue, choices, created_time,
+                               ids):
     completed = 0
     try:
         while True:
@@ -270,6 +146,7 @@ async def completion_generator(model, result_queue, choices, created_time):
             response_json = res.model_dump_json(exclude_unset=True)
             yield f"data: {response_json}\n\n"
             if completed == len(choices):
+                runner.remove_result_queues(ids)
                 break
 
         yield "data: [DONE]\n\n"
@@ -300,7 +177,7 @@ async def completions(request: CompletionRequest, raw_request: Request):
     if request.stream:
         created_time = int(time.time())
         return StreamingResponse(content=completion_generator(
-            request.model, result_queue, choices, created_time),
+            request.model, result_queue, choices, created_time, ids),
                                  media_type="text/event-stream")
     while True:
         request_id, token, stats = await result_queue.get()
@@ -313,6 +190,7 @@ async def completions(request: CompletionRequest, raw_request: Request):
             res.choices[choice_idx].stop_reason = stats["stop_reason"]
             completed += 1
             if completed == len(ids):
+                runner.remove_result_queues(ids)
                 break
             continue
     res.usage.total_tokens = (  # type: ignore
