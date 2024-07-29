@@ -18,13 +18,13 @@
 #     in this case, commands must be specified. the first command runs on first host, the second
 #     command runs on the second host.
 # working_dir(str): override the place where command execute. default to "/vllm-workspace/tests".
-# file_dependencies(list): the list of prefix to opt-in the test for, if empty, the test will always run.
+# source_file_dependencies(list): the list of prefix to opt-in the test for, if empty, the test will always run.
 
 steps:
 - label: Async Engine, Inputs, Utils, Worker Test
   fast_check: true
   fast_check_only: true
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
   - pytest -v -s async_engine # Async Engine
@@ -35,7 +35,7 @@ steps:
 
 - label: Metrics, Tracing Test
   fast_check: true
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
   - pytest -v -s metrics # Metrics
@@ -49,7 +49,7 @@ steps:
 - label: Regression Test
   mirror_hardwares: [amd]
   fast_check: false
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
@@ -57,7 +57,7 @@ steps:
 - label: Basic Correctness Test
   mirror_hardwares: [amd]
   fast_check: true
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
   # This flashinfer installation will fail on AMD ROCm, so it is set as optional.
@@ -71,7 +71,7 @@ steps:
 - label: Core Test
   mirror_hardwares: [amd]
   fast_check: true
-  file_dependencies:
+  source_file_dependencies:
   - vllm/core
   - vllm/distributed
   commands:
@@ -81,7 +81,7 @@ steps:
 - label: Distributed Comm Ops Test
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
-  file_dependencies:
+  source_file_dependencies:
   - vllm/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
@@ -91,7 +91,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
-  file_dependencies:
+  source_file_dependencies:
   - vllm/distributed
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
@@ -104,7 +104,7 @@ steps:
   mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
@@ -130,7 +130,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   fast_check: true
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
   - pytest -v -s distributed/test_pynccl.py
@@ -144,14 +144,14 @@ steps:
 - label: Pipeline Parallelism Test
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: Engine Test
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
@@ -161,7 +161,7 @@ steps:
 - label: Entrypoints Test
   fast_check: true
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - vllm/entrypoints
   commands:
   - pytest -v -s entrypoints/llm
@@ -170,7 +170,7 @@ steps:
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - vllm/entrypoints
   - examples/
   commands:
@@ -183,14 +183,14 @@ steps:
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
 
 - label: Inputs Test
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
     - pytest -v -s test_inputs.py
     - pytest -v -s multimodal
 
 - label: Kernels Test %N
-  file_dependencies:
+  source_file_dependencies:
   - csrc/
   commands:
     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
@@ -198,7 +198,7 @@ steps:
   parallelism: 4
 
 - label: Models Test
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
@@ -206,32 +206,32 @@ steps:
 
 - label: Vision Language Models Test
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
     - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
     - pytest -v -s prefix_caching
 
 - label: Samplers Test
-  file_dependencies:
+  source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
   command: pytest -v -s samplers
 
 - label: LogitsProcessor Test
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - vllm/model_executor/layers
   command: pytest -v -s test_logits_processor.py
 
 - label: Utils Test
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands:
     - pytest -v -s test_utils.py
@@ -239,12 +239,12 @@ steps:
 
 - label: Worker Test
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - vllm/worker
   command: pytest -v -s worker
 
 - label: Speculative decoding tests
-  file_dependencies:
+  source_file_dependencies:
   - vllm/spec_decode
   commands:
     # See https://github.com/vllm-project/vllm/issues/5152
@@ -252,7 +252,7 @@ steps:
     - pytest -v -s spec_decode
 
 - label: LoRA Test %N
-  file_dependencies:
+  source_file_dependencies:
   - vllm/lora
   - csrc/punica
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
@@ -261,7 +261,7 @@ steps:
 - label: LoRA Long Context (Distributed)
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   num_gpus: 4
-  file_dependencies:
+  source_file_dependencies:
   - vllm/lora
   - csrc/punica
   commands:
@@ -273,7 +273,7 @@ steps:
 - label: Tensorizer Test
   soft_fail: true
   fast_check: true
-  file_dependencies:
+  source_file_dependencies:
   - vllm/model_executor/model_loader
   commands:
     - apt-get install -y curl libsodium23
@@ -281,7 +281,7 @@ steps:
     - pytest -v -s tensorizer_loader
 
 - label: Quantization Test
-  file_dependencies:
+  source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
   command: pytest -v -s quantization
@@ -289,7 +289,7 @@ steps:
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
   mirror_hardwares: [amd]
-  file_dependencies:
+  source_file_dependencies:
   - benchmarks/
   commands:
   - pip install aiohttp
@@ -297,7 +297,7 @@ steps:
 
 - label: LM Eval Small Models
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  file_dependencies:
+  source_file_dependencies:
   - csrc/
   - vllm/
   commands:
@@ -309,7 +309,7 @@ steps:
   gpu: a100
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  file_dependencies:
+  source_file_dependencies:
   - csrc/
   - vllm/
   commands:
@@ -321,7 +321,7 @@ steps:
   working_dir: "/vllm-workspace/test_docs/docs"
   fast_check: true
   no_gpu: True
-  file_dependencies: [] # always run
+  source_file_dependencies: [] # always run
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
@@ -329,7 +329,7 @@ steps:
 - label: Distributed Tests (A100)
   gpu: a100
   num_gpus: 4
-  file_dependencies:
+  source_file_dependencies:
   - vllm/
   commands: 
   # NOTE: don't test llama model here, it seems hf implementation is buggy
