@@ -385,7 +385,7 @@ class ModelConfig:
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        from vllm.distributed.utils import get_pp_indices
+        from vllm.distributed.pp_partition_strategy import get_pp_indices
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
         pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
