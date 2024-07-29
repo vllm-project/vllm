@@ -196,6 +196,7 @@ def test_load_without_tensorizer_load_format(vllm_runner):
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
     del model
     gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
@@ -243,6 +244,8 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
     del model
     gc.collect()
+    torch.cuda.empty_cache()
+
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
