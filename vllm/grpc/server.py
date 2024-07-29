@@ -20,7 +20,8 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
     ].full_name
 
     def __init__(self):
-        self.engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(model=MODEL, enforce_eager=True))
+        self.engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(model=MODEL, 
+                                                                      enable_chunked_prefill=True))
 
     async def Generate(
         self, request: generate_pb2.GenerateRequest, context
