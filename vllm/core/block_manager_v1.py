@@ -344,7 +344,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
-        remote_allocator: Optional[int] = 0,
+        remote_allocator_number: Optional[int] = 0,
         block_migrate_size: Optional[int] = 0,
         block_migrate_threshold: Optional[int] = 8192,
         block_migrate_start: Optional[int] = 4096,
@@ -395,9 +395,17 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self.block_migrate_start = block_migrate_start
         else:
             self.block_migrate_start = 4096
+        if num_remote_blocks is not None:
+            self.num_remote_blocks = num_remote_blocks
+        else:
+            self.num_remote_blocks = 0
+        if remote_allocator_number is not None:
+            self.remote_allocator_number = remote_allocator_number
+        else:
+            self.remote_allocator_number = 0
         self.remote_allocator = RemoteAllocator(block_size,
-                                                num_remote_blocks,
-                                                remote_allocator,
+                                                self.num_remote_blocks,
+                                                self.remote_allocator_number,
                                                 SelectionPolicy.ONLYAPPEND)
         self.migrate_list: List[SequenceSuperBlock]
         # Mapping: seq_id -> BlockTable.
@@ -903,7 +911,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if length > 0:
             for i in range(length-1, -1, -1):
                 if self.migrate_list[i].seq_id == seq_id:
-                    del [self.migrate_list[i]]
+                    del self.migrate_list[i]
 
     def format_kvcache_migrate_blocks(
             self,
