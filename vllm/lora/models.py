@@ -368,7 +368,8 @@ class LoRAModel(AdapterModel):
             embeddings = torch.load(new_embeddings_bin_file_path)
 
         rank = config["r"]
-        lora_alpha = config["lora_alpha"] * math.sqrt(rank) if config["use_rslora"] else config["lora_alpha"]
+        lora_alpha = config["lora_alpha"] * math.sqrt(
+            rank) if config["use_rslora"] else config["lora_alpha"]
         context_length = config.get("context_length", None)
         scaling_factor = None
         if context_length:
