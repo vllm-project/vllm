@@ -127,11 +127,10 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
     config_for_deserializing = TensorizerConfig(tensorizer_uri=model_path,
                                                 encryption_keyfile=key_path)
 
-    with (vllm_runner(
+    with vllm_runner(
             model_ref,
             load_format="tensorizer",
-            model_loader_extra_config=config_for_deserializing) as
-    loaded_vllm_model):  # noqa: E501
+            model_loader_extra_config=config_for_deserializing) as loaded_vllm_model:  # noqa: E501
 
         deserialized_outputs = loaded_vllm_model.generate(prompts,
                                                           sampling_params)
