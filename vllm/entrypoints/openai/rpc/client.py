@@ -6,8 +6,10 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.entrypoints.openai.rpc import (
-    VLLM_GENERATE_RPC_PATH, VLLM_GET_DATA_RPC_PATH, GenerateRequest, GetDataRequest)
+from vllm.entrypoints.openai.rpc import (VLLM_GENERATE_RPC_PATH,
+                                         VLLM_GET_DATA_RPC_PATH, 
+                                         VLLM_IS_READY_RPC_PATH,
+                                         GenerateRequest, GetDataRequest)
 
 import zmq
 import zmq.asyncio
@@ -17,10 +19,14 @@ import pickle
 class RPCClient:
     def __init__(self):
         self.context = zmq.asyncio.Context()
-        self.is_ready_socket = self.context.socket(zmq.REP)
+        self.is_ready_socket = self.context.socket(zmq.PULL)
+        self.is_ready_socket.connect(VLLM_GET_DATA_RPC_PATH)
         self.get_data_socket = self.context.socket(zmq.REQ)
         self.get_data_socket.connect(VLLM_GET_DATA_RPC_PATH)
-    
+
+    async def wait_for_server(self):
+        await self.is_ready_socket.recv()
+
 
     async def get_model_config(self) -> ModelConfig:
         self.get_data_socket.send(pickle.dumps(GetDataRequest.MODEL_CONFIG))

@@ -20,7 +20,7 @@ class RPCServer:
         self.context = zmq.asyncio.Context()
         
         # Init socket for readiness state.
-        self.is_ready_socket = self.context.socket(zmq.REP)
+        self.is_ready_socket = self.context.socket(zmq.PUSH)
         self.is_ready_socket.bind(VLLM_IS_READY_RPC_PATH)
 
         # Init socket for generation.

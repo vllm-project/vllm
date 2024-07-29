@@ -227,10 +227,10 @@ async def build_server(
     else:
         served_model_names = [args.model]
     
-    print("HERE")
     rpc_client = RPCClient()
-    model_config = await rpc_client.get_model_config()
-    print("HERE2")
+    rpc_client.wait_for_server()
+    logger.info("RPC Client connected to RPC server.")
+    model_config = rpc_client.get_model_config()
 
     if args.disable_log_requests:
         request_logger = None
@@ -255,7 +255,7 @@ async def build_server(
     # )
     openai_serving_completion = OpenAIServingCompletion(
         engine,
-        # model_config,
+        model_config,
         served_model_names,
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
@@ -305,7 +305,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
     
-    logger.info("Starting RPC Server")
+    logger.info("Starting RPC Server.")
     rpc_server_process = Process(target=run_rpc_server, 
                                  args=(AsyncEngineArgs.from_cli_args(args),))
     rpc_server_process.start()
