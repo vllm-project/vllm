@@ -428,8 +428,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 remote_len = 0
-                block_ranks = seq_group_metadata.block_tables_remote_rank[seq_id]
-                for rank in block_ranks:
+                blk_ranks = seq_group_metadata.block_tables_remote_rank[seq_id]
+                for rank in blk_ranks:
                     if rank > 0:
                         remote_len += self.block_size
 
@@ -508,11 +508,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                       or not is_prompt):
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
-                        block_table_filter = seq_group_metadata.block_tables[seq_id]
+                        block_to_filte = seq_group_metadata.block_tables[seq_id]
                         block_table = []
-                        for block_number, block_rank in zip(block_table_filter, block_ranks):
-                            if block_rank == 0:
-                                block_table.append(block_number)
+                        for blk_number, rank in zip(block_to_filte, blk_ranks):
+                            if rank == 0:
+                                block_table.append(blk_number)
                         if curr_sliding_window_blocks is not None:
                             block_table = block_table[
                                 -curr_sliding_window_blocks:]
@@ -544,7 +544,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         prefill_seq_lens.append(seq_len)
                     else:
                         assert query_len == 1, (
-                            "seq_len: {}, context_len: {}, query_len: {}".format(
+                            "seq_len:{}, context_len:{}, query_len:{}".format(
                                 seq_len, context_len, query_len))
                         num_decode_tokens += query_len
                         local_len = sliding_seq_len-remote_len
@@ -589,13 +589,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     start_idx = 0
                     if self.sliding_window is not None:
                         if is_prompt:
-                            use_v2=self.scheduler_config.use_v2_block_manager
-                            assert  use_v2 or context_len == 0, (
-                                    "Prefix caching is currently not supported with "
-                                    "sliding window attention in V1 block manager")
-                        # It is an optimization. When it is decoding, it is always
-                        # 0. When prefill, we use it to not write slots to kv cache
-                        # to save memory.
+                            use_v2 = self.scheduler_config.use_v2_block_manager
+                            assert use_v2 or context_len == 0, (
+                                "Prefix caching is currently not supported "
+                                "with sliding window attention in V1 block "
+                                "manager")
+                        # It is an optimization. When it is decoding, it is
+                        # always 0. When prefill, we use it to not write
+                        # slots to kv cache to save memory.
                         start_idx = max(0, query_len - self.sliding_window)
 
                     for i in range(context_len, seq_len):
@@ -611,7 +612,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # Prepare input tensors for flashinfer
                     if self.attn_backend.get_name() == "flashinfer":
                         seq_len = seq_data.get_len()
-                        # Get the number of valid blocks based on sequence length.
+                        # Get the number of valid blocks based on sequence
+                        # length.
                         # If seq_len = 16, block_size = 16,
                         # block_table_bound is 1 with 1 valid block.
                         # If seq_len = 15, block_size = 16,
@@ -659,15 +661,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
                     start_idx = 0
                     # if self.sliding_window is not None:
-                    #     if is_prompt:
-                    #         assert self.scheduler_config.use_v2_block_manager \
-                    #             or context_len == 0, (
-                    #             "Prefix caching is currently not supported with "
-                    #             "sliding window attention in V1 block manager")
-                    #     # It is an optimization. When it is decoding, it is always
-                    #     # 0. When prefill, we use it to not write slots to kv cache
-                    #     # to save memory.
-                    #     start_idx = max(0, query_len - self.sliding_window)
+                    #   if is_prompt:
+                    #     assert self.scheduler_config.use_v2_block_manager
+                    #       or context_len == 0, (
+                    #       "Prefix caching is currently not supported with "
+                    #       "sliding window attention in V1 block manager")
+                    #   It is an optimization. When it is decoding, it is always
+                    #   0. When prefill, we use it to not write slots to kv cache
+                    #   to save memory.
+                    #   start_idx = max(0, query_len - self.sliding_window)
 
                     for i in range(context_len, seq_len):
                         if i < start_idx:
@@ -680,7 +682,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         slot_mapping_long.append(slot)
 
                     # prepare remote metadata of long decoding.
-                    #sequence|distribution|q_index|length
+                    # sequence|distribution|q_index|length
                     #############################################
                     # aaabbbbbbbba|aaaa bbbb pad pad |0 0 0|4 0 0
                     #             |     bbbb         |  0  |4
@@ -689,10 +691,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     block_table_remote: List[List[int]] = []
                     for i in range(sequence_parallel_size):
                         block_table_remote.append([])
-                    for block_number, block_rank in zip(block_table, block_ranks):
-                        if block_rank > 0:
-                            block_table_remote[block_rank -
-                                               1].append(block_number)
+                    for block_number, rank in zip(block_table, blk_ranks):
+                        if rank > 0:
+                            block_table_remote[rank - 1].append(block_number)
                     for i in range(sequence_parallel_size):
                         table = block_table_remote[i]
                         length = len(table)
@@ -798,15 +799,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             seq_lens_remote_tensor_list.append(seq_lens_remote_tensor)
 
             max_block_table_len_remote = max(
-                len(block_table) for block_table in block_tables_remote_rank[i])
-            block_tables_remote = make_tensor_with_pad(
-                block_tables_remote_rank[i],
+                len(block_table) for block_table in block_tables_remote[i])
+            block_tables_remote[i] = make_tensor_with_pad(
+                block_tables_remote[i],
                 max_len=max_block_table_len_remote,
                 pad=0,
                 dtype=torch.int,
                 device=self.device,
             )
-            block_tables_remote_rank.append(block_tables_remote)
 
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
@@ -836,8 +836,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
-
-        if self.attn_backend.get_name() == "flashinfer":
+        backend_name = self.attn_backend.get_name()
+        if backend_name == "flashinfer":
             if len(paged_kv_indptr) > 0:
                 paged_kv_indices_tensor = torch.tensor(paged_kv_indices,
                                                        device='cpu',
@@ -877,7 +877,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 data_type=kv_cache_dtype,
                 use_cuda_graph=use_captured_graph)
 
-        elif self.attn_backend.get_name() == "flash_attn" or self.attn_backend.get_name() == "xformers":
+        elif backend_name == "flash_attn" or backend_name == "xformers":
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
                 slot_mapping=slot_mapping_tensor,
@@ -1117,8 +1117,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
+            backend_name = self.attn_backend.get_name()
             for batch_size in reversed(batch_size_capture_list):
-                if self.attn_backend.get_name() == "flashinfer":
+                if backend_name == "flashinfer":
                     indptr_buffer = indptr_buffer[:batch_size + 1]
                     last_page_len_buffer = last_page_len_buffer[:batch_size]
 
@@ -1169,7 +1170,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         decode_wrapper=decode_wrapper,
                         prefill_wrapper=None)
                     attn_metadata.begin_forward()
-                elif self.attn_backend.get_name() == "flash_attn" or self.attn_backend.get_name() == "xformers":
+                elif backend_name == "flash_attn" or backend_name == "xformers":
                     output_reshape_index = [i for i in range(batch_size)]
                     seq_lens_tensor = seq_lens[:batch_size]
                     block_tables = block_tables[:batch_size]
@@ -1397,8 +1398,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             hidden_states_reshape[indexs[i]] = hidden_states[i]
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states_reshape,
-                                           model_input.sampling_metadata)
+        logits = self.model.compute_logits(
+            hidden_states_reshape,
+            model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:

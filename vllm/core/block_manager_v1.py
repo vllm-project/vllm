@@ -277,7 +277,7 @@ class RemoteAllocator:
                     if used_rank == self.last_used_rank:
                         break
             if not find:
-                raise ValueError(f"No Enough Free blocks!")
+                raise ValueError("No Enough Free blocks!")
         # need to add more selection_policy handler
         else:
             used_rank = used_rank

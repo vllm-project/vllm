@@ -697,7 +697,8 @@ class GroupCoordinator:
     def recv_tensor(self,
                     tensor: torch.Tensor,
                     src: Optional[int] = None) -> torch.Tensor:
-        """Receives a tensor from the src rank in the specified tensor buffer."""
+        """Receives a tensor from the src rank in the specified 
+        tensor buffer."""
         """NOTE: `src` is the local rank of the destination rank."""
         if src is None:
             src = self.prev_rank
