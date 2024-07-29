@@ -75,6 +75,7 @@ class OpenAIServing:
         self.rcp_client = rpc_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
+
         self.served_model_names = served_model_names
 
         self.lora_requests = []
