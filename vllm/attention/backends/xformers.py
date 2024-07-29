@@ -337,7 +337,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         """
 
         if sp_rank is not None and sp_rank != -1:
-            old_num_seqs = query.size(0)
+            num_old = query.size(0)
             if remote_metadata := attn_metadata.remote_metadata:
                 q_dist = remote_metadata.q_remote_distirbution[sp_rank][:]
                 query_remote = reshape_q(query, q_dist)
@@ -359,9 +359,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     device=output.device,
                 )
                 key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+                    kv_cache, self.num_kv_heads, self.head_size)
                 # Decoding run.
-                output[:], exp_sums[:], max_log[:] = PagedAttention.forward_decode2(
+
+                result = PagedAttention.forward_decode2(
                     decode_query,
                     key_cache,
                     value_cache,
@@ -375,10 +376,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     self.alibi_slopes,
                     kv_scale,
                 )
+                output[:], exp_sums[:], max_log[:] = result
 
                 # Reshape the output tensor.
                 temp = output.view(-1, self.num_heads * self.head_size)
-                return filter_tensor(temp, exp_sums, max_log, q_dist, old_num_seqs)
+                return filter_tensor(temp, exp_sums, max_log, q_dist, num_old)
         output = torch.empty_like(query)
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -411,7 +413,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             dtype=torch.float32,
             device=output.device,
         )
-        max_log= torch.empty(
+        max_log = torch.empty(
             size=(num_seqs, num_heads),
             dtype=torch.float32,
             device=output.device,
@@ -457,8 +459,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
-            num=num_prefill_tokens
-            output[num:], exp_sums[:], max_log[:] = PagedAttention.forward_decode_v2(
+            num = num_prefill_tokens
+            result = PagedAttention.forward_decode_v2(
                 decode_query,
                 key_cache,
                 value_cache,
@@ -471,7 +473,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.alibi_slopes,
                 kv_scale,
             )
-
+            output[num:], exp_sums[:], max_log[:] = result
         # Reshape the output tensor.
         temp = output.view(-1, self.num_heads * self.head_size)
         return temp, exp_sums, max_log
@@ -572,7 +574,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         attn_metadata: "XFormersMetadata",
     ) -> torch.Tensor:
-        if decode_meta := attn_metadata.decode_metadata :
+        if decode_meta := attn_metadata.decode_metadata:
             num_seqs = decode_meta.num_long_decode_tokens
             if decode_meta.seq_lens is not None:
                 seq_lens = decode_meta.seq_lens[-num_seqs:]
@@ -584,6 +586,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             return tmp_out
         else:
             return tmp_out
+
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
