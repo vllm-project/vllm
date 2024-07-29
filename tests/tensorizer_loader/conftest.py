@@ -24,9 +24,9 @@ def cleanup():
     destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
+    ray.shutdown()
     gc.collect()
     torch.cuda.empty_cache()
-    ray.shutdown()
 
 def retry_until_skip(n):
     def decorator_retry(func):

@@ -28,7 +28,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          tensorize_vllm_model)
 
 from ..conftest import VllmRunner
-from conftest import cleanup, retry_until_skip
+from .conftest import cleanup, retry_until_skip
 from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
@@ -198,6 +198,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
 
 
 def test_load_without_tensorizer_load_format(vllm_runner):
+    model = None
     with pytest.raises(ValueError):
         model = vllm_runner(
             model_ref,
@@ -245,6 +246,7 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
 
 
 def test_raise_value_error_on_invalid_load_format(vllm_runner):
+    model = None
     with pytest.raises(ValueError):
         model = vllm_runner(
             model_ref,
@@ -255,7 +257,7 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
     torch.cuda.empty_cache()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
+@pytest.mark.skipif(torch.cuda.device_count() < 3,
                     reason="Requires 2 GPUs")
 def test_tensorizer_with_tp_path_without_template(vllm_runner):
     with pytest.raises(ValueError):
@@ -275,7 +277,7 @@ def test_tensorizer_with_tp_path_without_template(vllm_runner):
         )
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
+@pytest.mark.skipif(torch.cuda.device_count() < 3,
                     reason="Requires 2 GPUs")
 def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
                                                                     tmp_path):
@@ -326,7 +328,8 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
 
 @retry_until_skip(3)
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
-    cleanup()
+    gc.collect()
+    torch.cuda.empty_cache()
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(tensorizer_uri=str(model_path))
