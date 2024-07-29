@@ -338,7 +338,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if sp_rank != -1:
             old_num_seqs = query.size(0)
-            if remote_metadata := attn_metadata.remote_metadata:
+            if remote_metadata := attn_metadata.remote_metadata and sp_rank is not None:
                 q_remote_distribution = remote_metadata.q_remote_distirbution[sp_rank][:]
                 query_remote = reshape_q(query, q_remote_distribution)
                 output = torch.empty_like(query_remote)
