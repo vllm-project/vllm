@@ -76,22 +76,56 @@ class RPCClient(AsyncLLMEngine):
         socket = self.context.socket(zmq.DEALER)
         socket.connect('tcp://localhost:5570')
 
-        await socket.send_multipart([
-            pickle.dumps(
-                RCPRequest(
-                    inputs=inputs,
-                    sampling_params=sampling_params,
-                    request_id=request_id
-                ), pickle.HIGHEST_PROTOCOL
-            )
-        ])
+        # socket.send_multipart([
+        #     pickle.dumps(
+        #         RCPRequest(
+        #             inputs=inputs,
+        #             sampling_params=sampling_params,
+        #             request_id=request_id
+        #         ), pickle.HIGHEST_PROTOCOL
+        #     )
+        # ])
+        prompt: str = inputs.get('prompt', "")
+        prompt_token_ids: List[int] = inputs.get('prompt_token_ids', [])
+        proto = generate_pb2.GenerateRequest(
+            prompt_inputs=generate_pb2.PromptInputs(
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids),
+            request_id=request_id,
+        )
+        print("sending")
+        await socket.send_multipart([proto.SerializeToString()])
+        print("sent")
 
         while True:
-            message = await socket.recv()
-            request_output = pickle.loads(message)
+            # message = await socket.recv()
+            # request_output = pickle.loads(message)
+            proto = await socket.recv()
+            generate_response = generate_pb2.GenerateResponse().ParseFromString(proto)
+            
+            completion_outputs = [
+                CompletionOutput(
+                    index=output.index,
+                    text=output.text,
+                    token_ids=output.token_ids,
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason=(None if output.finish_reason == "" else output.finish_reason),
+                ) for output in generate_response.outputs
+            ]
+        
+            request_output = RequestOutput(
+                request_id=request_id,
+                prompt_token_ids=[],
+                outputs=completion_outputs,
+                finished=(completion_outputs[0].finish_reason is not None),
+                prompt_logprobs=None,
+                prompt=prompt,
+            )
 
             if request_output.finished:
                 break
+
             yield request_output
 
         socket.close()

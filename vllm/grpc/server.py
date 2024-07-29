@@ -3,9 +3,12 @@ import asyncio
 import pickle
 import zmq
 import zmq.asyncio
+from .pb import generate_pb2
+from vllm import SamplingParams
 
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
-
+MAX_TOKENS = 150
+TEMPERATURE = 0
 
 class RPCServer:
     def __init__(self):
@@ -15,24 +18,37 @@ class RPCServer:
 
         self.running_tasks = set()
         self.engine = AsyncLLMEngine.from_engine_args(
-            AsyncEngineArgs(model=MODEL))
+            AsyncEngineArgs(model=MODEL,
+                            enable_chunked_prefill=True))
 
     async def generate(self, identity, message):
-        request = pickle.loads(message)
+        # request = pickle.loads(message)
+        breakpoint()
+        request = generate_pb2.GenerateRequest().ParseFromString(message)
+        
         results_generator = self.engine.generate(
             request.inputs, 
-            sampling_params=request.sampling_params,
+            sampling_params=SamplingParams(max_tokens=MAX_TOKENS, 
+                                           temperature=TEMPERATURE),
             request_id=request.request_id)
         
         async for request_output in results_generator:
-            self.socket.send_multipart([
-                identity, 
-                pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL)
-            ])
+            outputs = [ 
+                generate_pb2.CompletionOutput(
+                    index=output.index,
+                    token_ids=output.token_ids,
+                    text=output.text,
+                    finish_reason=output.finish_reason)
+                for output in request_output.outputs
+            ]
+            proto = generate_pb2.GenerateResponse(outputs=outputs)
+
+            self.socket.send_multipart([identity, proto.SerializeToString()])
         
     async def run_loop(self):
         while True:
             identity, message = await self.socket.recv_multipart()
+            print("got message")
             
             # Process the request in the background.
             task = asyncio.create_task(self.generate(identity=identity,
