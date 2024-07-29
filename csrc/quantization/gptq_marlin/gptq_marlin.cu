@@ -1149,7 +1149,7 @@ __global__ void Marlin(
           frag_qzp[k % 2][i] =
               (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
         }
-      } else /*if constexpr (group_blocks != 0) */ {
+      } else {
         int warp_id = threadIdx.x / 32;
         int n_warps = thread_n_blocks / 4;
 
