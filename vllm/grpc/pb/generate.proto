@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package generate.v1;
+
+message GenerateRequest {
+    PromptInputs prompt_inputs = 1;
+    string request_id = 2;
+}
+
+message PromptInputs {
+    string prompt = 1;
+    repeated uint64 prompt_token_ids = 2;
+}
+
+message GenerateResponse {
+    repeated CompletionOutput outputs = 1;
+}
+
+message CompletionOutput {
+    uint64 index = 1;
+    repeated uint64 token_ids = 2;
+    string text = 3;
+    string finish_reason = 4;
+}
