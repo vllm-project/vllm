@@ -5,6 +5,7 @@ import zmq
 import zmq.asyncio
 from .pb import generate_pb2
 from vllm import SamplingParams
+from vllm.inputs.data import TextPrompt, TokensPrompt
 
 MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 MAX_TOKENS = 150
@@ -23,11 +24,16 @@ class RPCServer:
 
     async def generate(self, identity, message):
         # request = pickle.loads(message)
-        breakpoint()
-        request = generate_pb2.GenerateRequest().ParseFromString(message)
+        request = generate_pb2.GenerateRequest()
+        request.ParseFromString(message)
         
+        if len(request.prompt_inputs.prompt_token_ids) > 0:
+            inputs = TokensPrompt(prompt_token_ids=request.prompt_inputs.prompt_token_ids)
+        else:
+            inputs = TextPrompt(prompt=request.prompt_inputs.prompt)
+
         results_generator = self.engine.generate(
-            request.inputs, 
+            inputs,
             sampling_params=SamplingParams(max_tokens=MAX_TOKENS, 
                                            temperature=TEMPERATURE),
             request_id=request.request_id)
@@ -42,7 +48,6 @@ class RPCServer:
                 for output in request_output.outputs
             ]
             proto = generate_pb2.GenerateResponse(outputs=outputs)
-
             self.socket.send_multipart([identity, proto.SerializeToString()])
         
     async def run_loop(self):

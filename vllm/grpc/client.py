@@ -93,15 +93,13 @@ class RPCClient(AsyncLLMEngine):
                 prompt_token_ids=prompt_token_ids),
             request_id=request_id,
         )
-        print("sending")
         await socket.send_multipart([proto.SerializeToString()])
-        print("sent")
 
         while True:
-            # message = await socket.recv()
+            message = await socket.recv()
             # request_output = pickle.loads(message)
-            proto = await socket.recv()
-            generate_response = generate_pb2.GenerateResponse().ParseFromString(proto)
+            generate_response = generate_pb2.GenerateResponse()
+            generate_response.ParseFromString(message)
             
             completion_outputs = [
                 CompletionOutput(
