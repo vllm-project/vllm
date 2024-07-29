@@ -893,7 +893,7 @@ __global__ void sequence_block_reduce_kernel(
 }
 
 }  // namespace vllm
-//@###################modifiy
+//@###################modify
 // the launcher of sequence block reduce kernel
 #define LAUNCH_SEQUENCE_BLOCK_REDUCER(HEAD_SIZE)                            \
   vllm::sequence_block_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,             \

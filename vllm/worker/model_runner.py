@@ -523,7 +523,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # Prefill without chunked prefill or memory profiling.
                     block_table = []
 
-                # currently, distirbuted inference is only performed
+                # currently, distributed inference is only performed
                 # for decode stage.
                 if remote_len == 0 or is_prompt:
                     block_tables.append(block_table)
@@ -1398,9 +1398,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             hidden_states,
             dtype=hidden_states.dtype,
             device=hidden_states.device)
-        indexs = model_input.output_reshape_index
-        for i in range(len(indexs)):
-            hidden_states_reshape[indexs[i]] = hidden_states[i]
+        indexes = model_input.output_reshape_index
+        for i in range(len(indexes)):
+            hidden_states_reshape[indexes[i]] = hidden_states[i]
 
         # Compute the logits.
         logits = self.model.compute_logits(

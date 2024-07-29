@@ -336,7 +336,7 @@ class Worker(LocalOrDistributedWorkerBase):
                                       dtype=torch.int64).view(-1, 2)
 
         # # `blocks_to_migrate` is a gpu tensor. The src blocks are in the local
-        # # GPU cache, while the tgt blcoks are in the GPU chunk.
+        # # GPU cache, while the tgt blocks are in the GPU chunk.
         # blocks_to_migrate = torch.tensor(execute_model_req.blocks_to_migrate,
         #                               device=self.device,
         #                               dtype=torch.int64).view(-1, 2)
@@ -367,7 +367,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine.copy(worker_input.blocks_to_copy)
         # Note sequence parallel requires master workers (in sp and tp)
-        # to first copy blocks their chunck memories, and then migrate
+        # to first copy blocks their chunk memories, and then migrate
         # the chunk to the tgt sp worker
         if (worker_input.superblock_to_migrate is not None
                 and worker_input.superblock_to_migrate.numel() > 0):

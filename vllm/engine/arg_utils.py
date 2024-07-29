@@ -632,7 +632,7 @@ class EngineArgs:
             '--block-migrate-size',
             type=int,
             default=EngineArgs.block_migrate_size,
-            help='The superblock size for once kv cache tranfer.')
+            help='The superblock size for once kv cache transfer.')
 
         parser.add_argument(
             '--block-migrate-threshold',

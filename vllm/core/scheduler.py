@@ -285,7 +285,7 @@ class Scheduler:
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching,
-            remote_allocator=remote_allocator,
+            remote_allocator_number=remote_allocator,
             block_migrate_size=self.cache_config.block_migrate_size,
             block_migrate_threshold=self.cache_config.block_migrate_threshold,
             block_migrate_start=self.cache_config.block_migrate_start)
