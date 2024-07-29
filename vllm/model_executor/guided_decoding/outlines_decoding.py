@@ -5,13 +5,13 @@ from json import dumps as json_dumps
 from re import escape as regex_escape
 from typing import Tuple, Union
 
+from outlines.processors import (CFGLogitsProcessor, JSONLogitsProcessor,
+                                 RegexLogitsProcessor)
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
-from vllm.model_executor.guided_decoding.outlines_logits_processors import (
-    CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):
@@ -52,8 +52,8 @@ global_thread_pool = None  # used for generating logits processor fsm
 
 
 async def get_outlines_guided_decoding_logits_processor(
-    request: Union[CompletionRequest,
-                   ChatCompletionRequest], tokenizer: PreTrainedTokenizerBase
+    request: Union[CompletionRequest, ChatCompletionRequest],
+    tokenizer: PreTrainedTokenizerBase,
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -72,9 +72,14 @@ async def get_outlines_guided_decoding_logits_processor(
             max_workers=2)
     loop = asyncio.get_running_loop()
 
-    return await loop.run_in_executor(global_thread_pool,
-                                      _get_logits_processor, guide, tokenizer,
-                                      mode, request.guided_whitespace_pattern)
+    return await loop.run_in_executor(
+        global_thread_pool,
+        _get_logits_processor,
+        guide,
+        tokenizer,
+        mode,
+        request.guided_whitespace_pattern,
+    )
 
 
 def _get_guide_and_mode(
@@ -110,8 +115,10 @@ def _get_guide_and_mode(
 
 
 def _get_logits_processor(
-    guide: str, tokenizer: PreTrainedTokenizerBase, mode: GuidedDecodingMode,
-    whitespace_pattern: Union[str, None]
+    guide: str,
+    tokenizer: PreTrainedTokenizerBase,
+    mode: GuidedDecodingMode,
+    whitespace_pattern: Union[str, None],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern)
