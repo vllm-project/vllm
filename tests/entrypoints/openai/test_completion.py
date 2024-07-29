@@ -544,19 +544,19 @@ async def test_allowed_token_ids(client: openai.AsyncOpenAI):
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
 
     # Test exclusive selection
-    allowed_ids = [1000, 1001, 1002]
+    allowed_ids = [21555, 21557, 21558]
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=0.0,
         seed=42,
-        extra_body=dict(allowed_token_ids=allowed_ids, ),
+        extra_body=dict(allowed_token_ids=allowed_ids),
+        logprobs=1,
     )
-    response_tokens = tokenizer(completion.choices[0].text,
-                                add_special_tokens=False)["input_ids"]
+    response_tokens = completion.choices[0].logprobs.tokens
     assert len(response_tokens) == 1
-    assert response_tokens[0] in allowed_ids
+    assert tokenizer.convert_tokens_to_ids(response_tokens)[0] in allowed_ids
 
 
 @pytest.mark.asyncio
