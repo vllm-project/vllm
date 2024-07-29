@@ -899,9 +899,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for index in range(start, end):
                 self.gpu_allocator.free(block_table[index])
                 to_block = to_blocks[index-migrate_block.start]
-                mapping_item = [block_table[index].block_number,
+                mapping_item = (block_table[index].block_number,
                                 remote_rank,
-                                to_block.block_number]
+                                to_block.block_number)
                 mapping.append(mapping_item)
                 block_table[index] = to_block
             self.block_tables[migrate_block.seq_id] = block_table
@@ -919,4 +919,4 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             blocks_to_copy: List[Tuple[int, int]]) -> None:
         dest_blocks = self.gpu_allocator.get_migrate_blocks()
         for from_info, dest_block in zip(blocks_to_migrate, dest_blocks):
-            blocks_to_copy.append([from_info[0], dest_block])
+            blocks_to_copy.append((from_info[0], dest_block))
