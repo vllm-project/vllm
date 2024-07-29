@@ -350,7 +350,7 @@ torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
   auto options = torch::TensorOptions()
                      .dtype(b_q_weight.dtype())
                      .device(b_q_weight.device());
-  return torch::empty({size_k / marlin::tile_size,
-                       size_n * marlin::tile_size / pack_factor},
-                      options);
+  return torch::empty(
+      {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
+      options);
 }
