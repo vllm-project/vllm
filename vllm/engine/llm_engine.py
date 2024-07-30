@@ -394,8 +394,14 @@ class LLMEngine:
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
         elif engine_config.device_config.device_type == "tpu":
-            from vllm.executor.tpu_executor import TPUExecutor
-            executor_class = TPUExecutor
+            if distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_tpu_executor import RayTPUExecutor
+                executor_class = RayTPUExecutor
+            else:
+                assert distributed_executor_backend is None
+                from vllm.executor.tpu_executor import TPUExecutor
+                executor_class = TPUExecutor
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
@@ -949,8 +955,9 @@ class LLMEngine:
             model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
+            stats = self._get_stats(scheduler_outputs, model_output)
             for logger in self.stat_loggers.values():
-                logger.log(self._get_stats(scheduler_outputs, model_output))
+                logger.log(stats)
 
     def _get_stats(
             self,

@@ -404,27 +404,6 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def init_kmp_env():
-    if not is_cpu():
-        return
-
-    ld_prealod_str = os.getenv("LD_PRELOAD", "")
-    if "libiomp5.so" not in ld_prealod_str:
-        return
-
-    # The time(milliseconds) that a thread should wait after completing the
-    # execution of a parallel region, before sleeping.
-    os.environ['KMP_BLOCKTIME'] = "1"
-    # dump settings on start up
-    os.environ['KMP_SETTINGS'] = "1"
-    # Prevents the CPU to run into low performance state
-    os.environ['KMP_TPAUSE'] = "0"
-    # Provides fine granularity parallelism
-    os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
-    os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
-    os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
-
-
 def chunk_list(lst: List[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
     for i in range(0, len(lst), chunk_size):
@@ -491,7 +470,6 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -507,7 +485,13 @@ def create_kv_caches_with_random_flash(
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
                                       device=device)
-        key_value_cache.uniform_(-scale, scale)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -524,6 +508,12 @@ def create_kv_caches_with_random(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)

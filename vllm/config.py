@@ -31,6 +31,7 @@ _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _PP_SUPPORTED_MODELS = [
     "AquilaModel",
     "AquilaForCausalLM",
+    "DeepseekV2ForCausalLM",
     "InternLMForCausalLM",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
@@ -38,6 +39,7 @@ _PP_SUPPORTED_MODELS = [
     "Phi3ForCausalLM",
     "GPT2LMHeadModel",
     "MixtralForCausalLM",
+    "NemotronForCausalLM",
 ]
 
 
@@ -280,6 +282,10 @@ class ModelConfig:
                 or parallel_config.pipeline_parallel_size > 1):
             raise ValueError(
                 "BitAndBytes quantization with TP or PP is not supported yet.")
+
+        if self.quantization == "bitsandbytes" and self.enforce_eager is False:
+            raise ValueError(
+                "BitAndBytes with enforce_eager = False is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
@@ -590,9 +596,11 @@ class LoadConfig:
                 mainly for profiling.
             "tensorizer" will use CoreWeave's tensorizer library for
                 fast weight loading.
+            "bitsandbytes" will load nf4 type weights.
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's 
             checkpoints.
+            
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO

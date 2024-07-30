@@ -1,12 +1,13 @@
 import random
+from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData, SequenceGroupMetadata
+from vllm.triton_utils.sample import get_num_triton_sampler_splits
 from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
                         make_tensor_with_pad, maybe_expand_dim)
 
@@ -117,6 +118,7 @@ class SamplingMetadata:
         query_lens: Optional[List[int]],
         device: str,
         pin_memory: bool,
+        generators: Optional[Dict[str, torch.Generator]] = None,
     ) -> "SamplingMetadata":
         (
             seq_groups,
@@ -124,7 +126,7 @@ class SamplingMetadata:
             categorized_sample_indices,
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
-                                device)
+                                device, generators)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -159,6 +161,7 @@ def _prepare_seq_groups(
     seq_lens: List[int],
     query_lens: Optional[List[int]],
     device: str,
+    generators: Optional[Dict[str, torch.Generator]] = None,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
         SamplingType, List[Tuple[int, int]]], int]:
     """Prepare sequence groups and indices for sampling.
@@ -169,8 +172,10 @@ def _prepare_seq_groups(
             Index of prompt len should match with seq_group_metadata_list.
         query_lens: A list of query lengths. Prompt lens include the length
             of entire prompt tokens, and it could be shorter.
-        device: A device to use for random number generator,
+        device: A device to use for random number generators,
             `SequenceGroupToSample.generator`.
+        generators: A store of per-request random number generators used
+            for seeded requests.
 
     Returns:
         seq_groups: A list of sequence group to sample.
@@ -216,8 +221,10 @@ def _prepare_seq_groups(
 
         if seq_group_metadata.is_prompt:
             if sampling_params.seed is not None:
-                seq_group_metadata.state.generator = torch.Generator(
-                    device=device).manual_seed(sampling_params.seed)
+                generator = torch.Generator(device=device).manual_seed(
+                    sampling_params.seed)
+                if generators is not None:
+                    generators[seq_group_metadata.request_id] = generator
 
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
@@ -233,6 +240,9 @@ def _prepare_seq_groups(
             # Decode
             prompt_logprob_len = 0
             sample_len = len(seq_ids) if do_sample else 0
+
+            if sampling_params.seed is not None and generators is not None:
+                generator = generators.get(seq_group_metadata.request_id)
 
         # Update indices to select from the model output.
         """
@@ -277,9 +287,6 @@ def _prepare_seq_groups(
                         range(sample_idx, sample_idx + sample_len))))
             logit_idx += sample_len
             sample_idx += sample_len
-
-        if sampling_params.seed is not None:
-            generator = seq_group_metadata.state.generator
 
         seq_groups.append(
             SequenceGroupToSample(
@@ -329,8 +336,8 @@ class SamplingTensors:
             user-defined seed for each sequence.
         extra_entropy: extra entropy to use when generating seeds.
         """
-        prompt_tokens: List[List[int]] = []
-        output_tokens: List[List[int]] = []
+        prompt_tokens: List[array] = []
+        output_tokens: List[array] = []
         top_ks: List[int] = []
         temperatures: List[float] = []
         top_ps: List[float] = []
@@ -432,13 +439,15 @@ class SamplingTensors:
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
-                    prompt_tokens.extend([] for _ in range(prefill_len))
-                    output_tokens.extend([] for _ in range(prefill_len))
+                    prompt_tokens.extend(
+                        array('l') for _ in range(prefill_len))
+                    output_tokens.extend(
+                        array('l') for _ in range(prefill_len))
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
-                        prompt_tokens.append(list(seq_data.prompt_token_ids))
-                        output_tokens.append(list(seq_data.output_token_ids))
+                        prompt_tokens.append(seq_data.prompt_token_ids_array)
+                        output_tokens.append(seq_data.output_token_ids_array)
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,
@@ -454,9 +463,9 @@ class SamplingTensors:
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
                    sampling_seeds: List[int], sample_indices: List[int],
-                   prompt_tokens: List[List[int]],
-                   output_tokens: List[List[int]], vocab_size: int,
-                   extra_seeds_to_generate: int, device: torch.device,
+                   prompt_tokens: List[array], output_tokens: List[array],
+                   vocab_size: int, extra_seeds_to_generate: int,
+                   device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.

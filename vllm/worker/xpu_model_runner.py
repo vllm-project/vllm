@@ -246,7 +246,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 # just use seq_lens instead.
                 seq_lens,
                 self.device,
-                pin_memory=False)
+                pin_memory=False,
+                generators=self.get_generators(finished_requests_ids))
             # Broadcast the metadata.
             metadata_dict = {
                 "input_tokens": input_tokens,
