@@ -273,7 +273,9 @@ class SiglipAttention(nn.Module):
             # (e.g. google/siglip-so400m-patch14-384 has hidden_size=1152
             #  with num_attention_heads=16, which is not supported)
             # If the backend is not supported, fall back to the default
-            # TODO(ChristopherCho): flash_attn_varlen_func is not working properly
+
+            # TODO(ChristopherCho): flash_attn_varlen_func
+            #                       is not working properly
             # if self.qkv_proj.params_dtype in [torch.float16, torch.bfloat16]:
             #     # Flash attention only supports float16 and bfloat16
             #     self.attn_fn = self._flash_attention_forward
@@ -281,6 +283,7 @@ class SiglipAttention(nn.Module):
             # else:
             #     self.attn_fn = self._basic_attention_forward
             #     self.use_paged_attn = False
+
             self.attn_fn = self._basic_attention_forward
             self.use_paged_attn = False
 
