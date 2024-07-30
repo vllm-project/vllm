@@ -135,8 +135,6 @@ class OpenAIServingChat(OpenAIServing):
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
-            print(request)
-            print("prompt", prompt)
             prompt_inputs = self._tokenize_prompt_input(
                 request,
                 tokenizer,
