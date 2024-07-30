@@ -57,7 +57,8 @@ class CPUExecutor(ExecutorBase):
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        return self.driver_worker.determine_num_available_blocks(), 0
+        num_gpu, num_cpu = self.driver_worker.determine_num_available_blocks()
+        return num_gpu, num_cpu, 0
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int,

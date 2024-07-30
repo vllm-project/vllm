@@ -84,7 +84,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
     def _init_executor(self) -> None:
         pass
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int, int]:
         """Determine the number of available KV blocks.
 
         This invokes `determine_num_available_blocks` on each worker and takes
@@ -216,7 +216,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int,
-                         num_remote_gpu_blocks: int) -> None:
+                         num_remote_gpu_blocks: int = 0) -> None:
         """Initialize the KV cache in all workers.
         """
 
