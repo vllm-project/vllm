@@ -147,6 +147,7 @@ class EngineArgs:
 
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
+    disable_output_proc_callback: Optional[bool] = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -735,6 +736,12 @@ class EngineArgs:
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
 
+        parser.add_argument('--disable-output-proc-callback',
+                            action='store_true',
+                            default=False,
+                            help="Use output processing callback to remove "
+                            "python overheads in decoding. If False, "
+                            "will default to older version.")
         return parser
 
     @classmethod
@@ -794,6 +801,7 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            use_output_proc_callback=not self.disable_output_proc_callback,
         )
         cache_config = CacheConfig(
             block_size=self.block_size,

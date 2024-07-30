@@ -256,6 +256,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             broadcast_data.update(model_input.as_broadcastable_tensor_dict())
             broadcast_tensor_dict(broadcast_data, src=0)
 
+        if execute_model_req.callback_fn:
+            model_input = dataclasses.replace(  # type: ignore
+                model_input,
+                callback_fn=execute_model_req.callback_fn)
+
         return model_input, worker_input
 
     def prepare_input(
@@ -281,7 +286,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
@@ -315,6 +320,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input, self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None, intermediate_tensors,
             num_steps)
+
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors

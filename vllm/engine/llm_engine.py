@@ -1,6 +1,7 @@
 import time
+from collections import deque
 from contextlib import contextmanager
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
+from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, TypeVar, Union
@@ -36,9 +37,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           PoolerOutput, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+                           SamplerOutput, Sequence, SequenceGroup,
+                           SequenceGroupMetadata, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -178,6 +178,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        step_return_finished_only=False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -192,7 +193,7 @@ class LLMEngine:
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
-            "enable_prefix_caching=%s)",
+            "enable_prefix_caching=%s use_output_proc_callback=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -222,6 +223,7 @@ class LLMEngine:
             model_config.served_model_name,
             scheduler_config.use_v2_block_manager,
             cache_config.enable_prefix_caching,
+            model_config.use_output_proc_callback,
         )
         # TODO(woosuk): Print more configs in debug mode.
         from vllm.plugins import load_general_plugins
@@ -240,6 +242,7 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
+        self.step_return_finished_only = step_return_finished_only
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -327,8 +330,11 @@ class LLMEngine:
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = [
-            Scheduler(scheduler_config, cache_config, lora_config,
-                      parallel_config.pipeline_parallel_size)
+            Scheduler(
+                scheduler_config, cache_config, lora_config,
+                parallel_config.pipeline_parallel_size,
+                self._process_model_outputs
+                if model_config.use_output_proc_callback else None)
             for _ in range(parallel_config.pipeline_parallel_size)
         ]
 
@@ -377,6 +383,14 @@ class LLMEngine:
                     get_tokenizer_for_seq,
                 ),
             ))
+
+        # Output processing callback pointers
+        self.output_queue: Deque[Tuple[List[SamplerOutput],
+                                       List[Tuple[ScheduledSequenceGroup,
+                                                  SequenceGroupMetadata]],
+                                       List[SequenceGroup]]] = deque()
+        self.request_outputs: List[Union[RequestOutput,
+                                         EmbeddingRequestOutput]] = []
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1169,32 +1183,47 @@ class LLMEngine:
 
         return
 
-    def _process_model_outputs(
-        self,
-        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
-        scheduled_seq_groups: List[ScheduledSequenceGroup],
-        ignored_seq_groups: List[SequenceGroup],
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def _process_model_outputs(self, is_async) -> None:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
         """
-
         now = time.time()
 
-        # Organize outputs by [sequence group][step] instead of
-        # [step][sequence group].
-        output_by_sequence_group = create_output_by_sequence_group(
-            output, num_seq_groups=len(scheduled_seq_groups))
+        self.request_outputs.clear()
 
-        # Update the scheduled sequence groups with the model outputs.
-        for scheduled_seq_group, outputs, seq_group_meta in zip(
-                scheduled_seq_groups, output_by_sequence_group,
-                seq_group_metadata_list):
+        if len(self.output_queue) == 0:
+            return None
+
+        (outputs, scheduled_ids,
+         ignored_seq_groups) = self.output_queue.popleft()
+        # Organize outputs by [step][sequence group] instead of
+        # [sequence group][step].
+        if len(outputs) > 1:
+            outputs_by_sequence_group = create_output_by_sequence_group(
+                outputs, num_seq_groups=len(scheduled_ids))
+        else:
+            outputs_by_sequence_group = outputs
+
+        output = [None]
+        finished_before: List[int] = []
+        for i, (scheduled_seq_group,
+                seq_group_meta) in enumerate(scheduled_ids):
             seq_group = scheduled_seq_group.seq_group
-            seq_group.update_num_computed_tokens(
-                scheduled_seq_group.token_chunk_size)
+
+            if seq_group.is_finished():
+                finished_before.append(i)
+                continue
+
+            if len(outputs) > 1:
+                output = outputs_by_sequence_group[i]
+            else:
+                output[0] = outputs[0][i]
+
+            if not is_async:
+                seq_group.update_num_computed_tokens(
+                    scheduled_seq_group.token_chunk_size)
+
             if output is not None and len(output) > 0:
                 for o in output:
                     if (isinstance(o, SamplerOutput)
@@ -1211,30 +1240,71 @@ class LLMEngine:
                         else:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
+
             if self.model_config.embedding_mode:
-                self._process_sequence_group_outputs(seq_group, outputs)
+                self._process_sequence_group_outputs(seq_group, output)
                 continue
 
-            self.output_processor.process_prompt_logprob(seq_group, outputs)
+            self.output_processor.process_prompt_logprob(seq_group, output)
             if seq_group_meta.do_sample:
-                self.output_processor.process_outputs(seq_group, outputs)
+                self.output_processor.process_outputs(seq_group, output,
+                                                      is_async)
 
         # Free the finished sequence groups.
         for scheduler in self.scheduler:
             scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[Union[RequestOutput,
-                                    EmbeddingRequestOutput]] = []
-        for scheduled_seq_group in scheduled_seq_groups:
+        for i, (scheduled_seq_group, _) in enumerate(scheduled_ids):
+            if i in finished_before:
+                continue  # Avoids double processing
+
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutputFactory.create(seq_group)
-            request_outputs.append(request_output)
+            if (seq_group.is_finished()
+                    if self.step_return_finished_only else True):
+                request_output = RequestOutputFactory.create(seq_group)
+                self.request_outputs.append(request_output)
+
         for seq_group in ignored_seq_groups:
             request_output = RequestOutputFactory.create(seq_group)
-            request_outputs.append(request_output)
-        return request_outputs
+            self.request_outputs.append(request_output)
+
+        return None
+
+    def _advance_to_next_step(
+            self, output: List[SamplerOutput],
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
+        """Given model output from a single run, append the tokens to the
+        sequences. This is normally done inside output processor, but it is
+        required if the worker is to perform async forward pass to next step.
+        """
+        for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \
+            zip(seq_group_metadata_list, output, scheduled_seq_groups):
+            seq_group = scheduled_seq_group.seq_group
+
+            if not seq_group.is_finished():
+                seq_group.update_num_computed_tokens(
+                    seq_group_metadata.token_chunk_size)
+
+            if not seq_group.is_finished() and seq_group_metadata.do_sample:
+                assert len(sequence_group_outputs.samples) == 1, (
+                    "output_proc_callback expects a single sample"
+                    " (i.e sampling_params.n == 1 and no "
+                    "sampling_params.best_of > 1)")
+                seq_group_metadata.is_prompt = False
+                seq_output = sequence_group_outputs.samples[0]
+
+                # NOTE: Beam search is not supported, so we can assume that
+                # parent_seq_id == seq_id.
+                seq_data = seq_group_metadata.seq_data[
+                    seq_output.parent_seq_id]
+
+                token_id = seq_output.output_token
+                token_logprob = seq_output.logprobs[token_id]
+
+                seq_data.append_token_id(token_id, token_logprob.logprob)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1291,8 +1361,8 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
-        seq_group_metadata_list, scheduler_outputs = self.scheduler[
-            0].schedule()
+        (seq_group_metadata_list, scheduler_outputs, scheduled_ids,
+         allow_output_proc_callback) = self.scheduler[0].schedule()
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
@@ -1305,14 +1375,31 @@ class LLMEngine:
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
+
+            if allow_output_proc_callback:
+                execute_model_req.callback_fn = self._process_model_outputs
+
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:
+            if len(self.output_queue) > 0:
+                self._process_model_outputs(is_async=True)
             output = []
 
-        request_outputs = self._process_model_outputs(
-            output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+        # Add results to the output_queue
+        # (for async or non-async postprocessing)
+        self.output_queue.append(
+            (output, scheduled_ids, scheduler_outputs.ignored_seq_groups))
+
+        if (len(output) > 0) and allow_output_proc_callback:
+            assert len(output) == 1, ("Multi step decoding does not work "
+                                      "with output processor callback")
+
+            self._advance_to_next_step(output[0], seq_group_metadata_list,
+                                       scheduler_outputs.scheduled_seq_groups)
+
+        if not allow_output_proc_callback:
+            self._process_model_outputs(is_async=False)
 
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
@@ -1328,7 +1415,10 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
-        return request_outputs
+            # Do not process the extra +1 runs (due to async postprocessor)
+            self.output_queue.clear()
+
+        return self.request_outputs
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
         if logger_name in self.stat_loggers:

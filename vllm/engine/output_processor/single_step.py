@@ -29,14 +29,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     that is currently difficult to schedule multiple steps ahead of time.
     """
 
-    def __init__(
-        self,
-        scheduler_config: SchedulerConfig,
-        detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
-        seq_counter: Counter,
-        stop_checker: StopChecker,
-    ):
+    def __init__(self, scheduler_config: SchedulerConfig,
+                 detokenizer: Detokenizer, scheduler: List[Scheduler],
+                 seq_counter: Counter, stop_checker: StopChecker):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
@@ -44,7 +39,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool) -> None:
         """Append all new tokens to sequences in the sequence group. Fork any
         surviving beam candidates; free any unsurviving ones.
 
@@ -53,7 +49,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         """
         assert (len(outputs) == 1
                 ), f"{type(self)} does not support multiple outputs per step"
-        return self._process_sequence_group_outputs(sequence_group, outputs[0])
+        return self._process_sequence_group_outputs(sequence_group, outputs[0],
+                                                    is_async)
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
@@ -80,29 +77,33 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             seq_group.prompt_logprobs.extend(prompt_logprobs)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
+                                        outputs: SequenceGroupOutput,
+                                        is_async: bool) -> None:
         sampling_params = seq_group.sampling_params
         if sampling_params.n == 1 and not sampling_params.use_beam_search:
-            # only have one output sample
-            sample = outputs.samples[0]
-            # only have one sequence
-            seq = seq_group.seqs[0]
-            seq.append_token_id(sample.output_token, sample.logprobs)
-            if sampling_params.detokenize and self.detokenizer:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
+            if len(outputs.samples) > 0:
+                sample = outputs.samples[0]
+                # only have one sequence
+                seq = seq_group.seqs[0]
+                seq.append_token_id(sample.output_token, sample.logprobs,
+                                    not is_async)
+                if sampling_params.detokenize and self.detokenizer:
+                    new_char_count = self.detokenizer.decode_sequence_inplace(
+                        seq, sampling_params)
+                else:
+                    new_char_count = 0
+
+                self.stop_checker.maybe_stop_sequence(
+                    seq,
+                    new_char_count,
+                    sampling_params,
+                    lora_req=seq_group.lora_request,
+                )
+                return
             else:
-                new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(
-                seq,
-                new_char_count,
-                sampling_params,
-                lora_req=seq_group.lora_request,
-            )
-            if seq.is_finished():
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(seq)
-            return
+                # When a new request is added and execute_model
+                # is still not finished
+                return
 
         # Process samples
         samples = outputs.samples
@@ -130,23 +131,23 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 # the parent sequence from the sequence group since it will
                 # not be used in the future iterations.
                 parent.status = SequenceStatus.FINISHED_ABORTED
-                seq_group.remove(parent.seq_id)
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(parent)
+                # seq_group.remove(parent.seq_id)
+                # for scheduler in self.scheduler:
+                #     scheduler.free_seq(parent)
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
                 new_child_seq_id: int = next(self.seq_counter)
                 child = parent.fork(new_child_seq_id)
                 child.append_token_id(child_sample.output_token,
-                                      child_sample.logprobs)
+                                      child_sample.logprobs, not is_async)
                 child_seqs.append((child, parent))
             # Continue the parent sequence for the last child sample.
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
             parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
+                                   last_child_sample.logprobs, not is_async)
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
@@ -177,10 +178,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # manager. Keep them in the sequence group as candidate output.
             # NOTE: we need to fork the new sequences before freeing the
             # old sequences.
-            for seq, parent in child_seqs:
-                if seq is parent and seq.is_finished():
-                    for scheduler in self.scheduler:
-                        scheduler.free_seq(seq)
+            # for seq, parent in child_seqs:
+            #     if seq is parent and seq.is_finished():
+            #         for scheduler in self.scheduler:
+            #             scheduler.free_seq(seq)
             return
 
         # Beam search case

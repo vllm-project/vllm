@@ -31,14 +31,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     number of new output tokens per sequence differs in a single batch.
     """
 
-    def __init__(
-        self,
-        detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
-        seq_counter: Counter,
-        get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
-        stop_checker: StopChecker,
-    ):
+    def __init__(self, detokenizer: Detokenizer, scheduler: List[Scheduler],
+                 seq_counter: Counter,
+                 get_tokenizer_for_seq: Callable[[Sequence],
+                                                 PreTrainedTokenizer],
+                 stop_checker: StopChecker):
         self.detokenizer = detokenizer
         self.scheduler = scheduler
         self.seq_counter = seq_counter
@@ -58,8 +55,10 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
 
-    def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+    def process_outputs(self,
+                        sequence_group: SequenceGroup,
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool = False) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
@@ -69,6 +68,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         including freeing finished sequences. It also handles cases where there
         are tokens emitted after the EOS token.
         """
+        # TODO: Add support for async if necessary
+        assert not is_async
+
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"
@@ -139,7 +141,3 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             )
             if seq.is_finished():
                 break
-
-        if seq.is_finished():
-            for scheduler in self.scheduler:
-                scheduler.free_seq(seq)

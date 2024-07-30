@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
-                    Tuple, Union, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
+                    Optional, Set, Tuple, Union, cast)
 
 import msgspec
 import torch
@@ -474,14 +474,15 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def append_token_id(
-        self,
-        token_id: int,
-        logprobs: Dict[int, Logprob],
-    ) -> None:
+    def append_token_id(self,
+                        token_id: int,
+                        logprobs: Dict[int, Logprob],
+                        update_seq_data: bool = True) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id].logprob)
+        # Only do this when output proc callback is not used
+        if update_seq_data:
+            self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -1242,6 +1243,8 @@ class ExecuteModelRequest(
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
+    # Async postprocessor
+    callback_fn: Optional[Callable] = None
 
     @property
     def is_first_multi_step(self) -> bool:
@@ -1287,4 +1290,5 @@ class ExecuteModelRequest(
             num_steps=self.num_steps,
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
-            if self.last_sampled_token_ids is not None else None)
+            if self.last_sampled_token_ids is not None else None,
+            callback_fn=self.callback_fn)

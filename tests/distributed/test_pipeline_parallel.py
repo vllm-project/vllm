@@ -49,6 +49,8 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
         str(TP_SIZE),
         "--distributed-executor-backend",
         DIST_BACKEND,
+        # disable output proc callback to test PP
+        "--disable-output-proc-callback",
     ]
 
     # compare without pipeline parallelism

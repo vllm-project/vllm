@@ -98,6 +98,10 @@ def _test_stopping(llm_engine: LLMEngine,
     output: Optional[CompletionOutput] = None
     output_text = ""
     stop_reason = None
+
+    # Run first (because of async callback)
+    llm_engine.step()
+
     while llm_engine.has_unfinished_requests():
         (request_output, ) = llm_engine.step()
         (output, ) = request_output.outputs

@@ -126,7 +126,8 @@ def test_asyncio_run():
     )
 
     engine = AsyncLLMEngine.from_engine_args(
-        AsyncEngineArgs(model="facebook/opt-125m"))
+        AsyncEngineArgs(model="facebook/opt-125m",
+                        disable_output_proc_callback=False))
 
     async def run(prompt: str):
         sampling_params = SamplingParams(

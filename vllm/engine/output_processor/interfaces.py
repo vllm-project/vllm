@@ -25,13 +25,10 @@ class SequenceGroupOutputProcessor(ABC):
 
     @staticmethod
     def create_output_processor(
-        scheduler_config: SchedulerConfig,
-        detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
-        seq_counter: Counter,
-        get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
-        stop_checker: "StopChecker",
-    ):
+            scheduler_config: SchedulerConfig, detokenizer: Detokenizer,
+            scheduler: List[Scheduler], seq_counter: Counter,
+            get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
+            stop_checker: "StopChecker"):
         """Create an output processor.
 
         This returns a single-step output processor if num_lookahead_slots is
@@ -41,13 +38,9 @@ class SequenceGroupOutputProcessor(ABC):
             # Importing here to avoid cycle.
             from vllm.engine.output_processor.single_step import (
                 SingleStepOutputProcessor)
-            return SingleStepOutputProcessor(
-                scheduler_config,
-                detokenizer,
-                scheduler,
-                seq_counter,
-                stop_checker,
-            )
+            return SingleStepOutputProcessor(scheduler_config, detokenizer,
+                                             scheduler, seq_counter,
+                                             stop_checker)
         else:
             # Importing here to avoid cycle.
             from vllm.engine.output_processor.multi_step import (
@@ -62,7 +55,8 @@ class SequenceGroupOutputProcessor(ABC):
 
     @abstractmethod
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool) -> None:
         """Process new token ids for the sequence group. Handles logic such as
         detokenization, stop checking, and freeing/forking sequences in the
         scheduler.

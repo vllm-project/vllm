@@ -22,6 +22,8 @@ def test_pp_cudagraph(PP_SIZE, MODEL_NAME, ATTN_BACKEND):
         str(PP_SIZE),
         "--distributed-executor-backend",
         "mp",
+        # disable output proc callback to test PP
+        "--disable-output-proc-callback",
     ]
     os.environ["VLLM_ATTENTION_BACKEND"] = ATTN_BACKEND
 

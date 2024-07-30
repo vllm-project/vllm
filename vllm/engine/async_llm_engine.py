@@ -292,7 +292,7 @@ class _AsyncLLMEngine(LLMEngine):
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
-            seq_group_metadata_list, scheduler_outputs = self.scheduler[
+            (seq_group_metadata_list, scheduler_outputs, scheduled_ids, allow_output_proc_callback) = self.scheduler[
                 virtual_engine].schedule()
 
             if (self.scheduler_config.is_multi_step
@@ -336,6 +336,8 @@ class _AsyncLLMEngine(LLMEngine):
             if self.scheduler_config.is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, output)
         else:
+            if len(self.output_queue) > 0:
+                self._process_model_outputs(is_async=True)
             output = []
 
         # Finish the current step for all the sequence groups.
@@ -348,11 +350,22 @@ class _AsyncLLMEngine(LLMEngine):
             if self.scheduler_config.is_multi_step:
                 self.cached_scheduler_outputs[
                     virtual_engine] = SchedulerOutputState()
-            request_outputs = self._process_model_outputs(
-                output, scheduler_outputs.scheduled_seq_groups,
-                scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+            
+            # Cache results in engine
+            self.output_queue.append(
+                    (output, scheduled_ids, scheduler_outputs.ignored_seq_groups))
+
+            if (len(output) > 0) and allow_output_proc_callback:
+                assert len(
+                    output
+                ) == 1, "Multi step decoding does not work with output processor callback"  # noqa: E501
+                self._advance_to_next_step(output[0], seq_group_metadata_list,
+                                        scheduler_outputs.scheduled_seq_groups)
+
+            if not allow_output_proc_callback:
+                self._process_model_outputs(is_async=False)
         else:
-            request_outputs = []
+            self.request_outputs = []
 
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
@@ -360,7 +373,7 @@ class _AsyncLLMEngine(LLMEngine):
         # Tracing
         self.do_tracing(scheduler_outputs)
 
-        return request_outputs
+        return self.request_outputs
 
     def _has_remaining_steps(
         self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
@@ -861,6 +874,10 @@ class AsyncLLMEngine:
             request_outputs = await self.engine.step.remote()  # type: ignore
         else:
             request_outputs = await self.engine.step_async(virtual_engine)
+
+        # HACK: no output returned in first step
+        if not request_outputs:
+            return False
 
         # Put the outputs into the corresponding streams.
         finished = True
