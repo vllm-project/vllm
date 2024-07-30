@@ -251,7 +251,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         # Use simpler sampling parameters apart from for final token
         # (in particular don't do seeded sampling) since those sampled tokens
-        # aren't used
+        # aren't used.
+        # We don't replace the sampling_params in the greedy case because
+        # this also controls whether the probs get modified in the sampler
+        # (see use of _modify_greedy_probs_inplace there).
         sampling_params = input_seq_group_metadata.sampling_params
         non_bonus_sampling_params = DEFAULT_SIMPLE_SAMPLING_PARAMS \
             if sampling_params.temperature else sampling_params
