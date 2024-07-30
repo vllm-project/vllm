@@ -313,6 +313,7 @@ class Scheduler:
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
+        # This is used to evict the finished requests from the Mamba cache.
         self._finished_requests_ids: List[str] = list()
         # Time at previous scheduling step
         self.prev_time = 0.0
@@ -374,6 +375,7 @@ class Scheduler:
             for aborted_group in aborted_groups:
                 # Remove the sequence group from the state queue.
                 state_queue.remove(aborted_group)
+                # Remove the aborted request from the Mamba cache.
                 self._finished_requests_ids.append(aborted_group.request_id)
                 for seq in aborted_group.get_seqs():
                     if seq.is_finished():
@@ -566,7 +568,6 @@ class Scheduler:
                     "Failing the request %s because there's not enough kv "
                     "cache blocks to run the entire sequence.",
                     seq_group.request_id)
-                self._finished_requests_ids.append(seq_group.request_id)
                 for seq in seq_group.get_seqs():
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 infeasible_seq_groups.append(seq_group)
@@ -700,7 +701,6 @@ class Scheduler:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)
-                self._finished_requests_ids.append(seq_group.request_id)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -716,7 +716,6 @@ class Scheduler:
                     "Input prompt (%d tokens) is too long"
                     " and exceeds the capacity of block_manager",
                     num_new_tokens)
-                self._finished_requests_ids.append(seq_group.request_id)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -1061,12 +1060,12 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        # finished requests in self.waiting and self.swapped are already
-        # appended to self._finished_requests_ids during the scheduling.
-        # the only new finished requests are in self.running.
         remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.running:
             if seq_group.is_finished():
+                # Add the finished requests to the finished requests list.
+                # This list will be used to update the Mamba cache in the
+                # next step.
                 self._finished_requests_ids.append(seq_group.request_id)
             else:
                 remaining.append(seq_group)
