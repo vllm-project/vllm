@@ -102,8 +102,9 @@ struct ScaledEpilogueBase {
       OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   template <typename T>
-  using RowOrZeroLoad = cutlass::epilogue::threadblock::VisitorRowOrZeroBroadcast<
-      OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
+  using RowOrZeroLoad =
+      cutlass::epilogue::threadblock::VisitorRowOrZeroBroadcast<
+          OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   // This utility function constructs the arguments for the load descriptors
   // from a tensor. It can handle both row and column, as well as row/column or
