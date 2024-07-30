@@ -632,9 +632,9 @@ class EngineArgs:
             '--preemption-mode',
             type=str,
             default=None,
-            help='If \'recompute\', the engine performs preemption by block '
-            'swapping; If \'swap\', the engine performs preemption by block '
-            'swapping.')
+            help='If \'recompute\', the engine performs preemption by '
+            'recomputing; If \'swap\', the engine performs preemption by '
+            'block swapping.')
 
         parser.add_argument(
             "--served-model-name",
