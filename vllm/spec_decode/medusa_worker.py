@@ -57,9 +57,11 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
         seq_lens, query_lens = self._prepare_input_tensors(
             seq_group_metadata_list)
 
+        generators = self.model_runner.get_generators(
+            execute_model_req.finished_requests_ids)
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list, seq_lens, query_lens, self.device,
-            self.model_runner.pin_memory)
+            self.model_runner.pin_memory, generators)
 
         model_outputs = self.model_runner.model.generate_proposals(
             previous_hidden_states=execute_model_req.previous_hidden_states.
