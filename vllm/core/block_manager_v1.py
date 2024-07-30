@@ -177,8 +177,7 @@ class UncachedBlockAllocator(BlockAllocatorBase):
                  device: Device,
                  block_size: int,
                  num_blocks: int,
-                 remote_rank: Optional[int] = 0
-                 ) -> None:
+                 remote_rank: Optional[int] = 0) -> None:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
@@ -323,10 +322,7 @@ class RemoteAllocator:
 
 
 class SequenceSuperBlock:
-    def __init__(self,
-                 seq_id: int,
-                 block_size: int,
-                 start: int) -> None:
+    def __init__(self, seq_id: int, block_size: int, start: int) -> None:
         self.seq_id = seq_id
         self.block_size = block_size
         self.start = start

@@ -601,7 +601,7 @@ def test_determine_num_available_blocks(available_gpu_blocks: int,
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    num_gpu_blocks, num_cpu_blocks,_ = worker.determine_num_available_blocks()
+    num_gpu_blocks, num_cpu_blocks, _ = worker.determine_num_available_blocks()
 
     target_worker.determine_num_available_blocks.assert_called_once()
     assert num_cpu_blocks == available_cpu_blocks
