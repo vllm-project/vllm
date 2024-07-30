@@ -94,6 +94,15 @@ class TP1DraftModelRunner(ModelRunner):
             return_hidden_states=return_hidden_states,
         )
 
+        # (bong-furiosa)
+        # Resolve the issue of the wrapper variable
+        # not being defined during the execution of
+        # FlashInfer backend Speculative Decoding.
+        self.flashinfer_decode_workspace_buffer = None
+        self.flashinfer_decode_wrapper = None
+        self.flashinfer_prefill_workspace_buffer = None
+        self.flashinfer_prefill_wrapper = None
+
     def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
                                     num_queries):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
