@@ -30,7 +30,7 @@ from transformers import Qwen2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -253,10 +253,10 @@ class Qwen2Model(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
+        if input_embeds is not None:
+            hidden_states = input_embeds
         else:
             hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -340,9 +340,11 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
+                                   attn_metadata, intermediate_tensors, 
+                                   input_embeds)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
