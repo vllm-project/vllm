@@ -222,8 +222,12 @@ Vision Language Models
     -
   * - :code:`MiniCPM-V`
     - MiniCPM-V
-    - :code:`HwwwH/MiniCPM-V-2(Temporary)`, :code:`openbmb/MiniCPM-V-2(incoming...)`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
+    - :code:`openbmb/MiniCPM-V-2(Incoming...)`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
     -
+
+.. note::
+  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork(:code:`HwwwH/MiniCPM-V-2`) for now.
+  For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 ----
 
