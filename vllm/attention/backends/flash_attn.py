@@ -8,7 +8,7 @@ from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from utils import reshape_q, filter_tensor
+from utils import filter_tensor, reshape_q
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -364,7 +364,7 @@ class FlashAttentionImpl(AttentionImpl):
         if is_valid_rank:
             remote_metadata = attn_metadata.remote_metadata
         else:
-            remote_metadata=None
+            remote_metadata = None
         if remote_metadata is not None and sp_rank is not None:
             q_dist = remote_metadata.q_remote_distirbution[sp_rank]
             query_remote = reshape_q(query, q_dist)

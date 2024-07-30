@@ -6,13 +6,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-from vllm.distributed import broadcast_tensor_dict, broadcast_sp_tensor_dict
+from vllm.distributed import broadcast_sp_tensor_dict, broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
                         update_environment_variables)
-from vllm.worker.model_runner_base import (ModelRunnerBase, 
+from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerInputBase)
 logger = init_logger(__name__)
 
