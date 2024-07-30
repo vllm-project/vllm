@@ -61,6 +61,9 @@ def get_logits_processors(
         def logit_bias_logits_processor(token_ids: List[int],
                                         logits: torch.Tensor) -> torch.Tensor:
             for token_id, bias in clamped_logit_bias.items():
+                if token_id < 0 or token_id >= len(tokenizer.vocab_size):
+                    raise ValueError("token_id in logit_bias contains "
+                                     "out-of-vocab token id")
                 logits[token_id] += bias
             return logits
 
