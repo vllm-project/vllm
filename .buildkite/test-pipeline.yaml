@@ -56,7 +56,6 @@ steps:
   fast_check: true
   commands:
   - pytest -v -s core
-  - pytest -v -s distributed/test_parallel_state.py
 
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
