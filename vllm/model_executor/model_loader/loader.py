@@ -7,6 +7,7 @@ import json
 import math
 import os
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
 import huggingface_hub
@@ -38,6 +39,34 @@ from vllm.model_executor.models.interfaces import (has_inner_state,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_tpu
+
+
+@contextmanager
+def gpu_loading_context(module: torch.nn.Module):
+    # TODO: change this
+    target_device = torch.device("cuda")
+    original_device_states: Dict[str, torch.device] = {}
+    moved_param_names: set = set()
+    original_param_names = set(dict(module.named_parameters()).keys())
+
+    # Store original device states and move parameters to GPU if they're on CPU
+    for name, param in module.named_parameters():
+        original_device_states[name] = param.device
+        if param.device.type == 'cpu':
+            param.data = param.data.to(target_device)
+            moved_param_names.add(name)
+        # Parameters already on CUDA devices are not touched
+
+    try:
+        yield module
+
+    finally:
+        # Restore parameters to their original devices, ignoring new parameters
+        for name, param in module.named_parameters():
+            if name in original_param_names and name in moved_param_names:
+                param.data = param.data.to(original_device_states[name])
+        # New parameters or parameters already on CUDA are untouched
+
 
 logger = init_logger(__name__)
 
@@ -291,7 +320,8 @@ class DefaultModelLoader(BaseModelLoader):
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
-                    quant_method.process_weights_after_loading(module)
+                    with gpu_loading_context(module):
+                        quant_method.process_weights_after_loading(module)
         return model.eval()
 
 
