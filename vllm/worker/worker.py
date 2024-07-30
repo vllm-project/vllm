@@ -3,17 +3,15 @@ import gc
 import os
 from typing import List, Optional, Set, Tuple, Type
 
-import torch # type: ignore
-import torch.distributed # type: ignore
+import torch
+import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              recv_sp_tensor,
-                              set_custom_all_reduce,
-                              send_sp_tensor)
+                              init_distributed_environment, recv_sp_tensor,
+                              send_sp_tensor, set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig

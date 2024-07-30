@@ -3,17 +3,17 @@ import gc
 import time
 import warnings
 from collections import defaultdict
-from typing import (Any, Dict, List, Optional, Set, Tuple, Type,
-                    TYPE_CHECKING, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
+                    TypeVar, Union)
 
-import numpy as np # type: ignore
-import torch # type: ignore
-import torch.nn as nn # type: ignore
+import numpy as np
+import torch
+import torch.nn as nn
 
 try:
-    from flashinfer import BatchDecodeWithPagedKVCacheWrapper # type: ignore
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper # type: ignore
-    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper # type: ignore
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 except ImportError:
     BatchDecodeWithPagedKVCacheWrapper = None
@@ -38,11 +38,8 @@ from vllm.model_executor.models.interfaces import supports_lora
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (CudaMemoryProfiler,
-                        get_kv_cache_torch_dtype,
-                        is_hip,
-                        is_pin_memory_available,
-                        make_tensor_with_pad, 
+from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
+                        is_pin_memory_available, make_tensor_with_pad,
                         reshape_list)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,

@@ -1,25 +1,25 @@
 import asyncio
+import copy
 import os
 import pickle
-import copy
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
-from vllm.executor.ray_utils import ray, RayWorkerWrapper
+from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
 if ray is not None:
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy # type: ignore
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
-    from ray.util.placement_group import PlacementGroup # type: ignore
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 

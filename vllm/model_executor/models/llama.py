@@ -23,21 +23,19 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import torch # type: ignore
-from torch import nn # type: ignore
-from transformers import LlamaConfig # type: ignore
+import torch
+from torch import nn
+from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear,
-                                               SequenceParallelLinearForBroastcast,
-                                               SequenceParallelLinearForGather)
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear,
+    SequenceParallelLinearForBroastcast, SequenceParallelLinearForGather)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
