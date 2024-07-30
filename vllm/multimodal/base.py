@@ -26,7 +26,14 @@ Currently only supports up to singly nested list of tensors.
 
 BatchedTensors: TypeAlias = JSONTree[torch.Tensor]
 """
-A nested JSON structure where the leaves are tensors.
+A nested JSON structure of tensors which have been batched via
+:meth:`MultiModalInputs.batch`.
+"""
+
+BatchedTensorInputs: TypeAlias = Dict[str, JSONTree[torch.Tensor]]
+"""
+A dictionary containing nested tensors which have been batched via
+:meth:`MultiModalInputs.batch`.
 """
 
 if sys.version_info < (3, 9):
@@ -50,7 +57,7 @@ class MultiModalInputs(_MultiModalInputsBase):
         tensors: List[NestedTensors],
     ) -> Union[GenericSequence[NestedTensors], NestedTensors]:
         """
-        If each input tensor in the batch has the same size, return a single
+        If each input tensor in the batch has the same shape, return a single
         batched tensor; otherwise, return a list of :class:`NestedTensors` with
         one element per item in the batch.
         """
@@ -69,10 +76,16 @@ class MultiModalInputs(_MultiModalInputsBase):
         return torch.cat(tensors_, dim=0)
 
     @staticmethod
-    def batch(
-            inputs_list: List["MultiModalInputs"]
-    ) -> Dict[str, BatchedTensors]:
-        """Batch multiple inputs together into a dictionary."""
+    def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
+        """
+        Batch multiple inputs together into a dictionary.
+
+        The resulting dictionary has the same keys as the inputs.
+        If the corresponding value from each input is a tensor and they all
+        share the same shape, the output value is a single batched tensor;
+        otherwise, the output value is a list containing the original value
+        from each input.
+        """
         if len(inputs_list) == 0:
             return {}
 
@@ -95,10 +108,10 @@ class MultiModalInputs(_MultiModalInputsBase):
 
     @staticmethod
     def as_kwargs(
-        batched_inputs: Dict[str, BatchedTensors],
+        batched_inputs: BatchedTensorInputs,
         *,
         device: torch.types.Device,
-    ) -> Dict[str, BatchedTensors]:
+    ) -> BatchedTensorInputs:
         return json_map_leaves(lambda x: x.to(device, non_blocking=True),
                                batched_inputs)
 

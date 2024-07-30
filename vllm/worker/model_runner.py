@@ -40,7 +40,7 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -94,7 +94,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     prompt_adapter_mapping: Optional[PromptAdapterMapping] = None
     prompt_adapter_requests: Optional[Set[PromptAdapterRequest]] = None
-    multi_modal_kwargs: Optional[Dict[str, BatchedTensors]] = None
+    multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0

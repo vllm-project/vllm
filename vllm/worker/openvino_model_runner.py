@@ -1,4 +1,4 @@
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 import openvino as ov
 import torch
@@ -12,7 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.openvino import get_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
@@ -25,7 +25,7 @@ class ModelInput(NamedTuple):
     attn_metadata: Optional[OpenVINOAttentionMetadata]
     seq_lens: List[int]
     query_lens: List[int]
-    multi_modal_kwargs: Dict[str, BatchedTensors]
+    multi_modal_kwargs: BatchedTensorInputs
 
     @classmethod
     def empty(cls, device):
@@ -280,7 +280,7 @@ class OpenVINOModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, OpenVINOAttentionMetadata,
-               SamplingMetadata, Dict[str, BatchedTensors]]:
+               SamplingMetadata, BatchedTensorInputs]:
         # Prepare input tensors.
         (
             input_tokens,
