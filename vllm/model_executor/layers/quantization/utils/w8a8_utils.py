@@ -179,6 +179,7 @@ def apply_fp8_linear(
                                          out_dtype=torch.float32)
             # Unpad (undo num_token_padding)
             output = torch.narrow(output, 0, 0, input.shape[0])
+            x_scale = torch.narrow(x_scale, 0, 0, input.shape[0])
 
             # DQ
             # C = sw * sx * (X * W) + bias
