@@ -46,7 +46,10 @@ Additional epilogues would be required to support asymmetric quantization for we
 Expanding further, we can calculate $` \widehat D `$ as follows:
 
 ```math
-A B = s_a ( \widehat A - J_a z_a ) s_b \widehat B = s_a s_b \left( \widehat A \widehat B - J_a z_a \widehat B \right)
+A B = s_a ( \widehat A - J_a z_a ) s_b \widehat B
+```
+```math
+A B = s_a s_b \left( \widehat A \widehat B - J_a z_a \widehat B \right)
 ```
 ```math
 \widehat D = \widehat A \widehat B - z_a J_a \widehat B
@@ -66,8 +69,10 @@ The output of the GEMM is:
 \widehat D = \widehat A \widehat B
 ```
 ```math
-D = s_a s_b \widehat D = s_a s_b \widehat A \widehat B
-
+D = s_a s_b \widehat D
+```
+```math
+D = s_a s_b \widehat A \widehat B
 ```
 
 Epilogue parameters:
@@ -82,7 +87,10 @@ The output of the GEMM is:
 \widehat D = \widehat A \widehat B
 ```
 ```math
-D = s_a s_b \widehat D + C = s_a s_b \widehat A \widehat B + C
+D = s_a s_b \widehat D + C 
+```
+```math
+D = s_a s_b \widehat A \widehat B + C
 ```
 
 
@@ -99,7 +107,10 @@ The output of the GEMM is:
 \widehat D = \widehat A \widehat B - z_a J_a \widehat B
 ```
 ```math
-D = s_a s_b \widehat D + C = s_a s_b \left( \widehat A \widehat B - z_a J_a \widehat B \right) + C
+D = s_a s_b \widehat D + C 
+```
+```math
+D = s_a s_b \left( \widehat A \widehat B - z_a J_a \widehat B \right) + C
 ```
 
 Because $` z_a `$ is a scalar, the zero-point term $` z_a J_a \widehat B `$ has every row equal to $` z_a \mathbf 1 B `$. 
