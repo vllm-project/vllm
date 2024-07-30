@@ -20,6 +20,8 @@ logger = init_logger(__name__)
 
 class HabanaExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
         self._init_worker()

@@ -651,19 +651,19 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.block_size)
 
         input_tokens = make_tensor_with_pad(input_tokens,
-                                            max_prompt_len,
+                                            max_len=max_prompt_len,
                                             pad=0,
                                             dtype=torch.long,
                                             device=self.device)
 
         input_positions = make_tensor_with_pad(input_positions,
-                                               max_prompt_len,
+                                               max_len=max_prompt_len,
                                                pad=0,
                                                dtype=torch.long,
                                                device=self.device)
 
         slot_mapping = make_tensor_with_pad(slot_mapping,
-                                            max_prompt_len,
+                                            max_len=max_prompt_len,
                                             pad=_PAD_SLOT_ID,
                                             dtype=torch.long,
                                             device=self.device)
