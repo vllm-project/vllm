@@ -273,8 +273,6 @@ __global__ void Code2x8Dequant(
   }
   __syncthreads();
 
-  float res = 0;
-
   int iters = (prob_k / 8 - 1) / (8 * 32) + 1;
   while (iters--) {
     if (pred && a_gl_rd < a_gl_end) {
