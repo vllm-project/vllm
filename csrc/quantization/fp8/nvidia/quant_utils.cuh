@@ -508,6 +508,7 @@ __inline__ __device__ Tout convert(const Tin& x) {
   }
   #endif
   assert(false);
+  return {};  // Squash missing return statement warning
 }
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
@@ -520,6 +521,7 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   }
   #endif
   assert(false);
+  return {};  // Squash missing return statement warning
 }
 
   // The following macro is used to dispatch the conversion function based on
