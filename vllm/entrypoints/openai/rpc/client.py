@@ -1,19 +1,19 @@
-from typing import AsyncIterator, Optional, Mapping
+import pickle
+from typing import AsyncIterator, Mapping, Optional
 
-from vllm.config import ModelConfig, DecodingConfig
+import zmq
+import zmq.asyncio
+
+from vllm.config import DecodingConfig, ModelConfig
+from vllm.entrypoints.openai.rpc import (VLLM_GENERATE_RPC_PATH,
+                                         VLLM_GET_DATA_RPC_PATH,
+                                         VLLM_IS_READY_RPC_PATH,
+                                         GenerateRequest, GetDataRequest)
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.entrypoints.openai.rpc import (VLLM_GENERATE_RPC_PATH,
-                                         VLLM_GET_DATA_RPC_PATH,
-                                         VLLM_IS_READY_RPC_PATH,
-                                         GenerateRequest, GetDataRequest)
-
-import zmq
-import zmq.asyncio
-import pickle
 
 
 class RPCClient:

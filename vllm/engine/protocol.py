@@ -1,4 +1,7 @@
-from typing import AsyncIterator, List, Mapping, Optional, Protocol
+from typing import (AsyncIterator, List, Mapping, Optional, Protocol,
+                    runtime_checkable)
+
+from transformers import PreTrainedTokenizer
 
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
@@ -10,22 +13,22 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput
 
-from transformers import PreTrainedTokenizer
 
+@runtime_checkable
 class VLLMBackend(Protocol):
     """Protocol class for asynchronous vllm backends"""
 
     @property
     def is_running(self) -> bool:
-        pass
+        ...
 
     @property
     def is_stopped(self) -> bool:
-        pass
+        ...
 
     @property
     def errored(self) -> bool:
-        pass
+        ...
 
     async def generate(
         self,
@@ -76,4 +79,3 @@ class VLLMBackend(Protocol):
         model_output: Optional[List[SamplerOutput]] = None,
     ) -> None:
         pass
-    

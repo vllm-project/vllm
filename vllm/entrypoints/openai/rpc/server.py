@@ -1,16 +1,17 @@
 import asyncio
 import pickle
-import zmq
-import zmq.asyncio
 import signal
 
+import zmq
+import zmq.asyncio
+
 from vllm import AsyncLLMEngine
-from vllm.usage.usage_lib import UsageContext
 from vllm.entrypoints.openai.rpc import (VLLM_GENERATE_RPC_PATH,
                                          VLLM_GET_DATA_RPC_PATH,
                                          VLLM_IS_READY_RPC_PATH,
                                          GetDataRequest)
 from vllm.logger import init_logger
+from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger('vllm.entrypoints.openai.rpc.server')
 

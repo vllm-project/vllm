@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from typing import Optional, Mapping
 from enum import Enum
+from typing import Mapping, Optional
 
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
