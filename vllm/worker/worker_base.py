@@ -4,7 +4,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
-import torch
+import torch # type: ignore
 
 from vllm.distributed import broadcast_sp_tensor_dict, broadcast_tensor_dict
 from vllm.logger import init_logger

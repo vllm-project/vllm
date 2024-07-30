@@ -16,10 +16,10 @@ from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
 if ray is not None:
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy # type: ignore
 
 if TYPE_CHECKING:
-    from ray.util.placement_group import PlacementGroup
+    from ray.util.placement_group import PlacementGroup # type: ignore
 
 logger = init_logger(__name__)
 

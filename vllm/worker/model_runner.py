@@ -6,14 +6,14 @@ from collections import defaultdict
 from typing import (Any, Dict, List, Optional, Set, Tuple, Type,
                     TYPE_CHECKING, TypeVar, Union)
 
-import numpy as np
-import torch
-import torch.nn as nn
+import numpy as np # type: ignore
+import torch # type: ignore
+import torch.nn as nn # type: ignore
 
 try:
-    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper # type: ignore
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper # type: ignore
+    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper # type: ignore
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 except ImportError:
     BatchDecodeWithPagedKVCacheWrapper = None

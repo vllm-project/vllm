@@ -3,8 +3,8 @@ import gc
 import os
 from typing import List, Optional, Set, Tuple, Type
 
-import torch
-import torch.distributed
+import torch # type: ignore
+import torch.distributed # type: ignore
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
