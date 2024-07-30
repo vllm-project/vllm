@@ -683,8 +683,8 @@ class SequenceParallelLinearForBroastcast:
         return output
 
     def extra_repr(self) -> str:
-        s = f", tp_size={self.sp_size}"
-        s += f", reduce_results={self.reduce_results}"
+        s = f", tp_rank={self.tp_rank}"
+        s += f", from_rank={self.from_rank}"
         return s
 
 
@@ -713,8 +713,8 @@ class SequenceParallelLinearForGather:
         return output, output2, output3
 
     def extra_repr(self) -> str:
-        s = f", tp_size={self.sp_size}"
-        s += f", reduce_results={self.reduce_results}"
+        s = f", tp_rank={self.tp_rank}"
+        s += f", from_rank={self.from_rank}"
         return s
 
 
