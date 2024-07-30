@@ -1,10 +1,7 @@
-from typing import Any, Dict
-
 import pytest
 import torch
 
-from vllm.distributed.parallel_state import (_split_tensor_dict,
-                                             _update_nested_dict)
+from vllm.distributed.parallel_state import _split_tensor_dict
 
 
 def test_split_tensor_dict():
@@ -31,27 +28,3 @@ def test_split_tensor_dict_invalid_key():
     }
     with pytest.raises(AssertionError):
         _split_tensor_dict(test_dict)
-
-
-def test_update_nested_dict():
-    flattened_keys_values = [("key1%key2%key3", "value1"),
-                             ("key1%key2%key4", "value2"),
-                             ("key1%key5", "value3"), ("key6%key7", "value4"),
-                             ("key8", "value5")]
-    res: Dict[str, Any] = {}
-
-    for flat_key, value in flattened_keys_values:
-        _update_nested_dict(res, flat_key, value)
-    assert res == {
-        "key1": {
-            "key2": {
-                "key3": "value1",
-                "key4": "value2"
-            },
-            "key5": "value3"
-        },
-        "key6": {
-            "key7": "value4"
-        },
-        "key8": "value5"
-    }
