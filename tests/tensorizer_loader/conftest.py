@@ -1,11 +1,6 @@
-# isort: skip_file
-# ruff: noqa
-# yapf: disable
-# type: ignore
-
 import contextlib
-import gc
 import functools
+import gc
 
 import pytest
 import ray

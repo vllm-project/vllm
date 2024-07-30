@@ -1,8 +1,4 @@
-# isort: skip_file
-# ruff: noqa
-# yapf: disable
-# type: ignore
-
+import gc
 import json
 import os
 import pathlib
@@ -13,7 +9,6 @@ import openai
 import pytest
 import torch
 from tensorizer import EncryptionParams
-import gc
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
@@ -27,8 +22,8 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          tensorize_vllm_model)
 
 from ..conftest import VllmRunner
-from .conftest import retry_until_skip
 from ..utils import RemoteOpenAIServer
+from .conftest import retry_until_skip
 
 # yapf conflicts with isort for this docstring
 
