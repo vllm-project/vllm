@@ -12,7 +12,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, is_hpu
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
@@ -52,7 +52,9 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
-    block_size: int = 16
+    # NOTE(kzawora): default block size for Gaudi should be 128
+    # smaller sizes still work, but very inefficiently
+    block_size: int = 16 if not is_hpu() else 128
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
