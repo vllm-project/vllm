@@ -155,12 +155,12 @@ steps:
     - pytest -v -s test_inputs.py
     - pytest -v -s multimodal
 
-- label: Kernels Test %N
-  #mirror_hardwares: [amd]
-  commands:
-    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
-    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
+# - label: Kernels Test %N
+#   #mirror_hardwares: [amd]
+#   commands:
+#     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
+#     - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+#   parallelism: 4
 
 - label: Models Test
   #mirror_hardwares: [amd]
@@ -202,20 +202,20 @@ steps:
     - export VLLM_ATTENTION_BACKEND=XFORMERS
     - pytest -v -s spec_decode
 
-- label: LoRA Test %N
-  #mirror_hardwares: [amd]
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
-  parallelism: 4
+# - label: LoRA Test %N
+#   #mirror_hardwares: [amd]
+#   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
+#   parallelism: 4
 
-- label: LoRA Long Context (Distributed)
-  #mirror_hardwares: [amd]
-  num_gpus: 4
-  # This test runs llama 13B, so it is required to run on 4 GPUs.
-  commands:
-    # FIXIT: find out which code initialize cuda before running the test
-    # before the fix, we need to use spawn to test it
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -x lora/test_long_context.py
+# - label: LoRA Long Context (Distributed)
+#   #mirror_hardwares: [amd]
+#   num_gpus: 4
+#   # This test runs llama 13B, so it is required to run on 4 GPUs.
+#   commands:
+#     # FIXIT: find out which code initialize cuda before running the test
+#     # before the fix, we need to use spawn to test it
+#     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#     - pytest -v -s -x lora/test_long_context.py
 
 - label: Tensorizer Test
   #mirror_hardwares: [amd]

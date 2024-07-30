@@ -21,7 +21,8 @@ correctess for the target model outputs.
 
 import pytest
 
-from .conftest import run_greedy_equality_correctness_test
+from .conftest import (run_equality_correctness_test,
+                       run_greedy_equality_correctness_test)
 
 # main model
 MAIN_MODEL = "JackFram/llama-160m"
@@ -75,6 +76,57 @@ def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model": MAIN_MODEL,
+
+        # Speculative model
+        "speculative_model": SPEC_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{"seed": 1}])
+@pytest.mark.parametrize("test_llm_kwargs", [{"seed": 5}])
+@pytest.mark.parametrize("output_len", [64])
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("temperature", [0.1, 1.0])
+@pytest.mark.parametrize("seed", [None])
+def test_mlp_e2e_seeded_correctness(baseline_llm_generator, test_llm_generator,
+                                    batch_size: int, output_len: int,
+                                    temperature: float):
+    """Verify seeded runs produce the same output."""
+    run_equality_correctness_test(baseline_llm_generator,
+                                  test_llm_generator,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  temperature=temperature,
+                                  seeded=True,
+                                  force_output_len=True)
+
+    # Ensure this same test does fail if we _don't_ include per-request seeds
+    with pytest.raises(AssertionError):
+        run_equality_correctness_test(baseline_llm_generator,
+                                      test_llm_generator,
+                                      batch_size,
+                                      max_output_len=output_len,
+                                      temperature=temperature,
+                                      seeded=False,
+                                      force_output_len=True)
 
 
 @pytest.mark.parametrize(
