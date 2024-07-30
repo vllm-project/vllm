@@ -440,14 +440,6 @@ class Sequence:
                 f"num_blocks={self.n_blocks}, ")
 
 
-@dataclass
-class SequenceGroupState:
-    """Mutable state tied to a specific sequence group"""
-
-    # torch.Generator used in seeded sampling
-    generator: Optional = None  # type: ignore
-
-
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -490,7 +482,6 @@ class SequenceGroup:
                                       time_in_queue=None)
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
-        self.state = SequenceGroupState()
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.prompt_adapter_request = prompt_adapter_request
@@ -686,7 +677,6 @@ class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defa
         lora_request: LoRA request.
         computed_block_nums: The block numbers that are already computed,
             used in prefix caching.
-        state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None 
