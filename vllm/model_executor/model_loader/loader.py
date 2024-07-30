@@ -42,7 +42,8 @@ from vllm.utils import is_tpu
 
 
 @contextmanager
-def device_loading_context(module: torch.nn.Module, target_device: torch.device):
+def device_loading_context(module: torch.nn.Module,
+                           target_device: torch.device):
     if target_device.type == "cpu":
         # If target is CPU, no need to move anything
         yield module
