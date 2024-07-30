@@ -25,20 +25,30 @@ If $` \widehat X `$ is the quantized $` X `$, our matrices become the following
 
 ```math
 A = s_a (\widehat A - J_a z_a)
+```
+```math
 B = s_b \widehat B
+```
+```math
 D = A B + C
+```
+```math
 D = s_a s_b \widehat D + C
 ```
 
 Here, D is the output of the GEMM, and C is the bias.
 A is the activations and supports asymmetric quantization,
 and B is the weights and only supports symmetric quantization.
+$ s_a $ and $s_b$ are the scales for activations and weights, respectively.
+$ z_a $ is the zero-point for activations, and $ J_a $ is the matrix of all ones with dimensions of A.
 Additional epilogues would be required to support asymmetric quantization for weights.
 
 Expanding further, we can calculate $` \widehat D `$ as follows:
 
 ```math
 A B = s_a ( \widehat A - J_a z_a ) s_b \widehat B = s_a s_b \left( \widehat A \widehat B - J_a z_a \widehat B \right)
+```
+```math
 \widehat D = \widehat A \widehat B - z_a J_a \widehat B
 ```
 
@@ -53,8 +63,9 @@ This epilogue computes the symmetric quantization for activations without bias, 
 The output of the GEMM is:
 
 ```math
-
 \widehat D = \widehat A \widehat B
+```
+```math
 D = s_a s_b \widehat D = s_a s_b \widehat A \widehat B
 
 ```
@@ -68,10 +79,10 @@ This epilogue computes the symmetric quantization for activations with bias, mea
 The output of the GEMM is:
 
 ```math
-
 \widehat D = \widehat A \widehat B
+```
+```math
 D = s_a s_b \widehat D + C = s_a s_b \widehat A \widehat B + C
-
 ```
 
 
@@ -86,6 +97,8 @@ The output of the GEMM is:
 
 ```math
 \widehat D = \widehat A \widehat B - z_a J_a \widehat B
+```
+```math
 D = s_a s_b \widehat D + C = s_a s_b \left( \widehat A \widehat B - z_a J_a \widehat B \right) + C
 ```
 
