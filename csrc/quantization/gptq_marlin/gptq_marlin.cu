@@ -1128,44 +1128,47 @@ __global__ void Marlin(
   };
 
   auto fetch_zp_to_registers = [&](int k, int full_pipe) {
-    if constexpr (!has_zp) {
-      return;
-    }
+    if constexpr (has_zp) {
+      // This code does not handle group_blocks == 0,
+      // which signifies act_order.
+      // has_zp implies AWQ, which doesn't have act_order,
+      static_assert(group_blocks != 0);
 
-    int pipe = full_pipe % stages;
+      int pipe = full_pipe % stages;
 
-    if constexpr (group_blocks == -1) {
-      for (int i = 0; i < num_ints_per_thread; i++) {
-        frag_qzp[k % 2][i] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd + i];
-      }
+      if constexpr (group_blocks == -1) {
+        for (int i = 0; i < num_ints_per_thread; i++) {
+          frag_qzp[k % 2][i] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd + i];
+        }
 
-    } else if constexpr (group_blocks >= thread_k_blocks) {
-      int4* sh_zp_stage =
-          sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
-                                 (pipe / (group_blocks / thread_k_blocks)));
-      for (int i = 0; i < num_ints_per_thread; i++) {
-        frag_qzp[k % 2][i] =
-            (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
-      }
-    } else {
-      int warp_id = threadIdx.x / 32;
-      int n_warps = thread_n_blocks / 4;
+      } else if constexpr (group_blocks >= thread_k_blocks) {
+        int4* sh_zp_stage =
+            sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
+                                   (pipe / (group_blocks / thread_k_blocks)));
+        for (int i = 0; i < num_ints_per_thread; i++) {
+          frag_qzp[k % 2][i] =
+              (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
+        }
+      } else {
+        int warp_id = threadIdx.x / 32;
+        int n_warps = thread_n_blocks / 4;
 
-      int warp_row = warp_id / n_warps;
+        int warp_row = warp_id / n_warps;
 
-      int cur_k = warp_row * 16;
-      cur_k += k_iter_size * (k % b_sh_wr_iters);
+        int cur_k = warp_row * 16;
+        cur_k += k_iter_size * (k % b_sh_wr_iters);
 
-      int k_blocks = cur_k / 16;
-      int cur_group_id = k_blocks / group_blocks;
+        int k_blocks = cur_k / 16;
+        int cur_group_id = k_blocks / group_blocks;
 
-      int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
+        int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
-      sh_zp_stage += cur_group_id * zp_sh_stride;
+        sh_zp_stage += cur_group_id * zp_sh_stride;
 
-      for (int i = 0; i < num_ints_per_thread; i++) {
-        frag_qzp[k % 2][i] =
-            (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
+        for (int i = 0; i < num_ints_per_thread; i++) {
+          frag_qzp[k % 2][i] =
+              (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
+        }
       }
     }
   };
