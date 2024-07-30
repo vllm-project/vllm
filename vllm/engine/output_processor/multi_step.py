@@ -57,17 +57,28 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
 
-    def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+    def process_outputs(self,
+                        sequence_group: SequenceGroup,
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool = False) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
         one new token per sequence.
 
-        This applies logic like stop condition checking and detokenization,
-        including freeing finished sequences. It also handles cases where there
-        are tokens emitted after the EOS token.
+        This applies logic like stop condition checking and detokenization.
+        It also handles cases where there are tokens emitted after 
+        the EOS token.
+
+        is_async - Indicates whether this postprocessor runs in 
+            parallel with the GPU forward pass and is processing 
+            tokens from the previous step. If this is true, then
+            no tokens need to be appended since it is already done
+            externally (before the next schedule() call)
         """
+        # TODO: Add support for async if necessary
+        assert not is_async
+
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"
@@ -138,7 +149,3 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             )
             if seq.is_finished():
                 break
-
-        if seq.is_finished():
-            for scheduler in self.scheduler:
-                scheduler.free_seq(seq)

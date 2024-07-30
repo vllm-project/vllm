@@ -1,69 +1,30 @@
-from typing import Any, List, Optional
-
 import pytest
 
-from vllm import CompletionOutput, LLMEngine, SamplingParams
+from .test_stop_strings import _test_stopping
 
 MODEL = "meta-llama/llama-2-7b-hf"
 MAX_TOKENS = 200
 
-IS_ASYNC = False
+IS_ASYNC = True
 
 
 @pytest.fixture(scope="module")
-def vllm_model(vllm_runner):
-    with vllm_runner(MODEL, disable_async_output_proc=True) as vllm_model:
-        yield vllm_model
-
-
-def _test_stopping(llm_engine: LLMEngine,
-                   expected_output: str,
-                   expected_reason: Any,
-                   stop: Optional[List[str]] = None,
-                   stop_token_ids: Optional[List[int]] = None,
-                   include_in_output: bool = False,
-                   use_async_output_proc: bool = False) -> None:
-    llm_engine.add_request(
-        "id", "A story about vLLM:\n",
-        SamplingParams(
-            temperature=0.0,
-            max_tokens=MAX_TOKENS,
-            stop=stop,
-            stop_token_ids=stop_token_ids,
-            include_stop_str_in_output=include_in_output,
-        ), None)
-
-    output: Optional[CompletionOutput] = None
-    output_text = ""
-    stop_reason = None
-
-    if use_async_output_proc:
-        llm_engine.step()
-
-    while llm_engine.has_unfinished_requests():
-        (request_output, ) = llm_engine.step()
-        (output, ) = request_output.outputs
-
-        # Ensure we don't backtrack
-        assert output.text.startswith(output_text)
-        output_text = output.text
-        stop_reason = output.stop_reason
-
-    assert output is not None
-    assert output_text == expected_output
-    assert stop_reason == expected_reason
+def vllm_model_async(vllm_runner):
+    with vllm_runner(MODEL,
+                     disable_async_output_proc=False) as vllm_model_async:
+        yield vllm_model_async
 
 
 @pytest.mark.skip_global_cleanup
-def test_stop_basic(vllm_model):
-    _test_stopping(vllm_model.model.llm_engine,
+def test_stop_basic(vllm_model_async):
+    _test_stopping(vllm_model_async.model.llm_engine,
                    stop=["."],
                    include_in_output=False,
                    expected_output="VLLM is a 100% volunteer organization",
                    expected_reason=".",
                    use_async_output_proc=IS_ASYNC)
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(vllm_model_async.model.llm_engine,
                    stop=["."],
                    include_in_output=True,
                    expected_output="VLLM is a 100% volunteer organization.",
@@ -72,9 +33,9 @@ def test_stop_basic(vllm_model):
 
 
 @pytest.mark.skip_global_cleanup
-def test_stop_multi_tokens(vllm_model):
+def test_stop_multi_tokens(vllm_model_async):
     _test_stopping(
-        vllm_model.model.llm_engine,
+        vllm_model_async.model.llm_engine,
         stop=["group of peo", "short"],
         include_in_output=False,
         expected_output="VLLM is a 100% volunteer organization. We are a ",
@@ -82,7 +43,7 @@ def test_stop_multi_tokens(vllm_model):
         use_async_output_proc=IS_ASYNC)
 
     _test_stopping(
-        vllm_model.model.llm_engine,
+        vllm_model_async.model.llm_engine,
         stop=["group of peo", "short"],
         include_in_output=True,
         expected_output=
@@ -92,15 +53,15 @@ def test_stop_multi_tokens(vllm_model):
 
 
 @pytest.mark.skip_global_cleanup
-def test_stop_partial_token(vllm_model):
-    _test_stopping(vllm_model.model.llm_engine,
+def test_stop_partial_token(vllm_model_async):
+    _test_stopping(vllm_model_async.model.llm_engine,
                    stop=["gani"],
                    include_in_output=False,
                    expected_output="VLLM is a 100% volunteer or",
                    expected_reason="gani",
                    use_async_output_proc=IS_ASYNC)
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(vllm_model_async.model.llm_engine,
                    stop=["gani"],
                    include_in_output=True,
                    expected_output="VLLM is a 100% volunteer organi",
@@ -109,17 +70,17 @@ def test_stop_partial_token(vllm_model):
 
 
 @pytest.mark.skip_global_cleanup
-def test_stop_token_id(vllm_model):
+def test_stop_token_id(vllm_model_async):
     # token id 13013 => " organization"
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(vllm_model_async.model.llm_engine,
                    stop_token_ids=[13013],
                    include_in_output=False,
                    expected_output="VLLM is a 100% volunteer",
                    expected_reason=13013,
                    use_async_output_proc=IS_ASYNC)
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(vllm_model_async.model.llm_engine,
                    stop_token_ids=[13013],
                    include_in_output=True,
                    expected_output="VLLM is a 100% volunteer organization",
