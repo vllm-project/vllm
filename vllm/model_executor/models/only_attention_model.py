@@ -31,8 +31,8 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_sequence_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.model_executor.layers.linear import (SequenceParallelLinearForBroastcast,
-                                               SequenceParallelLinearForGather)
+from vllm.model_executor.layers.linear import (
+    SequenceParallelLinearForBroastcast, SequenceParallelLinearForGather)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
