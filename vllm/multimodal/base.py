@@ -99,7 +99,8 @@ class MultiModalInputs(_MultiModalInputsBase):
         *,
         device: torch.types.Device,
     ) -> Dict[str, BatchedTensors]:
-        return map_json(lambda x: x.to(device), batched_inputs)
+        return map_json(lambda x: x.to(device, non_blocking=True),
+                        batched_inputs)
 
 
 class MultiModalDataBuiltins(TypedDict, total=False):

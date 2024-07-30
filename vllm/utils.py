@@ -711,7 +711,7 @@ def merge_dicts(dict1: Dict[K, List[T]],
 
 
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
-                 Tuple["JSONTree[T]", ...], T, ]
+                 Tuple["JSONTree[T]", ...], T]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
 
