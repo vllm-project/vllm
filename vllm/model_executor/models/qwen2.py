@@ -43,10 +43,10 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
 
@@ -243,14 +243,22 @@ class Qwen2Model(nn.Module):
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -382,18 +390,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Remapping the name of FP8 kv-scale.
-                if name.endswith("kv_scale"):
-                    remapped_kv_scale_name = name.replace(
-                        ".kv_scale", ".attn.kv_scale")
-                    if remapped_kv_scale_name not in params_dict:
-                        print_warning_once(
-                            f"Found kv scale in the checkpoint (e.g. {name}), "
-                            "but not found the expected name in the model "
-                            f"(e.g. {remapped_kv_scale_name}). kv-scale is "
-                            "not loaded.")
-                        continue
-                    else:
-                        name = remapped_kv_scale_name
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

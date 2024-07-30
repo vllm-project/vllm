@@ -1,12 +1,11 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
 
 import torch
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
@@ -14,12 +13,15 @@ from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
-                        print_warning_once, update_environment_variables)
+                        print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.model_loader.loader import BaseModelLoader
+    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+        BaseTokenizerGroup)
 
 logger = init_logger(__name__)
 
@@ -29,12 +31,15 @@ _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _PP_SUPPORTED_MODELS = [
     "AquilaModel",
     "AquilaForCausalLM",
+    "DeepseekV2ForCausalLM",
     "InternLMForCausalLM",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
     "MistralForCausalLM",
     "Phi3ForCausalLM",
     "GPT2LMHeadModel",
+    "MixtralForCausalLM",
+    "NemotronForCausalLM",
 ]
 
 
@@ -138,12 +143,10 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
-        self.max_context_len_to_capture = max_context_len_to_capture
-        if self.max_context_len_to_capture is not None:
+        if max_context_len_to_capture is not None:
             raise ValueError("`max_context_len_to_capture` is deprecated. "
                              "Use `max_seq_len_to_capture` instead.")
-        self.max_seq_len_to_capture = (max_seq_len_to_capture
-                                       or max_context_len_to_capture)
+        self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
@@ -240,7 +243,8 @@ class ModelConfig:
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
             if (self.quantization
-                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin")):
+                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin",
+                            "awq_marlin", "fbgemm_fp8", "compressed_tensors")):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -278,6 +282,10 @@ class ModelConfig:
                 or parallel_config.pipeline_parallel_size > 1):
             raise ValueError(
                 "BitAndBytes quantization with TP or PP is not supported yet.")
+
+        if self.quantization == "bitsandbytes" and self.enforce_eager is False:
+            raise ValueError(
+                "BitAndBytes with enforce_eager = False is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
@@ -434,6 +442,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        cpu_offload_gb: float = 0,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -442,6 +451,7 @@ class CacheConfig:
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.cpu_offload_gb = cpu_offload_gb
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -517,11 +527,12 @@ class TokenizerPoolConfig:
             pool type.
     """
     pool_size: int
-    pool_type: str
+    pool_type: Union[str, Type["BaseTokenizerGroup"]]
     extra_config: dict
 
     def __post_init__(self):
-        if self.pool_type not in ("ray", ):
+        if self.pool_type not in ("ray", ) and not isinstance(
+                self.pool_type, type):
             raise ValueError(f"Unknown pool type: {self.pool_type}")
         if not isinstance(self.extra_config, dict):
             raise ValueError("extra_config must be a dictionary.")
@@ -585,12 +596,18 @@ class LoadConfig:
                 mainly for profiling.
             "tensorizer" will use CoreWeave's tensorizer library for
                 fast weight loading.
+            "bitsandbytes" will load nf4 type weights.
+        ignore_patterns: The list of patterns to ignore when loading the model.
+            Default to "original/**/*" to avoid repeated loading of llama's 
+            checkpoints.
+            
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
     download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
+    ignore_patterns: Optional[Union[List[str], str]] = None
 
     def __post_init__(self):
         model_loader_extra_config = self.model_loader_extra_config or {}
@@ -598,6 +615,13 @@ class LoadConfig:
             self.model_loader_extra_config = json.loads(
                 model_loader_extra_config)
         self._verify_load_format()
+
+        if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
+            logger.info(
+                "Ignoring the following patterns when downloading weights: %s",
+                self.ignore_patterns)
+        else:
+            self.ignore_patterns = ["original/**/*"]
 
     def _verify_load_format(self) -> None:
         if not isinstance(self.load_format, str):
@@ -651,7 +675,8 @@ class ParallelConfig:
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
-        distributed_executor_backend: Optional[str] = None,
+        distributed_executor_backend: Optional[Union[
+            str, Type["ExecutorBase"]]] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
@@ -666,7 +691,7 @@ class ParallelConfig:
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
-            elif self.distributed_executor_backend != "ray":
+            elif not self.use_ray:
                 raise ValueError(f"worker-use-ray can't be used with "
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
@@ -697,26 +722,29 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
-        # If CUDA_VISIBLE_DEVICES is set on ROCm prior to vLLM init,
-        # propagate changes to HIP_VISIBLE_DEVICES (conversion handled by
-        # the update_environment_variables function)
-        if is_hip() and envs.CUDA_VISIBLE_DEVICES:
-            update_environment_variables(
-                {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
         self.rank = 0
 
+    @property
+    def use_ray(self) -> bool:
+        return self.distributed_executor_backend == "ray" or (
+            isinstance(self.distributed_executor_backend, type)
+            and self.distributed_executor_backend.uses_ray)
+
     def _verify_args(self) -> None:
-        if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend == "mp"):
-            raise NotImplementedError("Pipeline parallelism is not supported "
-                                      "yet with multiprocessing.")
-        if self.distributed_executor_backend not in ("ray", "mp", None):
+        # Lazy import to avoid circular import
+        from vllm.executor.executor_base import ExecutorBase
+
+        if self.distributed_executor_backend not in (
+                "ray", "mp", None) and not (isinstance(
+                    self.distributed_executor_backend, type) and issubclass(
+                        self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
-                "Unrecognized distributed executor backend. Supported values "
-                "are 'ray' or 'mp'.")
-        if self.distributed_executor_backend == "ray":
+                "Unrecognized distributed executor backend "
+                f"{self.distributed_executor_backend}. Supported "
+                "values are 'ray', 'mp' or custom ExecutorBase subclass.")
+        if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
         if is_hip():
@@ -724,8 +752,7 @@ class ParallelConfig:
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on AMD GPUs.")
-        if self.ray_workers_use_nsight and (
-                not self.distributed_executor_backend == "ray"):
+        if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
@@ -784,7 +811,9 @@ class SchedulerConfig:
                 # for higher throughput.
                 self.max_num_batched_tokens = max(max_model_len, 2048)
         if enable_chunked_prefill:
-            logger.info("Chunked prefill is enabled (EXPERIMENTAL).")
+            logger.info(
+                "Chunked prefill is enabled with max_num_batched_tokens=%d.",
+                self.max_num_batched_tokens)
 
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
@@ -877,6 +906,7 @@ class SpeculativeConfig:
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: Optional[float],
         typical_acceptance_sampler_posterior_alpha: Optional[float],
+        disable_logprobs: Optional[bool],
         cpu_draft_worker: Optional[bool],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
@@ -927,6 +957,11 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
                 TypicalAcceptanceSampler.
+            disable_logprobs (Optional[bool]): If set to True, token log
+                probabilities are not returned during speculative decoding.
+                If set to False, token log probabilities are returned
+                according to the log probability settings in SamplingParams.
+                If not specified, it defaults to True.
             cpu_draft_worker (Optional[bool]): Run draft model on CPU.
     
         Returns:
@@ -1040,6 +1075,8 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_threshold = 0.09
         if typical_acceptance_sampler_posterior_alpha is None:
             typical_acceptance_sampler_posterior_alpha = 0.3
+        if disable_logprobs is None:
+            disable_logprobs = True
 
         return SpeculativeConfig(
             draft_model_config,
@@ -1053,6 +1090,7 @@ class SpeculativeConfig:
                 typical_acceptance_sampler_posterior_threshold,
             typical_acceptance_sampler_posterior_alpha=\
                 typical_acceptance_sampler_posterior_alpha,
+            disable_logprobs=disable_logprobs,
             cpu_draft_worker=cpu_draft_worker,
         )
 
@@ -1138,6 +1176,7 @@ class SpeculativeConfig:
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
+        disable_logprobs: bool,
         cpu_draft_worker: Optional[bool],
     ):
         """Create a SpeculativeConfig object.
@@ -1165,6 +1204,12 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
                 TypicalAcceptanceSampler.
+            disable_logprobs: If set to True, token log probabilities will not
+                be returned even if requested by sampling parameters. This 
+                reduces latency by skipping logprob calculation in proposal
+                sampling, target sampling, and after accepted tokens are
+                determined. If set to False, log probabilities will be
+                returned.
             cpu_draft_worker: Run draft model on CPU.
         """
         self.draft_model_config = draft_model_config
@@ -1179,6 +1224,7 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_threshold
         self.typical_acceptance_sampler_posterior_alpha = \
             typical_acceptance_sampler_posterior_alpha
+        self.disable_logprobs = disable_logprobs
         self.cpu_draft_worker = cpu_draft_worker or False
 
         self._verify_args()
@@ -1451,23 +1497,32 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    # The correct one should be "longrope", kept "su" here
-    # to be backward compatible
-    if rope_scaling is not None and rope_scaling["type"] != "su" \
-        and rope_scaling["type"] != "longrope":
-        if disable_sliding_window:
-            # TODO(robertgshaw): Find a model that supports rope_scaling
-            # with sliding window to see if this case should be allowed.
-            raise NotImplementedError(
-                "Disabling sliding window is not supported for models "
-                "with rope_scaling. Please raise an issue so we can "
-                "investigate.")
-        assert "factor" in rope_scaling
-        scaling_factor = rope_scaling["factor"]
-        if rope_scaling["type"] == "yarn":
-            derived_max_model_len = rope_scaling[
-                "original_max_position_embeddings"]
-        derived_max_model_len *= scaling_factor
+    if rope_scaling is not None:
+        if "type" in rope_scaling:
+            rope_type = rope_scaling["type"]
+        elif "rope_type" in rope_scaling:
+            rope_type = rope_scaling["rope_type"]
+        else:
+            raise ValueError(
+                "rope_scaling must have a 'type' or 'rope_type' key.")
+
+        # The correct one should be "longrope", kept "su" here
+        # to be backward compatible
+        if rope_type not in ("su", "longrope", "llama3"):
+            if disable_sliding_window:
+                # TODO(robertgshaw): Find a model that supports rope_scaling
+                # with sliding window to see if this case should be allowed.
+                raise NotImplementedError(
+                    "Disabling sliding window is not supported for models "
+                    "with rope_scaling. Please raise an issue so we can "
+                    "investigate.")
+
+            assert "factor" in rope_scaling
+            scaling_factor = rope_scaling["factor"]
+            if rope_type == "yarn":
+                derived_max_model_len = rope_scaling[
+                    "original_max_position_embeddings"]
+            derived_max_model_len *= scaling_factor
 
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.

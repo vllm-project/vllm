@@ -7,6 +7,8 @@ vLLM supports a variety of generative Transformer models in `HuggingFace Transfo
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
+----
+
 Decoder-only Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .. list-table::
@@ -94,8 +96,8 @@ Decoder-only Language Models
     - :code:`ai21labs/Jamba-v0.1`, etc.
     - ✅︎
   * - :code:`LlamaForCausalLM`
-    - LLaMA, Llama 2, Meta Llama 3, Vicuna, Alpaca, Yi
-    - :code:`meta-llama/Meta-Llama-3-8B-Instruct`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
+    - Llama 3.1, Llama 3, Llama 2, LLaMA, Yi
+    - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3.1-70B`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
@@ -113,6 +115,10 @@ Decoder-only Language Models
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
     -
+  * - :code:`NemotronForCausalLM`
+    - Nemotron-3, Nemotron-4, Minitron
+    - :code:`nvidia/Minitron-8B-Base`, :code:`mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.
+    - ✅︎
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
@@ -137,6 +143,10 @@ Decoder-only Language Models
     - Phi-3-Small
     - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
     -
+  * - :code:`PersimmonForCausalLM`
+    - Persimmon
+    - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
+    - 
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
@@ -178,6 +188,22 @@ Vision Language Models
     - Models
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
+  * - :code:`Blip2ForConditionalGeneration`
+    - BLIP-2
+    - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
+    -
+  * - :code:`ChameleonForConditionalGeneration`
+    - Chameleon
+    - :code:`facebook/chameleon-7b` etc.
+    - 
+  * - :code:`FuyuForCausalLM`
+    - Fuyu
+    - :code:`adept/fuyu-8b` etc.
+    - 
+  * - :code:`InternVLChatModel`
+    - InternVL2
+    - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
@@ -194,6 +220,12 @@ Vision Language Models
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
     -
+  * - :code:`MiniCPM-V`
+    - MiniCPM-V
+    - :code:`openbmb/MiniCPM-V-2`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
+    -
+
+----
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 

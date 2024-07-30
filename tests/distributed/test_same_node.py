@@ -10,3 +10,4 @@ test_result = all(
 
 expected = os.environ.get("VLLM_TEST_SAME_HOST", "1") == "1"
 assert test_result == expected, f"Expected {expected}, got {test_result}"
+print("Same node test passed!")

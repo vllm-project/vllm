@@ -1,4 +1,4 @@
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import torch
 from torch.nn import Parameter
@@ -18,6 +18,11 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # turing and up
+        return 75
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
@@ -64,22 +69,25 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         # WEIGHT SCALE
         layer_kwargs = {"weight_loader": weight_loader}
         if self.strategy == QuantizationStrategy.CHANNEL:
-            scale = create_per_channel_scale_param(output_partition_sizes,
-                                                   **layer_kwargs)
+            weight_scale = create_per_channel_scale_param(
+                output_partition_sizes, **layer_kwargs)
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
-            scale = create_per_tensor_scale_param(output_partition_sizes,
-                                                  **layer_kwargs)
-        layer.register_parameter("weight_scale", scale)
+            weight_scale = create_per_tensor_scale_param(
+                output_partition_sizes, **layer_kwargs)
+        layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            scale = create_per_tensor_scale_param(output_partition_sizes,
-                                                  **layer_kwargs)
-            layer.register_parameter("input_scale", scale)
+            input_scale = create_per_tensor_scale_param(
+                output_partition_sizes, **layer_kwargs)
+            layer.register_parameter("input_scale", input_scale)
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
+                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+
         return apply_int8_linear(input=x,
                                  weight=layer.weight,
                                  weight_scale=layer.weight_scale,
-                                 input_scale=layer.input_scale)
+                                 input_scale=layer.input_scale,
+                                 bias=bias)

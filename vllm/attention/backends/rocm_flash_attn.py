@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonMetadataBuilder
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -27,6 +28,10 @@ class ROCmFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return ROCmFlashAttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["ROCmFlashAttentionMetadataBuilder"]:
+        return ROCmFlashAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -166,6 +171,12 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self._cached_decode_metadata
 
 
+class ROCmFlashAttentionMetadataBuilder(
+        CommonMetadataBuilder[ROCmFlashAttentionMetadata]):
+
+    _metadata_cls = ROCmFlashAttentionMetadata
+
+
 def _make_alibi_bias(alibi_slopes: torch.Tensor,
                      dtype: torch.dtype,
                      seq_lens: Optional[List[int]],
@@ -264,6 +275,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 triton_attention)
             self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
+            if self.sliding_window != (-1, -1):
+                logger.warning("ROCm Triton FA does not currently support "
+                               "sliding window attention. If using half "
+                               "precision, please try using the ROCm CK "
+                               "FA backend instead by setting the env var "
+                               "`VLLM_USE_TRITON_FLASH_ATTN=0`")
         else:
             # if not using triton, navi3x/navi21/navi10 do not use flash-attn
             # either
@@ -296,7 +313,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -336,7 +354,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -421,6 +440,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         max_seqlen_k=prefill_meta.max_prefill_seq_len,
                         softmax_scale=self.scale,
                         causal=True,
+                        window_size=self.sliding_window,
+                        alibi_slopes=self.alibi_slopes,
                     )
 
                 # common code for prefill
@@ -456,7 +477,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         # Reshape the output tensor.
