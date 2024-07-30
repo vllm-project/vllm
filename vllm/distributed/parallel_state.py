@@ -789,6 +789,10 @@ def get_sp_group(rank: int) -> GroupCoordinator:
     )
     assert _SP[rank] is not None, (
         f"sequence parallel group of rank {rank} is not initialized")
+    sp = _SP[rank]
+    assert sp is not None, (
+        f"sequence parallel group of rank {rank} is not initialized"
+    )
     return _SP[rank]
 
 
