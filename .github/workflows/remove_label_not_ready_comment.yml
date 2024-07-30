@@ -1,0 +1,23 @@
+name: Remove ready Label on notready Comment
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  add-ready-label:
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request && contains(github.event.comment.body, '/notready')
+    steps:
+        -   name: Remove ready label
+            uses: actions/github-script@v5
+            with:
+                script: |
+                    github.rest.issues.removeLabel({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        name: 'ready'
+                    })
+            env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
