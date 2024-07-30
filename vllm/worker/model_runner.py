@@ -725,8 +725,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             num_decode_tokens += num_decode_tokens_long
             output_reshape_index.extend(output_reshape_index_long)
             for i in range(sequence_parallel_size):
-                max_remote_decode_seq_len[i] = max(seq_lens_remote[i], 0)
-                num_remote_decode_tokens[i] = len(seq_lens_remote[i])
+                item_max_seq_len = max(seq_lens_remote[i], 0)
+                item_len = len(seq_lens_remote[i])
+                max_remote_decode_seq_len.append(item_max_seq_len)
+                num_remote_decode_tokens.append(item_len)
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)

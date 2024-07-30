@@ -171,7 +171,7 @@ class WorkerInput:
         WorkerInput.
         """
         return cls(
-            chunk_to_migrate=tensor_dict.pop("chunk_to_migrate"),
+            superblock_to_migrate=tensor_dict.pop("superblock_to_migrate"),
         )
 
     def as_broadcastable_sp_tensor_dict(
@@ -180,7 +180,7 @@ class WorkerInput:
         Extract broadcastable fields.
         """
         tensor_dict = {
-            "chunk_to_migrate": self.chunk_to_migrate,
+            "superblock_to_migrate": self.superblock_to_migrate,
         }
 
         return tensor_dict
