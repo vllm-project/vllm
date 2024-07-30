@@ -11,6 +11,21 @@ except ModuleNotFoundError:
     from vllm.attention.backends.rocm_flash_attn import (
         ROCmFlashAttentionMetadata as FlashAttentionMetadata)
 
+# (bong-furiosa)
+# Resolve the issue of the wrapper variable
+# not being defined during the execution of
+# FlashInfer backend Speculative Decoding.
+try:
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+except ImportError:
+    BatchDecodeWithPagedKVCacheWrapper = None
+    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
+    BatchPrefillWithPagedKVCacheWrapper = None
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
+
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -285,6 +300,41 @@ class TP1DraftModelRunner(ModelRunner):
                 self.set_active_prompt_adapters(
                     model_input.prompt_adapter_requests,
                     model_input.prompt_adapter_mapping)
+
+        # (bong-furiosa)
+        # Resolve the issue of the wrapper variable
+        # not being defined during the execution of
+        # FlashInfer backend Speculative Decoding.
+        if self.attn_backend.get_name() == "flashinfer":
+            assert model_input.attn_metadata is not None
+            assert model_input.input_tokens is not None
+            if self.flashinfer_decode_workspace_buffer is None:
+                self.flashinfer_decode_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_decode_wrapper = \
+                    BatchDecodeWithPagedKVCacheWrapper(
+                    self.flashinfer_decode_workspace_buffer, "NHD")
+                self.flashinfer_prefill_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_prefill_wrapper = \
+                    BatchPrefillWithPagedKVCacheWrapper(
+                    self.flashinfer_prefill_workspace_buffer, "NHD")
+
+            model_input.attn_metadata.prefill_wrapper = \
+                self.flashinfer_prefill_wrapper
+            if model_input.attn_metadata.use_cuda_graph:
+                batch_size = model_input.input_tokens.shape[0]
+                model_input.attn_metadata.decode_wrapper = self.graph_runners[
+                    model_input.
+                    virtual_engine][batch_size].flashinfer_decode_wrapper
+            else:
+                model_input.attn_metadata.decode_wrapper = \
+                    self.flashinfer_decode_wrapper
+            model_input.attn_metadata.begin_forward()
 
         # Detect exec mode
         assert model_input.attn_metadata is not None
