@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
-from vllm.executor.ray_utils import RayWorkerWrapper, ray
+from vllm.executor.ray_utils import ray, RayWorkerWrapper
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,

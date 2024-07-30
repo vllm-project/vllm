@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
-from utils import filter_tensor, reshape_q
+from vllm.utils import filter_tensor, reshape_q
 
 logger = init_logger(__name__)
 

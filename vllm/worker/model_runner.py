@@ -3,8 +3,8 @@ import gc
 import time
 import warnings
 from collections import defaultdict
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+from typing import (Any, Dict, List, Optional, Set, Tuple, Type,
+                    TYPE_CHECKING, TypeVar, Union)
 
 import numpy as np
 import torch
@@ -42,7 +42,8 @@ from vllm.utils import (CudaMemoryProfiler,
                         get_kv_cache_torch_dtype,
                         is_hip,
                         is_pin_memory_available,
-                        make_tensor_with_pad, reshape_list)
+                        make_tensor_with_pad, 
+                        reshape_list)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,

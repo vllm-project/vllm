@@ -14,6 +14,7 @@ from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
                         update_environment_variables)
 from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerInputBase)
+
 logger = init_logger(__name__)
 
 
