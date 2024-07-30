@@ -14,7 +14,7 @@ from typing_extensions import TypeAlias
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import JSONTree, map_json
+from vllm.utils import JSONTree, json_map_leaves
 
 logger = init_logger(__name__)
 
@@ -99,8 +99,8 @@ class MultiModalInputs(_MultiModalInputsBase):
         *,
         device: torch.types.Device,
     ) -> Dict[str, BatchedTensors]:
-        return map_json(lambda x: x.to(device, non_blocking=True),
-                        batched_inputs)
+        return json_map_leaves(lambda x: x.to(device, non_blocking=True),
+                               batched_inputs)
 
 
 class MultiModalDataBuiltins(TypedDict, total=False):

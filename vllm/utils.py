@@ -716,7 +716,7 @@ JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
 
 
 @overload
-def map_json(
+def json_map_leaves(
     func: Callable[[T], U],
     value: Dict[str, JSONTree[T]],
 ) -> Dict[str, JSONTree[U]]:
@@ -724,7 +724,7 @@ def map_json(
 
 
 @overload
-def map_json(
+def json_map_leaves(
     func: Callable[[T], U],
     value: List[JSONTree[T]],
 ) -> List[JSONTree[U]]:
@@ -732,7 +732,7 @@ def map_json(
 
 
 @overload
-def map_json(
+def json_map_leaves(
     func: Callable[[T], U],
     value: Tuple[JSONTree[T], ...],
 ) -> Tuple[JSONTree[U], ...]:
@@ -740,20 +740,20 @@ def map_json(
 
 
 @overload
-def map_json(
+def json_map_leaves(
     func: Callable[[T], U],
     value: JSONTree[T],
 ) -> JSONTree[U]:
     ...
 
 
-def map_json(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
+def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
     if isinstance(value, dict):
-        return {k: map_json(func, v) for k, v in value.items()}
+        return {k: json_map_leaves(func, v) for k, v in value.items()}
     elif isinstance(value, list):
-        return [map_json(func, v) for v in value]
+        return [json_map_leaves(func, v) for v in value]
     elif isinstance(value, tuple):
-        return tuple(map_json(func, v) for v in value)
+        return tuple(json_map_leaves(func, v) for v in value)
     else:
         return func(value)
 
