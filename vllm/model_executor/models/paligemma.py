@@ -32,6 +32,13 @@ _KEYS_TO_MODIFY_MAPPING = {
 }
 
 
+def get_max_paligemma_image_tokens(ctx: InputContext):
+    hf_config = ctx.get_hf_config(PaliGemmaConfig)
+    vision_config = hf_config.vision_config
+
+    return get_max_siglip_image_tokens(vision_config)
+
+
 def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
@@ -113,7 +120,7 @@ PaliGemmaImageInputs = PaliGemmaImagePixelInputs
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_siglip_image_tokens)
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_paligemma_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_paligemma)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_paligemma)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
@@ -172,30 +179,52 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
             data=self._validate_pixel_values(pixel_values),
         )
 
-    def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
-                                  pixel_values: torch.Tensor) -> torch.Tensor:
+    def _image_pixels_to_features(
+        self,
+        vision_tower: SiglipVisionModel,
+        pixel_values: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
 
         target_dtype = vision_tower.get_input_embeddings().weight.dtype
         image_outputs = vision_tower(pixel_values.to(dtype=target_dtype),
-                                     output_hidden_states=True)
+                                     kv_caches, attn_metadata)
 
-        selected_image_features = image_outputs.last_hidden_state
+        selected_image_features = image_outputs[0]
 
         return selected_image_features
 
     def _process_image_pixels(
-            self, inputs: PaliGemmaImagePixelInputs) -> torch.Tensor:
+        self,
+        inputs: PaliGemmaImagePixelInputs,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
         assert self.vision_tower is not None
 
         pixel_values = inputs["data"]
 
-        return self._image_pixels_to_features(self.vision_tower, pixel_values)
+        return self._image_pixels_to_features(
+            self.vision_tower,
+            pixel_values,
+            kv_caches,
+            attn_metadata,
+        )
 
     def _process_image_input(
-            self, image_input: PaliGemmaImageInputs) -> torch.Tensor:
+        self,
+        image_input: PaliGemmaImageInputs,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
 
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input)
+        image_features = self._process_image_pixels(
+            image_input,
+            kv_caches,
+            attn_metadata,
+        )
 
         return self.multi_modal_projector(image_features)
 
@@ -210,7 +239,11 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         parsed_image_input = self._parse_and_validate_image_input(**kwargs)
 
         if parsed_image_input is not None:
-            vision_embeddings = self._process_image_input(parsed_image_input)
+            vision_embeddings = self._process_image_input(
+                parsed_image_input,
+                kv_caches,
+                attn_metadata,
+            )
             # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
             vision_embeddings = vision_embeddings * (self.config.hidden_size**
                                                      -0.5)
@@ -267,33 +300,26 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
-            if "vision" in name:
-                if self.vision_tower is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
-                    use_default_weight_loading = True
+            for (param_name, shard_name, shard_id) in stacked_params_mapping:
+                if shard_name not in name:
+                    continue
+                name = name.replace(shard_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
             else:
-                for (param_name, shard_name,
-                     shard_id) in stacked_params_mapping:
-                    if shard_name not in name:
-                        continue
-                    name = name.replace(shard_name, param_name)
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
-                    # lm_head is not used in vllm as it is tied with
-                    # embed_token. To prevent errors, skip loading
-                    # lm_head.weight.
-                    if "lm_head.weight" in name:
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
+                # lm_head is not used in vllm as it is tied with
+                # embed_token. To prevent errors, skip loading
+                # lm_head.weight.
+                if "lm_head.weight" in name:
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                     use_default_weight_loading = True
 
             if use_default_weight_loading:
