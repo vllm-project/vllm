@@ -320,12 +320,50 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                               num_cpu_blocks=num_cpu_blocks)
 
     @torch.inference_mode()
+    def _execute_model_spmd(self, execute_model_req: ExecuteModelRequest, ) -> List[SamplerOutput]:
+        # NOTE(cade): Performance: this separates the API server and scheduler from rank0 process,
+        # which significantly reduces variance in step time due to less gil interrupts.
+        # However, currently this still invokes the NCCL control plane for the scoring model,
+        # because not all ranks  have perfect information (don't have the proposal tokens).
+        # This can be fixed by either communicating the proposal tokens to other ranks,
+        # or by running the draft model + sampling in all ranks. The latter is preferred
+        # for performance reasons.
+
+        # Workaround for other ranks not running sampler.
+        if self.rank != self._driver_rank:
+            self._run_non_driver_rank_spmd(execute_model_req.num_lookahead_slots)
+            return []
+
+        # TODO how to handle shutdown? need to signal to workers that we're done.
+        # in non-spmd case this is None execute_model_req
+        # We may not need to handle this if it's handled by ray
+
+        self._track_finished_requests(execute_model_req)
+
+        disable_all_speculation = self._should_disable_all_speculation(
+            execute_model_req)
+        num_lookahead_slots = execute_model_req.num_lookahead_slots
+
+        self._maybe_disable_speculative_tokens(
+            disable_all_speculation, execute_model_req.seq_group_metadata_list)
+
+        if num_lookahead_slots == 0 or len(
+                execute_model_req.seq_group_metadata_list
+        ) == 0 or disable_all_speculation:
+            return self._run_no_spec(execute_model_req,
+                                     skip_proposer=disable_all_speculation)
+
+        return self._run_speculative_decoding_step(execute_model_req,
+                                                   num_lookahead_slots)
+
+    @torch.inference_mode()
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
+        assert False, "expected not to enter this path"
         if self.rank != self._driver_rank:
             self._run_non_driver_rank()
             return []
@@ -495,6 +533,30 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         if not data:
             return False
         num_lookahead_slots = data["num_lookahead_slots"]
+
+        # Even if num_lookahead_slots is zero, we want to run the proposer model
+        # as it may have KV.
+        #
+        # We run the proposer once per lookahead slot. In the future we should
+        # delegate how many times it runs to the proposer.
+        for _ in range(max(num_lookahead_slots, 1)):
+            self.proposer_worker.execute_model()
+
+        self.scorer_worker.execute_model()
+        return True
+
+    def _run_non_driver_rank_spmd(self, num_lookahead_slots: int) -> bool:
+        """Run proposer and verifier model in non-driver workers. This is used
+        for both speculation cases (num_lookahead_slots>0) and non-speculation
+        cases (e.g. prefill).
+        Returns True iff there are remaining sequences to process.
+        """
+        assert self.rank != self._driver_rank
+
+        #data = broadcast_tensor_dict(src=self._driver_rank)
+        #if not data:
+        #    return False
+        #num_lookahead_slots = data["num_lookahead_slots"]
 
         # Even if num_lookahead_slots is zero, we want to run the proposer model
         # as it may have KV.
