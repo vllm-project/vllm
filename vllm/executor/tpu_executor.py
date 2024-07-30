@@ -85,8 +85,8 @@ class TPUExecutor(ExecutorBase):
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        num_gpu_blocks, num_cpu_blocks=self.driver_worker.determine_num_available_blocks()
-        return num_gpu_blocks,num_cpu_blocks,0
+        num_gpu, num_cpu = self.driver_worker.determine_num_available_blocks()
+        return num_gpu, num_cpu, 0
 
     def execute_model(
         self,
