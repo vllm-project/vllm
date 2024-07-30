@@ -46,15 +46,12 @@ def gpu_loading_context(module: torch.nn.Module):
     # TODO: change this
     target_device = torch.device("cuda")
     original_device_states: Dict[str, torch.device] = {}
-    moved_param_names: set = set()
-    original_param_names = set(dict(module.named_parameters()).keys())
 
     # Store original device states and move parameters to GPU if they're on CPU
     for name, param in module.named_parameters():
-        original_device_states[name] = param.device
         if param.device.type == 'cpu':
+            original_device_states[name] = param.device
             param.data = param.data.to(target_device)
-            moved_param_names.add(name)
         # Parameters already on CUDA devices are not touched
 
     try:
@@ -63,7 +60,7 @@ def gpu_loading_context(module: torch.nn.Module):
     finally:
         # Restore parameters to their original devices, ignoring new parameters
         for name, param in module.named_parameters():
-            if name in original_param_names and name in moved_param_names:
+            if name in original_device_states:
                 param.data = param.data.to(original_device_states[name])
         # New parameters or parameters already on CUDA are untouched
 
