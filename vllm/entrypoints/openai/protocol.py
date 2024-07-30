@@ -11,7 +11,7 @@ from typing_extensions import Annotated
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.utils import random_uuid
 
 
@@ -215,15 +215,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: end-chat-completion-extra-params
 
-    def to_sampling_params(self,
-                           tokenizer: PreTrainedTokenizer) -> SamplingParams:
+    def to_sampling_params(
+        self, tokenizer: PreTrainedTokenizer,
+        guided_decode_logits_processor: Optional[LogitsProcessor]
+    ) -> SamplingParams:
         # We now allow logprobs being true without top_logrobs.
-
         logits_processors = get_logits_processors(
             logit_bias=self.logit_bias,
             allowed_token_ids=None,
             tokenizer=tokenizer,
         )
+        if guided_decode_logits_processor:
+            logits_processors.append(guided_decode_logits_processor)
 
         return SamplingParams(
             n=self.n,
@@ -395,7 +398,10 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
-    def to_sampling_params(self, tokenizer: PreTrainedTokenizer):
+    def to_sampling_params(
+        self, tokenizer: PreTrainedTokenizer,
+        guided_decode_logits_processor: Optional[LogitsProcessor]
+    ) -> SamplingParams:
         echo_without_generation = self.echo and self.max_tokens == 0
 
         logits_processors = get_logits_processors(
@@ -403,6 +409,8 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             tokenizer=tokenizer,
         )
+        if guided_decode_logits_processor:
+            logits_processors.append(guided_decode_logits_processor)
 
         return SamplingParams(
             n=self.n,

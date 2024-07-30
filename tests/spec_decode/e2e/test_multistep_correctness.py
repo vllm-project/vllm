@@ -35,6 +35,7 @@ greedy-equality tests for those batch sizes/prompts.
 """
 
 from itertools import cycle
+from typing import Optional
 
 import pytest
 from transformers import AutoTokenizer
@@ -72,14 +73,15 @@ from .conftest import (get_output_from_llm_generator,
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("output_len", [32, None])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_e2e_with_detokenization(test_llm_generator,
-                                             batch_size: int):
+                                             batch_size: int,
+                                             output_len: Optional[int]):
     """Run generation with speculative decoding on a batch. Verify the engine
     generates the correct number of tokens (via ignore_eos=True), and that the
     detokenization matches HF transformers.
     """
-    output_len = 32
     temperature = 0.0
 
     prompts = [
