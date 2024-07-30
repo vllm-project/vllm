@@ -203,7 +203,8 @@ void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
 #endif
       mat.data_ptr<int>(),
 #ifndef USE_ROCM
-      (half2*)mul.data<at::Half>(), (__half*)lookup_table.data_ptr<at::Half>(),
+      (half2*)mul.data_ptr<at::Half>(),
+      (__half*)lookup_table.data_ptr<at::Half>(),
 #else
       (float2*)mul.data_ptr<float>(),
       (__half*)lookup_table.data_ptr<at::Half>(),
