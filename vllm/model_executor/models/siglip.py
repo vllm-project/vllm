@@ -273,13 +273,16 @@ class SiglipAttention(nn.Module):
             # (e.g. google/siglip-so400m-patch14-384 has hidden_size=1152
             #  with num_attention_heads=16, which is not supported)
             # If the backend is not supported, fall back to the default
-            if self.qkv_proj.params_dtype in [torch.float16, torch.bfloat16]:
-                # Flash attention only supports float16 and bfloat16
-                self.attn_fn = self._flash_attention_forward
-                self.use_paged_attn = False
-            else:
-                self.attn_fn = self._basic_attention_forward
-                self.use_paged_attn = False
+            # TODO(ChristopherCho): flash_attn_varlen_func is not working properly
+            # if self.qkv_proj.params_dtype in [torch.float16, torch.bfloat16]:
+            #     # Flash attention only supports float16 and bfloat16
+            #     self.attn_fn = self._flash_attention_forward
+            #     self.use_paged_attn = False
+            # else:
+            #     self.attn_fn = self._basic_attention_forward
+            #     self.use_paged_attn = False
+            self.attn_fn = self._basic_attention_forward
+            self.use_paged_attn = False
 
     def forward(
         self,
@@ -563,8 +566,11 @@ class SiglipVisionTransformer(nn.Module):
         )
         self.post_layernorm = nn.LayerNorm(embed_dim,
                                            eps=config.layer_norm_eps)
-        self.head = SiglipMultiheadAttentionPoolingHead(
-            config=config, quant_config=quant_config)
+        self.use_head = (True if not hasattr(config, "vision_use_head") else
+                         config.vision_use_head)
+        if self.use_head:
+            self.head = SiglipMultiheadAttentionPoolingHead(
+                config=config, quant_config=quant_config)
 
     def forward(
         self,
@@ -591,7 +597,7 @@ class SiglipVisionTransformer(nn.Module):
         last_hidden_state = encoder_outputs[0]
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
-        pooled_output = self.head(last_hidden_state)
+        pooled_output = self.head(last_hidden_state) if self.use_head else None
 
         return (last_hidden_state, pooled_output) + encoder_outputs[1:]
 
@@ -645,10 +651,12 @@ class SiglipVisionModel(nn.Module):
             quant_config,
         )
 
+    def get_input_embeddings(self) -> nn.Module:
+        return self.vision_model.embeddings.patch_embedding
+
     def forward(
             self,
             pixel_values,
-            positions: torch.Tensor,
             kv_caches: List[torch.Tensor] = None,
             attn_metadata: AttentionMetadata = None,
             interpolate_pos_encoding: Optional[bool] = False,  # added by eric
