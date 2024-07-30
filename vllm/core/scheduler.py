@@ -967,6 +967,7 @@ class Scheduler:
         )
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
+        # TODO: add the code for block to migrate
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
