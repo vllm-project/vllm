@@ -62,7 +62,7 @@ class OpenVINOExecutor(ExecutorBase):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int,
-                         num_remote_gpu_blocks: int) -> None:
+                         num_remote_gpu_blocks: int=0) -> None:
         """Initialize the KV cache by invoking the underlying worker."""
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors
