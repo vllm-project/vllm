@@ -145,23 +145,28 @@ class SiglipVisionConfig(PretrainedConfig):
         self.hidden_act = hidden_act
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str,
+                                                                  os.PathLike],
+                        **kwargs) -> "PretrainedConfig":
         cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_dict, kwargs = cls.get_config_dict(
+            pretrained_model_name_or_path, **kwargs)
 
         # get the vision config dict if we are loading from SiglipConfig
         if config_dict.get("model_type") == "siglip":
             config_dict = config_dict["vision_config"]
 
-        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
+        if "model_type" in config_dict and hasattr(
+                cls,
+                "model_type") and config_dict["model_type"] != cls.model_type:
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
                 f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
             )
 
         return cls.from_dict(config_dict, **kwargs)
-        
+
 
 _CHECKPOINT_FOR_DOC = "google/siglip-base-patch16-224"
 
@@ -180,7 +185,8 @@ def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0))
+    cu_seqlens = F.pad(
+        torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0))
     return (
         indices,
         cu_seqlens,
@@ -237,9 +243,11 @@ def _trunc_normal_(tensor, mean, std, a, b):
         tensor.clamp_(min=a, max=b)
 
 
-def trunc_normal_tf_(
-    tensor: torch.Tensor, mean: float = 0.0, std: float = 1.0, a: float = -2.0, b: float = 2.0
-) -> torch.Tensor:
+def trunc_normal_tf_(tensor: torch.Tensor,
+                     mean: float = 0.0,
+                     std: float = 1.0,
+                     a: float = -2.0,
+                     b: float = 2.0) -> torch.Tensor:
     """Fills the input Tensor with values drawn from a truncated
     normal distribution. The values are effectively drawn from the
     normal distribution :math:`\\mathcal{N}(\text{mean}, \text{std}^2)`
@@ -321,6 +329,7 @@ class SiglipVisionModelOutput(ModelOutput):
 
 
 class SiglipVisionEmbeddings(nn.Module):
+
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.config = config
@@ -339,9 +348,13 @@ class SiglipVisionEmbeddings(nn.Module):
         self.num_patches_per_side = self.image_size // self.patch_size
         self.num_patches = self.num_patches_per_side**2
         self.num_positions = self.num_patches
-        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+        self.position_embedding = nn.Embedding(self.num_positions,
+                                               self.embed_dim)
 
-    def forward(self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor, tgt_sizes: Optional[torch.IntTensor]=None) -> torch.Tensor:
+    def forward(self,
+                pixel_values: torch.FloatTensor,
+                patch_attention_mask: torch.BoolTensor,
+                tgt_sizes: Optional[torch.IntTensor] = None) -> torch.Tensor:
         batch_size = pixel_values.size(0)
 
         patch_embeds = self.patch_embedding(pixel_values)
@@ -349,7 +362,8 @@ class SiglipVisionEmbeddings(nn.Module):
 
         max_im_h, max_im_w = pixel_values.size(2), pixel_values.size(3)
         max_nb_patches_h, max_nb_patches_w = max_im_h // self.patch_size, max_im_w // self.patch_size
-        boundaries = torch.arange(1 / self.num_patches_per_side, 1.0, 1 / self.num_patches_per_side)
+        boundaries = torch.arange(1 / self.num_patches_per_side, 1.0,
+                                  1 / self.num_patches_per_side)
         position_ids = torch.full(
             size=(
                 batch_size,
@@ -369,10 +383,15 @@ class SiglipVisionEmbeddings(nn.Module):
             fractional_coords_h = torch.arange(0, 1 - 1e-6, 1 / nb_patches_h)
             fractional_coords_w = torch.arange(0, 1 - 1e-6, 1 / nb_patches_w)
 
-            bucket_coords_h = torch.bucketize(fractional_coords_h, boundaries, right=True)
-            bucket_coords_w = torch.bucketize(fractional_coords_w, boundaries, right=True)
+            bucket_coords_h = torch.bucketize(fractional_coords_h,
+                                              boundaries,
+                                              right=True)
+            bucket_coords_w = torch.bucketize(fractional_coords_w,
+                                              boundaries,
+                                              right=True)
 
-            pos_ids = (bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w).flatten()
+            pos_ids = (bucket_coords_h[:, None] * self.num_patches_per_side +
+                       bucket_coords_w).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
 
         position_ids = position_ids.to(self.position_embedding.weight.device)
@@ -394,8 +413,7 @@ class SiglipAttention(nn.Module):
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
-            )
+                f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
 
@@ -409,7 +427,8 @@ class SiglipAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
 
         batch_size, q_len, _ = hidden_states.size()
@@ -418,18 +437,22 @@ class SiglipAttention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(batch_size, q_len, self.num_heads,
+                                         self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, q_len, self.num_heads,
+                                     self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, q_len, self.num_heads,
+                                         self.head_dim).transpose(1, 2)
 
         k_v_seq_len = key_states.shape[-2]
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
+        attn_weights = torch.matmul(query_states, key_states.transpose(
+            2, 3)) * self.scale
 
-        if attn_weights.size() != (batch_size, self.num_heads, q_len, k_v_seq_len):
+        if attn_weights.size() != (batch_size, self.num_heads, q_len,
+                                   k_v_seq_len):
             raise ValueError(
                 f"Attention weights should be of size {(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
+                f" {attn_weights.size()}")
 
         if attention_mask is not None:
             if attention_mask.size() != (batch_size, 1, q_len, k_v_seq_len):
@@ -439,15 +462,20 @@ class SiglipAttention(nn.Module):
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_weights = nn.functional.softmax(attn_weights,
+                                             dim=-1,
+                                             dtype=torch.float32).to(
+                                                 query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights,
+                                             p=self.dropout,
+                                             training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
 
-        if attn_output.size() != (batch_size, self.num_heads, q_len, self.head_dim):
+        if attn_output.size() != (batch_size, self.num_heads, q_len,
+                                  self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(batch_size, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
+                f" {attn_output.size()}")
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
@@ -477,7 +505,8 @@ class SiglipFlashAttention2(SiglipAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[Tuple[torch.Tensor]]]:
         output_attentions = False
 
         bsz, q_len, _ = hidden_states.size()
@@ -489,13 +518,17 @@ class SiglipFlashAttention2(SiglipAttention):
         # Flash attention requires the input to have the shape
         # batch_size x seq_length x head_dim x hidden_dim
         # therefore we just need to keep the original shape
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len, self.num_heads,
+                                         self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_heads,
+                                     self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_heads,
+                                         self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += past_key_value.get_usable_length(
+                kv_seq_len, self.layer_idx)
         # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
@@ -530,18 +563,21 @@ class SiglipFlashAttention2(SiglipAttention):
             logger.warning_once(
                 "The input hidden states seems to be silently casted in float32, this might be related to the fact"
                 " you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-                f" {target_dtype}."
-            )
+                f" {target_dtype}.")
 
             query_states = query_states.to(target_dtype)
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
-        attn_output = self._flash_attention_forward(
-            query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate
-        )
+        attn_output = self._flash_attention_forward(query_states,
+                                                    key_states,
+                                                    value_states,
+                                                    attention_mask,
+                                                    q_len,
+                                                    dropout=dropout_rate)
 
-        attn_output = attn_output.reshape(bsz, q_len, self.embed_dim).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len,
+                                          self.embed_dim).contiguous()
         attn_output = self.out_proj(attn_output)
 
         if not output_attentions:
@@ -549,9 +585,14 @@ class SiglipFlashAttention2(SiglipAttention):
 
         return attn_output, attn_weights
 
-    def _flash_attention_forward(
-        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
-    ):
+    def _flash_attention_forward(self,
+                                 query_states,
+                                 key_states,
+                                 value_states,
+                                 attention_mask,
+                                 query_length,
+                                 dropout=0.0,
+                                 softmax_scale=None):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
         first unpad the input, then computes the attention scores and pad the final attention scores.
@@ -578,8 +619,8 @@ class SiglipFlashAttention2(SiglipAttention):
         if attention_mask is not None:
             batch_size = query_states.shape[0]
             query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
-                query_states, key_states, value_states, attention_mask, query_length
-            )
+                query_states, key_states, value_states, attention_mask,
+                query_length)
 
             cu_seqlens_q, cu_seqlens_k = cu_seq_lens
             max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
@@ -597,28 +638,34 @@ class SiglipFlashAttention2(SiglipAttention):
                 causal=causal,
             )
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+            attn_output = pad_input(attn_output_unpad, indices_q, batch_size,
+                                    query_length)
         else:
-            attn_output = flash_attn_func(
-                query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal
-            )
+            attn_output = flash_attn_func(query_states,
+                                          key_states,
+                                          value_states,
+                                          dropout,
+                                          softmax_scale=softmax_scale,
+                                          causal=causal)
 
         return attn_output
 
-    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
-        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask,
+                    query_length):
+        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(
+            attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
-            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
-        )
+            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads,
+                              head_dim), indices_k)
         value_layer = index_first_axis(
-            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
-        )
+            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads,
+                                head_dim), indices_k)
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
-                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k
-            )
+                query_layer.reshape(batch_size * kv_seq_len, self.num_heads,
+                                    head_dim), indices_k)
             cu_seqlens_q = cu_seqlens_k
             max_seqlen_in_batch_q = max_seqlen_in_batch_k
             indices_q = indices_k
@@ -632,7 +679,8 @@ class SiglipFlashAttention2(SiglipAttention):
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -query_length:]
-            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(
+                query_layer, attention_mask)
 
         return (
             query_layer,
@@ -646,6 +694,7 @@ class SiglipFlashAttention2(SiglipAttention):
 
 # Copied from transformers.models.clip.modeling_clip.CLIPMLP with CLIP->Siglip
 class SiglipMLP(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -662,18 +711,19 @@ class SiglipMLP(nn.Module):
 
 # Copied from transformers.models.clip.modeling_clip.CLIPEncoderLayer with CLIP->Siglip
 class SiglipEncoderLayer(nn.Module):
+
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
-        self.self_attn = (
-            SiglipAttention(config)
-            if not self._use_flash_attention_2
-            else SiglipFlashAttention2(config)
-        )
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.self_attn = (SiglipAttention(config)
+                          if not self._use_flash_attention_2 else
+                          SiglipFlashAttention2(config))
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim,
+                                        eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(config)
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim,
+                                        eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -706,10 +756,10 @@ class SiglipEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
+        outputs = (hidden_states, )
 
         if output_attentions:
-            outputs += (attn_weights,)
+            outputs += (attn_weights, )
 
         return outputs
 
@@ -729,7 +779,8 @@ class SiglipPreTrainedModel(PreTrainedModel):
 
         if isinstance(module, SiglipVisionEmbeddings):
             width = self.config.hidden_size
-            nn.init.normal_(module.position_embedding.weight, std=1 / np.sqrt(width))
+            nn.init.normal_(module.position_embedding.weight,
+                            std=1 / np.sqrt(width))
         elif isinstance(module, nn.Embedding):
             default_flax_embed_init(module.weight)
         elif isinstance(module, SiglipAttention):
@@ -768,7 +819,6 @@ SIGLIP_START_DOCSTRING = r"""
             configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
 
-
 SIGLIP_VISION_INPUTS_DOCSTRING = r"""
     Args:
         pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
@@ -797,7 +847,9 @@ class SiglipEncoder(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList([SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)
+        ])
         self.gradient_checkpointing = False
 
     # Ignore copy
@@ -830,9 +882,9 @@ class SiglipEncoder(nn.Module):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = (output_hidden_states
+                                if output_hidden_states is not None else
+                                self.config.output_hidden_states)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_states = () if output_hidden_states else None
@@ -841,7 +893,7 @@ class SiglipEncoder(nn.Module):
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
             if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
+                encoder_states = encoder_states + (hidden_states, )
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     encoder_layer.__call__,
@@ -859,21 +911,23 @@ class SiglipEncoder(nn.Module):
             hidden_states = layer_outputs[0]
 
             if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
+                all_attentions = all_attentions + (layer_outputs[1], )
 
         if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
+            encoder_states = encoder_states + (hidden_states, )
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
-        )
+            return tuple(
+                v for v in [hidden_states, encoder_states, all_attentions]
+                if v is not None)
+        return BaseModelOutput(last_hidden_state=hidden_states,
+                               hidden_states=encoder_states,
+                               attentions=all_attentions)
+
 
 @add_start_docstrings(
     """The vision model from SigLIP without any head or projection on top.""",
-    SIGLIP_START_DOCSTRING
-)
+    SIGLIP_START_DOCSTRING)
 class SiglipVisionTransformer(SiglipPreTrainedModel):
     config_class = SiglipVisionConfig
     main_input_name = "pixel_values"
@@ -886,7 +940,8 @@ class SiglipVisionTransformer(SiglipPreTrainedModel):
 
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(config)
-        self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.post_layernorm = nn.LayerNorm(embed_dim,
+                                           eps=config.layer_norm_eps)
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         # Initialize weights and apply final processing
@@ -896,7 +951,8 @@ class SiglipVisionTransformer(SiglipPreTrainedModel):
         return self.embeddings.patch_embedding
 
     @add_start_docstrings_to_model_forward(SIGLIP_VISION_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=SiglipVisionConfig)
+    @replace_return_docstrings(output_type=BaseModelOutputWithPooling,
+                               config_class=SiglipVisionConfig)
     def forward(
         self,
         pixel_values,
@@ -910,9 +966,9 @@ class SiglipVisionTransformer(SiglipPreTrainedModel):
         Returns:
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = (output_hidden_states
+                                if output_hidden_states is not None else
+                                self.config.output_hidden_states)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = pixel_values.size(0)
@@ -927,20 +983,22 @@ class SiglipVisionTransformer(SiglipPreTrainedModel):
                 device=pixel_values.device,
             )
 
-        hidden_states = self.embeddings(pixel_values=pixel_values, patch_attention_mask=patch_attention_mask, tgt_sizes=tgt_sizes)
+        hidden_states = self.embeddings(
+            pixel_values=pixel_values,
+            patch_attention_mask=patch_attention_mask,
+            tgt_sizes=tgt_sizes)
 
         patch_attention_mask = patch_attention_mask.view(batch_size, -1)
         # The call to `_upad_input` in `_flash_attention_forward` is expensive
         # So when the `patch_attention_mask` is full of 1s (i.e. attending to the whole sequence),
         # avoiding passing the attention_mask, which is equivalent to attending to the full sequence
         if not torch.any(~patch_attention_mask):
-            attention_mask=None
+            attention_mask = None
         else:
-            attention_mask = (
-                _prepare_4d_attention_mask(patch_attention_mask, hidden_states.dtype)
-                if not self._use_flash_attention_2
-                else patch_attention_mask
-            )
+            attention_mask = (_prepare_4d_attention_mask(
+                patch_attention_mask, hidden_states.dtype)
+                              if not self._use_flash_attention_2 else
+                              patch_attention_mask)
 
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
@@ -1411,20 +1469,21 @@ class MiniCPMV(nn.Module, SupportsVision):
                 patch_attention_mask=patch_attn_mask).last_hidden_state
             vision_embedding = self.resampler(vision_embedding, tgt_sizes)
         else:
-            vision_embedding = self.vpm(
-                pixel_values.type(dtype),
-                patch_attention_mask=patch_attn_mask,
-                tgt_sizes=tgt_sizes).last_hidden_state
+            vision_embedding = self.vpm(pixel_values.type(dtype),
+                                        patch_attention_mask=patch_attn_mask,
+                                        tgt_sizes=tgt_sizes).last_hidden_state
 
     def get_image_bounds(self, input_ids):
         tokenizer = cached_get_tokenizer(self.config._name_or_path,
                                          trust_remote_code=True)
         if not hasattr(tokenizer, "slice_start_id"):
             start_cond = input_ids == tokenizer.im_start_id
-            end_cond = input_ids == tokenizer.im_end_id        
+            end_cond = input_ids == tokenizer.im_end_id
         else:
-            start_cond = (input_ids == tokenizer.im_start_id) | (input_ids == tokenizer.slice_start_id)
-            end_cond = (input_ids == tokenizer.im_end_id) | (input_ids == tokenizer.slice_end_id)
+            start_cond = (input_ids == tokenizer.im_start_id) | (
+                input_ids == tokenizer.slice_start_id)
+            end_cond = (input_ids == tokenizer.im_end_id) | (
+                input_ids == tokenizer.slice_end_id)
 
         image_start_tokens = torch.where(start_cond)[0]
         image_start_tokens += 1
@@ -1466,23 +1525,24 @@ class MiniCPMV(nn.Module, SupportsVision):
                     all_pixel_values = all_pixel_values.permute(
                         0, 2, 1).reshape(B, 3, -1, L)
                     patch_attn_mask = torch.zeros((B, 1, max_patches),
-                                                dtype=torch.bool,
-                                                device=device)
+                                                  dtype=torch.bool,
+                                                  device=device)
                     if self.version == 2.5:
                         for i in range(B):
                             patch_attn_mask[i, :tgt_sizes[i][0] *
                                             tgt_sizes[i][1]] = True
                         vision_embedding = self.vpm(
                             all_pixel_values.type(dtype),
-                            patch_attention_mask=patch_attn_mask).last_hidden_state
+                            patch_attention_mask=patch_attn_mask
+                        ).last_hidden_state
                     else:
                         for i in range(B):
                             patch_attn_mask[i, 0, :tgt_sizes[i][0] *
                                             tgt_sizes[i][1]] = True
                         vision_embedding = self.vpm(
                             all_pixel_values.type(dtype),
-                            patch_attention_mask=patch_attn_mask, 
-                            tgt_sizes=tgt_sizes).last_hidden_state        
+                            patch_attention_mask=patch_attn_mask,
+                            tgt_sizes=tgt_sizes).last_hidden_state
 
                     vision_hidden_states = self.resampler(
                         vision_embedding, tgt_sizes)
