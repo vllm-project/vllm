@@ -1,4 +1,4 @@
-name: Add Ready Label on Ready Comment
+name: Add Ready Label on Ready Comments
 
 on:
   issue_comment:
