@@ -337,7 +337,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             # just use seq_lens instead.
             seq_lens,
             self.device,
-            pin_memory=False)
+            pin_memory=False,
+            generators=self.get_generators(finished_requests_ids))
         return CPUModelInput(
             input_tokens=input_tokens,
             input_positions=input_positions,

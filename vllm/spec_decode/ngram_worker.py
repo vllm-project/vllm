@@ -7,10 +7,9 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 
-class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
+class NGramWorker(NonLLMProposerWorkerBase):
     """NGramWorker provides a light drafter without need for model.
 
     Current NGramWorker only implements prompt lookup decoding,

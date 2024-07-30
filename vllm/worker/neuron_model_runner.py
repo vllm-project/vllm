@@ -219,7 +219,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             # just use seq_lens instead.
             seq_lens,
             self.device,
-            self.pin_memory)
+            self.pin_memory,
+            generators=self.get_generators(finished_requests_ids))
 
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,

@@ -86,6 +86,7 @@ def test_create_single_target_seq_group_metadata(k: int):
         input_seq_id,
         target_seq_id,
         token_ids,
+        input_seq_group_metadata.sampling_params,
     )
 
     assert output.request_id == input_seq_group_metadata.request_id
