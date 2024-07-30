@@ -256,15 +256,11 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @property
     def do_metadata_sp_broadcast(self) -> bool:
-        return self.parallel_config.sequece_parallel_size > 1
+        return self.parallel_config.sequence_parallel_size > 1
 
     @property
     def kv_cache(self) -> Optional[List[torch.Tensor]]:
         return self.gpu_cache
-
-    @property
-    def get_kv_chunk(self, layer: int) -> Optional[List[torch.Tensor]]:
-        return self.gpu_cache[layer]
 
     @torch.inference_mode()
     def send_chunk(self, sp_group: int = 0, dst: int = 0) -> None:
@@ -339,18 +335,19 @@ class Worker(LocalOrDistributedWorkerBase):
         # blocks_to_migrate = torch.tensor(execute_model_req.blocks_to_migrate,
         #                               device=self.device,
         #                               dtype=torch.int64).view(-1, 2)
-        # `chunk_to_migrate` is a gpu tensor which records the dest chunk in a
-        # remote SP GPU worker
-        chunk_to_migrate = torch.tensor(execute_model_req.chunk_to_migrate,
-                                        device=self.device,
-                                        dtype=torch.int64).view(-1)
+        # `superblock_to_migrate` is a gpu tensor which records the dest chunk 
+        # in a remote SP GPU worker
+        superblock_to_migrate = torch.tensor(
+            execute_model_req.superblock_to_migrate,
+            device=self.device,
+            dtype=torch.int64).view(-1)
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            chunk_to_migrate=chunk_to_migrate
+            superblock_to_migrate=superblock_to_migrate
         )
 
     @torch.inference_mode()

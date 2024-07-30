@@ -156,7 +156,7 @@ class WorkerInput:
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
-            "superblock_to_migrate": self.chunk_to_migrate,
+            "superblock_to_migrate": self.superblock_to_migrate,
         }
 
         return tensor_dict
@@ -288,7 +288,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 broadcast_tensor_dict(broadcast_data, src=0)
 
             # broadcast inputs for all workers in its sp_group.
-            if self.do_sp_metadata_broadcast:
+            if self.do_metadata_sp_broadcast:
                 broadcast_data = worker_input.as_broadcastable_sp_tensor_dict()
                 broadcast_data.update(
                     model_input.as_broadcastable_tensor_dict())
@@ -296,7 +296,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 broadcast_sp_tensor_dict(broadcast_data, src=0)
 
         elif self.is_sp_worker:
-            assert self.do_sp_metadata_broadcast
+            assert self.do_metadata_sp_broadcast
             broadcast_data = broadcast_sp_tensor_dict(src=0)
             if not broadcast_data:
                 return None

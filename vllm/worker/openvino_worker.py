@@ -43,7 +43,7 @@ class OpenVINOCacheEngine:
 
         self.head_size = model_config.get_head_size()
         if device_config.device.type == "cpu" and \
-            cache_config.cache_dtype == ov.Type.u8:
+                cache_config.cache_dtype == ov.Type.u8:
             # Scale, zero point and quantized data will be stored together.
             # The layout for per token per head:
             # |scale(f32)|zeropoint(f32)|quantized data(u8,idx_1)|quantized data(u8,idx_2)|...|quantized data(u8,idx_head_size)| # noqa: E501
@@ -221,8 +221,10 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         num_cpu_blocks = 0
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int) -> None:
         """Initialize the KV cache. Currently, swappable CPU memory is not
         supported.
 

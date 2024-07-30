@@ -697,7 +697,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         length = len(table)
                         if length == 0:
                             seq_lens_remote[i].append(0)
-                            block_tables_remote[i].extend(padding_mapping)
+                            block_tables_remote[i].extend([padding_mapping])
                             q_remote_distribution[i].append(q_index)
                         else:
                             start_idx = 0
@@ -725,8 +725,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             num_decode_tokens += num_decode_tokens_long
             output_reshape_index.extend(output_reshape_index_long)
             for i in range(sequence_parallel_size):
-                max_remote_decode_seq_len = max(seq_lens_remote[i], 0)
-                num_remote_decode_tokens = len(seq_lens_remote)
+                max_remote_decode_seq_len[i] = max(seq_lens_remote[i], 0)
+                num_remote_decode_tokens[i] = len(seq_lens_remote[i])
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
@@ -1397,8 +1397,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             dtype=hidden_states.dtype,
             device=hidden_states.device)
         indexes = model_input.output_reshape_index
-        for i in range(len(indexes)):
-            hidden_states_reshape[indexes[i]] = hidden_states[i]
+        if indexes is not None:
+            for i in range(len(indexes)):
+                hidden_states_reshape[indexes[i]] = hidden_states[i]
+        else:
+            hidden_states_reshape = hidden_states
 
         # Compute the logits.
         logits = self.model.compute_logits(
