@@ -74,10 +74,29 @@ def _split_tensor_dict(
         elif isinstance(value, dict):
             if len(value) == 0:
                 metadata_list.append((prefix + key, value))
-            inner_metadata_list, inner_tensor_list = _split_tensor_dict(
-                value, prefix + key + "%")
-            metadata_list.extend(inner_metadata_list)
-            tensor_list.extend(inner_tensor_list)
+            else:
+                inner_metadata_list, inner_tensor_list = _split_tensor_dict(
+                    value, prefix + key + "%")
+                metadata_list.extend(inner_metadata_list)
+                tensor_list.extend(inner_tensor_list)
+        elif isinstance(value, list):
+            if len(value) == 0:
+                metadata_list.append((prefix + key, value))
+            elif isinstance(value[0], torch.Tensor):
+                # should all be Tensors
+                metadata_list_value = []
+                for v in value:
+                    assert isinstance(v, torch.Tensor)
+                    metadata_list_value.append(
+                        TensorMetadata(v.device.type, v.dtype, v.size()))
+                    tensor_list.append(v)
+                metadata_list.append((prefix + key, metadata_list_value))
+            else:
+                # no nested nested list, only primitive types allowed if not Tensor
+                assert not any(
+                    isinstance(v, list) or isinstance(v, torch.Tensor)
+                    for v in value)
+                metadata_list.append((prefix + key, value))
         else:
             metadata_list.append((prefix + key, value))
     return metadata_list, tensor_list
@@ -561,6 +580,26 @@ class GroupCoordinator:
                             async_op=True)
                     async_handles.append(handle)
                     _update_nested_dict(tensor_dict, key, tensor)
+                elif isinstance(value, list) and len(value) > 0 and isinstance(
+                        value[0], TensorMetadata):
+                    tensor_list = []
+                    for t in value:
+                        tensor = torch.empty(t.size,
+                                             dtype=t.dtype,
+                                             device=t.device)
+                        if tensor.numel() == 0:
+                            # Skip broadcasting empty tensors.
+                            tensor_list.append(tensor)
+                        else:
+                            handle = torch.distributed.broadcast(
+                                tensor,
+                                src=self.ranks[src],
+                                group=metadata_group
+                                if tensor.is_cpu else group,
+                                async_op=True)
+                            async_handles.append(handle)
+                            tensor_list.append(tensor)
+                    _update_nested_dict(tensor_dict, key, tensor_list)
                 else:
                     _update_nested_dict(tensor_dict, key, value)
             for async_handle in async_handles:
@@ -651,6 +690,21 @@ class GroupCoordinator:
                                            src=self.ranks[src],
                                            group=group)
                 _update_nested_dict(tensor_dict, key, tensor)
+            elif isinstance(value, list) and len(value) > 0 and isinstance(
+                    value[0], TensorMetadata):
+                tensor_list = []
+                for t in value:
+                    tensor = torch.empty(t.size,
+                                         dtype=t.dtype,
+                                         device=t.device)
+                    if tensor.numel() == 0:
+                        tensor_list.append(tensor)
+                    else:
+                        torch.distributed.recv(
+                            tensor,
+                            src=self.ranks[src],
+                            group=metadata_group if tensor.is_cpu else group)
+                _update_nested_dict(tensor_dict, key, tensor_list)
             else:
                 _update_nested_dict(tensor_dict, key, value)
         return tensor_dict

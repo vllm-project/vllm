@@ -9,20 +9,28 @@ from vllm.distributed.parallel_state import (_split_tensor_dict,
 
 def test_split_tensor_dict():
     test_dict = {
-        "key_a": "a",
-        "key_b": torch.arange(8, dtype=torch.float32),
+        "key_a":
+        "a",
+        "key_b":
+        torch.arange(8, dtype=torch.float32),
         "key_c": {
             "key_1": torch.arange(5, dtype=torch.float32),
             "key_2": torch.tensor([], dtype=torch.float32),
             "key_3": 123,
         },
         "key_d": {},
+        "key_e": [
+            torch.arange(11, dtype=torch.float32),
+            torch.arange(13, dtype=torch.float32)
+        ]
     }
     metadata_list, tensor_list = _split_tensor_dict(test_dict)
-    assert len(metadata_list) == 6
+    assert len(metadata_list) == 7
     assert torch.allclose(tensor_list[0], test_dict["key_b"])
     assert torch.allclose(tensor_list[1], test_dict["key_c"]["key_1"])
     assert torch.allclose(tensor_list[2], test_dict["key_c"]["key_2"])
+    assert torch.allclose(tensor_list[3], test_dict["key_e"][0])
+    assert torch.allclose(tensor_list[4], test_dict["key_e"][1])
 
 
 def test_split_tensor_dict_invalid_key():
