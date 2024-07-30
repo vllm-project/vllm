@@ -332,6 +332,8 @@ class Scheduler:
                                        if self.enable_artificial_preemption
                                        else 0)
         self.num_cumulative_preemption: int = 0
+        from collections import defaultdict
+        self._block_table_cache: Dict[int, Dict[int, List[int]]] = defaultdict(dict)
 
     @property
     def lora_enabled(self) -> bool:
@@ -993,10 +995,21 @@ class Scheduler:
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
 
+            is_prompt = seq_group.is_prefill()
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                if is_prompt or not envs.VLLM_USE_RAY_SPMD_WORKER:
+                    block_table = self.block_manager.get_block_table(seq)
+                    block_tables[seq_id] = block_table
+                    self._block_table_cache[seq_group.request_id][seq_id] = block_table
+                else:
+                    block_table = self.block_manager.get_block_table(seq)
+                    if len(self._block_table_cache[seq_group.request_id][seq_id]) < len(block_table):
+                        block_tables[seq_id] = [block_table[-1]]
+                        self._block_table_cache[seq_group.request_id][seq_id].append(block_table[-1])
+                    else:
+                        block_tables[seq_id] = []
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             common_computed_block_nums = (
@@ -1004,7 +1017,7 @@ class Scheduler:
                     seq_group.get_seqs(status=SequenceStatus.RUNNING)))
 
             do_sample = True
-            if seq_group.is_prefill():
+            if is_prompt:
                 seqs = seq_group.get_seqs()
                 # Prefill has only 1 sequence.
                 assert len(seqs) == 1
@@ -1019,7 +1032,6 @@ class Scheduler:
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            is_prompt = seq_group.is_prefill()
             if is_prompt or not envs.VLLM_USE_RAY_SPMD_WORKER:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,

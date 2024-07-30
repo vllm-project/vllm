@@ -109,7 +109,7 @@ class SequenceDataDelta(msgspec.Struct, array_like=True, omit_defaults=True):
     new_stage: SequenceStage
 
 
-class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
+class SequenceData(msgspec.Struct, omit_defaults=True):
     """Data associated with a sequence.
 
     Args:
@@ -125,7 +125,7 @@ class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
     _prompt_token_ids: array
     _output_token_ids: Optional[array] = None
 
-    ## The below fields should not be passed as an argument ##
+    ### The below fields should not be passed as an argument ###
     cumulative_logprob: float = 0.0
     _prompt_token_ids_tuple: Optional[Tuple[int, ...]] = None
     # The number of tokens that are computed (that run against the model).
@@ -661,7 +661,6 @@ class SequenceGroup:
 
 class SequenceGroupMetadataDecode(msgspec.Struct, tag=True, array_like=True, omit_defaults=True):
     """Delta sequence group metadata."""
-
     seq_data_delta: Dict[int, SequenceDataDelta]
     request_id: str
     block_tables: Dict[int, List[int]]
@@ -718,7 +717,7 @@ class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defa
     # prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
 
-    ## Stateful fields that are lazily defined. ##
+    ### Stateful fields that are lazily defined. ###
     # The number of speculative tokens adopted in this request.
     # None means specuative decoding is not used.
     # Zero means speculative decoding is disabled for some reasons.
@@ -746,13 +745,15 @@ class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defa
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
 
-
     def apply_delta(
             self, sequence_group_metadata_decode: SequenceGroupMetadataDecode):
         for id, delta in sequence_group_metadata_decode.seq_data_delta.items():
             self.seq_data[id].apply_delta(delta)
         self.request_id = sequence_group_metadata_decode.request_id
-        self.block_tables = sequence_group_metadata_decode.block_tables
+        for seq_id, block_table in sequence_group_metadata_decode.block_tables.items():
+            if len(block_table) > 0:
+                self.block_tables[seq_id].append(block_table[0])
+        # self.block_tables = sequence_group_metadata_decode.block_tables
         self.token_chunk_size = sequence_group_metadata_decode.token_chunk_size
         self.do_sample = sequence_group_metadata_decode.do_sample
         self.is_prompt = False

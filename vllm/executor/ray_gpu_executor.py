@@ -292,9 +292,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         serialized_data = self.encoder.encode(execute_model_req)
         # # Open a file in binary write mode
-        # with open('example.bin', 'wb') as file:
-        #     # Write bytes to the file
-        #     file.write(serialized_data)
+        import sys
+        if sys.getsizeof(serialized_data) > 60000:
+            with open('example.bin', 'wb') as file:
+                # Write bytes to the file
+                file.write(serialized_data)
 
         # print(f"SANG-TODO input serialization takes {(time.time() - s) * 1000} ms index: {self.i}")
 
