@@ -106,6 +106,8 @@ struct ScaledEpilogueBase {
                   std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
       return Arguments{data_ptr, tensor.numel() != 1};
     } else {
+      static_assert(!std::is_same_v<Descriptor, ColLoad<T, true>> &&
+                    !std::is_same_v<Descriptor, RowLoad<T, true>>);
       return Arguments{data_ptr};
     }
   }

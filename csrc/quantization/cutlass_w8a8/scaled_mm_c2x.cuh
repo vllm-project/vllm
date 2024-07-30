@@ -83,17 +83,15 @@ struct ScaledEpilogueBase {
  protected:
   using Accum = cutlass::epilogue::threadblock::VisitorAccFetch;
 
-  template <typename T, bool EnableNullptr = false>
+  template <typename T>
   using ColOrScalarLoad =
       cutlass::epilogue::threadblock::VisitorColOrScalarBroadcast<
-          OutputTileThreadMap, T, Stride<Int<1>, Int<0>, Int<0>>,
-          EnableNullptr>;
+          OutputTileThreadMap, T, Stride<Int<1>, Int<0>, Int<0>>>;
 
-  template <typename T, bool EnableNullptr = false>
+  template <typename T>
   using RowOrScalarLoad =
       cutlass::epilogue::threadblock::VisitorRowOrScalarBroadcast<
-          OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>,
-          EnableNullptr>;
+          OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   template <typename T>
   using ColLoad = cutlass::epilogue::threadblock::VisitorColBroadcast<
@@ -101,6 +99,10 @@ struct ScaledEpilogueBase {
 
   template <typename T>
   using RowLoad = cutlass::epilogue::threadblock::VisitorRowBroadcast<
+      OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
+
+  template <typename T>
+  using RowOrZeroLoad = cutlass::epilogue::threadblock::VisitorRowOrZeroBroadcast<
       OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   // This utility function constructs the arguments for the load descriptors
@@ -114,8 +116,8 @@ struct ScaledEpilogueBase {
                   std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
       return Arguments{data_ptr, tensor.numel() != 1};
     } else {
-      static_assert(!std::is_same_v<Descriptor, ColOrScalarLoad<T, true>> &&
-                    !std::is_same_v<Descriptor, RowOrScalarLoad<T, true>>);
+      // it would technically work but no use case as data_ptr is never nullptr
+      static_assert(!std::is_same_v<Descriptor, RowOrZeroLoad<T>>);
       return Arguments{data_ptr};
     }
   }
@@ -124,12 +126,10 @@ struct ScaledEpilogueBase {
   // case a nullptr is passed and a constant (0) is used.
   template <typename Descriptor, typename T>
   static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
+    static_assert(std::is_same_v<Descriptor, RowOrZeroLoad<T>>);
     using Arguments = typename Descriptor::Arguments;
     auto* data_ptr = tensor ? static_cast<T*>(tensor->data_ptr()) : nullptr;
-    static_assert(std::is_same_v<Descriptor, ColOrScalarLoad<T, true>> ||
-                  std::is_same_v<Descriptor, RowOrScalarLoad<T, true>>);
-
-    return Arguments{data_ptr, true};  // always row broadcast anyway
+    return Arguments{data_ptr};
   }
 };
 
@@ -245,7 +245,7 @@ struct ScaledEpilogueBiasAzp
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowOrScalarLoad<ElementD, true>;
+  using Bias = typename SUPER::template RowOrZeroLoad<ElementD>;
 
   // This is the full AZP term, azp * J @ B, shape (1,n)
   using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
@@ -311,7 +311,7 @@ struct ScaledEpilogueBiasAzpToken
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
-  using Bias = typename SUPER::template RowOrScalarLoad<ElementD, true>;
+  using Bias = typename SUPER::template RowOrZeroLoad<ElementD>;
 
   // Per-token azp term, shape (m,1)
   using Azp = typename SUPER::template ColLoad<int32_t>;
