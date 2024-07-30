@@ -56,7 +56,7 @@
             "num_prompts": 200
         }
     },
-    {   
+    {
         "test_name": "serving_llama70B_tp4_sharegpt_specdecode",
         "qps_list": [2],
         "server_parameters": {
