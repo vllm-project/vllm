@@ -220,7 +220,7 @@ steps:
     - pytest -v -s -x lora/test_long_context.py
 
 - label: Tensorizer Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   commands:
     - apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
