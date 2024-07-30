@@ -354,6 +354,12 @@ class LLMEngine:
                 ),
             ))
 
+        # Async output processing pointers
+        # TO DO: move it to asyncllmengine
+        self.previous_output = None
+        self.previous_scheduler_outputs = None
+        self.previous_seq_group_metadata_list = None
+
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
 
