@@ -108,8 +108,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 # not be used in the future iterations.
                 parent.status = SequenceStatus.FINISHED_ABORTED
                 seq_group.remove(parent.seq_id)
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(parent)
+                # for scheduler in self.scheduler:
+                #     scheduler.free_seq(parent)
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
@@ -154,10 +154,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # manager. Keep them in the sequence group as candidate output.
             # NOTE: we need to fork the new sequences before freeing the
             # old sequences.
-            for seq, parent in child_seqs:
-                if seq is parent and seq.is_finished():
-                    for scheduler in self.scheduler:
-                        scheduler.free_seq(seq)
+            # for seq, parent in child_seqs:
+            #     if seq is parent and seq.is_finished():
+            #         for scheduler in self.scheduler:
+            #             scheduler.free_seq(seq)
             return
 
         # Beam search case

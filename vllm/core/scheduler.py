@@ -975,6 +975,11 @@ class Scheduler:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
+        
+        # Free finished sequence groups if any
+        # This was in output processor before.
+        self.free_finished_seq_groups()
+
         scheduler_outputs = self._schedule()
         now = time.time()
 
@@ -1063,8 +1068,16 @@ class Scheduler:
                 seq_group.request_id for seq_group in queue
                 if seq_group.is_finished()
             ]
-        self.running = deque(seq_group for seq_group in self.running
-                             if not seq_group.is_finished())
+        running_seq_groups = []
+        for seq_group in self.running:
+            if not seq_group.is_finished():
+                running_seq_groups += [seq_group]
+            else:
+                for seq in seq_group.get_seqs():
+                    self.free_seq(seq)
+        self.running = deque(running_seq_groups)
+        # self.running = deque(seq_group for seq_group in self.running
+        #                      if not seq_group.is_finished())
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)

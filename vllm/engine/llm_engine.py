@@ -828,9 +828,9 @@ class LLMEngine:
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
 
-        # Free the finished sequence groups.
-        for scheduler in self.scheduler:
-            scheduler.free_finished_seq_groups()
+        # # Free the finished sequence groups.
+        # for scheduler in self.scheduler:
+        #     scheduler.free_finished_seq_groups()
 
         # Create the outputs.
         request_outputs: List[Union[RequestOutput,
