@@ -108,6 +108,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     router_logits: torch.Tensor, top_k: int, renormalize: bool,
                     use_grouped_topk: bool, num_expert_group: Optional[int],
                     topk_group: Optional[int]):
+        assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
+        assert num_expert_group is None, ('num_expert_group is '
+                                          'not supported on HPU')
+        assert topk_group is None, 'topk_group is not supported on HPU'
         return static_fused_moe(x, w1, w2, router_logits, top_k)
 
     def forward_cpu(self, *args, **kwargs):
