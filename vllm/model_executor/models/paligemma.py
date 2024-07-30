@@ -1,9 +1,8 @@
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
-from PIL import Image
 from torch import nn
-from transformers import PaliGemmaConfig, SiglipVisionConfig
+from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -19,11 +18,12 @@ from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsVision
+from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
+                     dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
 from .utils import merge_vision_embeddings
-from .siglip import SiglipVisionModel, dummy_image_for_siglip, dummy_seq_data_for_siglip, get_max_siglip_image_tokens
 
 logger = init_logger(__name__)
 
@@ -37,7 +37,7 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
     vision_config = hf_config.vision_config
 
     seq_data = dummy_seq_data_for_siglip(
-        hf_config,
+        vision_config,
         seq_len,
         image_token_id=hf_config.image_token_index,
     )

@@ -1,4 +1,4 @@
-"""Implementation of SiglipVisionModel intended to be only used 
+"""Implementation of SiglipVisionModel intended to be only used
 within a vision language model."""
 
 import math
@@ -9,24 +9,28 @@ from einops import rearrange
 from PIL import Image
 from torch import nn
 from transformers import SiglipConfig, SiglipVisionConfig
+from vllm_flash_attn import flash_attn_varlen_func
+
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import get_compressed_tensors_cache_scale
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    get_compressed_tensors_cache_scale)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    kv_cache_scales_loader,
-    maybe_remap_kv_scale_name,
-)
-from vllm.multimodal.image import cached_get_tokenizer, repeat_and_pad_image_tokens
+    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+from vllm.multimodal.image import (cached_get_tokenizer,
+                                   repeat_and_pad_image_tokens)
 from vllm.sequence import SequenceData
 from vllm.utils import is_hip
-from vllm_flash_attn import flash_attn_varlen_func
 
 from .utils import is_pp_missing_parameter
 
@@ -37,12 +41,14 @@ def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
 
 
 def get_siglip_num_patches(*, image_size: int, patch_size: int) -> int:
-    grid_length = get_siglip_patch_grid_length(image_size=image_size, patch_size=patch_size)
+    grid_length = get_siglip_patch_grid_length(image_size=image_size,
+                                               patch_size=patch_size)
     return grid_length * grid_length
 
 
 def get_siglip_image_feature_size(hf_config: SiglipVisionConfig) -> int:
-    return get_siglip_num_patches(image_size=hf_config.image_size, patch_size=hf_config.patch_size)
+    return get_siglip_num_patches(image_size=hf_config.image_size,
+                                  patch_size=hf_config.patch_size)
 
 
 def get_max_siglip_image_tokens(hf_config: SiglipVisionConfig) -> int:
@@ -110,11 +116,16 @@ def input_processor_for_siglip(
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids, prompt=new_prompt, multi_modal_data=multi_modal_data)
+    return LLMInputs(
+        prompt_token_ids=new_token_ids,
+        prompt=new_prompt,
+        multi_modal_data=multi_modal_data,
+    )
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L249 # noqa
 class SiglipVisionEmbeddings(nn.Module):
+
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.config = config
@@ -130,18 +141,24 @@ class SiglipVisionEmbeddings(nn.Module):
             padding="valid",
         )
 
-        self.num_patches = (self.image_size // self.patch_size) ** 2
+        self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches
-        self.position_embedding = VocabParallelEmbedding(self.num_positions, self.embed_dim)
+        self.position_embedding = VocabParallelEmbedding(
+            self.num_positions, self.embed_dim)
         self.register_buffer(
-            "position_ids", torch.arange(self.num_positions, dtype=torch.int64).expand((1, -1)), persistent=False
+            "position_ids",
+            torch.arange(self.num_positions, dtype=torch.int64).expand(
+                (1, -1)),
+            persistent=False,
         )
 
-    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int,
+                                 width: int) -> torch.Tensor:
         """
-        This method is an adapted method for SigLIP (due to SigLIP not having class embedding unlike other ViTs)
-        that allows the model to interpolate the pre-trained position encodings such that it can be usable on
-        higher resolution images.
+        This method is an adapted method for SigLIP (due to SigLIP not having
+        class embedding unlike other ViTs) that allows the model to interpolate
+        the pre-trained position encodings such that it can be usable on higher
+        resolution images.
 
         Source:
         https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174
@@ -155,40 +172,52 @@ class SiglipVisionEmbeddings(nn.Module):
         dim = embeddings.shape[-1]
         height = height // self.patch_size
         width = width // self.patch_size
-        # we add a small number to avoid floating point error in the interpolation
+        # we add a small number to avoid floating point error
+        # in the interpolation
         # see discussion at https://github.com/facebookresearch/dino/issues/8
         height, width = height + 0.1, width + 0.1
 
         patch_pos_embed = position_embeddings.reshape(
-            1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)), dim
-        )
+            1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)),
+            dim)
         patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed,
-            scale_factor=(height / math.sqrt(num_positions), width / math.sqrt(num_positions)),
+            scale_factor=(
+                height / math.sqrt(num_positions),
+                width / math.sqrt(num_positions),
+            ),
             mode="bicubic",
             align_corners=False,
         )
-        if int(height) != patch_pos_embed.shape[-2] or int(width) != patch_pos_embed.shape[-1]:
-            raise ValueError("Width or height does not match with the interpolated position embeddings")
+        if (int(height) != patch_pos_embed.shape[-2]
+                or int(width) != patch_pos_embed.shape[-1]):
+            raise ValueError("Width or height does not match with "
+                             "the interpolated position embeddings")
 
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return patch_pos_embed
 
-    def forward(self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=False) -> torch.Tensor:
+    def forward(self,
+                pixel_values: torch.FloatTensor,
+                interpolate_pos_encoding=False) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [*, width, grid, grid]
+        patch_embeds = self.patch_embedding(pixel_values.to(
+            dtype=target_dtype))  # shape = [*, width, grid, grid]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
         if interpolate_pos_encoding:
-            embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
+            embeddings = embeddings + self.interpolate_pos_encoding(
+                embeddings, height, width)
         else:
-            embeddings = embeddings + self.position_embedding(self.position_ids)
+            embeddings = embeddings + self.position_embedding(
+                self.position_ids)
         return embeddings
 
 
 class SiglipAttention(nn.Module):
+
     def __init__(
         self,
         config,
@@ -203,17 +232,16 @@ class SiglipAttention(nn.Module):
         self.total_num_heads = config.num_attention_heads
         if self.total_num_heads % tp_size != 0:
             raise ValueError(
-                f"Number of attention heads ({self.total_num_heads}) must be divisible by the tensor model parallel size"
-                f" ({tp_size})."
-            )
+                f"Number of attention heads ({self.total_num_heads}) "
+                "must be divisible by the tensor model parallel size"
+                f" ({tp_size}).")
 
         self.num_heads = self.total_num_heads // tp_size
         self.head_dim = self.embed_dim // self.total_num_heads
         if self.head_dim * self.total_num_heads != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
-            )
+            raise ValueError(f"embed_dim must be divisible by num_heads (got "
+                             "`embed_dim`: {self.embed_dim} and `num_heads`:"
+                             f" {self.num_heads}).")
         self.qkv_size = self.num_heads * self.head_dim
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
@@ -225,18 +253,25 @@ class SiglipAttention(nn.Module):
             quant_config=quant_config,
         )
         self.out_proj = RowParallelLinear(
-            input_size=self.embed_dim, output_size=self.embed_dim, quant_config=quant_config
+            input_size=self.embed_dim,
+            output_size=self.embed_dim,
+            quant_config=quant_config,
         )
 
         try:
             self.attn = Attention(
-                self.num_heads, self.head_dim, self.scale, cache_config=cache_config, quant_config=quant_config
+                self.num_heads,
+                self.head_dim,
+                self.scale,
+                cache_config=cache_config,
+                quant_config=quant_config,
             )
             self.attn_fn = self._vllm_attention_forward
             self.use_paged_attn = True
         except Exception:
             # For some pretrained Siglip models, the backend is not supported
-            # (e.g. google/siglip-so400m-patch14-384 has hidden_size=1152 with num_attention_heads=16, which is not supported)
+            # (e.g. google/siglip-so400m-patch14-384 has hidden_size=1152
+            #  with num_attention_heads=16, which is not supported)
             # If the backend is not supported, fall back to the default
             if self.qkv_proj.params_dtype in [torch.float16, torch.bfloat16]:
                 # Flash attention only supports float16 and bfloat16
@@ -256,7 +291,8 @@ class SiglipAttention(nn.Module):
         batch_size, q_len, _ = hidden_states.size()
 
         qkv_states, _ = self.qkv_proj(hidden_states)
-        query_states, key_states, value_states = qkv_states.split([self.qkv_size] * 3, dim=-1)
+        query_states, key_states, value_states = qkv_states.split(
+            [self.qkv_size] * 3, dim=-1)
 
         attn_output = self.attn_fn(
             q=query_states,
@@ -271,44 +307,65 @@ class SiglipAttention(nn.Module):
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
-    def _vllm_attention_forward(self, q, k, v, kv_caches, attn_metadata, *args, **kwargs):
+    def _vllm_attention_forward(self, q, k, v, kv_caches, attn_metadata, *args,
+                                **kwargs):
         return self.attn(q, k, v, kv_caches, attn_metadata)
 
-    def _basic_attention_forward(self, q, k, v, batch_size, q_len, *args, **kwargs):
-        q = q.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    def _basic_attention_forward(self, q, k, v, batch_size, q_len, *args,
+                                 **kwargs):
+        q = q.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
 
         k_v_seq_len = k.shape[-2]
         attn_weights = torch.matmul(q, k.transpose(2, 3)) * self.scale
 
-        if attn_weights.size() != (batch_size, self.num_heads, q_len, k_v_seq_len):
+        if attn_weights.size() != (
+                batch_size,
+                self.num_heads,
+                q_len,
+                k_v_seq_len,
+        ):
             raise ValueError(
-                f"Attention weights should be of size {(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
+                "Attention weights should be of size "
+                f"{(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is"
+                f" {attn_weights.size()}")
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_weights = nn.functional.softmax(attn_weights,
+                                             dim=-1,
+                                             dtype=torch.float32).to(q.dtype)
+        attn_weights = nn.functional.dropout(attn_weights,
+                                             p=self.dropout,
+                                             training=self.training)
         attn_output = torch.matmul(attn_weights, v)
 
-        if attn_output.size() != (batch_size, self.num_heads, q_len, self.head_dim):
+        if attn_output.size() != (
+                batch_size,
+                self.num_heads,
+                q_len,
+                self.head_dim,
+        ):
             raise ValueError(
-                f"`attn_output` should be of size {(batch_size, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
+                "`attn_output` should be of size "
+                f"{(batch_size, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}")
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
 
         return attn_output
 
-    def _flash_attention_forward(self, q, k, v, batch_size, q_len, *args, **kwargs):
+    def _flash_attention_forward(self, q, k, v, batch_size, q_len, *args,
+                                 **kwargs):
         """Implements the multihead softmax attention.
         Arguments
         ---------
-            q, k, v: The tensor containing the query, key, and value. (B, S, H, D)
+            q, k, v: The tensor containing the
+                     query, key, and value. (B, S, H, D)
         """
 
         q = q.view(batch_size, q_len, self.num_heads, self.head_dim)
@@ -319,7 +376,13 @@ class SiglipAttention(nn.Module):
 
         # goes for cuda device
         q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
-        cu_seqlens_q = torch.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device)
+        cu_seqlens_q = torch.arange(
+            0,
+            (batch_size + 1) * q_len,
+            step=q_len,
+            dtype=torch.int32,
+            device=q.device,
+        )
 
         # during training q,k,v always have same seqlen
         assert seqlen_k == q_len
@@ -347,6 +410,7 @@ class SiglipAttention(nn.Module):
 
 
 class SiglipMLP(nn.Module):
+
     def __init__(
         self,
         config,
@@ -357,12 +421,17 @@ class SiglipMLP(nn.Module):
         self.activation_fn = get_act_fn(config.hidden_act)
 
         # For quantization, we require the hidden size to be a multiple of 64
-        quantizable = config.hidden_size % 64 == 0 and config.intermediate_size % 64 == 0
+        quantizable = (config.hidden_size % 64 == 0
+                       and config.intermediate_size % 64 == 0)
         self.fc1 = ColumnParallelLinear(
-            config.hidden_size, config.intermediate_size, quant_config=quant_config if quantizable else None
+            config.hidden_size,
+            config.intermediate_size,
+            quant_config=quant_config if quantizable else None,
         )
         self.fc2 = RowParallelLinear(
-            config.intermediate_size, config.hidden_size, quant_config=quant_config if quantizable else None
+            config.intermediate_size,
+            config.hidden_size,
+            quant_config=quant_config if quantizable else None,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -373,6 +442,7 @@ class SiglipMLP(nn.Module):
 
 
 class SiglipEncoderLayer(nn.Module):
+
     def __init__(
         self,
         config: SiglipConfig,
@@ -387,12 +457,14 @@ class SiglipEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
         )
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim,
+                                        eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
         )
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim,
+                                        eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -405,10 +477,12 @@ class SiglipEncoderLayer(nn.Module):
             hidden_states (`torch.FloatTensor`):
                 Input to the layer of shape `(batch, seq_len, embed_dim)`.
             attention_mask (`torch.FloatTensor`):
-                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` where padding elements are indicated by very large negative values.
+                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)`
+                where padding elements are indicated by very large negative
+                values.
             output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
+                Whether or not to return the attentions tensors of all attention
+                layers. See `attentions` under returned tensors for more detail.
         """
         residual = hidden_states
 
@@ -425,12 +499,13 @@ class SiglipEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
+        outputs = (hidden_states, )
 
         return outputs
 
 
 class SiglipEncoder(nn.Module):
+
     def __init__(
         self,
         config: SiglipConfig,
@@ -439,16 +514,13 @@ class SiglipEncoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [
-                SiglipEncoderLayer(
-                    config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                )
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([
+            SiglipEncoderLayer(
+                config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+            ) for _ in range(config.num_hidden_layers)
+        ])
 
     def forward(
         self,
@@ -457,7 +529,7 @@ class SiglipEncoder(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> Tuple:
         last_hidden_state = inputs_embeds
-        hidden_states = (last_hidden_state,)
+        hidden_states = (last_hidden_state, )
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(
                 hidden_states=last_hidden_state,
@@ -466,12 +538,13 @@ class SiglipEncoder(nn.Module):
             )
 
             last_hidden_state = layer_outputs[0]
-            hidden_states = hidden_states + (last_hidden_state,)
+            hidden_states = hidden_states + (last_hidden_state, )
 
         return (last_hidden_state, hidden_states)
 
 
 class SiglipVisionTransformer(nn.Module):
+
     def __init__(
         self,
         config: SiglipVisionConfig,
@@ -488,8 +561,10 @@ class SiglipVisionTransformer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
         )
-        self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.head = SiglipMultiheadAttentionPoolingHead(config=config, quant_config=quant_config)
+        self.post_layernorm = nn.LayerNorm(embed_dim,
+                                           eps=config.layer_norm_eps)
+        self.head = SiglipMultiheadAttentionPoolingHead(
+            config=config, quant_config=quant_config)
 
     def forward(
         self,
@@ -534,8 +609,10 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
         self.head_size = config.hidden_size // config.num_attention_heads
         self.scaling = self.head_size**-0.5
-        self.attention = torch.nn.MultiheadAttention(config.hidden_size, config.num_attention_heads, batch_first=True)
-        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.attention = torch.nn.MultiheadAttention(
+            config.hidden_size, config.num_attention_heads, batch_first=True)
+        self.layernorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(config=config, quant_config=quant_config)
 
     def forward(self, hidden_state):
@@ -569,12 +646,12 @@ class SiglipVisionModel(nn.Module):
         )
 
     def forward(
-        self,
-        pixel_values,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor] = None,
-        attn_metadata: AttentionMetadata = None,
-        interpolate_pos_encoding: Optional[bool] = False,  # added by eric
+            self,
+            pixel_values,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor] = None,
+            attn_metadata: AttentionMetadata = None,
+            interpolate_pos_encoding: Optional[bool] = False,  # added by eric
     ) -> Tuple:
         return self.vision_model(
             pixel_values=pixel_values,
@@ -595,7 +672,8 @@ class SiglipVisionModel(nn.Module):
             if scale_name := get_compressed_tensors_cache_scale(name):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
                 continue
@@ -628,7 +706,8 @@ class SiglipVisionModel(nn.Module):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
@@ -638,7 +717,11 @@ class SiglipVisionModel(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
-            quantization_param_path, tp_rank, tp_size, self.config.num_hidden_layers, self.config.__class__.model_type
+                quantization_param_path,
+                tp_rank,
+                tp_size,
+                self.config.num_hidden_layers,
+                self.config.__class__.model_type,
         ):
             if not isinstance(self.model.layers[layer_idx], nn.Identity):
                 layer_self_attn = self.model.layers[layer_idx].self_attn
@@ -652,4 +735,5 @@ class SiglipVisionModel(nn.Module):
             if hasattr(layer_self_attn, "kv_scale"):
                 layer_self_attn.attn._kv_scale = scaling_factor
             else:
-                raise RuntimeError("Self attention has no KV cache scaling " "factor attribute!")
+                raise RuntimeError("Self attention has no KV cache scaling "
+                                   "factor attribute!")
