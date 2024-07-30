@@ -69,8 +69,7 @@ class TPUExecutor(ExecutorBase):
     def initialize_cache(self,
                          num_gpu_blocks: int,
                          num_cpu_blocks: int,
-                         num_remote_gpu_blocks: int = 0
-                         ) -> None:
+                         num_remote_gpu_blocks: int = 0) -> None:
         """Initialize the KV cache by invoking the underlying worker."""
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work

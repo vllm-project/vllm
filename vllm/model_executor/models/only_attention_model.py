@@ -267,9 +267,8 @@ class OnlyAttentionModel(nn.Module, SupportsLoRA):
         self.model(kv_caches, attn_metadata)
 
     def compute_logits(
-        self, hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata
-    ) -> Optional[torch.Tensor]:
+            self, hidden_states: torch.Tensor,
+            sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
         pass
 
     def sample(

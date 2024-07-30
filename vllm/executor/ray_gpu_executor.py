@@ -82,8 +82,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     vision_language_config=self.vision_language_config,
                     speculative_config=self.speculative_config,
                     is_driver_worker=rank == 0,
-                    is_sp_worker=is_sp_worker
-                    )
+                    is_sp_worker=is_sp_worker)
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:

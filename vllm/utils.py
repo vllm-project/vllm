@@ -622,13 +622,13 @@ def filter_tensor(
         output: torch.tensor, out_exp_sums: torch.tensor,
         out_max_logits: torch.tensor, pattern: List[int],
         length: int) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-    result = torch.empty(length*output[0],
+    result = torch.empty(length * output[0],
                          dtype=output.dtype,
                          device=output.device)
-    result_exp_sums = torch.empty(length*out_exp_sums[0],
+    result_exp_sums = torch.empty(length * out_exp_sums[0],
                                   dtype=out_exp_sums.dtype,
                                   device=out_exp_sums.device)
-    result_max_logits = torch.empty(length*out_max_logits[0],
+    result_max_logits = torch.empty(length * out_max_logits[0],
                                     dtype=out_max_logits.dtype,
                                     device=out_max_logits.device)
     index = 0

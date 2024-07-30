@@ -379,7 +379,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
 
         dead_actors = []
         for actor in self.workers:
-            actor_state = ray.state.actors(actor._ray_actor_id.hex())  
+            actor_state = ray.state.actors(actor._ray_actor_id.hex())
             # pylint: disable=protected-access
             if actor_state["State"] == "DEAD":
                 dead_actors.append(actor)

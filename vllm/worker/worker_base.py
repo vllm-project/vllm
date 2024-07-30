@@ -46,9 +46,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def initialize_cache(self,
-                         num_gpu_blocks: int,
-                         num_cpu_blocks: int,
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int,
                          num_remote_gpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
         """

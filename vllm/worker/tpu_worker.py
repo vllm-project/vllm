@@ -140,8 +140,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         return num_tpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int,
-                         num_remote_gpu_blocks: int
-                         ) -> None:
+                         num_remote_gpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         self.block_size = self.cache_config.block_size

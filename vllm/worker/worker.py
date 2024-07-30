@@ -216,9 +216,7 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self,
-                         num_gpu_blocks: int,
-                         num_cpu_blocks: int,
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int,
                          num_remote_gpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
