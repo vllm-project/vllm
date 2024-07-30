@@ -1,7 +1,7 @@
+import time
 from collections import defaultdict
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple
-import time
 
 import torch
 
@@ -532,20 +532,21 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
-        
+
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
             )
-        
+
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
 
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
-            scoring_timer.elapsed_time_ms, verification_timer.elapsed_time_ms)
+                       scoring_timer.elapsed_time_ms,
+                       verification_timer.elapsed_time_ms)
 
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
@@ -737,9 +738,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics
 
             (average_time_per_proposal_tok_ms, scoring_time_ms,
-                verification_time_ms) = stage_times
+             verification_time_ms) = stage_times
             logger.info(
-                f"SpecDecodeWorker stage times: {average_time_per_proposal_tok_ms=:.02f} {scoring_time_ms=:.02f} {verification_time_ms=:.02f}")
+                "SpecDecodeWorker stage times: "
+                "average_time_per_proposal_tok_ms=%.02f "
+                "scoring_time_ms=%.02f verification_time_ms=%.02f",
+                average_time_per_proposal_tok_ms, scoring_time_ms,
+                verification_time_ms)
         return sampler_output_list
 
     def _create_dummy_logprob_lists(
@@ -928,7 +933,9 @@ def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
 
     return new_num_gpu_blocks
 
+
 class Timer:
+
     def __enter__(self):
         self.start_time = time.time()
         return self
