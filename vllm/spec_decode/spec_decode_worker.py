@@ -1,4 +1,3 @@
-import time
 from collections import defaultdict
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -28,7 +27,7 @@ from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
 from vllm.spec_decode.target_model_runner import TargetModelRunner
-from vllm.spec_decode.util import (create_sequence_group_output,
+from vllm.spec_decode.util import (Timer, create_sequence_group_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
@@ -932,15 +931,3 @@ def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
         (proposer_cache_block_size_bytes + scorer_cache_block_size_bytes))
 
     return new_num_gpu_blocks
-
-
-class Timer:
-
-    def __enter__(self):
-        self.start_time = time.time()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.end_time = time.time()
-        self.elapsed_time_s = self.end_time - self.start_time
-        self.elapsed_time_ms = self.elapsed_time_s * 1000
