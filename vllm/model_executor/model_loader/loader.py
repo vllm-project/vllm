@@ -38,7 +38,7 @@ from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_tpu
+from vllm.utils import is_pin_memory_available, is_tpu
 
 
 @contextmanager
@@ -63,9 +63,21 @@ def device_loading_context(module: torch.nn.Module,
 
     finally:
         # Restore parameters to their original devices, ignoring new parameters
+        pin_memory = is_pin_memory_available()
         for name, param in module.named_parameters():
             if name in original_device_states:
-                param.data = param.data.to(original_device_states[name])
+                original_device: torch.device = original_device_states[name]
+                if original_device.type == "cpu":
+                    # `torch.empty_like` does not support `pin_memory` argument
+                    cpu_data = torch.empty(size=param.data.size(),
+                                           dtype=param.data.dtype,
+                                           layout=param.data.layout,
+                                           device="cpu",
+                                           pin_memory=pin_memory)
+                    cpu_data.copy_(param.data)
+                    param.data = cpu_data
+                else:
+                    param.data = param.data.to(original_device)
         # New parameters or parameters already on target device are untouched
 
 
