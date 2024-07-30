@@ -18,7 +18,6 @@ def embedding_server():
         "--enforce-eager",
         "--max-model-len",
         "8192",
-        "--enforce-eager",
     ]
 
     with RemoteOpenAIServer(EMBEDDING_MODEL_NAME, args) as remote_server:
