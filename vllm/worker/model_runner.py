@@ -725,7 +725,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             num_decode_tokens += num_decode_tokens_long
             output_reshape_index.extend(output_reshape_index_long)
             for i in range(sequence_parallel_size):
-                item_max_seq_len = max(seq_lens_remote[i], 0)
+                item_max_seq_len = max(seq_lens_remote[i], default=0)
                 item_len = len(seq_lens_remote[i])
                 max_remote_decode_seq_len.append(item_max_seq_len)
                 num_remote_decode_tokens.append(item_len)
