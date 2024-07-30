@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
-    VLLM_PIPELINE_PARTITION_STRATEGY: Optional[str] = None
+    VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
@@ -244,8 +244,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
     # Pipeline stage partition strategy
-    "VLLM_PIPELINE_PARTITION_STRATEGY":
-    lambda: os.getenv("VLLM_PIPELINE_PARTITION_STRATEGY", None),
+    "VLLM_PP_LAYER_PARTITION":
+    lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
     # default is 4GB

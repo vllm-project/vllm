@@ -2,9 +2,11 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-from typing import Sequence
+from typing import Sequence, Tuple
 
 import torch
+
+import vllm.envs as envs
 
 
 def ensure_divisibility(numerator, denominator):
@@ -46,3 +48,37 @@ def split_tensor_along_last_dim(
         return tuple(chunk.contiguous() for chunk in tensor_list)
 
     return tensor_list
+
+
+def get_pp_indices(num_hidden_layers: int, pp_rank: int,
+                   pp_size: int) -> Tuple[int, int]:
+    """Try to evenly distribute layers across partitions.
+    If the number of layers is not divisible by the number of partitions,
+    the last partition will have the remaining layers.
+    """
+    partition_list_str = envs.VLLM_PP_LAYER_PARTITION
+    if partition_list_str is not None:
+        try:
+            partitions = [
+                int(layer) for layer in partition_list_str.split(",")
+            ]
+        except ValueError as err:
+            raise ValueError("Invalid partition string: {}".format(
+                partition_list_str)) from err
+        if len(partitions) != pp_size:
+            raise ValueError(
+                "Number of partitions does not match the number of workers.")
+        if sum(partitions) != num_hidden_layers:
+            raise ValueError(
+                "Sum of partitions does not match the number of layers.")
+        start_layer = sum(partitions[:pp_rank])
+        end_layer = start_layer + partitions[pp_rank]
+    else:
+        layers_per_partition = num_hidden_layers // pp_size
+        start_layer = pp_rank * layers_per_partition
+        end_layer = start_layer + layers_per_partition
+
+        if pp_rank == pp_size - 1:
+            end_layer = num_hidden_layers
+
+    return (start_layer, end_layer)
