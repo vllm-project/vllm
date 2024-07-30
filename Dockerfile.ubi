@@ -167,6 +167,10 @@ RUN --mount=type=bind,from=libsodium-builder,src=/usr/src/libsodium,target=/usr/
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.9/flashinfer-0.0.9+cu121torch2.3-cp311-cp311-linux_x86_64.whl
 
+# Install peft for prompt adapter support
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install peft==0.12.0
+
 ENV HF_HUB_OFFLINE=1 \
     PORT=8000 \
     HOME=/home/vllm \
