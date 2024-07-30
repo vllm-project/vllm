@@ -103,6 +103,9 @@ struct ScaledEpilogueBase {
   using RowLoad = cutlass::epilogue::threadblock::VisitorRowBroadcast<
       OutputTileThreadMap, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
+  // This utility function constructs the arguments for the load descriptors
+  // from a tensor. It can handle both row and column, as well as row/column or
+  // scalar cases.
   template <typename Descriptor, typename T>
   static auto args_from_tensor(torch::Tensor const& tensor) {
     using Arguments = typename Descriptor::Arguments;
@@ -111,10 +114,14 @@ struct ScaledEpilogueBase {
                   std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
       return Arguments{data_ptr, tensor.numel() != 1};
     } else {
+      static_assert(!std::is_same_v<Descriptor, ColOrScalarLoad<T, true>> &&
+                    !std::is_same_v<Descriptor, RowOrScalarLoad<T, true>>);
       return Arguments{data_ptr};
     }
   }
 
+  // This overload handles the case where there might not be a tensor, in which
+  // case a nullptr is passed and a constant (0) is used.
   template <typename Descriptor, typename T>
   static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
     using Arguments = typename Descriptor::Arguments;
@@ -122,8 +129,7 @@ struct ScaledEpilogueBase {
     static_assert(std::is_same_v<Descriptor, ColOrScalarLoad<T, true>> ||
                   std::is_same_v<Descriptor, RowOrScalarLoad<T, true>>);
 
-    bool is_scalar = tensor && tensor->numel() != 1;  // ignored if null
-    return Arguments{data_ptr, is_scalar};
+    return Arguments{data_ptr, true};  // always row broadcast anyway
   }
 };
 
@@ -244,7 +250,7 @@ struct ScaledEpilogueBiasAzp
   // This is the full AZP term, azp * J @ B, shape (1,n)
   using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
 
-  // Compute (accum - azp_adj), resulting in a float
+  // Compute float(accum - azp_adj), both operands are int32_t
   using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::minus, float, int32_t,
       cutlass::FloatRoundStyle::round_to_nearest>;
@@ -321,7 +327,7 @@ struct ScaledEpilogueBiasAzpToken
   using EVTComputeAzp =
       cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, Azp, AzpAdj>;
 
-  // Compute (accum - azp * azp_adj), resulting in a float
+  // Compute float(accum - azp*azp_adj), all operands are int32_t
   using ComputeAcc = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::minus, float, int32_t,
       cutlass::FloatRoundStyle::round_to_nearest>;

@@ -59,6 +59,16 @@ namespace cutlass::epilogue::threadblock {
 using namespace cute;
 using namespace detail;
 
+//
+// In addition to supporting both row and scalar broadcasting, this Visitor has
+// been modified to support a null pointer that can be used to broadcast a
+// pre-defined constant.
+// That's because the original VisitorRowBroadcast (despite having a
+// null_default parameter) does not support broadcasting a constant when ptr_row
+// is nullptr.
+// If EnableNullptr is true, scalar broadcasting is not supported.
+// In CUTLASS 3.x, this is supported, so this feature is not included.
+//
 template<
   class ThreadMap,
   class Element,
@@ -68,7 +78,8 @@ template<
 struct VisitorRowOrScalarBroadcast {
 
   // This struct has been modified to have a bool indicating that ptr_row is a 
-  // scalar that must be broadcast.
+  // scalar that must be broadcast. If EnableNullptr is true, then ptr_row can
+  // be nullptr, and the null_default value will be broadcast instead.
   struct Arguments {
     Element const* ptr_row = nullptr;
     bool row_broadcast = true;
@@ -235,7 +246,12 @@ struct VisitorRowOrScalarBroadcast {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Column vector broadcast
+
+//
+// Just like VisitorRowOrScalarBroadcast, this Visitor supports both column and
+// scalar broadcasting, as well as a null pointer that can be used to broadcast
+// the null_default.
+// If EnableNullptr is true, scalar broadcasting is not supported.
 template<
   class ThreadMap,
   class Element,
@@ -244,8 +260,9 @@ template<
 >
 struct VisitorColOrScalarBroadcast {
 
-  // This struct has been modified to have a bool indicating that ptr_col is a 
-  // scalar that must be broadcast.
+  // This struct has been modified to have a bool indicating that ptr_col is a
+  // scalar that must be broadcast. If EnableNullptr is true, then ptr_row can
+  // be nullptr, and the null_default value will be broadcast instead.
   struct Arguments {
     Element const* ptr_col = nullptr;
     bool col_broadcast = true;

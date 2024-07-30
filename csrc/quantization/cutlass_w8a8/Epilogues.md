@@ -99,6 +99,8 @@ Epilogue parameters:
 - `azp_with_adj` is the precomputed zero-point term ($` z_a J_a \widehat B `$), is per-channel (row-vector).
 - `bias` is the bias, is always per-channel (row-vector).
 
+To use these kernels efficiently, users must precompute the `azp_with_adj` term offline and pass it to the kernel.
+
 ### ScaledEpilogueAzpPerToken
 This epilogue computes the asymmetric per-token quantization for activations with bias.
 
@@ -112,6 +114,8 @@ Epilogue parameters:
 - `azp_adj` is the precomputed zero-point adjustment term ($` \mathbf 1 \widehat B `$), is per-channel (row-vector).
 - `azp` is the zero-point (`z_a`), is per-token (column-vector).
 - `bias` is the bias, is always per-channel (row-vector).
+
+To use these kernels efficiently, users must precompute the `azp_adj` term offline and pass it to the kernel.
 
 The epilogue performs the following computation (where `Dq` is the raw quantized output of the GEMM):
 ```

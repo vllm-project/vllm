@@ -95,6 +95,9 @@ struct ScaledEpilogueBase {
       RowDescriptor<T>::Stages, typename EpilogueDescriptor::TileShape, T,
       Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
 
+  // This utility function constructs the arguments for the load descriptors
+  // from a tensor. It can handle both row and column, as well as row/column or
+  // scalar cases.
   template <typename Descriptor, typename T>
   static auto args_from_tensor(torch::Tensor const& tensor) {
     using Arguments = typename Descriptor::Arguments;
@@ -106,6 +109,9 @@ struct ScaledEpilogueBase {
       return Arguments{data_ptr};
     }
   }
+
+  // This overload handles the case where there might not be a tensor, in which
+  // case a nullptr is passed and a constant (0) is used.
   template <typename Descriptor, typename T>
   static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
     using Arguments = typename Descriptor::Arguments;
@@ -235,7 +241,7 @@ struct ScaledEpilogueBiasAzp
   // This is the full AZP term, azp * J @ B, shape (1,n)
   using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
 
-  // Compute (accum - azp_adj), resulting in a float
+  // Compute float(accum - azp_adj), both operands are int32_t
   using ComputeAzp = cutlass::epilogue::fusion::Sm90Compute<
       cutlass::minus, float, int32_t,
       cutlass::FloatRoundStyle::round_to_nearest>;
@@ -310,7 +316,7 @@ struct ScaledEpilogueBiasAzpToken
   using EVTComputeAzp =
       cutlass::epilogue::fusion::Sm90EVT<ComputeAzp, Azp, AzpAdj>;
 
-  // Compute (accum - azp * azp_adj), resulting in a float
+  // Compute float(accum - azp*azp_adj), all operands are int32_t
   using ComputeAcc = cutlass::epilogue::fusion::Sm90Compute<
       cutlass::minus, float, int32_t,
       cutlass::FloatRoundStyle::round_to_nearest>;

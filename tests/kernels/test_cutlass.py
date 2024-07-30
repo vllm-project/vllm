@@ -224,20 +224,6 @@ def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
                                      use_bias)
 
 
-def naive_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    m = a.shape[0]
-    n = b.shape[1]
-    k = a.shape[1]
-    assert k == b.shape[0]
-    out = torch.zeros((m, n), device=a.device, dtype=a.dtype)
-    for i in range(m):
-        for j in range(n):
-            for k2 in range(k):
-                out[i, j] += a[i, k2] * b[k2, j]
-
-    return out
-
-
 @pytest.mark.parametrize("m", [32, 64, 128])
 @pytest.mark.parametrize("n", [16, 32, 64])
 @pytest.mark.parametrize("k", [64, 128, 256])
