@@ -22,8 +22,8 @@ class GuidedDecodingFields:
             self.guided_regex is not None,
             self.guided_choice is not None,
             self.guided_grammar is not None,
-            self.guided_json_object is not None, ])
+            self.guided_json_object is not None])
         if guide_count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding but multiple is "
+                "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")

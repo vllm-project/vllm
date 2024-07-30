@@ -1,7 +1,6 @@
 import json
 import re
 import weakref
-from typing import List
 
 import jsonschema
 import pytest

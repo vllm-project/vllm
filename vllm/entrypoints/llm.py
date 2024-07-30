@@ -307,11 +307,11 @@ class LLM:
         else:
             inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
 
-        if isinstance(guided_options, Dict):
+        if isinstance(guided_options, dict):
             if len(guided_options) > 1:
                 raise ValueError(
                     "You can only use one guided decoding but multiple is "
-                    f"specified: {self.__dict__}")
+                    f"specified: {guided_options}")
             guided_options = GuidedDecodingFields(**guided_options)
 
         if sampling_params is None:
@@ -537,10 +537,6 @@ class LLM:
                              "must be the same.")
 
         if isinstance(params, list):
-            if len(params) != num_requests:
-                raise ValueError("The lengths of prompts and params "
-                                 "must be the same.")
-
             params = [
                 self._add_guided_processor(param, guided_options)
                 for param in params if isinstance(param, SamplingParams)
