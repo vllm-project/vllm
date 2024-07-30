@@ -60,8 +60,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v3", torch::kCUDA, &paged_attention_v3);
-  
-// Sequence block reducer of attention.
+
+  // Sequence block reducer of attention.
   ops.def(
       "sequence_block_reducer("
       "    Tensor! out, Tensor exp_sums, Tensor max_logits,"

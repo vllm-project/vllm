@@ -402,7 +402,7 @@ class TensorizerLoader(BaseModelLoader):
             from vllm.distributed import get_tensor_model_parallel_rank
             self.tensorizer_config.tensorizer_uri = \
                 self.tensorizer_config.tensorizer_uri \
-                    % get_tensor_model_parallel_rank()
+                % get_tensor_model_parallel_rank()
 
         if is_vllm_tensorized(self.tensorizer_config):
             return self._load_model_serialized(model_config, device_config,
@@ -644,7 +644,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             allowed_patterns: List[str],
             revision: Optional[str] = None) -> Tuple[List[str], str]:
         """Retrieve weight files. Download the files if necessary. 
-        
+
         Return the weight files and the file pattern."""
         is_local = os.path.isdir(model_name_or_path)
 

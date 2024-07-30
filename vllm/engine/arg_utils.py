@@ -106,9 +106,9 @@ class EngineArgs:
 
     otlp_traces_endpoint: Optional[str] = None
 
-    block_migrate_size: int=1024
-    block_migrate_threshold: int=6144
-    block_migrate_start: int=4096
+    block_migrate_size: int = 1024
+    block_migrate_threshold: int = 6144
+    block_migrate_start: int = 4096
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -542,8 +542,8 @@ class EngineArgs:
             '--speculative-model',
             type=nullable_str,
             default=EngineArgs.speculative_model,
-            help=
-            'The name of the draft model to be used in speculative decoding.')
+            help='The name of the draft model to be used in speculative'
+            'decoding.')
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -632,20 +632,19 @@ class EngineArgs:
             '--block-migrate-size',
             type=int,
             default=EngineArgs.block_migrate_size,
-            help='The superblock size for once kv cache tranfer.')
-        
+            help='The superblock size for once kv cache transfer.')
+
         parser.add_argument(
             '--block-migrate-threshold',
             type=int,
             default=EngineArgs.block_migrate_threshold,
             help='The threshold to start the kvcache migration.')
-        
-        parser.add_argument(
-            '--block-migrate-start',
-            type=int,
-            default=EngineArgs.block_migrate_start,
-            help='The start index of kvcache migration.')
-        
+
+        parser.add_argument('--block-migrate-start',
+                            type=int,
+                            default=EngineArgs.block_migrate_start,
+                            help='The start index of kvcache migration.')
+
         return parser
 
     @classmethod
@@ -661,15 +660,15 @@ class EngineArgs:
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
-            self.load_format != "bitsandbytes":
+                self.qlora_adapter_name_or_path is not None) and \
+                self.load_format != "bitsandbytes":
             raise ValueError(
                 "BitsAndBytes quantization and QLoRA adapter only support "
                 f"'bitsandbytes' load format, but got {self.load_format}")
 
         if (self.load_format == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
-            self.quantization != "bitsandbytes":
+                self.qlora_adapter_name_or_path is not None) and \
+                self.quantization != "bitsandbytes":
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
@@ -759,8 +758,8 @@ class EngineArgs:
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
-            speculative_draft_tensor_parallel_size = \
-                self.speculative_draft_tensor_parallel_size,
+            speculative_draft_tensor_parallel_size=self.
+            speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
@@ -795,7 +794,7 @@ class EngineArgs:
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
         if self.qlora_adapter_name_or_path is not None and \
-            self.qlora_adapter_name_or_path != "":
+                self.qlora_adapter_name_or_path != "":
             if self.model_loader_extra_config is None:
                 self.model_loader_extra_config = {}
             self.model_loader_extra_config[

@@ -53,14 +53,17 @@ class CPUExecutor(ExecutorBase):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        return self.driver_worker.determine_num_available_blocks()
+        num_gpu, num_cpu = self.driver_worker.determine_num_available_blocks()
+        return num_gpu, num_cpu, 0
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int = 0) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: We log here to avoid multiple logs when number of workers is
@@ -70,7 +73,9 @@ class CPUExecutor(ExecutorBase):
         # referred as `gpu block`. Because we want to reuse the existing block
         # management procedure.
         logger.info("# CPU blocks: %d", num_gpu_blocks)
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        num_remote = num_remote_gpu_blocks
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks,
+                                            num_remote)
 
     def execute_model(
             self,

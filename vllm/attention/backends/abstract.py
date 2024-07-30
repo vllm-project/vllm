@@ -89,6 +89,13 @@ class AttentionMetadata:
         attention."""
         pass
 
+    @property
+    @abstractmethod
+    def remote_metadata(self) -> Optional["AttentionMetadata"]:
+        """Return the attention metadata that's required to run decode
+        attention."""
+        pass
+
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
                         ) -> Dict[str, Any]:
@@ -126,15 +133,15 @@ class AttentionImpl(ABC, Generic[T]):
     def forward(
         self,
         query: torch.Tensor,
-        key: Optional[torch.Tensor],
-        value: Optional[torch.Tensor],
+        key: torch.Tensor,
+        value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: T,
         kv_scale: float = 1.0,
-        generate_kv_cache:Optional[bool]=True,
+        sp_rank: Optional[int] = -1,
     ) -> torch.Tensor:
         raise NotImplementedError
-    
+
     @abstractmethod
     def reducer(
         self,

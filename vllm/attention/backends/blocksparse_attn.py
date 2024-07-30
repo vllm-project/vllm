@@ -180,6 +180,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
         "BlocksparseFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None
+    _cache_remote_metadata: Optional[
+        "BlocksparseFlashAttentionMetadata"] = None
 
     @property
     def prefill_metadata(
@@ -201,6 +203,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
+            num_long_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
@@ -229,6 +232,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
+            num_long_decode_tokens=0,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
@@ -242,6 +246,10 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
+
+    @property
+    def remote_metadata(self) -> Optional["BlocksparseFlashAttentionMetadata"]:
+        return None
 
 
 class BlocksparseFlashAttentionImpl(AttentionImpl):
@@ -328,6 +336,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
         kv_scale: float = 1.0,
+        sp_rank: Optional[int] = -1,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -372,8 +381,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # prompt, and they have the same length.
 
             assert kv_cache is None \
-                    or prefill_meta.block_tables is None \
-                    or prefill_meta.block_tables.numel() == 0, \
+                or prefill_meta.block_tables is None \
+                or prefill_meta.block_tables.numel() == 0, \
                 "Does not support prefix-enabled attention."
 
             output = self.bs_attn(

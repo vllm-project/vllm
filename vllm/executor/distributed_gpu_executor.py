@@ -24,7 +24,7 @@ class DistributedGPUExecutor(GPUExecutor):
 
         super().__init__(*args, **kwargs)
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int, int]:
         """Determine the number of available KV blocks.
 
         This invokes `determine_num_available_blocks` on each worker and takes
@@ -40,13 +40,20 @@ class DistributedGPUExecutor(GPUExecutor):
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
         # operators can be applied to all workers.
+
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
 
-        return num_gpu_blocks, num_cpu_blocks
+        num_remote_blocks = [
+            num_block for num_block in num_blocks if num_block[1] < 0
+        ]
+        num_remote_gpu_blocks = min(b[0] for b in num_remote_blocks)
+        return num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         num_remote_gpu_blocks: int = 1) -> None:
         """Initialize the KV cache in all workers.
         """
 
@@ -61,7 +68,8 @@ class DistributedGPUExecutor(GPUExecutor):
 
         self._run_workers("initialize_cache",
                           num_gpu_blocks=num_gpu_blocks,
-                          num_cpu_blocks=num_cpu_blocks)
+                          num_cpu_blocks=num_cpu_blocks,
+                          num_remote_gpu_blocks=num_remote_gpu_blocks)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest

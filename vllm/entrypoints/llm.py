@@ -80,7 +80,7 @@ class LLM:
         disable_custom_all_reduce: See ParallelConfig
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
-    
+
     Note:
         This class is intended to be used for offline inference. For online
         serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
@@ -561,7 +561,8 @@ class LLM:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
                             total_in_toks += len(output.prompt_token_ids)
-                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            in_spd = total_in_toks / \
+                                pbar.format_dict["elapsed"]
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
                             out_spd = total_out_toks / pbar.format_dict[
