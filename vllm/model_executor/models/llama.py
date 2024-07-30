@@ -173,13 +173,12 @@ class LlamaAttention(nn.Module):
         if not num_long_decode_tokens:
             num = num_long_decode_tokens
             attn, exp_sum, max_logits = self.parallel_gather(
-                attn_output[-num:],
-                out_exp_sum, out_max_sums)
+                attn_output[-num:], out_exp_sum, out_max_sums)
 
             # reduce sequence block result
 
-            attn_output[-num:] = self.attn.reducer(
-                attn, exp_sum, max_logits, q[-num:], attn_metadata)
+            attn_output[-num:] = self.attn.reducer(attn, exp_sum, max_logits,
+                                                   q[-num:], attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -250,7 +249,6 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
-
         )
 
         # Fully Connected

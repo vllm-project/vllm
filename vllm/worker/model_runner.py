@@ -369,7 +369,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # self.cache_config.block_migrate_size/self.cache_config.block_size
         # to be modified
         max_sequence_length = self.model_config.max_model_len
-        max_block_size = max_sequence_length/self.cache_config.block_size
+        max_block_size = max_sequence_length / self.cache_config.block_size
         seq_lens_remote: List[List[int]] = []
         block_tables_remote: List[List[List[int]]] = []
         q_remote_distribution: List[List[int]] = []
@@ -381,7 +381,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             num_remote_decode_tokens.append(0)
             max_remote_decode_seq_len.append(0)
         padding_mapping = []
-        padding_mapping.extend([_PAD_BLOCK_NUMBER]*max_block_size)
+        padding_mapping.extend([_PAD_BLOCK_NUMBER] * max_block_size)
 
         # The following fields are only for flashinfer
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
@@ -506,7 +506,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                       or not is_prompt):
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
-                        block_to_filte = seq_group_metadata.block_tables[seq_id]
+                        block_to_filte = seq_group_metadata.block_tables[
+                            seq_id]
                         block_table = []
                         for blk_number, rank in zip(block_to_filte, blk_ranks):
                             if rank == 0:
@@ -525,8 +526,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 # for decode stage.
                 if remote_len == 0 or is_prompt:
                     block_tables.append(block_table)
-                    seq_lens.append(sliding_seq_len-remote_len)
-                    context_lens.append(sliding_context_len-remote_len)
+                    seq_lens.append(sliding_seq_len - remote_len)
+                    context_lens.append(sliding_context_len - remote_len)
                     query_len = sliding_seq_len - sliding_context_len
                     query_lens.append(query_len)
                     input_tokens.extend(tokens)
@@ -545,7 +546,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             "seq_len:{}, context_len:{}, query_len:{}".format(
                                 seq_len, context_len, query_len))
                         num_decode_tokens += query_len
-                        local_len = sliding_seq_len-remote_len
+                        local_len = sliding_seq_len - remote_len
                         decode_seq_lens.append(local_len)
 
                     if lora_id > 0:
@@ -633,8 +634,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # long decoding
                     # prepare lead-node metadata of long decoding
                     block_tables_long.append(block_table)
-                    seq_lens_long.append(sliding_seq_len-remote_len)
-                    context_lens_long.append(sliding_context_len-remote_len)
+                    seq_lens_long.append(sliding_seq_len - remote_len)
+                    context_lens_long.append(sliding_context_len - remote_len)
                     query_len_long = sliding_seq_len - sliding_context_len
                     query_lens_long.append(query_len_long)
                     input_tokens_long.extend(tokens)
@@ -645,7 +646,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "seq_len: {}, context_len: {}, query_len: {}".format(
                             seq_len, context_len, query_len))
                     num_decode_tokens_long += query_len
-                    decode_seq_lens_long.append(sliding_seq_len-remote_len)
+                    decode_seq_lens_long.append(sliding_seq_len - remote_len)
                     output_reshape_index_long.append(old_index)
 
                     # Compute the slot mapping.
@@ -701,16 +702,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             q_remote_distribution[i].append(q_index)
                         else:
                             start_idx = 0
-                            while (length-start_idx >= max_block_size):
+                            while (length - start_idx >= max_block_size):
                                 seq_lens_remote[i].append(max_sequence_length)
                                 block_tables_remote[i].extend(
-                                    block_table_remote[start_idx:start_idx+max_block_size])
+                                    block_table_remote[start_idx:start_idx +
+                                                       max_block_size])
                                 q_remote_distribution[i].append(q_index)
-                                start_idx = start_idx+max_block_size
-
-                    q_index = q_index+1
+                                start_idx = start_idx + max_block_size
+                    q_index = q_index + 1
                 # Prepare the remote metadata
-                old_index = old_index+1
+                old_index = old_index + 1
 
         # append long-decoding metadata to the tail of list.
         if num_decode_tokens_long > 0:
@@ -1315,11 +1316,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             seq_group_metadata_list)
         seq_lens = reshape_list(model_input.seq_lens,
                                 model_input.output_reshape_index)
-        query_lens = reshape_list(
-            model_input.query_lens, model_input.output_reshape_index)
+        query_lens = reshape_list(model_input.query_lens,
+                                  model_input.output_reshape_index)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     seq_lens,
-                                                     query_lens,
+                                                     seq_lens, query_lens,
                                                      self.device,
                                                      self.pin_memory)
         is_prompt = (seq_group_metadata_list[0].is_prompt
@@ -1394,10 +1394,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **multi_modal_kwargs,
         )
 
-        hidden_states_reshape = torch.empty_like(
-            hidden_states,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device)
+        hidden_states_reshape = torch.empty_like(hidden_states,
+                                                 dtype=hidden_states.dtype,
+                                                 device=hidden_states.device)
         indexes = model_input.output_reshape_index
         if indexes is not None:
             for i in range(len(indexes)):
@@ -1406,9 +1405,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             hidden_states_reshape = hidden_states
 
         # Compute the logits.
-        logits = self.model.compute_logits(
-            hidden_states_reshape,
-            model_input.sampling_metadata)
+        logits = self.model.compute_logits(hidden_states_reshape,
+                                           model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:

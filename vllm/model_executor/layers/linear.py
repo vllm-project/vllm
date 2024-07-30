@@ -656,14 +656,15 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+
 # modify
 # used for q broastcast and output reduce of sequence parallel
 
 
 class SequenceParallelLinearForBroastcast:
 
-    def __init__(self,
-                 from_rank: Optional[int]):
+    def __init__(self, from_rank: Optional[int]):
         # Divide the weight matrix along the last dimension.
         self.tp_rank = get_tensor_model_parallel_rank()
         if from_rank is None:
@@ -690,8 +691,7 @@ class SequenceParallelLinearForBroastcast:
 
 class SequenceParallelLinearForGather:
 
-    def __init__(self,
-                 from_rank: Optional[int]):
+    def __init__(self, from_rank: Optional[int]):
         # Divide the weight matrix along the last dimension.
         self.tp_rank = get_tensor_model_parallel_rank()
         if from_rank is None:
@@ -704,7 +704,7 @@ class SequenceParallelLinearForGather:
 
         #########
         # gather(input_,dst,dim),dim is untest.
-        # output need be the shape 
+        # output need be the shape
         # [num_seqs, num_heads, num_sequece_block, head_size]
         output = get_sp_group(self.tp_rank).gather(input_, 0, -1)
         output2 = get_sp_group(self.tp_rank).gather(input_2, 0, -1)

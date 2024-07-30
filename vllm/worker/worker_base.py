@@ -46,7 +46,8 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def initialize_cache(self, num_gpu_blocks: int,
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
                          num_cpu_blocks: int,
                          num_remote_gpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
@@ -171,8 +172,7 @@ class WorkerInput:
         WorkerInput.
         """
         return cls(
-            superblock_to_migrate=tensor_dict.pop("superblock_to_migrate"),
-        )
+            superblock_to_migrate=tensor_dict.pop("superblock_to_migrate"), )
 
     def as_broadcastable_sp_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:

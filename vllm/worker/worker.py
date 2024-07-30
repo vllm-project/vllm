@@ -111,8 +111,9 @@ class Worker(LocalOrDistributedWorkerBase):
         if is_sp_worker:
             tp_pp_world = self.parallel_config.pipeline_parallel_size \
                 * self.parallel_config.tensor_parallel_size
-            self.kv_recv_streams = [torch.cuda.Stream()
-                                    for _ in range(tp_pp_world)]
+            self.kv_recv_streams = [
+                torch.cuda.Stream() for _ in range(tp_pp_world)
+            ]
         else:
             self.kv_send_stream = torch.cuda.Stream()
 
@@ -215,7 +216,8 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
                          num_cpu_blocks: int,
                          num_remote_gpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
@@ -281,8 +283,8 @@ class Worker(LocalOrDistributedWorkerBase):
         chunk_size = self.cache_config.chunk_size
         pp_size = self.parallel_config.pipeline_parallel_size
         tp_size = self.parallel_config.tensor_parallel_size
-        paralled_blocks = int(
-            self.cache_config.num_gpu_blocks / (pp_size * tp_size))
+        paralled_blocks = int(self.cache_config.num_gpu_blocks /
+                              (pp_size * tp_size))
         block_idx = sp_group * paralled_blocks + chunk_size * chunk_idx
 
         # Use a recv stream to do KV migration
@@ -335,20 +337,18 @@ class Worker(LocalOrDistributedWorkerBase):
         # blocks_to_migrate = torch.tensor(execute_model_req.blocks_to_migrate,
         #                               device=self.device,
         #                               dtype=torch.int64).view(-1, 2)
-        # `superblock_to_migrate` is a gpu tensor which records the dest chunk 
+        # `superblock_to_migrate` is a gpu tensor which records the dest chunk
         # in a remote SP GPU worker
         superblock_to_migrate = torch.tensor(
             execute_model_req.superblock_to_migrate,
             device=self.device,
             dtype=torch.int64).view(-1)
 
-        return WorkerInput(
-            num_seq_groups=num_seq_groups,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-            superblock_to_migrate=superblock_to_migrate
-        )
+        return WorkerInput(num_seq_groups=num_seq_groups,
+                           blocks_to_swap_in=blocks_to_swap_in,
+                           blocks_to_swap_out=blocks_to_swap_out,
+                           blocks_to_copy=blocks_to_copy,
+                           superblock_to_migrate=superblock_to_migrate)
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:

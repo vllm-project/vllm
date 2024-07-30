@@ -41,10 +41,8 @@ class FlashAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_blocks(kv_cache: torch.Tensor,
-                   start: int,
-                   step: int
-                   ) -> torch.Tensor:
+    def get_blocks(kv_cache: torch.Tensor, start: int,
+                   step: int) -> torch.Tensor:
         return kv_cache[:, start:start+step]
 
     @staticmethod
@@ -395,7 +393,8 @@ class FlashAttentionImpl(AttentionImpl):
                     key_cache,
                     value_cache,
                     block_table=remote_metadata.block_tables_remote[sp_rank],
-                    cache_seqlens=remote_metadata.seq_lens_remote_tensor[sp_rank],
+                    cache_seqlens=remote_metadata.
+                    seq_lens_remote_tensor[sp_rank],
                     softmax_scale=self.scale,
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
@@ -403,10 +402,7 @@ class FlashAttentionImpl(AttentionImpl):
 
             # Reshape the output tensor.
             temp = output.view(-1, self.num_heads * self.head_size)
-            return filter_tensor(temp,
-                                 out_exp_sums,
-                                 out_max_logits,
-                                 q_dist,
+            return filter_tensor(temp, out_exp_sums, out_max_logits, q_dist,
                                  num_seqs)
 
         num_tokens, hidden_size = query.shape

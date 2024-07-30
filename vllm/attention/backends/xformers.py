@@ -580,8 +580,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 seq_lens = decode_meta.seq_lens[-num_seqs:]
                 # to modify: seq_lens maybe need to be further designed
                 output = PagedAttention.sequence_block_reducer(
-                    tmp_out, exp_sum, max_logits, query,
-                    seq_lens, decode_meta.max_long_decode_seq_len)
+                    tmp_out, exp_sum, max_logits, query, seq_lens,
+                    decode_meta.max_long_decode_seq_len)
                 return output
             return tmp_out
         else:

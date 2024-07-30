@@ -640,11 +640,10 @@ class EngineArgs:
             default=EngineArgs.block_migrate_threshold,
             help='The threshold to start the kvcache migration.')
 
-        parser.add_argument(
-            '--block-migrate-start',
-            type=int,
-            default=EngineArgs.block_migrate_start,
-            help='The start index of kvcache migration.')
+        parser.add_argument('--block-migrate-start',
+                            type=int,
+                            default=EngineArgs.block_migrate_start,
+                            help='The start index of kvcache migration.')
 
         return parser
 
@@ -759,7 +758,8 @@ class EngineArgs:
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
-            speculative_draft_tensor_parallel_size=self.speculative_draft_tensor_parallel_size,
+            speculative_draft_tensor_parallel_size=self.
+            speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,

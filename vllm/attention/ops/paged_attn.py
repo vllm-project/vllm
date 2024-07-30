@@ -43,10 +43,9 @@ class PagedAttention:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
 
     @staticmethod
-    def get_blocks(kv_cache: torch.Tensor,
-                   start: int,
+    def get_blocks(kv_cache: torch.Tensor, start: int,
                    step: int) -> torch.Tensor:
-        return kv_cache[:, start:start+step,:]
+        return kv_cache[:, start:start+step, :]
 
     @staticmethod
     def split_kv_cache(
@@ -94,8 +93,8 @@ class PagedAttention:
         max_seq_len: int,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
-        ops.sequence_block_reducer(
-            output, exp_sum, max_logits, tmp_out, query, seq_lens, max_seq_len)
+        ops.sequence_block_reducer(output, exp_sum, max_logits, tmp_out, query,
+                                   seq_lens, max_seq_len)
         return output
 
     @staticmethod
@@ -230,8 +229,6 @@ class PagedAttention:
                     blocksparse_block_size % block_size == 0), \
                 (f"{blocksparse_block_size=} needs to be a multiple of"
                  f"{block_size=} used in block_tables.")
-
-        
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //

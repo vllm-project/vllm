@@ -60,7 +60,8 @@ class CPUExecutor(ExecutorBase):
         num_gpu, num_cpu = self.driver_worker.determine_num_available_blocks()
         return num_gpu, num_cpu, 0
 
-    def initialize_cache(self, num_gpu_blocks: int,
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
                          num_cpu_blocks: int,
                          num_remote_gpu_blocks: int = 0) -> None:
         """Initialize the KV cache by invoking the underlying worker.
@@ -73,8 +74,8 @@ class CPUExecutor(ExecutorBase):
         # management procedure.
         logger.info("# CPU blocks: %d", num_gpu_blocks)
         num_remote = num_remote_gpu_blocks
-        self.driver_worker.initialize_cache(
-            num_gpu_blocks, num_cpu_blocks, num_remote)
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks,
+                                            num_remote)
 
     def execute_model(
             self,

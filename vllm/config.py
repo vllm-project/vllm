@@ -636,7 +636,7 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         # When SP is enable, i.e., SP > 0, the world should contains
-        # pipeline_parallel_size * self.tensor_parallel_size GPUs as 
+        # pipeline_parallel_size * self.tensor_parallel_size GPUs as
         # master and SP GPUs.
         pp_size = pipeline_parallel_size
         tp_size = tensor_parallel_size

@@ -293,11 +293,8 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(
-            scheduler_config, 
-            cache_config, 
-            lora_config, 
-            parallel_config.sequence_parallel_size)
+        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config,
+                                   parallel_config.sequence_parallel_size)
 
         # Metric Logging.
         if self.log_stats:
@@ -359,8 +356,8 @@ class LLMEngine:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         self.cache_config.num_remote_gpu_blocks = num_remote_gpu_blocks
 
-        self.model_executor.initialize_cache(
-            num_gpu_blocks, num_cpu_blocks, num_remote_gpu_blocks)
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks,
+                                             num_remote_gpu_blocks)
 
     @classmethod
     def from_engine_args(

@@ -221,9 +221,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         num_cpu_blocks = 0
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self,
-                         num_gpu_blocks: int,
-                         num_cpu_blocks: int,
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int,
                          num_remote_gpu_blocks: int) -> None:
         """Initialize the KV cache. Currently, swappable CPU memory is not
         supported.

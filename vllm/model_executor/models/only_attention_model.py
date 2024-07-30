@@ -42,17 +42,18 @@ from .interfaces import SupportsLoRA
 
 
 class broastcastlayer:
+
     def __init__(self,
                  tp_size: int,
                  hidden_size: int,
-                 dtype: Optional[torch.dtype] = None
-                 ) -> None:
+                 dtype: Optional[torch.dtype] = None) -> None:
         self.tp_size = tp_size
         self.broastcast_streams = [torch.cuda.Stream() for _ in range(tp_size)]
-        self.broatcasters = [SequenceParallelLinearForBroastcast(
-            i) for i in range[self.tp_size]]
+        self.broatcasters = [
+            SequenceParallelLinearForBroastcast(i) for i in range[self.tp_size]
+        ]
         self.hidden_size = hidden_size
-        self.q_size = self.hidden_size/self.tp_size
+        self.q_size = self.hidden_size / self.tp_size
         self.dtype = dtype
 
     def forward(self, num_seqs: int) -> torch.Tensor:
@@ -64,21 +65,22 @@ class broastcastlayer:
 
 
 class gatherlayer:
+
     def __init__(self, tp_size: int, num_heads: int) -> None:
         self.tp_size = tp_size
         self.gather_streams = [torch.cuda.Stream() for _ in range(tp_size)]
-        self.gathers = [SequenceParallelLinearForGather(
-            i) for i in range[self.tp_size]]
-        self.num_heads = num_heads/self.tp_size
+        self.gathers = [
+            SequenceParallelLinearForGather(i) for i in range[self.tp_size]
+        ]
+        self.num_heads = num_heads / self.tp_size
 
-    def forward(self,
-                attn_to_reduce: torch.Tensor,
+    def forward(self, attn_to_reduce: torch.Tensor,
                 exp_sum_to_reduce: torch.Tensor,
                 max_logits_to_reduce: torch.Tensor) -> None:
         for i in range(self.tp_size):
             with torch.cuda.stream(self.gather_streams[i]):
-                start = i*self.num_heads
-                end = (i+1)*self.num_heads
+                start = i * self.num_heads
+                end = (i + 1) * self.num_heads
                 self.gather[i](attn_to_reduce[:, start:end, :],
                                exp_sum_to_reduce[:, start:end],
                                max_logits_to_reduce[:, start:end])
@@ -124,6 +126,7 @@ class OnlyAttention(nn.Module):
         self.sp_rank = get_sequence_parallel_rank()
         self.broastcastlayer = broastcastlayer(self.tp_size, self.hidden_size)
         self.gatherlayer = gatherlayer(self.tp_size, self.total_num_heads)
+
     #     def __init__(
     #     self,
     #     num_heads: int,
@@ -201,7 +204,10 @@ class AttentionModel(nn.Module):
     ) -> torch.Tensor:
         for i in range(len(self.num_hidden_layers)):
             layer = self.layer
-            layer(kv_caches[i], attn_metadata,)
+            layer(
+                kv_caches[i],
+                attn_metadata,
+            )
 
 
 class OnlyAttentionModel(nn.Module, SupportsLoRA):
@@ -260,10 +266,10 @@ class OnlyAttentionModel(nn.Module, SupportsLoRA):
     ) -> None:
         self.model(kv_caches, attn_metadata)
 
-    def compute_logits(self,
-                       hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata
-                       ) -> Optional[torch.Tensor]:
+    def compute_logits(
+        self, hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata
+    ) -> Optional[torch.Tensor]:
         pass
 
     def sample(
