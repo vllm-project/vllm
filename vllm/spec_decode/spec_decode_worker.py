@@ -1,6 +1,7 @@
 from collections import defaultdict
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple
+import time
 
 import torch
 
@@ -522,28 +523,36 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         execute_model_req.previous_hidden_states = self.previous_hidden_states
         self.previous_hidden_states = None
 
-        # Generate proposals using draft worker.
-        proposals = self.proposer_worker.get_spec_proposals(
-            execute_model_req, self._seq_with_bonus_token_in_last_step)
+        with Timer() as proposal_timer:
+            # Generate proposals using draft worker.
+            proposals = self.proposer_worker.get_spec_proposals(
+                execute_model_req, self._seq_with_bonus_token_in_last_step)
 
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
+        
+        with Timer() as scoring_timer:
+            proposal_scores = self.scorer.score_proposals(
+                execute_model_req,
+                proposals,
+            )
+        
+        with Timer() as verification_timer:
+            accepted_token_ids, target_logprobs = self._verify_tokens(
+                execute_model_req.seq_group_metadata_list, proposal_scores,
+                proposals, execute_model_req.num_lookahead_slots)
 
-        proposal_scores = self.scorer.score_proposals(
-            execute_model_req,
-            proposals,
-        )
-        accepted_token_ids, target_logprobs = self._verify_tokens(
-            execute_model_req.seq_group_metadata_list, proposal_scores,
-            proposals, execute_model_req.num_lookahead_slots)
+        stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
+            scoring_timer.elapsed_time_ms, verification_timer.elapsed_time_ms)
 
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
             accepted_token_ids,
             target_logprobs=target_logprobs,
-            k=execute_model_req.num_lookahead_slots)
+            k=execute_model_req.num_lookahead_slots,
+            stage_times=stage_times)
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
@@ -648,6 +657,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
         target_logprobs: torch.Tensor,  # shape: [batch_size, k+1, vocab_size]
         k: int,
+        stage_times: Tuple[float, float, float],
     ) -> List[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
 
@@ -725,6 +735,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         if maybe_rejsample_metrics is not None:
             sampler_output_list[
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics
+
+            (average_time_per_proposal_tok_ms, scoring_time_ms,
+                verification_time_ms) = stage_times
+            logger.info(
+                f"SpecDecodeWorker stage times: {average_time_per_proposal_tok_ms=:.02f} {scoring_time_ms=:.02f} {verification_time_ms=:.02f}")
         return sampler_output_list
 
     def _create_dummy_logprob_lists(
@@ -912,3 +927,13 @@ def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
         (proposer_cache_block_size_bytes + scorer_cache_block_size_bytes))
 
     return new_num_gpu_blocks
+
+class Timer:
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.end_time = time.time()
+        self.elapsed_time_s = self.end_time - self.start_time
+        self.elapsed_time_ms = self.elapsed_time_s * 1000
