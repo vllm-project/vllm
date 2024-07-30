@@ -282,6 +282,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         # output is List[SamplerOutput]
         return output
 
+# 1. spmd -> general & used by other backend easier
+# 2. 
+
     def _execute_model_spmd(
         self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[SamplerOutput]]:

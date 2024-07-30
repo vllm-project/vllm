@@ -122,11 +122,11 @@ class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
-    prompt_token_ids: List[int]
-    _output_token_ids: Optional[List[int]] = msgspec.field(default_factory=list)
-    cumulative_logprob: float = 0.0
+    _prompt_token_ids: array
+    _output_token_ids: Optional[array] = None
 
     ## The below fields should not be passed as an argument ##
+    cumulative_logprob: float = 0.0
     _prompt_token_ids_tuple: Optional[Tuple[int, ...]] = None
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
@@ -138,11 +138,17 @@ class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
     def __post_init__(
         self,
     ) -> None:
-        self.prompt_token_ids = array('l', self.prompt_token_ids)
-        self._output_token_ids = array(
+        if not isinstance(self._prompt_token_ids, array):
+            self._prompt_token_ids = array('l', self._prompt_token_ids)
+        if not isinstance(self._output_token_ids, array):
+            self._output_token_ids = array(
             'l', self._output_token_ids if self._output_token_ids is not None else [])
-        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(self.prompt_token_ids)
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(self._prompt_token_ids)
         self._update_cached_all_tokens()
+
+    def _update_cached_all_tokens(self):
+        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
+                                                     self._output_token_ids)
 
     @property
     def prompt_token_ids(self) -> Tuple[int, ...]:
@@ -150,9 +156,7 @@ class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
 
     @prompt_token_ids.setter
     def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        self._prompt_token_ids = array('l', new_prompt_token_ids)
-        self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
-        self._update_cached_all_tokens()
+        raise NotImplementedError
 
     @property
     def prompt_token_ids_array(self) -> array:
@@ -178,10 +182,10 @@ class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return len(self._output_token_ids) + len(self.prompt_token_ids)
+        return len(self._output_token_ids) + len(self._prompt_token_ids)
 
     def get_prompt_len(self) -> int:
-        return len(self.prompt_token_ids)
+        return len(self._prompt_token_ids)
 
     def get_output_len(self) -> int:
         return len(self._output_token_ids)
@@ -230,11 +234,11 @@ class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
 
     def get_last_token_id(self) -> int:
         if not self._output_token_ids:
-            return self.prompt_token_ids[-1]
+            return self._prompt_token_ids[-1]
         return self._output_token_ids[-1]
 
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
-        return self.prompt_token_ids
+        return self._prompt_token_ids
 
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self._output_token_ids
@@ -260,7 +264,7 @@ class SequenceData(msgspec.Struct, array_like=False, omit_defaults=True):
 
     def __repr__(self) -> str:
         return (f"SequenceData("
-                f"prompt_token_ids={self.prompt_token_ids}, "
+                f"prompt_token_ids={self._prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()}")

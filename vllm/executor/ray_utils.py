@@ -1,7 +1,8 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Type, Any
 import time
 import pickle
 import msgspec
+from array import array
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -26,7 +27,14 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
             self.i = 0
-            self.decoder = msgspec.msgpack.Decoder(ExecuteModelRequest)
+
+            def dec_hook(type: Type, obj: Any) -> Any:
+                if type is array:
+                    deserialized = array('l')
+                    deserialized.frombytes(obj)
+                    return deserialized
+
+            self.decoder = msgspec.msgpack.Decoder(ExecuteModelRequest, dec_hook=dec_hook)
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -40,6 +48,7 @@ try:
             """Used only when SPMD worker and compiled DAG are both
             enabled."""
             s = time.time()
+
             execute_model_req: ExecuteModelRequest = self.decoder.decode(execute_model_req)
             # execute_model_req: ExecuteModelRequest = pickle.loads(execute_model_req)
             # print(f"SANG-TODO input deserialization takes {(time.time() - s) * 1000} ms index: {self.i}")
