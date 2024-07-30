@@ -59,31 +59,18 @@ namespace cutlass::epilogue::threadblock {
 using namespace cute;
 using namespace detail;
 
-//
-// In addition to supporting both row and scalar broadcasting, this Visitor has
-// been modified to support a null pointer that can be used to broadcast a
-// pre-defined constant.
-// That's because the original VisitorRowBroadcast (despite having a
-// null_default parameter) does not support broadcasting a constant when ptr_row
-// is nullptr.
-// If EnableNullptr is true, scalar broadcasting is not supported.
-// In CUTLASS 3.x, this is supported, so this feature is not included.
-//
 template<
   class ThreadMap,
   class Element,
-  class StrideMNL,
-  bool EnableNullptr = false
+  class StrideMNL
 >
 struct VisitorRowOrScalarBroadcast {
 
   // This struct has been modified to have a bool indicating that ptr_row is a 
-  // scalar that must be broadcast. If EnableNullptr is true, then ptr_row can
-  // be nullptr, and the null_default value will be broadcast instead.
+  // scalar that must be broadcast.
   struct Arguments {
     Element const* ptr_row = nullptr;
     bool row_broadcast = true;
-    Element null_default = Element(0);
     StrideMNL dRow = {};
   };
 
@@ -147,31 +134,7 @@ struct VisitorRowOrScalarBroadcast {
       auto coord_v = filter(tC_cRow);
       auto dst_v = filter(tC_rRow);
 
-      // Fill dst_v with the scalar value
-      auto fill_dst = [&](Element const& value) {
-        VecType filled_vec;
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < VecLength; i++) {
-          reinterpret_cast<Element*>(&filled_vec)[i] = value;
-        }
-
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < size(src_v); ++i) {
-          if (get<1>(coord_v(i)) < n) {
-            dst_v(i) = filled_vec;
-          }
-        }
-      };
-
-      if constexpr(EnableNullptr) {
-        if (params_ptr->ptr_row == nullptr) {
-          fill_dst(params_ptr->null_default);
-          return;
-        }
-      }
-
-      // if nullptr is enabled but not present, always row broadcast
-      if (EnableNullptr || params_ptr->row_broadcast) {
+      if (params_ptr->row_broadcast) {
         // In this case we are loading from a row vector and broadcasting
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size(src_v); ++i) {
@@ -246,27 +209,19 @@ struct VisitorRowOrScalarBroadcast {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-//
-// Just like VisitorRowOrScalarBroadcast, this Visitor supports both column and
-// scalar broadcasting, as well as a null pointer that can be used to broadcast
-// the null_default.
-// If EnableNullptr is true, scalar broadcasting is not supported.
+// Column vector broadcast
 template<
   class ThreadMap,
   class Element,
-  class StrideMNL = Stride<_1,_0,_0>,
-  bool EnableNullptr = false
+  class StrideMNL = Stride<_1,_0,_0>
 >
 struct VisitorColOrScalarBroadcast {
 
   // This struct has been modified to have a bool indicating that ptr_col is a
-  // scalar that must be broadcast. If EnableNullptr is true, then ptr_row can
-  // be nullptr, and the null_default value will be broadcast instead.
+  // scalar that must be broadcast.
   struct Arguments {
     Element const* ptr_col = nullptr;
     bool col_broadcast = true;
-    Element null_default = Element(0);
     StrideMNL dCol = {};
   };
 
@@ -328,26 +283,7 @@ struct VisitorColOrScalarBroadcast {
         pred(i) = get<0>(tC_cCol(i)) < m;
       }
 
-      auto fill_dst = [&](Element const& value) {
-        auto dst_v = filter(tC_rCol);
-
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < size(dst_v); ++i) {
-          if (pred(i)) {
-            dst_v(i) = value;
-          }
-        }
-      };
-
-      if constexpr(EnableNullptr) {
-        if (params_ptr->ptr_col == nullptr) {
-          fill_dst(params_ptr->null_default);
-          return;
-        }
-      }
-
-      // if nullptr is enabled but not present, always col broadcast
-      if (EnableNullptr || params_ptr->col_broadcast) {
+      if (params_ptr->col_broadcast) {
         // In this case we are loading from a column vector and broadcasting
         copy_if(pred, tC_gCol, tC_rCol);
       } else {
