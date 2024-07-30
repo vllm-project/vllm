@@ -7,10 +7,10 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
                                                             fused_topk,
                                                             grouped_topk)
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -62,18 +62,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor) -> torch.Tensor:
 
-        return self.forward(x,
-                             layer.w13_weight,
-                             layer.w2_weight,
-                             topk_weights,
-                             topk_ids)
+        return self.forward(x=x,
+                            layer=layer,
+                            topk_weights=topk_weights,
+                            topk_ids=topk_ids)
 
     def forward_cuda(
-        self, layer: torch.nn.Module, x: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor:
-        return fused_experts(x=x,
+        return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
                              topk_weights=topk_weights,
@@ -85,15 +86,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             "The CPU backend currently does not support MoE.")
 
     def forward_tpu(
-        self, layer: torch.nn.Module, x: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor:
-        
+
         #assert not use_grouped_topk
         #assert num_expert_group is None
         #assert topk_group is None
-        return fused_experts(x=x,
+        return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
                              topk_weights=topk_weights,
@@ -151,8 +154,6 @@ class FusedMoE(torch.nn.Module):
         self.reduce_results = reduce_results
         self.renormalize = renormalize
         self.use_grouped_topk = use_grouped_topk
-        if self.use_grouped_topk:
-            assert num_expert_group is not None and topk_group is not None
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
 
@@ -268,8 +269,8 @@ class FusedMoE(torch.nn.Module):
                         router_logits: torch.Tensor):
         # DeekSeekv2 uses grouped_top_k
         if self.use_grouped_topk:
-            assert (self.num_expert_group is not None
-                    and self.topk_group is not None)
+            assert self.topk_group is not None
+            assert self.num_expert_group is not None
             topk_weights, topk_ids = grouped_topk(hidden_states, router_logits,
                                                   self.top_k, self.renormalize,
                                                   self.num_expert_group,
@@ -285,12 +286,15 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
 
         # Select experts.
-        topk_weights, topk_ids = self._select_experts(hidden_states,
-                                                      router_logits)
+        topk_weights, topk_ids = self._select_experts(
+            hidden_states=hidden_states, router_logits=router_logits)
 
         # Call fused kernel.
-        final_hidden_states = self.quant_method.apply(self, hidden_states,
-                                                      topk_weights, topk_ids)
+        final_hidden_states = self.quant_method.apply(
+            layer=self,
+            x=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids)
 
         # Optionally reduce.
         if self.reduce_results and self.tp_size > 1:

@@ -7,8 +7,11 @@ import torch
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.quantization.awq import (AWQConfig,
+                                                         AWQLinearMethod)
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
@@ -100,6 +103,7 @@ def test_mixtral_moe(dtype: torch.dtype):
                           rtol=mixtral_moe_tol[dtype],
                           atol=mixtral_moe_tol[dtype])
 
+
 def torch_moe_awq(a, w1, w1_scale, w1_zero, w2, w2_scale, w2_zero, score,
                   topk):
     score = torch.softmax(score.float(), dim=-1)
@@ -176,5 +180,7 @@ def test_fused_moe_awq(
     awq_method = AWQLinearMethod(AWQConfig(4, groupsize, False))
     torch_output = torch_moe_awq(a, qw1, scale1, zero1, qw2, scale2, zero2,
                                  score, topk)
+    # TODO @dsikka: what is this supposed to be applying?
+    # LinearMethod used for a fused test?
     cuda_output = awq_method.apply_moe_weights(w1, w2, a, score, topk, False)
     assert torch.allclose(cuda_output, torch_output, atol=1e-2, rtol=0)

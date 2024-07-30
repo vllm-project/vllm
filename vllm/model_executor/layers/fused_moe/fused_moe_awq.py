@@ -44,6 +44,7 @@ def fused_experts_awq(
     do_naive_dequant = hidden_states.shape[:-1].numel() >= NAIVE_THRESHOLD
     if do_naive_dequant:
         # TODO: why is this not contiguous already?
+        # from @dsikka: because of the permutation operation
         dequant_w1 = ops.awq_dequantize(w1, w1_scales, w1_qzeros, 0, 0,
                                         0).permute(0, 2, 1).contiguous()
         dequant_w2 = ops.awq_dequantize(w2, w2_scales, w2_qzeros, 0, 0,

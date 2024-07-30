@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
@@ -8,7 +8,7 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   fused_experts_awq)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -65,9 +65,9 @@ class AWQConfig(QuantizationConfig):
         zero_point = cls.get_from_keys(config, ["zero_point"])
         return cls(weight_bits, group_size, zero_point)
 
-
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["AWQLinearMethod"]:
+    def get_quant_method(
+            self, layer: torch.nn.Module,
+            prefix: str) -> Optional[Union["AWQMoEMethod", "AWQLinearMethod"]]:
         if isinstance(layer, LinearBase):
             return AWQLinearMethod(self)
         elif isinstance(layer, FusedMoE):
@@ -283,8 +283,13 @@ class AWQMoEMethod(FusedMoEMethodBase):
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor) -> torch.Tensor:
 
-        return fused_experts_awq(x, layer.w13_qweight, layer.w2_qweight,
-                                 layer.w13_scales, layer.w2_scales,
-                                 layer.w13_qzeros, layer.w2_qzeros,
-                                 topk_weights, topk_ids,
-                                 self.quant_config.pack_factor)
+        return fused_experts_awq(hidden_states=x,
+                                 w1=layer.w13_qweight,
+                                 w2=layer.w2_qweight,
+                                 w1_scales=layer.w13_scales,
+                                 w2_scales=layer.w2_scales,
+                                 w1_qzeros=layer.w13_qzeros,
+                                 w2_qzeros=layer.w2_qzeros,
+                                 topk_weights=topk_weights,
+                                 topk_ids=topk_ids,
+                                 pack_factor=self.quant_config.pack_factor)
