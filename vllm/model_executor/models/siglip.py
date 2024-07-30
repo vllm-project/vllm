@@ -49,7 +49,7 @@ def get_max_siglip_image_tokens(hf_config: SiglipVisionConfig) -> int:
     return get_siglip_image_feature_size(hf_config)
 
 
-def dummy_seq_data_for_clip(
+def dummy_seq_data_for_siglip(
     hf_config: SiglipVisionConfig,
     seq_len: int,
     *,
