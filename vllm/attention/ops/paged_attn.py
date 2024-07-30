@@ -46,7 +46,7 @@ class PagedAttention:
     def get_blocks(kv_cache: torch.Tensor, start: int,
                    step: int) -> torch.Tensor:
         return kv_cache[:, start:start + step, :]
-    
+
     @staticmethod
     def split_kv_cache(
         kv_cache: torch.Tensor,
