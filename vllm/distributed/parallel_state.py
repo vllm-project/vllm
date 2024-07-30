@@ -680,8 +680,8 @@ class GroupCoordinator:
         return tensor
 
     def send_tensor(
-            self, 
-            tensor: torch.Tensor, 
+            self,
+            tensor: torch.Tensor,
             dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -784,6 +784,9 @@ _SP: Optional[List[Optional[GroupCoordinator]]] = None
 def get_sp_group(rank: int) -> GroupCoordinator:
     assert _SP is not None, (
         "pipeline model parallel groups are not initialized")
+    assert rank < len(_SP) and rank >= 0, (
+        "rank is out of range of sp groups"
+    )
     assert _SP[rank] is not None, (
         f"sequence parallel group of rank {rank} is not initialized")
     return _SP[rank]
@@ -949,8 +952,8 @@ def initialize_model_parallel(
         ranks = [i] + list(range(tp_pp_world_size,
                            tp_pp_world_size + sp_world_size))
         if get_world_group().rank in ranks:
-            local_rank=get_world_group().local_rank
-            _SP[i] = init_model_parallel_group([ranks],local_rank, backend)
+            local_rank = get_world_group().local_rank
+            _SP[i] = init_model_parallel_group([ranks], local_rank, backend)
 
 
 def ensure_model_parallel_initialized(
@@ -1035,7 +1038,7 @@ def get_sequence_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     global_rank = get_world_group().rank_in_group
     if global_rank >= get_tp_group().world_size:
-        return get_tp_group(0).rank_in_group-1
+        return get_sp_group(0).rank_in_group-1
     else:
         return -1
 
