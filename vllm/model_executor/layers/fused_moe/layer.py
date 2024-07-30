@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
                                                             fused_topk,
                                                             grouped_topk)
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -32,7 +33,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
-class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
+class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -61,11 +62,42 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor) -> torch.Tensor:
 
-        return fused_experts(x,
+        return self.forward(x,
                              layer.w13_weight,
                              layer.w2_weight,
                              topk_weights,
-                             topk_ids,
+                             topk_ids)
+
+    def forward_cuda(
+        self, layer: torch.nn.Module, x: torch.Tensor,
+              topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return fused_experts(x=x,
+                             w1=layer.w13_weight,
+                             w2=layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True)
+
+    def forward_cpu(self, *args, **kwargs):
+        raise NotImplementedError(
+            "The CPU backend currently does not support MoE.")
+
+    def forward_tpu(
+        self, layer: torch.nn.Module, x: torch.Tensor,
+              topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        
+        #assert not use_grouped_topk
+        #assert num_expert_group is None
+        #assert topk_group is None
+        return fused_experts(x=x,
+                             w1=layer.w13_weight,
+                             w2=layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
                              inplace=True)
 
 
@@ -104,6 +136,7 @@ class FusedMoE(torch.nn.Module):
         topk_group: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -127,7 +160,7 @@ class FusedMoE(torch.nn.Module):
             self.quant_method: Optional[QuantizeMethodBase] = (
                 UnquantizedFusedMoEMethod())
         else:
-            self.quant_method = quant_config.get_quant_method(self)
+            self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
 
         self.quant_method.create_weights(

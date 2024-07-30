@@ -105,6 +105,7 @@ Documentation
 
    quantization/supported_hardware
    quantization/auto_awq
+   quantization/bnb
    quantization/fp8
    quantization/fp8_e5m2_kvcache
    quantization/fp8_e4m3_kvcache
@@ -115,6 +116,12 @@ Documentation
 
    automatic_prefix_caching/apc
    automatic_prefix_caching/details
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Performance benchmarks
+
+   performance_benchmark/benchmarks
 
 .. toctree::
    :maxdepth: 2

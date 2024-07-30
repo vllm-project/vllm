@@ -30,8 +30,13 @@ logger = logging.getLogger(__name__)
 
 def embed_commit_hash():
     try:
-        commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
-                                            encoding="utf-8").strip()
+        if "BUILDKITE_COMMIT" in os.environ:
+            # ci build
+            commit_id = os.environ["BUILDKITE_COMMIT"]
+        else:
+            commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                encoding="utf-8").strip()
+
         commit_contents = f'__commit__ = "{commit_id}"\n'
 
         version_file = os.path.join(ROOT_DIR, "vllm", "commit_id.py")
@@ -483,4 +488,9 @@ setup(
     },
     cmdclass={"build_ext": cmake_build_ext} if _build_custom_ops() else {},
     package_data=package_data,
+    entry_points={
+        "console_scripts": [
+            "vllm=vllm.scripts:main",
+        ],
+    },
 )

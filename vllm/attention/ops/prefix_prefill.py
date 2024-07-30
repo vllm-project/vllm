@@ -687,6 +687,12 @@ if triton.__version__ >= "2.1.0":
 
         cap = current_platform.get_device_capability()
         BLOCK = 128 if cap[0] >= 8 else 64
+
+        # need to reduce num. blocks when using fp32
+        # due to increased use of GPU shared memory
+        if q.dtype is torch.float32:
+            BLOCK = BLOCK // 2
+
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv

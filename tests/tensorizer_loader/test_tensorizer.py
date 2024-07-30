@@ -40,7 +40,6 @@ model_ref = "facebook/opt-125m"
 tensorize_model_for_testing_script = os.path.join(
     os.path.dirname(__file__), "tensorize_vllm_model_for_testing.py")
 
-
 def is_curl_installed():
     try:
         subprocess.check_call(['curl', '--version'])
@@ -63,10 +62,6 @@ def write_keyfile(keyfile_path: str):
     with open(keyfile_path, 'wb') as f:
         f.write(encryption_params.key)
 
-@pytest.fixture(autouse=True)
-def tensorizer_config():
-    config = TensorizerConfig(tensorizer_uri="vllm")
-    return config
 
 
 @patch('vllm.model_executor.model_loader.tensorizer.TensorizerAgent')
@@ -105,6 +100,7 @@ def test_can_deserialize_s3(vllm_runner):
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
         vllm_runner, tmp_path):
+    cleanup()
     with vllm_runner(model_ref) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
         key_path = tmp_path / (model_ref + ".key")
@@ -214,12 +210,12 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
 
     ## Start OpenAI API server
     openai_args = [
-        "--model", model_ref, "--dtype", "float16", "--load-format",
+        "--dtype", "float16", "--load-format",
         "tensorizer", "--model-loader-extra-config",
         json.dumps(model_loader_extra_config),
     ]
 
-    with RemoteOpenAIServer(openai_args) as server:
+    with RemoteOpenAIServer(model_ref, openai_args) as server:
         print("Server ready.")
 
         client = server.get_client()
@@ -316,6 +312,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
 
 
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
+    cleanup()
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(tensorizer_uri=str(model_path))

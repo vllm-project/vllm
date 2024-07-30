@@ -35,8 +35,8 @@ def sequence_with_eos(text: str, eos_token: str,
 @pytest.mark.parametrize(["text_wo_eos", "eos_token", "eos_token_id"], [
     ("This text ends with EOS token", "</s>", 2),
 ])
-@pytest.mark.parametrize("ignore_eos", [True, False, None])
-@pytest.mark.parametrize("include_stop_str_in_output", [True, False, None])
+@pytest.mark.parametrize("ignore_eos", [True, False])
+@pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 @pytest.mark.skip_global_cleanup
 def test_stop_on_eos_token(text_wo_eos: str, eos_token: str, eos_token_id: int,
                            ignore_eos: bool, include_stop_str_in_output: bool):

@@ -150,3 +150,10 @@ def test_compressed_tensors_fp8(vllm_runner):
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
+
+
+def test_compressed_tensors_kv_cache(vllm_runner):
+    model_path = "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
+    with vllm_runner(model_path, kv_cache_dtype="fp8") as llm:
+        output = llm.generate_greedy("Hello world!", max_tokens=20)
+        assert output

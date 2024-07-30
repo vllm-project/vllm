@@ -2,8 +2,8 @@
 
 On the server side, run one of the following commands:
     vLLM OpenAI API server
-    python -m vllm.entrypoints.openai.api_server \
-        --model <your_model> --swap-space 16 \
+    vllm serve <your_model> \
+        --swap-space 16 \
         --disable-log-requests
 
     (TGI backend)
@@ -203,7 +203,7 @@ def sample_random_requests(
     )
     offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
     input_requests = []
-    for i in range(args.num_prompts):
+    for i in range(num_prompts):
         prompt = tokenizer.decode([(offsets[i] + i + j) % tokenizer.vocab_size
                                    for j in range(input_lens[i])])
         input_requests.append(
