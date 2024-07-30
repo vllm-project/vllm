@@ -738,6 +738,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             (average_time_per_proposal_tok_ms, scoring_time_ms,
              verification_time_ms) = stage_times
+
+            # Log time spent in each stage periodically.
+            # This is periodic because the rejection sampler emits metrics
+            # periodically.
             logger.info(
                 "SpecDecodeWorker stage times: "
                 "average_time_per_proposal_tok_ms=%.02f "
