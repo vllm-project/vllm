@@ -181,8 +181,24 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
 
-        model_input = self._prepare_encoder_model_input_tensors(
-            seq_group_metadata_list, model_input)
+        (attn_metadata, 
+         encoder_input_tokens_tensor,
+         encoder_input_positions_tensor,
+         ) = (
+             self._prepare_encoder_model_input_tensors(
+            seq_group_metadata_list, model_input))
+
+        # Inject attn_metadata encoder/cross-attention fields &
+        # encoder input tokens/positions into model_input.
+        # Frozen dataclass fields cannot be modified, so use
+        # dataclasses.replace to construct a new model input
+        # instance.
+        model_input = dataclasses.replace(
+            model_input,
+            attn_metadata=attn_metadata,
+            encoder_input_tokens=encoder_input_tokens_tensor,
+            encoder_input_positions=encoder_input_positions_tensor,
+        )
 
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
                                                      model_input.seq_lens,
@@ -407,19 +423,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         attn_metadata.cross_slot_mapping = cross_slot_mapping_tensor
         attn_metadata.cross_block_tables = cross_block_tables
 
-        # Inject attn_metadata encoder/cross-attention fields &
-        # encoder input tokens/positions into model_input.
-        # Frozen dataclass fields cannot be modified, so use
-        # dataclasses.replace to construct a new model input
-        # instance.
-        model_input = dataclasses.replace(
-            model_input,
-            attn_metadata=attn_metadata,
-            encoder_input_tokens=encoder_input_tokens_tensor,
-            encoder_input_positions=encoder_input_positions_tensor,
-        )
-
-        return model_input
+        return (attn_metadata, 
+                encoder_input_tokens_tensor,
+                encoder_input_positions_tensor)
 
 
 def _is_single_block_table_empty(block_table: Optional[List[int]]):

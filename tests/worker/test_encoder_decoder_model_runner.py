@@ -176,13 +176,12 @@ def test_prepare_prompt(
     # Augment model input data structure with encoder model
     # inputs & encoder/decoder cross-attention KV caching
     # data structures
-    encoder_decoder_model_input = (
+    (attn_metadata, 
+        encoder_input_tokens,
+        encoder_input_positions,
+        ) = (
         model_runner._prepare_encoder_model_input_tensors(
             seq_group_metadata_list, decoder_only_model_input))
-    encoder_input_tokens = encoder_decoder_model_input.encoder_input_tokens
-    encoder_input_positions = (
-        encoder_decoder_model_input.encoder_input_positions)
-    attn_metadata = encoder_decoder_model_input.attn_metadata
     cross_slot_mapping = attn_metadata.cross_slot_mapping
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
@@ -215,7 +214,7 @@ def test_prepare_prompt(
         torch.tensor(start_loc, dtype=torch.int32, device=device),
     )
 
-    # Test decoder seq start locs.
+    # Test decoder seq start locs & context lengths
 
     assert torch.equal(
         attn_metadata.seq_start_loc,
@@ -383,16 +382,13 @@ def test_prepare_decode(
     # Augment model input data structure with encoder model
     # inputs & encoder/decoder cross-attention KV caching
     # data structures
-    encoder_decoder_model_input = (
+    (attn_metadata, 
+        encoder_input_tokens,
+        encoder_input_positions,
+        ) = (
         model_runner._prepare_encoder_model_input_tensors(
             seq_group_metadata_list, decoder_only_model_input))
-    encoder_input_tokens = encoder_decoder_model_input.encoder_input_tokens
-    encoder_input_positions = (
-        encoder_decoder_model_input.encoder_input_positions)
-    attn_metadata = encoder_decoder_model_input.attn_metadata
-    # return_encoder_seq_lens = attn_metadata.encoder_seq_lens
     cross_slot_mapping = attn_metadata.cross_slot_mapping
-    # assert return_encoder_seq_lens == encoder_seq_lens
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
     # Verify input metadata is correct for decode phase.
@@ -431,6 +427,8 @@ def test_prepare_decode(
     for seq_len in seq_lens:
         start_idx += seq_len
         seq_start_loc.append(start_idx)
+
+    # Test seq_start_loc and context lengths
 
     assert torch.equal(
         attn_metadata.seq_start_loc,
