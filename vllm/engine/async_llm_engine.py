@@ -246,6 +246,16 @@ class _AsyncLLMEngine(LLMEngine):
                 seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
                 seq.append_token_id(token_id, token_logprob.logprob)
 
+    async def output_processor_async(self,
+                                     output,
+                                     scheduler_outputs,
+                                     seq_group_metadata_list):
+        request_outputs = self._process_model_outputs(output=output,
+                                                      scheduled_seq_groups=scheduler_outputs.scheduled_seq_groups,
+                                                      ignored_seq_groups=scheduler_outputs.ignored_seq_groups,
+                                                      seq_group_metadata_list=seq_group_metadata_list)
+        return request_outputs
+
     async def step_async(
         self, virtual_engine: int
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
@@ -260,9 +270,9 @@ class _AsyncLLMEngine(LLMEngine):
         """
         request_outputs = None
         if (self.previous_output) and (len(self.previous_output) > 0):
-            request_outputs = self._process_model_outputs(
-                self.previous_output, self.previous_scheduler_outputs.scheduled_seq_groups,
-                self.previous_scheduler_outputs.ignored_seq_groups, self.previous_seq_group_metadata_list)
+            request_outputs = asyncio.create_task(self.output_processor_async(
+                self.previous_output, self.previous_scheduler_outputs, self.previous_seq_group_metadata_list))
+            asyncio.sleep(0)
 
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
@@ -284,6 +294,11 @@ class _AsyncLLMEngine(LLMEngine):
                 execute_model_req)
         else:
             output = []
+
+        if request_outputs:
+            done, _ = await asyncio.wait([(request_outputs)])
+            request_outputs = list(done)[0].result()
+
         self.previous_output = output
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list
