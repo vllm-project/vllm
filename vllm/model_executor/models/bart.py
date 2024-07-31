@@ -75,7 +75,7 @@ class BartLearnedPositionalEmbedding(VocabParallelEmbedding):
 
         assert attn_type != AttentionType.ENCODER_DECODER
 
-        return super().forward(positions.unsqueeze(0) + self.offset)
+        return super().forward(positions + self.offset)
 
 
 class BartScaledWordEmbedding(VocabParallelEmbedding):
@@ -713,11 +713,10 @@ class BartDecoder(nn.Module):
             Decoder output torch.Tensor
         """
 
-        input = decoder_input_ids
-        input_shape = input.shape
-        decoder_input_ids = decoder_input_ids.view(-1, input_shape[-1])
+        #input_shape = decoder_input_ids.shape
+        #decoder_input_ids = decoder_input_ids.view(-1, input_shape[-1])
 
-        inputs_embeds = self.embed_tokens(input)
+        inputs_embeds = self.embed_tokens(decoder_input_ids)
 
         # embed positions
         embed_pos = self.embed_positions(
@@ -879,9 +878,8 @@ class BartForConditionalGeneration(nn.Module):
         Returns:
             Output torch.Tensor
         """
-        hidden_states = self.model(input_ids, positions, encoder_input_ids,
-                                   encoder_positions, kv_caches, attn_metadata)
-        return hidden_states[0, :, :]
+        return self.model(input_ids, positions, encoder_input_ids,
+                          encoder_positions, kv_caches, attn_metadata)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
