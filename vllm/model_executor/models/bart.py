@@ -768,12 +768,6 @@ class BartModel(nn.Module):
                                    cache_config,
                                    quant_config=quant_config)
 
-    def get_encoder(self):
-        return self.encoder
-
-    def get_decoder(self):
-        return self.decoder
-
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 encoder_input_ids: torch.Tensor,
                 encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
