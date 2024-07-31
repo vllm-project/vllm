@@ -449,7 +449,8 @@ class MiniCPMV(nn.Module, SupportsVision):
             if self.config.drop_vision_last_layer:
                 model.encoder.layers = model.encoder.layers[:-1]
         else:
-            from vllm.model_executor.models.na_vit import SiglipVisionTransformer
+            from vllm.model_executor.models.na_vit import (
+                SiglipVisionTransformer)
             if self.config._attn_implementation == 'flash_attention_2':
                 self.config.vision_config._attn_implementation \
                     = 'flash_attention_2'

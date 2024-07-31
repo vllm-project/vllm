@@ -1,23 +1,22 @@
-import os
-import math
 import logging
+import math
+import os
 import warnings
 from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 from torch.nn.init import _calculate_fan_in_and_fan_out
+from transformers.activations import ACT2FN
+from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (ModelOutput, is_flash_attn_2_available,
                                 replace_return_docstrings)
-from transformers.activations import ACT2FN
-from transformers.configuration_utils import PretrainedConfig
-
 
 logger = logging.getLogger("vllm")
 
@@ -91,8 +90,8 @@ SIGLIP_PRETRAINED_MODEL_ARCHIVE_LIST = [
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import (index_first_axis, pad_input,  # noqa
-                                         unpad_input)
+    from flash_attn.bert_padding import pad_input  # noqa
+    from flash_attn.bert_padding import index_first_axis, unpad_input
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
