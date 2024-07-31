@@ -55,8 +55,6 @@ from .idefics2_vision_model import Idefics2VisionTransformer
 # from transformers.models.idefics2.modeling_idefics2 import (
 #     Idefics2VisionTransformer)
 
-
-
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
@@ -549,7 +547,7 @@ class MiniCPMV(nn.Module, SupportsVision):
 
                     vision_embedding = self.vpm(
                         all_pixel_values.type(dtype),
-                        patch_attention_mask=patch_attn_mask).last_hidden_state
+                        patch_attention_mask=patch_attn_mask)
                     vision_hidden_states = self.resampler(
                         vision_embedding, tgt_sizes)
 
@@ -665,7 +663,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                 # the checkpoint. Skip them.
                 continue
             use_default_weight_loading = False
-            if "vpm" in name or 'resampler' in name:
+            if 'resampler' in name:
                 # We only do sharding for language model and
                 # not vision model for now.
                 use_default_weight_loading = True
