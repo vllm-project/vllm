@@ -7,3 +7,4 @@ Meta-Llama-3-8B-Instruct-Channelwise-compressed-tensors.yaml
 Minitron-4B-Base.yaml
 Qwen2-1.5B-Instruct-INT8-compressed-tensors.yaml
 Qwen2-1.5B-Instruct-FP8W8.yaml
+Meta-Llama-3-8B-QQQ.yaml

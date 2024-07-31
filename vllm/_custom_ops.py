@@ -389,6 +389,15 @@ def scaled_int8_quant(
     return output, input_scales
 
 
+# qqq ops
+def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                    s_tok: torch.Tensor, s_ch: torch.Tensor,
+                    s_group: torch.Tensor, workspace: torch.Tensor,
+                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
+    return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
+                                        workspace, size_m, size_n, size_k)
+
+
 # moe
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
