@@ -134,7 +134,6 @@ class QWenBlock(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ):
         super().__init__()
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -202,7 +201,7 @@ class QWenModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: QWenBlock(config, cache_config, quant_config, prefix),
-            prefix=f"{prefix}"
+            prefix=f"{prefix}.layers"
         )
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
