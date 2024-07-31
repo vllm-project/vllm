@@ -72,7 +72,7 @@ def get_logits_processors(
 
 
         logits_processors.append(partial(logit_bias_logits_processor, 
-                                         logit_bias))
+                                         clamped_logit_bias))
 
     if allowed_token_ids is not None:
         logits_processors.append(
