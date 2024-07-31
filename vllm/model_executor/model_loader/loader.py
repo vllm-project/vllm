@@ -69,11 +69,12 @@ def device_loading_context(module: torch.nn.Module,
                 original_device: torch.device = original_device_states[name]
                 if original_device.type == "cpu":
                     # `torch.empty_like` does not support `pin_memory` argument
-                    cpu_data = torch.empty(size=param.data.size(),
-                                           dtype=param.data.dtype,
-                                           layout=param.data.layout,
-                                           device="cpu",
-                                           pin_memory=pin_memory)
+                    cpu_data = torch.empty_strided(size=param.data.size(),
+                                                   stride=param.data.stride(),
+                                                   dtype=param.data.dtype,
+                                                   layout=param.data.layout,
+                                                   device="cpu",
+                                                   pin_memory=pin_memory)
                     cpu_data.copy_(param.data)
                     param.data = cpu_data
                 else:

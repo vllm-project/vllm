@@ -37,5 +37,10 @@ def test_cpu_offload_gptq_marlin_24():
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason="bitsandbytes is not supported on this GPU type.")
 def test_cpu_offload_bitsandbytes():
-    compare_two_settings("lllyasviel/omost-llama-3-8b-4bits", [],
-                         ["--cpu-offload-gb", "2"])
+    compare_two_settings("lllyasviel/omost-llama-3-8b-4bits", [
+        "quantization", "bitsandbytes", "load_format", "bitsandbytes",
+        "enforce_eager", "True"
+    ], [
+        "quantization", "bitsandbytes", "load_format", "bitsandbytes",
+        "enforce_eager", "True", "--cpu-offload-gb", "2"
+    ])
