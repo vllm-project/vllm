@@ -66,46 +66,16 @@ class BartLearnedPositionalEmbedding(VocabParallelEmbedding):
         self.offset = 2
         super().__init__(num_embeddings + self.offset, embedding_dim)
 
-    def forward(self, input_ids: torch.Tensor, attn_type: AttentionType,
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+    def forward(
+        self,
+        positions: torch.Tensor,
+        attn_type: AttentionType,
+    ) -> torch.Tensor:
         """`input_ids' shape is expected to be [bsz x seqlen]."""
 
         assert attn_type != AttentionType.ENCODER_DECODER
 
-        bsz, seq_len = get_bsz_seq_len(input_ids)
-        # afeldman-nm: This BART implementation is designed for vLLM, which
-        # packs variable-length sequences into a single vector
-        # without padding
-        assert bsz == 1
-
-        if attn_type == AttentionType.ENCODER:
-            seq_lens = attn_metadata.encoder_seq_lens
-            past_key_values_lens = [0] * len(seq_lens)
-        else:
-            # AttentionType.DECODER
-            if attn_metadata.num_prefill_tokens > 0:
-                # Prefill
-                seq_lens = attn_metadata.seq_lens
-                past_key_values_lens = [0] * len(seq_lens)
-            else:
-                # Decode: infer one (1) new token per sequence
-                seq_lens = [1] * len(attn_metadata.seq_lens)
-                past_key_values_lens = [
-                    seq_len - 1 for seq_len in attn_metadata.seq_lens
-                ]
-
-        positions = []
-        for past_key_values_len, seq_len in zip(past_key_values_lens,
-                                                seq_lens):
-            positions.extend(
-                list(range(past_key_values_len,
-                           past_key_values_len + seq_len)))
-
-        positions = torch.tensor(positions,
-                                 dtype=torch.long,
-                                 device=self.weight.device).expand(bsz, -1)
-
-        return super().forward(positions + self.offset)
+        return super().forward(positions.unsqueeze(0) + self.offset)
 
 
 class BartScaledWordEmbedding(VocabParallelEmbedding):
@@ -380,11 +350,6 @@ class BartCrossAttention(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        # q = self.q_proj(decoder_hidden_states)
-        # k=None if encoder_hidden_states is None else \
-        #     self.k_proj(encoder_hidden_states)
-        # v=None if encoder_hidden_states is None else \
-        #     self.v_proj(encoder_hidden_states)
 
         # (afeldman-nm 2024/07/22) TODO:
         # Need a more efficient solution for q/k/v
@@ -596,14 +561,6 @@ class BartDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
 
-        # if hidden_states.dtype == torch.float16 and (
-        #         torch.isinf(hidden_states).any()
-        #         or torch.isnan(hidden_states).any()):
-        #     clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-        #     hidden_states = torch.clamp(hidden_states,
-        #                                 min=-clamp_value,
-        #                                 max=clamp_value)
-
         return hidden_states
 
 
@@ -648,15 +605,17 @@ class BartEncoder(nn.Module):
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
-    def forward(self, input_ids: torch.Tensor, kv_caches: List[torch.Tensor],
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
             input_ids
-            (`torch.LongTensor` of shape `(total_num_tokens)`):
                 Indices of *encoder* input sequence tokens in the vocabulary.
                 Padding will be ignored by default should you
                 provide it.
+            positions
+                Positions of *encoder* input sequence tokens.
             kv_caches:
                 Layer-wise list of KV cache tensors
             attn_metadata:
@@ -666,12 +625,13 @@ class BartEncoder(nn.Module):
         """
         # retrieve input_ids and inputs_embeds
 
-        input = input_ids
         input_ids = input_ids.view(-1, input_ids.shape[-1])
         inputs_embeds = self.embed_tokens(input_ids)
 
-        embed_pos = self.embed_positions(input, AttentionType.ENCODER,
-                                         attn_metadata)
+        embed_pos = self.embed_positions(
+            positions,
+            AttentionType.ENCODER,
+        )
         embed_pos = embed_pos.to(inputs_embeds.device)
 
         hidden_states = inputs_embeds + embed_pos
@@ -731,16 +691,18 @@ class BartDecoder(nn.Module):
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
     def forward(self, decoder_input_ids: torch.Tensor,
+                decoder_positions: torch.Tensor,
                 encoder_hidden_states: Optional[torch.Tensor],
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
             decoder_input_ids
-            (`torch.LongTensor` of shape `(total_num_tokens)`):
                 Indices of *decoder* input sequence tokens in the vocabulary.
                 Padding will be ignored by default should you
                 provide it.
+            decoder_positions
+                Positions of *decoder* input sequence tokens.
             encoder_hidden_states:
                 Tensor of encoder output embeddings
             kv_caches:
@@ -758,8 +720,10 @@ class BartDecoder(nn.Module):
         inputs_embeds = self.embed_tokens(input)
 
         # embed positions
-        embed_pos = self.embed_positions(input, AttentionType.DECODER,
-                                         attn_metadata)
+        embed_pos = self.embed_positions(
+            decoder_positions,
+            AttentionType.DECODER,
+        )
         embed_pos = embed_pos.to(inputs_embeds.device)
 
         hidden_states = inputs_embeds + embed_pos
@@ -811,9 +775,29 @@ class BartModel(nn.Module):
     def get_decoder(self):
         return self.decoder
 
-    def forward(self, input_ids: torch.Tensor, encoder_input_ids: torch.Tensor,
-                kv_caches: List[torch.Tensor],
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                encoder_input_ids: torch.Tensor,
+                encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
+        r"""
+        Args:
+            input_ids
+                Indices of *decoder* input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you
+                provide it.
+            positions
+                Positions of *decoder* input sequence tokens.
+            encoder_input_ids
+                Indices of *encoder* input sequence tokens in the vocabulary.
+            encoder_positions:
+                Positions of *encoder* input sequence tokens.
+            kv_caches:
+                Layer-wise list of KV cache tensors
+            attn_metadata:
+                vLLM Attention metadata structure
+        Returns:
+            Model output torch.Tensor
+        """
 
         encoder_hidden_states = None
 
@@ -821,6 +805,7 @@ class BartModel(nn.Module):
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
+                                                 positions=encoder_positions,
                                                  kv_caches=kv_caches,
                                                  attn_metadata=attn_metadata)
 
@@ -828,6 +813,7 @@ class BartModel(nn.Module):
         # (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
+            decoder_positions=positions,
             encoder_hidden_states=encoder_hidden_states,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata)
@@ -893,8 +879,8 @@ class BartForConditionalGeneration(nn.Module):
         Returns:
             Output torch.Tensor
         """
-        hidden_states = self.model(input_ids, encoder_input_ids, kv_caches,
-                                   attn_metadata)
+        hidden_states = self.model(input_ids, positions, encoder_input_ids,
+                                   encoder_positions, kv_caches, attn_metadata)
         return hidden_states[0, :, :]
 
     def compute_logits(self, hidden_states: torch.Tensor,
