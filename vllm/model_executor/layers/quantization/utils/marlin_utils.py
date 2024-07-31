@@ -25,8 +25,8 @@ USE_FP32_REDUCE_DEFAULT = True
 # For binary size and compile time, we don't support the same types for with and
 #  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
 #  TODO: we may want to move this into the C++ so its closer to the actual impl
-def marlin_supported_quant_types(has_zp: bool,
-                                 min_capability: Optional[int] = None):
+def query_marlin_supported_quant_types(has_zp: bool,
+                                       min_capability: Optional[int] = None):
     if min_capability is None:
         major, minor = current_platform.get_device_capability()
         min_capability = major * 10 + minor
@@ -54,7 +54,8 @@ def _check_marlin_supported(
         major, minor = current_platform.get_device_capability()
         min_capability = major * 10 + minor
 
-    supported_types = marlin_supported_quant_types(has_zp, min_capability)
+    supported_types = query_marlin_supported_quant_types(
+        has_zp, min_capability)
 
     if quant_type not in supported_types:
         return (False, f"Marlin does not support weight_bits = {quant_type}. "

@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
-    MARLIN_SUPPORTED_GROUP_SIZES, marlin_supported_quant_types)
+    MARLIN_SUPPORTED_GROUP_SIZES, query_marlin_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
@@ -199,7 +199,8 @@ def main(args):
                            ) > 0 and is_k_full not in args.limit_k_full:
                         continue
 
-                    for quant_type in marlin_supported_quant_types(False):
+                    for quant_type in query_marlin_supported_quant_types(
+                            False):
                         if len(args.limit_num_bits) > 0 and \
                             quant_type.size_bits not in args.limit_num_bits:
                             continue
