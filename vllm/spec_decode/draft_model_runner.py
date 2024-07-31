@@ -3,11 +3,19 @@ from typing import List, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+
+try:
+    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+except ModuleNotFoundError:
+    # vllm_flash_attn is not installed, use the identical ROCm FA metadata
+    from vllm.attention.backends.rocm_flash_attn import (
+        ROCmFlashAttentionMetadata as FlashAttentionMetadata)
+
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
+from vllm.multimodal import MultiModalInputs
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
@@ -15,8 +23,12 @@ from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
 
 logger = init_logger(__name__)
 
+# A flag to enable debug prints for the updated input tensors
+# before each step.
 debug_advance_input = False
-enable_gpu_advance_step = True
+# A flag to allow GPU advance step for draft model runner.
+# Set to False for debugging.
+allow_gpu_advance_step = True
 
 
 class TP1DraftModelRunner(ModelRunner):
@@ -196,7 +208,7 @@ class TP1DraftModelRunner(ModelRunner):
             3. No LORA
             4. No prompt_adapter_config
         """
-        if not enable_gpu_advance_step:
+        if not allow_gpu_advance_step:
             return False
 
         # We allow multi-step GPU only in decode mode
@@ -312,7 +324,8 @@ class TP1DraftModelRunner(ModelRunner):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **multi_modal_kwargs,
+                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                             device=self.device),
             )
 
             # Compute the logits.
