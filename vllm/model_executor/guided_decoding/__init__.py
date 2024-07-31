@@ -4,7 +4,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionNamedToolChoiceParam, ChatCompletionRequest,
     CompletionRequest)
 from vllm.model_executor.guided_decoding.guided_fields import (
-    GuidedDecodingFields)
+    GuidedDecodingRequest)
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_local_outlines_guided_decoding_logits_processor,
     get_outlines_guided_decoding_logits_processor)
@@ -32,7 +32,7 @@ async def get_guided_decoding_logits_processor(
 
 
 def get_local_guided_decoding_logits_processor(
-        guided_decoding_backend: str, guided_options: GuidedDecodingFields,
+        guided_decoding_backend: str, guided_options: GuidedDecodingRequest,
         tokenizer) -> Optional[LogitsProcessor]:
     # request = _adapt_request_for_tool_use(request)
 

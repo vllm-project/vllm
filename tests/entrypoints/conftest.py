@@ -1,5 +1,23 @@
 import pytest
 
+@pytest.fixture
+def sample_prompts():
+    return [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+@pytest.fixture
+def sample_token_ids():
+    return [
+    [0],
+    [0, 1],
+    [0, 2, 1],
+    [0, 3, 1, 2],
+    ]
+
 
 @pytest.fixture
 def sample_regex():

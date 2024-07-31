@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 
 @dataclass
-class GuidedDecodingFields:
+class GuidedDecodingRequest:
     """One of the fields will be used to retrieve the logit processor."""
     guided_json: Optional[Union[Dict, BaseModel, str]] = None
     guided_regex: Optional[str] = None
@@ -18,11 +18,10 @@ class GuidedDecodingFields:
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         guide_count = sum([
-            self.guided_json is not None,
-            self.guided_regex is not None,
-            self.guided_choice is not None,
-            self.guided_grammar is not None,
-            self.guided_json_object is not None])
+            self.guided_json is not None, self.guided_regex is not None,
+            self.guided_choice is not None, self.guided_grammar is not None,
+            self.guided_json_object is not None
+        ])
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding but multiple are "

@@ -13,7 +13,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
 from vllm.model_executor.guided_decoding.guided_fields import (
-    GuidedDecodingFields)
+    GuidedDecodingRequest)
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_local_outlines_guided_decoding_logits_processor,
     get_outlines_guided_decoding_logits_processor)
@@ -58,7 +58,7 @@ async def get_lm_format_enforcer_guided_decoding_logits_processor(
 
 
 def get_local_lm_format_enforcer_guided_decoding_logits_processor(
-        guided_options: GuidedDecodingFields,
+        guided_options: GuidedDecodingRequest,
         tokenizer) -> Optional[LogitsProcessor]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters

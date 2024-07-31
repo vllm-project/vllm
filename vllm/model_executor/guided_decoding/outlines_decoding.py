@@ -11,7 +11,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
 from vllm.model_executor.guided_decoding.guided_fields import (
-    GuidedDecodingFields)
+    GuidedDecodingRequest)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
 
@@ -80,7 +80,7 @@ async def get_outlines_guided_decoding_logits_processor(
 
 
 def get_local_outlines_guided_decoding_logits_processor(
-    guided_options: GuidedDecodingFields, tokenizer: PreTrainedTokenizerBase
+    guided_options: GuidedDecodingRequest, tokenizer: PreTrainedTokenizerBase
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -99,7 +99,7 @@ def get_local_outlines_guided_decoding_logits_processor(
 
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest,
-                   GuidedDecodingFields]
+                   GuidedDecodingRequest]
 ) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
 
     if request.guided_json:
@@ -123,7 +123,7 @@ def _get_guide_and_mode(
         return choices_regex, GuidedDecodingMode.CHOICE
     elif request.guided_grammar:
         return request.guided_grammar, GuidedDecodingMode.GRAMMAR
-    elif (not isinstance(request, GuidedDecodingFields)
+    elif (not isinstance(request, GuidedDecodingRequest)
           and request.response_format is not None
           and request.response_format.type == "json_object"):
         return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR

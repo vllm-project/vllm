@@ -11,22 +11,8 @@ from vllm.sampling_params import SamplingParams
 
 from ...conftest import cleanup
 
-
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
-PROMPTS = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
-
-TOKEN_IDS = [
-    [0],
-    [0, 1],
-    [0, 2, 1],
-    [0, 3, 1, 2],
-]
 
 @pytest.fixture(scope="module")
 def llm():
@@ -39,18 +25,20 @@ def llm():
         del llm
     cleanup()
 
+
 @pytest.mark.skip_global_cleanup
 def test_guided_regex(sample_regex, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
     )
-    outputs = llm.generate(prompts=[
-        f"Give an example IPv4 address with this regex: {sample_regex}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True,
-                           guided_options=dict(guided_regex=sample_regex))
+    outputs = llm.generate(
+        prompts=[
+            f"Give an example IPv4 address with this regex: {sample_regex}"
+        ] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+        guided_options_request=dict(guided_regex=sample_regex))
 
     assert outputs is not None
     for output in outputs:
@@ -70,13 +58,14 @@ def test_guided_json_completion(sample_json_schema, llm):
         temperature=1.0,
         max_tokens=1000,
     )
-    outputs = llm.generate(prompts=[
-        f"Give an example JSON for an employee profile "
-        f"that fits this schema: {sample_json_schema}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True,
-                           guided_options=dict(guided_json=sample_json_schema))
+    outputs = llm.generate(
+        prompts=[
+            f"Give an example JSON for an employee profile "
+            f"that fits this schema: {sample_json_schema}"
+        ] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+        guided_options_request=dict(guided_json=sample_json_schema))
 
     assert outputs is not None
 
@@ -102,7 +91,7 @@ def test_guided_choice_completion(sample_guided_choice, llm):
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
         use_tqdm=True,
-        guided_options=dict(guided_choice=sample_guided_choice))
+        guided_options_request=dict(guided_choice=sample_guided_choice))
 
     assert outputs is not None
     for output in outputs:
@@ -128,7 +117,7 @@ def test_guided_grammar(sample_sql_statements, llm):
                  "table_1 where it is equals to 1"),
         sampling_params=sampling_params,
         use_tqdm=True,
-        guided_options=dict(guided_grammar=sample_sql_statements))
+        guided_options_request=dict(guided_grammar=sample_sql_statements))
 
     assert outputs is not None
     for output in outputs:
