@@ -27,6 +27,8 @@ class scalar_types:
     float6_e3m2f = ScalarType.float_(3, 2, True, NanRepr.NONE.value)
 
     # "gptq" types
+    uint2b2 = ScalarType.uint(2, 2)
+    uint3b4 = ScalarType.uint(3, 4)
     uint4b8 = ScalarType.uint(4, 8)
     uint8b128 = ScalarType.uint(8, 128)
 
