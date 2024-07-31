@@ -5,8 +5,6 @@
 
 export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_PORT=12345
-# export NCCL_DEBUG=INFO
-# export NCCL_BUFFSIZE=536870912
 
 # a function that waits vLLM server to start
 wait_for_server() {
@@ -35,7 +33,7 @@ VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     --enable-prefix-caching \
     --gpu-memory-utilization 0.8 &
 
-
+# wait until prefill and decode instances are ready
 wait_for_server 8100
 wait_for_server 8200
 

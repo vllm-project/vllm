@@ -49,23 +49,120 @@ benchmark() {
   model="neuralmagic/Meta-Llama-3-70B-Instruct-FP8"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=500
+  num_prompts=50
   qps=$1
   prefix_len=64
   input_len=2048
   output_len=$2
 
 
+  # # chunked prefill with tp=4
+  # CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+  #   -m vllm.entrypoints.openai.api_server \
+  #   --model $model \
+  #   --port 8000 \
+  #   -tp 4 \
+  #   --disable-log-stats \
+  #   --disable-log-requests \
+  #   --enable-chunked-prefill &
+  # wait_for_server 8000
+
+  # python3 ../benchmark_serving.py \
+  #         --backend vllm \
+  #         --model $model \
+  #         --dataset-name $dataset_name \
+  #         --dataset-path $dataset_path \
+  #         --sonnet-input-len $input_len \
+  #         --sonnet-output-len $output_len \
+  #         --sonnet-prefix-len $prefix_len \
+  #         --num-prompts $((num_prompts / 2)) \
+  #         --port 8000 \
+  #         --save-result \
+  #         --result-dir $results_folder \
+  #         --result-filename chunked_prefill_tp4.json \
+  #         --request-rate $((qps / 2))
+  # kill_gpu_processes
+
+
+  # # disaggregated prefill
+  # # prefill with tp=4
+  # python3 -m vllm.entrypoints.openai.api_server \
+  #         --model $model \
+  #         --port 8000 \
+  #         -tp 4 \
+  #         --disable-log-stats \
+  #         --disable-log-requests &
+  # wait_for_server 8000
+  # # set output-len to 1 so that it only do prefilling
+  # python3 ../benchmark_serving.py \
+  #         --backend vllm \
+  #         --model $model \
+  #         --dataset-name $dataset_name \
+  #         --dataset-path $dataset_path \
+  #         --sonnet-input-len $input_len \
+  #         --sonnet-output-len 1 \
+  #         --sonnet-prefix-len $prefix_len \
+  #         --num-prompts $num_prompts \
+  #         --port 8000 \
+  #         --save-result \
+  #         --result-dir $results_folder \
+  #         --result-filename disagg_prefill_tp4.json \
+  #         --request-rate $qps
+  # kill_gpu_processes
+
+  # # decode with tp=4, enable APC
+  # python3 -m vllm.entrypoints.openai.api_server \
+  #         --model $model \
+  #         --port 8000 \
+  #         -tp 4 \
+  #         --enable-prefix-caching \
+  #         --disable-log-stats \
+  #         --disable-log-requests &
+  # wait_for_server 8000
+  # # skip prefilling 
+  # # by enabling APC and force the input tokens be the same
+  # python3 ../benchmark_serving.py \
+  #         --backend vllm \
+  #         --model $model \
+  #         --dataset-name $dataset_name \
+  #         --dataset-path $dataset_path \
+  #         --sonnet-input-len $input_len \
+  #         --sonnet-output-len $output_len \
+  #         --sonnet-prefix-len $input_len  \
+  #         --num-prompts $num_prompts \
+  #         --port 8000 \
+  #         --save-result \
+  #         --result-dir $results_folder \
+  #         --result-filename disagg_decode_tp4.json \
+  #         --request-rate $qps
+  # kill_gpu_processes
+
+
+
   # chunked prefill with tp=4
-  CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+  export VLLM_PORT=12345
+  VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+      -m vllm.entrypoints.openai.api_server \
+      --model $model \
+      --port 8100 \
+      -tp 4 \
+      --disable-log-stats \
+      --disable-log-requests \
+      --enable-chunked-prefill &
+  VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
-    --port 8000 \
+    --port 8200 \
     -tp 4 \
     --disable-log-stats \
     --disable-log-requests \
     --enable-chunked-prefill &
-  wait_for_server 8000
+  wait_for_server 8100
+  wait_for_server 8200
+
+  # launch a proxy server that listen from port 8000
+  python3 disagg_prefill_proxy_server.py &
+  sleep 5
 
   python3 ../benchmark_serving.py \
           --backend vllm \
@@ -75,72 +172,18 @@ benchmark() {
           --sonnet-input-len $input_len \
           --sonnet-output-len $output_len \
           --sonnet-prefix-len $prefix_len \
-          --num-prompts $((num_prompts / 2)) \
-          --port 8000 \
-          --save-result \
-          --result-dir $results_folder \
-          --result-filename chunked_prefill_tp4.json \
-          --request-rate $((qps / 2))
-  kill_gpu_processes
-
-
-  # disaggregated prefill
-  # prefill with tp=4
-  python3 -m vllm.entrypoints.openai.api_server \
-          --model $model \
-          --port 8000 \
-          -tp 4 \
-          --disable-log-stats \
-          --disable-log-requests &
-  wait_for_server 8000
-  # set output-len to 1 so that it only do prefilling
-  python3 ../benchmark_serving.py \
-          --backend vllm \
-          --model $model \
-          --dataset-name $dataset_name \
-          --dataset-path $dataset_path \
-          --sonnet-input-len $input_len \
-          --sonnet-output-len 1 \
-          --sonnet-prefix-len $prefix_len \
           --num-prompts $num_prompts \
           --port 8000 \
           --save-result \
           --result-dir $results_folder \
-          --result-filename disagg_prefill_tp4.json \
+          --result-filename disagg_prefill_2xtp4.json \
           --request-rate $qps
   kill_gpu_processes
 
-  # decode with tp=4, enable APC
-  python3 -m vllm.entrypoints.openai.api_server \
-          --model $model \
-          --port 8000 \
-          -tp 4 \
-          --enable-prefix-caching \
-          --disable-log-stats \
-          --disable-log-requests &
-  wait_for_server 8000
-  # skip prefilling 
-  # by enabling APC and force the input tokens be the same
-  python3 ../benchmark_serving.py \
-          --backend vllm \
-          --model $model \
-          --dataset-name $dataset_name \
-          --dataset-path $dataset_path \
-          --sonnet-input-len $input_len \
-          --sonnet-output-len $output_len \
-          --sonnet-prefix-len $input_len  \
-          --num-prompts $num_prompts \
-          --port 8000 \
-          --save-result \
-          --result-dir $results_folder \
-          --result-filename disagg_decode_tp4.json \
-          --request-rate $qps
-  kill_gpu_processes
-
-  python3 analyze_benchmark_results.py \
-          --results-folder $results_folder \
-          --output-len $output_len \
-          --qps $qps
+  # python3 analyze_benchmark_results.py \
+  #         --results-folder $results_folder \
+  #         --output-len $output_len \
+  #         --qps $qps
 
 }
 
@@ -150,6 +193,8 @@ main() {
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
   (which jq) || (apt-get -y install jq)
   (which socat) || (apt-get -y install socat)
+
+  pip install quart httpx
 
   cd "$(dirname "$0")"
 
@@ -168,10 +213,11 @@ main() {
   default_qps=4
   default_output_len=150
 
-  for target_qps in 2 4 8 16
-  do
-    benchmark $target_qps $default_output_len
-  done
+  # for target_qps in 2 4 8 16
+  # do
+  #   benchmark $target_qps $default_output_len
+  # done
+  benchmark 1 150
 
   # for target_output_len in 5 10 20 40 80
   # do
