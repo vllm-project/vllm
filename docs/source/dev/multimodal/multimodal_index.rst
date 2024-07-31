@@ -44,6 +44,8 @@ Base Classes
 
 .. autodata:: vllm.multimodal.BatchedTensors
 
+.. autodata:: vllm.multimodal.BatchedTensorInputs
+
 .. autoclass:: vllm.multimodal.MultiModalDataBuiltins
     :members:
     :show-inheritance:
