@@ -28,6 +28,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.types
 import torch.nn.functional as F
 from PIL import Image
 from torch import nn
