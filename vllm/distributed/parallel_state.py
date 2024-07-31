@@ -51,16 +51,10 @@ def _split_tensor_dict(
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
     2. A list of tensors.
-
-    If the Tensor is nested under `tensor_dict["key1"]["key2"]`, the key of its
-    metadata will be "key1%key2".
     """
     metadata_list: List[Tuple[str, Any]] = []
     tensor_list: List[torch.Tensor] = []
     for key, value in tensor_dict.items():
-        assert "%" not in key, (
-            "Avoid having '%' in key "
-            "as it is used as a separator for nested entries.")
         if isinstance(value, torch.Tensor):
             # Note: we cannot use `value.device` here,
             # because it contains not only the device type but also the device
