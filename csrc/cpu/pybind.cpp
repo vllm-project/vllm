@@ -13,6 +13,10 @@ std::string join_shm_manager(const std::string &ip_port,
 
 void shm_allreduce(torch::Tensor &data, int rank);
 
+void shm_gather(torch::Tensor& data,
+                const std::optional<std::vector<torch::Tensor>>& outputs,
+                int64_t dst, int64_t rank);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // vLLM custom ops
   pybind11::module ops = m.def_submodule("ops", "vLLM custom operators");
@@ -71,4 +75,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "shm_allreduce",
     &shm_allreduce,
     "SHM based sum AllReduce operation."); 
+  ops.def(
+    "shm_gather",
+    &shm_gather,
+    "SHM based Gather operation."); 
 }

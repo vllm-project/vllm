@@ -151,10 +151,11 @@ def _tensor_model_parallel_gather(
     else:
         gather_list = None
     # Gather.
-    torch.distributed.gather(input_,
-                             gather_list,
-                             dst=dst,
-                             group=get_tensor_model_parallel_group())
+    ops.shm_gather(input_, gather_list, dst, get_tensor_model_parallel_rank())
+    # torch.distributed.gather(input_,
+    #                          gather_list,
+    #                          dst=dst,
+    #                          group=get_tensor_model_parallel_group())
     if get_tensor_model_parallel_rank() == dst:
         output_tensor = torch.cat(gather_list, dim=dim)
     else:

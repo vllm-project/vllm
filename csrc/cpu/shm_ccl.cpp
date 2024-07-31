@@ -3,19 +3,23 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 #define MAX_SHM_RANK_NUM 8
 
-template <typename scalar_t> struct KernelVecType {
+template <typename scalar_t>
+struct KernelVecType {
   using scalar_vec_t = void;
 };
 
-template <> struct KernelVecType<float> {
+template <>
+struct KernelVecType<float> {
   using scalar_vec_t = vec_op::FP32Vec16;
 };
 
-template <> struct KernelVecType<c10::BFloat16> {
+template <>
+struct KernelVecType<c10::BFloat16> {
   using scalar_vec_t = vec_op::BF16Vec16;
 };
 
@@ -27,7 +31,7 @@ struct SHMContext {
   int rank;
   int group_size;
   size_t rank_buffer_size;
-  SHMContext *shm_contexts[MAX_SHM_RANK_NUM];
+  SHMContext* shm_contexts[MAX_SHM_RANK_NUM];
   char _padding2[48];
 
   SHMContext(const int rank, const int group_size,
@@ -44,14 +48,15 @@ struct SHMContext {
     rank_stat = RankStat::DONE;
   }
 
-  void set_context(int rank, SHMContext *ptr) {
+  void set_context(int rank, SHMContext* ptr) {
     TORCH_CHECK(rank < MAX_SHM_RANK_NUM);
     TORCH_CHECK(ptr);
     shm_contexts[rank] = ptr;
   }
 
-  template <typename T> T *rank_ptr(int rank) {
-    return reinterpret_cast<T *>(shm_contexts[rank] + 1);
+  template <typename T>
+  T* rank_ptr(int rank) {
+    return reinterpret_cast<T*>(shm_contexts[rank] + 1);
   }
 
   RankStat get_rank_stat(int rank) const {
@@ -80,15 +85,13 @@ struct SHMContext {
           set_rank_stat(i, RankStat::READY);
         }
       } else {
-        while (get_rank_stat(rank) != RankStat::READY)
-          _mm_pause();
+        while (get_rank_stat(rank) != RankStat::READY) _mm_pause();
       }
       set_rank_stat(rank, RankStat::EXECUTE);
     } else if (next_stat == RankStat::DONE) {
       set_rank_stat(rank, RankStat::DONE);
       if (is_last()) {
-        while (!is_all_done())
-          _mm_pause();
+        while (!is_all_done()) _mm_pause();
       }
     } else {
       TORCH_CHECK(false, "Invalid next_stat to barrier.");
@@ -99,17 +102,17 @@ struct SHMContext {
     std::stringstream ss;
     ss << "SHMContext: \nrank_stat: ";
     switch (rank_stat) {
-    case RankStat::READY:
-      ss << "READY, ";
-      break;
-    case RankStat::EXECUTE:
-      ss << "EXECUTE, ";
-      break;
-    case RankStat::DONE:
-      ss << "DONE, ";
-      break;
-    default:
-      TORCH_CHECK(false, "Invalid RankStat type.");
+      case RankStat::READY:
+        ss << "READY, ";
+        break;
+      case RankStat::EXECUTE:
+        ss << "EXECUTE, ";
+        break;
+      case RankStat::DONE:
+        ss << "DONE, ";
+        break;
+      default:
+        TORCH_CHECK(false, "Invalid RankStat type.");
     }
     ss << "\nrank: " << rank;
     ss << "\ngroup_size: " << group_size;
@@ -127,19 +130,19 @@ struct SHMContext {
 
 namespace shm_cc_ops {
 
-void memcpy_64bytes(void *dst, void *src, size_t len) {
+void memcpy_64bytes(void* dst, void* src, size_t len) {
   constexpr size_t align_len = 64;
   TORCH_CHECK(len % align_len == 0);
   TORCH_CHECK((size_t)dst % align_len == 0);
   TORCH_CHECK((size_t)src % align_len == 0);
 #pragma GCC unroll 4
   for (size_t i = 0; i < len; i += align_len) {
-    vec_op::BF16Vec32 data((char *)src + i);
-    vec_op::non_temporal_save(data, (char *)dst + i);
+    vec_op::BF16Vec32 data((char*)src + i);
+    vec_op::non_temporal_save(data, (char*)dst + i);
   }
 }
 
-void parallel_memcpy(void *dst, void *src, size_t len) {
+void parallel_memcpy(void* dst, void* src, size_t len) {
   int thread_num = omp_get_max_threads();
   const size_t partition_num =
       (len + 512 * thread_num - 1) / (512 * thread_num);
@@ -149,12 +152,12 @@ void parallel_memcpy(void *dst, void *src, size_t len) {
     size_t offset = i * partition_num * 512;
     if (offset < len) {
       size_t partition_len = std::min(512 * partition_num, len - offset);
-      memcpy_64bytes((char *)dst + offset, (char *)src + offset, partition_len);
+      memcpy_64bytes((char*)dst + offset, (char*)src + offset, partition_len);
     }
   }
 }
 
-void gather(SHMContext *ctx, int rank, void *data, size_t len) {
+void gather(SHMContext* ctx, int rank, void* data, size_t len) {
   CPU_KERNEL_GUARD_IN(gather)
   TORCH_CHECK(len <= ctx->rank_buffer_size);
   ctx->barrier(RankStat::READY);
@@ -162,14 +165,14 @@ void gather(SHMContext *ctx, int rank, void *data, size_t len) {
   ctx->barrier(RankStat::DONE);
 }
 
-void broadcast(SHMContext *ctx, int rank, void *data, size_t len) {
+void broadcast(SHMContext* ctx, int rank, void* data, size_t len) {
   CPU_KERNEL_GUARD_IN(broatcast)
   ctx->barrier(RankStat::READY);
   parallel_memcpy(data, ctx->rank_ptr<void>(0), len);
   ctx->barrier(RankStat::DONE);
 }
 
-void scatter(SHMContext *ctx, int rank, void *data, size_t len) {
+void scatter(SHMContext* ctx, int rank, void* data, size_t len) {
   CPU_KERNEL_GUARD_IN(scatter)
   ctx->barrier(RankStat::READY);
   parallel_memcpy(data, ctx->rank_ptr<void>(rank), len);
@@ -177,7 +180,7 @@ void scatter(SHMContext *ctx, int rank, void *data, size_t len) {
 }
 
 template <typename scalar_t, int RANKS>
-void all_reduce_sum_v1(SHMContext *ctx, int rank, scalar_t *data,
+void all_reduce_sum_v1(SHMContext* ctx, int rank, scalar_t* data,
                        size_t elem_num) {
   CPU_KERNEL_GUARD_IN(all_reduce_sum_v1)
   const size_t bytes = elem_num * sizeof(scalar_t);
@@ -202,7 +205,7 @@ void all_reduce_sum_v1(SHMContext *ctx, int rank, scalar_t *data,
     if (offset < elem_num) {
       const size_t partition_len = std::min(
           VEC_ELEM_NUM * PACKED_FACTOR * partition_num, elem_num - offset);
-      scalar_t *rank_ptrs[RANKS];
+      scalar_t* rank_ptrs[RANKS];
       vec_op::unroll_loop<int, RANKS>([&](int idx) {
         rank_ptrs[idx] = ctx->rank_ptr<scalar_t>(idx) + offset;
         TORCH_CHECK((size_t)rank_ptrs[idx] % 64 == 0);
@@ -227,7 +230,7 @@ void all_reduce_sum_v1(SHMContext *ctx, int rank, scalar_t *data,
 }
 
 template <typename scalar_t, int RANKS>
-void all_reduce_sum_v2(SHMContext *ctx, int rank, scalar_t *data,
+void all_reduce_sum_v2(SHMContext* ctx, int rank, scalar_t* data,
                        size_t elem_num) {
   CPU_KERNEL_GUARD_IN(all_reduce_sum_v2)
   const size_t bytes = elem_num * sizeof(scalar_t);
@@ -269,7 +272,7 @@ void all_reduce_sum_v2(SHMContext *ctx, int rank, scalar_t *data,
     if (offset < rank_elem_num) {
       const size_t partition_len = std::min(
           VEC_ELEM_NUM * PACKED_FACTOR * partition_num, rank_elem_num - offset);
-      scalar_t *rank_ptrs[RANKS];
+      scalar_t* rank_ptrs[RANKS];
       vec_op::unroll_loop<int, RANKS>([&](int idx) {
         rank_ptrs[idx] = ctx->rank_ptr<scalar_t>(idx) + rank_offset + offset;
         TORCH_CHECK((size_t)rank_ptrs[idx] % 64 == 0);
@@ -296,13 +299,15 @@ void all_reduce_sum_v2(SHMContext *ctx, int rank, scalar_t *data,
 
   shm_cc_ops::scatter(ctx, rank, data, bytes);
 }
-}; // namespace shm_cc_ops
+};  // namespace shm_cc_ops
 
 class SHMManager {
-public:
-  explicit SHMManager(const std::string &ip_port, const int group_size,
+ public:
+  explicit SHMManager(const std::string& ip_port, const int group_size,
                       const int rank, const size_t rank_buffer_size)
-      : _rank(rank), _shm_names({""}), _shared_mem_ptrs({nullptr}),
+      : _rank(rank),
+        _shm_names({""}),
+        _shared_mem_ptrs({nullptr}),
         _shm_ctx(nullptr) {
     _shm_names[rank] = get_shm_name(ip_port, rank);
     _shared_mem_ptrs[rank] = init_shm(rank, rank_buffer_size);
@@ -311,10 +316,10 @@ public:
         SHMContext(rank, group_size, round_size(rank_buffer_size));
   }
 
-  void join(const std::string &ip_port, const int group_size, const int rank,
+  void join(const std::string& ip_port, const int group_size, const int rank,
             const size_t rank_buffer_size) {
     TORCH_CHECK(rank == _rank);
-    SHMContext *ctx = get_shm_ctx();
+    SHMContext* ctx = get_shm_ctx();
     for (int i = 0; i < group_size; ++i) {
       if (i != rank) {
         TORCH_CHECK(_shm_names[i].empty());
@@ -322,28 +327,28 @@ public:
 
         _shm_names[i] = get_shm_name(ip_port, i);
         _shared_mem_ptrs[i] = init_shm(i, rank_buffer_size);
-        ctx->set_context(i, (SHMContext *)_shared_mem_ptrs[i]);
+        ctx->set_context(i, (SHMContext*)_shared_mem_ptrs[i]);
       }
     }
   }
 
   ~SHMManager() { destroy_shm(); }
 
-  SHMContext *get_shm_ctx() const {
-    return reinterpret_cast<SHMContext *>(_shared_mem_ptrs[_rank]);
+  SHMContext* get_shm_ctx() const {
+    return reinterpret_cast<SHMContext*>(_shared_mem_ptrs[_rank]);
   }
 
-  static std::string get_shm_name(const std::string &ip_port, int rank) {
+  static std::string get_shm_name(const std::string& ip_port, int rank) {
     return "/vllm_" + ip_port + "_" + std::to_string(rank);
   }
 
-private:
+ private:
   static size_t round_size(const size_t size) {
     return ((size + 63) >> 6) << 6;
   }
 
-  void *init_shm(int target_rank, const size_t rank_buffer_size) {
-    const std::string &shm_name = _shm_names[target_rank];
+  void* init_shm(int target_rank, const size_t rank_buffer_size) {
+    const std::string& shm_name = _shm_names[target_rank];
     const int local_rank = _rank;
     const size_t rounded_rank_buffer_size = round_size(rank_buffer_size);
     const size_t shm_size = sizeof(SHMContext) + rounded_rank_buffer_size;
@@ -368,7 +373,7 @@ private:
                                std::to_string(errno));
     }
 
-    void *shm_ptr = mmap(nullptr, shm_size, PROT_READ | PROT_WRITE,
+    void* shm_ptr = mmap(nullptr, shm_size, PROT_READ | PROT_WRITE,
                          MAP_SHARED | MAP_POPULATE, fd, 0);
 
     if (shm_ptr == MAP_FAILED) {
@@ -391,34 +396,96 @@ private:
 
   int _rank;
   std::array<std::string, MAX_SHM_RANK_NUM> _shm_names;
-  std::array<void *, MAX_SHM_RANK_NUM> _shared_mem_ptrs;
-  SHMContext *_shm_ctx;
+  std::array<void*, MAX_SHM_RANK_NUM> _shared_mem_ptrs;
+  SHMContext* _shm_ctx;
 };
 
 static std::unique_ptr<SHMManager> shm_manager_singleton = nullptr;
 
 template <typename scalar_t>
-void shm_allreduce_sum(SHMContext *ctx, const int rank, scalar_t *data,
+void shm_allreduce_sum(SHMContext* ctx, const int rank, scalar_t* data,
                        size_t elem_num) {
   switch (ctx->group_size) {
-  case 2:
-    shm_cc_ops::all_reduce_sum_v1<scalar_t, 2>(ctx, rank, data, elem_num);
-    break;
-  case 4:
-    shm_cc_ops::all_reduce_sum_v2<scalar_t, 4>(ctx, rank, data, elem_num);
-    break;
-  case 8:
-    shm_cc_ops::all_reduce_sum_v2<scalar_t, 8>(ctx, rank, data, elem_num);
-    break;
-  default:
-    TORCH_CHECK(false,
-                "Invalid world size: " + std::to_string(ctx->group_size));
+    case 2:
+      shm_cc_ops::all_reduce_sum_v1<scalar_t, 2>(ctx, rank, data, elem_num);
+      break;
+    case 4:
+      shm_cc_ops::all_reduce_sum_v1<scalar_t, 4>(ctx, rank, data, elem_num);
+      break;
+    case 8:
+      shm_cc_ops::all_reduce_sum_v2<scalar_t, 8>(ctx, rank, data, elem_num);
+      break;
+    default:
+      TORCH_CHECK(false,
+                  "Invalid world size: " + std::to_string(ctx->group_size));
   }
 }
 
-} // namespace
+template <typename scalar_t>
+void shm_gather_impl(SHMContext* ctx, const int rank, scalar_t* data,
+                     size_t elem_num, scalar_t** outputs, const int dst) {
+  CPU_KERNEL_GUARD_IN(shm_gather_impl)
+  const int worldsize = ctx->group_size;
+  const size_t bytes = elem_num * sizeof(scalar_t);
+  TORCH_CHECK(bytes <= ctx->rank_buffer_size);
+  shm_cc_ops::gather(ctx, rank, data, bytes);
 
-void shm_allreduce(torch::Tensor &data, int rank) {
+  ctx->barrier(RankStat::READY);
+  if (rank != dst) {
+    ctx->barrier(RankStat::DONE);
+    return;
+  }
+  const int thread_num = std::max(omp_get_max_threads() / worldsize, 1);
+  const size_t partition_num =
+      (bytes + 512 * thread_num - 1) / (512 * thread_num);
+
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int target_rank = 0; target_rank < worldsize; ++target_rank) {
+    for (int i = 0; i < thread_num; ++i) {
+      size_t offset = i * partition_num * 512;
+      if (offset < bytes) {
+        size_t partition_len = std::min(512 * partition_num, bytes - offset);
+        shm_cc_ops::memcpy_64bytes(
+            (char*)(outputs[target_rank]) + offset,
+            (char*)(ctx->rank_ptr<scalar_t>(target_rank)) + offset,
+            partition_len);
+      }
+    }
+  }
+
+  ctx->barrier(RankStat::DONE);
+  return;
+}
+
+}  // namespace
+
+void shm_gather(torch::Tensor& data,
+                const std::optional<std::vector<torch::Tensor>>& outputs,
+                int64_t dst, int64_t rank) {
+  TORCH_CHECK(data.is_contiguous())
+  VLLM_DISPATCH_FLOATING_TYPES(data.scalar_type(), "shm_gather_impl", [&] {
+    CPU_KERNEL_GUARD_IN(shm_gather_impl)
+
+    if (outputs.has_value()) {
+      TORCH_CHECK_LE(outputs->size(), MAX_SHM_RANK_NUM);
+      scalar_t* output_ptrs[MAX_SHM_RANK_NUM] = {nullptr};
+      for (int i = 0; i < outputs->size(); ++i) {
+        output_ptrs[i] = outputs->at(i).data_ptr<scalar_t>();
+      }
+      shm_gather_impl(shm_manager_singleton->get_shm_ctx(), rank,
+                      data.data_ptr<scalar_t>(), data.numel(), output_ptrs,
+                      dst);
+    } else {
+      shm_gather_impl(shm_manager_singleton->get_shm_ctx(), rank,
+                      data.data_ptr<scalar_t>(), data.numel(), (scalar_t**)(0),
+                      dst);
+    }
+
+    CPU_KERNEL_GUARD_OUT(shm_gather_impl)
+  });
+}
+
+void shm_allreduce(torch::Tensor& data, int64_t rank) {
   TORCH_CHECK(data.is_contiguous())
   VLLM_DISPATCH_FLOATING_TYPES(data.scalar_type(), "shm_allreduce_sum", [&] {
     CPU_KERNEL_GUARD_IN(shm_allreduce_sum)
@@ -428,8 +495,8 @@ void shm_allreduce(torch::Tensor &data, int rank) {
   });
 }
 
-void init_shm_manager(const std::string &ip_port, const int group_size,
-                      const int rank, const size_t rank_buffer_size) {
+void init_shm_manager(const std::string& ip_port, const int64_t group_size,
+                      const int64_t rank, const int64_t rank_buffer_size) {
   if (shm_manager_singleton == nullptr) {
     shm_manager_singleton = std::make_unique<SHMManager>(
         ip_port, group_size, rank, rank_buffer_size);
@@ -440,8 +507,9 @@ void init_shm_manager(const std::string &ip_port, const int group_size,
   }
 }
 
-std::string join_shm_manager(const std::string &ip_port, const int group_size,
-                             const int rank, const size_t rank_buffer_size) {
+std::string join_shm_manager(const std::string& ip_port,
+                             const int64_t group_size, const int64_t rank,
+                             const int64_t rank_buffer_size) {
   TORCH_CHECK(shm_manager_singleton);
   shm_manager_singleton->join(ip_port, group_size, rank, rank_buffer_size);
   return shm_manager_singleton->get_shm_ctx()->to_string();
