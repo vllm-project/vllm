@@ -28,7 +28,7 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
     offsets = num_cols  * offsets_y[:, None] + offsets_x[None, :]
 
     masks_y = offsets_y < num_rows
-    masks_x = offsets_x < num_cols 
+    masks_x = offsets_x < num_cols
 
     masks = masks_y[:, None] & masks_x[None, :]
 
@@ -97,7 +97,7 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
     # Finally, store.
     tl.store(result_ptr + result_offsets, iweights, result_masks)
 
-# Example input: 
+# Example input:
 #   qweight.size=torch.Size([3584, 576]),
 #   qweight.dtype = torch.int32,
 #   scales.size=torch.Size([28, 4608]),
@@ -134,7 +134,7 @@ def awq_dequantize_triton(qweight: torch.Tensor,
     grid = lambda META: (
         triton.cdiv(X, META['BLOCK_SIZE_X']), triton.cdiv(Y,
                     META['BLOCK_SIZE_Y']), )
-    awq_dequantize_kernel[grid](qweight, scales, zeros, split_k_iters, 
+    awq_dequantize_kernel[grid](qweight, scales, zeros, split_k_iters,
             thx, thy, group_size, result, X, Y, reverse_awq_order,
             BLOCK_SIZE_X = block_size_x, BLOCK_SIZE_Y = block_size_y)
 
@@ -154,7 +154,7 @@ def reverse_awq_order(t: torch.Tensor):
     reverse_order_tensor = reverse_order_tensor.view(-1)
 
     t = t[:, reverse_order_tensor] & 0xF
-    return t 
+    return t
 
 # qweightss [R     , C // 8], int32
 # scales  - [R // G, C     ], float16
@@ -191,7 +191,6 @@ def awq_dequantize_torch(qweight: torch.Tensor,
     iweights = torch.bitwise_and(iweights, (2**bits) - 1)
     zeros = torch.bitwise_and(zeros, (2**bits) - 1)
 
-
     scales = scales.repeat_interleave(group_size, dim=0)
     zeros = zeros.repeat_interleave(group_size, dim=0)
     print(f"awq_dequantize_torch:iweights.shape = {iweights.shape},"
@@ -201,7 +200,7 @@ def awq_dequantize_torch(qweight: torch.Tensor,
     return (iweights - zeros) * scales
 
 def main():
-    use_triton = True 
+    use_triton = True
     use_torch = True
 
     qweight_rows = 3584
