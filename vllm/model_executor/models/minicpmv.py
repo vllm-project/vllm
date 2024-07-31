@@ -213,7 +213,7 @@ class Resampler(nn.Module):
 
     def _set_2d_pos_cache(self,
                           max_size: Tuple[int, int],
-                          device: torch.device = 'cpu'):
+                          device: torch.types.Device = 'cpu'):
         pos_embed = torch.from_numpy(
             get_2d_sincos_pos_embed(self.embed_dim,
                                     max_size,
