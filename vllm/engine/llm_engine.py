@@ -28,7 +28,6 @@ from vllm.inputs import (INPUT_REGISTRY, LLMInputs, PromptInputs,
                          get_prompt_type)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -623,6 +622,10 @@ class LLMEngine:
         src/transformers/generation/utils.py
 
         specifically GenerationMixin._prepare_decoder_input_ids_for_generation()
+
+        Arguments:
+
+        * decoder_input_ids: input token ids to preprocess
         """
 
         decoder_start_token_id: Optional[
@@ -679,47 +682,41 @@ class LLMEngine:
 
     def _tokenize_prompt(
         self,
-        request_id,
-        prompt,
-        lora_request,
-        is_enc_dec_decoder=False,
+        prompt: str,
+        request_id: Optional[str] = None,
+        lora_request: Optional[str] = None,
     ) -> List[int]:
+        '''
+        Wrapper around application of the model's
+        tokenizer.
+
+        Arguments:
+
+        * prompt
+        * request_id
+        * lora_request
+
+        Returns:
+
+        * prompt token ids
+        '''
+
         tokenizer = self.get_tokenizer_group("prompts must be None if "
                                              "skip_tokenizer_init is True")
 
-        if is_enc_dec_decoder and prompt is None:
-            # Scenario: enc/dec model, decoder input prompt is ""
-            # => Treat it as None (no decoder input prompt provided)
-            # & obtain default decoder input prompt
-            return self._prepare_decoder_input_ids_for_generation()
-
-        # Scenario:
-        # * Any decoder-only input prompt
-        # * Enc/dec model, non-empty-str decoder input prompt
-        # => Tokenize prompt
         prompt_token_ids = tokenizer.encode(request_id=request_id,
                                             prompt=prompt,
                                             lora_request=lora_request)
 
-        if is_enc_dec_decoder:
-            # Scenario: enc/dec model, non-empty-str decoder input prompt
-            # which was just tokenized
-            # => perform decoder-specific preprocessing
-            return self._prepare_decoder_input_ids_for_generation(
-                prompt_token_ids, )
-
-        # Decoder-only tokenized prompt
         return prompt_token_ids
 
-    def _extract_single_prompt(
+    def _extract_single_prompt_for_enc_dec_input(
         self,
-        request_id: str,
-        inputs: PromptInputs,
-        lora_request: Optional[LoRARequest],
+        inputs: Optional[PromptInputs],
+        request_id: Optional[str] = None,
         ptype: Optional[str] = None,
         is_encoder_prompt: bool = False,
-        is_enc_dec_model: bool = False,
-    ) -> Tuple[Optional[str], List[int], Optional["MultiModalDataDict"]]:
+    ) -> Tuple[Optional[str], List[int]]:
         '''
         Extract prompt & prompt_token_ids from any single
         encoder or decoder input prompt. For encoder input prompts
@@ -728,70 +725,122 @@ class LLMEngine:
         Arguments:
 
         * request_id
-        * ptype: str representation of the input prompt type
+        * ptype: str representation of the input prompt type.
+                 If `ptype` is `None`, assume that the prompt
+                 type is unknown and must be inferred. This is the
+                 case for ExplicitEncoderDecoder sub-prompts.
         * inputs: single encoder or decoder input prompt
-        * lora_request
         * is_encoder_prompt: True if encoder input prompt
 
         Returns:
+
         * prompt
         * prompt_token_ids
-        * multi_modal_data (None if is_encoder_prompt)
         '''
 
-        # Determine prompt type, if not provided
+        prompt_token_ids = None
 
-        is_enc_dec_decoder = ((not is_encoder_prompt) and is_enc_dec_model)
+        ptype = (get_prompt_type(inputs) if ptype is None else ptype)
 
-        # Any prompt such as None, string
-        # or TextPrompt that is not a dict
-        if ptype in [None, 'str']:
+        if inputs is None:
 
-            # no multi-modal data
-            return (inputs,
-                    self._tokenize_prompt(
-                        request_id,
-                        inputs,
-                        lora_request,
-                        is_enc_dec_decoder=is_enc_dec_decoder,
-                    ), None)
+            prompt = None
 
-        # Tokenize
-        prompt_token_ids = (inputs["prompt_token_ids"] if ptype
-                            == "TokensPrompt" else self._tokenize_prompt(
-                                request_id,
-                                inputs['prompt'],
-                                lora_request,
-                                is_enc_dec_decoder=is_enc_dec_decoder,
-                            ))
+        elif ptype == 'str':
 
-        # None if no prompt field is present
-        prompt = inputs.get('prompt')
+            prompt = inputs
 
-        if is_encoder_prompt:
-            # Only care about multi-modal data associated
-            # with the encoder prompt
-            return (prompt, prompt_token_ids, inputs.get("multi_modal_data"))
+            prompt_token_ids = self._tokenize_prompt(
+                prompt,
+                request_id=request_id,
+            )
+        elif ptype == 'TokensPrompt':
+            prompt = None
+            prompt_token_ids = inputs['prompt_token_ids']
         else:
-            # Assume there is no decoder multi-modal data
-            return (prompt, prompt_token_ids, None)
+            prompt = inputs['prompt']
+            prompt_token_ids = self._tokenize_prompt(
+                prompt,
+                request_id=request_id,
+            )
 
-    def _get_default_decoder_prompt(
+        if not is_encoder_prompt:
+            # Apply special pre-processing to
+            # decoder prompts
+            prompt_token_ids = (self._prepare_decoder_input_ids_for_generation(
+                prompt_token_ids))
+
+        assert prompt_token_ids is not None
+
+        return (
+            prompt,
+            prompt_token_ids,
+        )
+
+    def _get_default_enc_dec_decoder_prompt(
         self,
-        request_id: str,
-        lora_request: Optional[LoRARequest],
+        request_id: Optional[str] = None,
     ) -> Tuple[str, List[int]]:
+        '''
+        Specifically for encoder/decoder models:
+        generate a default decoder prompt for when
+        the user specifies only the encoder prompt.
+
+        Encoder/decoder models utilize the decoder
+        prompt in different ways; as new models are
+        added, it is intended that this function
+        will be extended to produce differing
+        default decoder prompts, depending on the
+        model variety.
+
+        Absent a special case, the default behavior
+        of this function is to return a "" prompt
+        along with whatever is the tokenization
+        of a "" prompt given the model's particular
+        tokenizer.
+
+        However, it is possible that in the futre
+        other models may have different or more 
+        complex logic for the default decoder prompt.
+
+        Arguments:
+
+        * request_id
+
+        Returns:
+
+        * prompt
+        * prompt_token_ids
+        '''
+
         prompt = ""
         prompt_token_ids = (self._tokenize_prompt(
-            request_id,
             prompt,
-            lora_request,
+            request_id=request_id,
         ))
         return prompt, prompt_token_ids
 
-    def _process_encoder_decoder_prompt(self, request_id: str,
-                                        inputs: PromptInputs,
-                                        lora_request: Optional[LoRARequest]):
+    def _process_encoder_decoder_prompt(
+        self,
+        inputs: PromptInputs,
+        request_id: Optional[str] = None,
+    ) -> LLMInputs:
+        '''
+        For encoder/decoder models only:
+        Process any encoder/decoder input-prompt
+        into an encoder/decoder-model-compatible
+        `LLMInputs` instance.
+
+        Arguments:
+
+        * inputs: any valid encoder/decoder prompt
+        * request_id
+
+        Returns:
+
+        * Encoder/decoder-model-compatible `LLMInputs` instance
+        '''
+
         ptype = get_prompt_type(inputs)
 
         if ptype == "ExplicitEncoderDecoder":
@@ -805,14 +854,11 @@ class LLMEngine:
         (
             encoder_prompt,
             encoder_prompt_token_ids,
-            multi_modal_data,
-        ) = self._extract_single_prompt(
-            request_id,
+        ) = self._extract_single_prompt_for_enc_dec_input(
             extracted_encoder_prompt,
-            lora_request,
+            request_id=request_id,
             ptype=encoder_ptype,
             is_encoder_prompt=True,
-            is_enc_dec_model=True,
         )
 
         # Obtain decoder prompt
@@ -823,37 +869,37 @@ class LLMEngine:
             (
                 decoder_prompt,
                 decoder_prompt_token_ids,
-                _,
-            ) = self._extract_single_prompt(
-                request_id,
+            ) = self._extract_single_prompt_for_enc_dec_input(
                 inputs.get('decoder_prompt'),
-                lora_request,
+                request_id=request_id,
                 ptype=None,
                 is_encoder_prompt=False,
-                is_enc_dec_model=True,
             )
         else:
             # User supplied a single prompt (implicitly
             # the encoder prompt) so default decoder
-            # prompt must be inferred
+            # prompt must be inferred. Preprocess decoder prompt.
             (
                 decoder_prompt,
                 decoder_prompt_token_ids,
-            ) = self._get_default_decoder_prompt(request_id, lora_request)
+            ) = self._get_default_enc_dec_decoder_prompt(request_id)
+
+            decoder_prompt_token_ids = (
+                self._prepare_decoder_input_ids_for_generation(
+                    decoder_prompt_token_ids))
 
         return LLMInputs(
             prompt_token_ids=decoder_prompt_token_ids,
             prompt=decoder_prompt,
             encoder_prompt_token_ids=encoder_prompt_token_ids,
             encoder_prompt=encoder_prompt,
-            multi_modal_data=multi_modal_data,
         )
 
     def _process_decoder_only_prompt(
         self,
-        request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
+        request_id: Optional[str] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         if isinstance(inputs, str):
@@ -862,9 +908,9 @@ class LLMEngine:
 
         if "prompt_token_ids" not in inputs:
             prompt_token_ids = self._tokenize_prompt(
-                request_id,
                 prompt,
-                lora_request,
+                request_id=request_id,
+                lora_request=lora_request,
             )
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
@@ -891,19 +937,18 @@ class LLMEngine:
             # input prompts to encoder & decoder
             return self.input_processor(
                 self._process_encoder_decoder_prompt(
-                    request_id,
                     inputs,
-                    lora_request,
+                    request_id=request_id,
                 ))
 
         else:
             # Decoder-only operation
             return self.input_processor(
                 self._process_decoder_only_prompt(
-                    request_id,
                     inputs,
-                    lora_request,
-                    prompt_adapter_request,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
                 ))
 
     def add_request(
