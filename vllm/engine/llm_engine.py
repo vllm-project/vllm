@@ -797,11 +797,17 @@ class LLMEngine:
         of this function is to return a "" prompt
         along with whatever is the tokenization
         of a "" prompt given the model's particular
-        tokenizer.
+        tokenizer. If all models worked this way,
+        then this helper method would be unnecessary
+        (it would be simpler to just inject `prompt = ''`
+        and then utilize the existing tokenization logic
+        for encoder/decoder models.)
 
-        However, it is possible that in the futre
+        However, it is possible that in the future
         other models may have different or more 
         complex logic for the default decoder prompt.
+        This motivates having a special helper method
+        for default decoder prompts.
 
         Arguments:
 
