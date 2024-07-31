@@ -124,8 +124,6 @@ def test_prepare_prompt(
     * batch_size
     * backend_name: The attention backend under test
     * enforce_eager: Enforce eager mode if True (i.e. no CUDAGraph)
-    * monkeypatch: PyTest monkeypatch instance which supports forcing
-                   the attention backend via environment variable
     '''
 
     model_runner = _create_model_runner(
@@ -328,7 +326,7 @@ def test_prepare_decode(
 ):
     '''
     Test the ability of the encoder/decoder model runner subclass to
-    produce prefill-phase model inputs & attention metadata.
+    produce decode-phase model inputs & attention metadata.
 
     Test behavior:
 
@@ -342,8 +340,6 @@ def test_prepare_decode(
     * batch_size
     * backend_name: The attention backend under test
     * enforce_eager: Enforce eager mode if True (i.e. no CUDAGraph)
-    * monkeypatch: PyTest monkeypatch instance which supports forcing
-                   the attention backend via environment variable
     '''
 
     model_runner = _create_model_runner(

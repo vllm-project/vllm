@@ -324,10 +324,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # tokens.
                 tokens = [encoder_seq_data.get_last_token_id()]
 
-                if cross_block_table is not None:
-                    # Decode
-                    block_table = cross_block_table
-
             block_table = (
                 []  # Memory profiling
                 if
@@ -363,7 +359,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 slot = block_number * self.block_size + block_offset
                 cross_slot_mapping.append(slot)
 
-        max_query_len = max(query_lens)
         encoder_max_seq_len = max(encoder_seq_lens, default=0)
 
         max_cross_block_table_len = max(
@@ -375,8 +370,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             dtype=torch.int,
             device=self.device,
         )
-        assert (not is_prompt) or max_query_len > 0, (
-            "Decode-phase query_lens: {}".format(query_lens))
 
         encoder_seq_lens_tensor = torch.tensor(encoder_seq_lens,
                                                dtype=torch.int,
