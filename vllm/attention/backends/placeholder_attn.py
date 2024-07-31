@@ -39,7 +39,6 @@ class PlaceholderAttentionBackend(AttentionBackend):
         head_size: int,
     ) -> Tuple[int, ...]:
         return None
-        return (1, 1, 1, 1, 1)
 
     @staticmethod
     def swap_blocks(

@@ -60,6 +60,7 @@ class CacheEngine:
             model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
+            self.num_attention_layers,
         )
 
         # Initialize the cache.

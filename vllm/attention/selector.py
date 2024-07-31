@@ -22,6 +22,7 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    NO_ATTENTION = enum.auto()
 
 
 @lru_cache(maxsize=None)
@@ -33,6 +34,7 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    num_attention_layers: int,
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -45,7 +47,7 @@ def get_attn_backend(
 
     backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
                                 sliding_window, dtype, kv_cache_dtype,
-                                block_size)
+                                num_attention_layers, block_size)
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
@@ -84,6 +86,8 @@ def get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.NO_ATTENTION:
+        return PlaceholderAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
 
@@ -96,10 +100,14 @@ def which_attn_to_use(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    num_attention_layers: int,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case.
     selected_backend = _Backend.FLASH_ATTN
+
+    if num_attention_layers == 0:
+        return _Backend.NO_ATTENTION
 
     # Check the environment variable and override if specified
     backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
