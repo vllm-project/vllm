@@ -102,6 +102,7 @@ class MixtralMoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
+        self.hidden_size = config.hidden_size
         if self.tp_size > self.num_total_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -112,12 +113,11 @@ class MixtralMoE(nn.Module):
         if not self.expert_indicies:
             raise ValueError(
                 f"Rank {self.rank} has no experts assigned to it.")
-
+        
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
-                                     params_dtype=None,  # will use torch default fp32
                                      quant_config=None)
 
         self.experts = FusedMoE(num_experts=self.num_total_experts,
@@ -128,7 +128,7 @@ class MixtralMoE(nn.Module):
                                 reduce_results=True,
                                 renormalize=True,
                                 quant_config=quant_config,
-                                tp_size=tp_size)
+                                tp_size=self.tp_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.

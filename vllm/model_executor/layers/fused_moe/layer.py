@@ -10,6 +10,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import CompressionFormat, QuantizationStrategy
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import create_per_channel_scale_param
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -133,8 +135,8 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-        self.strategy = extra_weight_attrs['quant_config'].layer_quant_details['Linear']['weights'].strategy
-        self.is_static_input_scheme = not extra_weight_attrs['quant_config'].layer_quant_details['Linear']['input_activations'].dynamic
+        self.strategy = extra_weight_attrs['quant_config'].target_scheme_map['Linear']['weights'].strategy
+        self.is_static_input_scheme = not extra_weight_attrs['quant_config'].target_scheme_map['Linear']['input_activations'].dynamic
 
         self.quant_config = extra_weight_attrs["quant_config"]
         self.weight_loader = extra_weight_attrs["weight_loader"]
@@ -309,11 +311,10 @@ class FusedMoE(torch.nn.Module):
             assert num_expert_group is not None and topk_group is not None
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
-        breakpoint()
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
                 UnquantizedFusedMoEMethod())
-        elif quant_config == 1:
+        elif quant_config.quant_format == CompressionFormat.int_quantized.value:
             self.quant_method: Optional[QuantizeMethodBase] = (
                     W8A8QuantizedFusedMoEMethod())
         else:
@@ -333,18 +334,22 @@ class FusedMoE(torch.nn.Module):
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: int, expert_id: int):
         param_data = param.data
+        if isinstance(self.quant_method, W8A8QuantizedFusedMoEMethod):
+            weight_quant_strategy = self.quant_method.quant_config.target_scheme_map['Linear']['weights'].strategy
+        else:
+            weight_quant_strategy = None
 
         # Input scales can be loaded directly and should be equal.
         if "input_scale" in weight_name:
             if param_data[expert_id] != 1 and (param_data[expert_id] -
-                                               loaded_weight).abs() > 1e-5:
+                                               loaded_weight.to(param_data.device)).abs() > 1e-5:
                 raise ValueError(
                     "input_scales of w1 and w3 of a layer "
                     f"must be equal. But got {param_data[expert_id]} "
                     f"vs. {loaded_weight}")
             param_data[expert_id] = loaded_weight
         # Weight scales
-        elif "weight_scale" in weight_name:
+        elif "weight_scale" in weight_name and weight_quant_strategy == QuantizationStrategy.TENSOR:
             # If we are in merged column case (gate_up_proj)
             #   shard_id 0 == gate_proj / w1
             #   shard_id 2 == up_proj / w3
@@ -373,7 +378,10 @@ class FusedMoE(torch.nn.Module):
                            shard_size, :] = loaded_weight[shard, :]
             # w2, down_proj case: Load into only shard of w2.
             elif shard_id == 1:
-                param_data[expert_id, :, :] = loaded_weight[:, shard]
+                if "weight_scale" in weight_name and weight_quant_strategy == QuantizationStrategy.CHANNEL:
+                    param_data[expert_id, :, :] = loaded_weight
+                else:
+                    param_data[expert_id, :, :] = loaded_weight[:, shard]
             else:
                 raise ValueError(
                     f"Shard id must be in [0,1,2] but got {shard_id}")
