@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from vllm.utils import is_tpu
+from vllm.utils import is_hpu, is_tpu
 
 from .interface import Platform, PlatformEnum, UnspecifiedPlatform
 
@@ -17,6 +17,9 @@ elif torch.version.hip is not None:
 elif is_tpu():
     from .tpu import TpuPlatform
     current_platform = TpuPlatform()
+elif is_hpu():
+    from .hpu import HpuPlatform
+    current_platform = HpuPlatform()
 else:
     current_platform = UnspecifiedPlatform()
 
