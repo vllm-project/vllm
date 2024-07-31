@@ -4,19 +4,20 @@ import triton.language as tl
 
 
 @triton.jit
-def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
-                          scales_ptr,    # scales, per group
-                          zeros_ptr,     # zeros, per group
-                          split_k_iters, # Not used
-                          thx,           # Not used
-                          thy,           # Not used
-                          group_size,    # Should always be 128
-                          result_ptr,    # Output matrix
-                          num_cols,      # input num cols in qweight
-                          num_rows,      # input num rows in qweight
-                          reverse_awq_order_ptr,
-                          BLOCK_SIZE_X: tl.constexpr,
-                          BLOCK_SIZE_Y: tl.constexpr):
+def awq_dequantize_kernel(
+        qweight_ptr,  # quantized matrix
+        scales_ptr,  # scales, per group
+        zeros_ptr,  # zeros, per group
+        split_k_iters,  # Not used
+        thx,  # Not used
+        thy,  # Not used
+        group_size,  # Should always be 128
+        result_ptr,  # Output matrix
+        num_cols,  # input num cols in qweight
+        num_rows,  # input num rows in qweight
+        reverse_awq_order_ptr,
+        BLOCK_SIZE_X: tl.constexpr,
+        BLOCK_SIZE_Y: tl.constexpr):
     # Setup the pids.
     pid_x = tl.program_id(axis=0)
     pid_y = tl.program_id(axis=1)
@@ -24,7 +25,7 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
     # Compute offsets and masks for qweight_ptr.
     offsets_y = pid_y * BLOCK_SIZE_Y + tl.arange(0, BLOCK_SIZE_Y)
     offsets_x = pid_x * BLOCK_SIZE_X + tl.arange(0, BLOCK_SIZE_X * 8) // 8
-    offsets = num_cols  * offsets_y[:, None] + offsets_x[None, :]
+    offsets = num_cols * offsets_y[:, None] + offsets_x[None, :]
 
     masks_y = offsets_y < num_rows
     masks_x = offsets_x < num_cols
@@ -33,10 +34,10 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
 
     # Compute offsets and masks for result output ptr.
     result_offsets_y = pid_y * BLOCK_SIZE_Y + tl.arange(0, BLOCK_SIZE_Y)
-    result_offsets_x = (pid_x * BLOCK_SIZE_X * 8
-                       + tl.arange(0, BLOCK_SIZE_X * 8))
-    result_offsets = (8 * num_cols * result_offsets_y[:, None]
-                      + result_offsets_x[None, :])
+    result_offsets_x = (pid_x * BLOCK_SIZE_X * 8 +
+                        tl.arange(0, BLOCK_SIZE_X * 8))
+    result_offsets = (8 * num_cols * result_offsets_y[:, None] +
+                      result_offsets_x[None, :])
 
     result_masks_y = result_offsets_y < num_rows
     result_masks_x = result_offsets_x < num_cols * 8
@@ -47,8 +48,8 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
 
     # Load the AWQ reverse order offsets.
     reverse_awq_order_offsets = tl.arange(0, 8)
-    reverse_awq_order_tensor =  tl.load(reverse_awq_order_ptr +
-            reverse_awq_order_offsets)
+    reverse_awq_order_tensor = tl.load(reverse_awq_order_ptr +
+                                       reverse_awq_order_offsets)
 
     # Use this to compute a set of shifts that can be used to unpack and
     # reorder the values in iweights and zeros.
@@ -60,8 +61,8 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
     iweights = (iweights >> shifts) & 0xF
 
     # Compute zero offsets and masks.
-    zero_offsets_y = (pid_y * BLOCK_SIZE_Y // group_size
-                      + tl.arange(0, BLOCK_SIZE_Y) // group_size)
+    zero_offsets_y = (pid_y * BLOCK_SIZE_Y // group_size +
+                      tl.arange(0, BLOCK_SIZE_Y) // group_size)
     zero_offsets_x = pid_x * BLOCK_SIZE_X + tl.arange(0, BLOCK_SIZE_X * 8) // 8
     zero_offsets = num_cols * zero_offsets_y[:, None] + zero_offsets_x[None, :]
 
@@ -76,12 +77,12 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
     zeros = (zeros >> shifts) & 0xF
 
     # Compute scale offsets and masks.
-    scale_offsets_y  = (pid_y * BLOCK_SIZE_Y // group_size
-                       + tl.arange(0, BLOCK_SIZE_Y) // group_size)
-    scale_offsets_x = (pid_x * BLOCK_SIZE_X * 8
-                        + tl.arange(0, BLOCK_SIZE_X * 8))
+    scale_offsets_y = (pid_y * BLOCK_SIZE_Y // group_size +
+                       tl.arange(0, BLOCK_SIZE_Y) // group_size)
+    scale_offsets_x = (pid_x * BLOCK_SIZE_X * 8 +
+                       tl.arange(0, BLOCK_SIZE_X * 8))
     scale_offsets = (num_cols * 8 * scale_offsets_y[:, None] +
-                    scale_offsets_x[None, :])
+                     scale_offsets_x[None, :])
     scale_masks_y = scale_offsets_y < num_rows // group_size
     scale_masks_x = scale_offsets_x < num_cols * 8
     scale_masks = scale_masks_y[:, None] & scale_masks_x[None, :]
@@ -96,6 +97,7 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
     # Finally, store.
     tl.store(result_ptr + result_offsets, iweights, result_masks)
 
+
 # Example input:
 #   qweight.size=torch.Size([3584, 576]),
 #   qweight.dtype = torch.int32,
@@ -106,36 +108,49 @@ def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
 #   split_k_iters=0
 #   thx=0
 #   thy=0
-def awq_dequantize_triton(qweight: torch.Tensor,
-                         scales: torch.Tensor,
-                         zeros: torch.Tensor,
-                         split_k_iters: int, # Not used
-                         thx: int, # Not used
-                         thy: int # Not used
-                         ) -> torch.Tensor:
+def awq_dequantize_triton(
+        qweight: torch.Tensor,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        split_k_iters: int,  # Not used
+        thx: int,  # Not used
+        thy: int  # Not used
+) -> torch.Tensor:
     # Result tensor:
     # number of rows = same as input tensor
     # number of cols = 8 x input tensor num cols
     result = torch.empty(qweight.shape[0],
                          qweight.shape[1] * 8,
-                         device = qweight.device,
-                         dtype = torch.float16)
+                         device=qweight.device,
+                         dtype=torch.float16)
 
     block_size_x = 32
     block_size_y = 32
 
     reverse_awq_order = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
-            dtype = torch.uint8, device = qweight.device)
+                                     dtype=torch.uint8,
+                                     device=qweight.device)
 
-    Y = qweight.shape[0] # num rows
-    X = qweight.shape[1] # num cols
+    Y = qweight.shape[0]  # num rows
+    X = qweight.shape[1]  # num cols
     group_size = 128
     grid = lambda META: (
-        triton.cdiv(X, META['BLOCK_SIZE_X']), triton.cdiv(Y,
-                    META['BLOCK_SIZE_Y']), )
-    awq_dequantize_kernel[grid](qweight, scales, zeros, split_k_iters,
-            thx, thy, group_size, result, X, Y, reverse_awq_order,
-            BLOCK_SIZE_X = block_size_x, BLOCK_SIZE_Y = block_size_y)
+        triton.cdiv(X, META['BLOCK_SIZE_X']),
+        triton.cdiv(Y, META['BLOCK_SIZE_Y']),
+    )
+    awq_dequantize_kernel[grid](qweight,
+                                scales,
+                                zeros,
+                                split_k_iters,
+                                thx,
+                                thy,
+                                group_size,
+                                result,
+                                X,
+                                Y,
+                                reverse_awq_order,
+                                BLOCK_SIZE_X=block_size_x,
+                                BLOCK_SIZE_Y=block_size_y)
 
     return result
 
@@ -155,14 +170,12 @@ def reverse_awq_order(t: torch.Tensor):
     t = t[:, reverse_order_tensor] & 0xF
     return t
 
+
 # qweightss [R     , C // 8], int32
 # scales  - [R // G, C     ], float16
 # zeros   - [R // G, C // 8], int32
-def awq_dequantize_torch(qweight: torch.Tensor,
-                         scales: torch.Tensor,
-                         qzeros: torch.Tensor,
-                         split_k_iters: int,
-                         thx: int,
+def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
+                         qzeros: torch.Tensor, split_k_iters: int, thx: int,
                          thy: int) -> torch.Tensor:
     print(f"awq_dequantize_torch:qweight.shape = {qweight.shape}"
           f", qzeros.shape={qzeros.shape}")
@@ -170,17 +183,16 @@ def awq_dequantize_torch(qweight: torch.Tensor,
     group_size = 128
     shifts = torch.arange(0, 32, bits, device=qzeros.device)
 
-    iweights = torch.bitwise_right_shift(
-        qweight[:, :, None],
-        shifts[None, None, :]).to(torch.int8)
+    iweights = torch.bitwise_right_shift(qweight[:, :, None],
+                                         shifts[None, None, :]).to(torch.int8)
 
     iweights = iweights.view(iweights.shape[0], -1)
 
     # iweights = reverse_awq_order(iweights)
     # return (iweights & 0xF).to(torch.float16)
 
-    zeros = torch.bitwise_right_shift(
-        qzeros[:, :, None], shifts[None, None, :]).to(torch.int8)
+    zeros = torch.bitwise_right_shift(qzeros[:, :, None],
+                                      shifts[None, None, :]).to(torch.int8)
 
     zeros = zeros.view(qzeros.shape[0], -1)
 
@@ -197,6 +209,7 @@ def awq_dequantize_torch(qweight: torch.Tensor,
           f"scales.shape={scales.shape}")
 
     return (iweights - zeros) * scales
+
 
 def main():
     use_triton = True
@@ -217,42 +230,43 @@ def main():
     zeros_rows = scales_rows
     zeros_cols = qweight_cols
     zeros_dtype = torch.int32
-    split_k_iters=0
-    thx=0
-    thy=0
-    device='cuda'
+    split_k_iters = 0
+    thx = 0
+    thy = 0
+    device = 'cuda'
     torch.manual_seed(0)
 
-    qweight = torch.randint(0,10000000, (qweight_rows,
-                         qweight_cols),
-                         dtype=qweight_dtype,
-                         device=device)
+    qweight = torch.randint(0,
+                            10000000, (qweight_rows, qweight_cols),
+                            dtype=qweight_dtype,
+                            device=device)
     scales = torch.rand(scales_rows,
                         scales_cols,
                         dtype=scales_dtype,
                         device=device)
-    zeros = torch.randint(0, 10000000, (zeros_rows,
-                          zeros_cols),
+    zeros = torch.randint(0,
+                          10000000, (zeros_rows, zeros_cols),
                           dtype=zeros_dtype,
                           device=device)
     print(f"zeros.shape = {zeros.shape}")
     print(f"qweight = {qweight}")
     if use_triton:
-      iweights_triton = awq_dequantize_triton(
-        qweight, scales, zeros, split_k_iters, thx, thy)
-      print(f"Triton result:iweights_triton = {iweights_triton}")
-      print(f"Any infs in triton result? -->"
-            f"{torch.any(torch.isinf(iweights_triton))}")
+        iweights_triton = awq_dequantize_triton(qweight, scales, zeros,
+                                                split_k_iters, thx, thy)
+        print(f"Triton result:iweights_triton = {iweights_triton}")
+        print(f"Any infs in triton result? -->"
+              f"{torch.any(torch.isinf(iweights_triton))}")
 
     if use_torch:
-      iweights_torch = awq_dequantize_torch(
-        qweight, scales, zeros, split_k_iters, thx, thy)
-      print(f"Torch result:iweights_torch = {iweights_torch}")
+        iweights_torch = awq_dequantize_torch(qweight, scales, zeros,
+                                              split_k_iters, thx, thy)
+        print(f"Torch result:iweights_torch = {iweights_torch}")
 
     if use_torch and use_triton:
         diff = iweights_torch - iweights_triton
         error = torch.sum(torch.sqrt(diff * diff))
         print(f"error = {error}")
+
 
 if __name__ == '__main__':
     main()
