@@ -25,13 +25,18 @@ class EAGLEConfig(PretrainedConfig):
         if self.model is None:
             self.truncated_vocab_size = None
         else:
-            self.truncated_vocab_size = self.vocab_size if \
+            self.truncated_vocab_size = self.model.vocab_size if \
                 truncated_vocab_size is None else truncated_vocab_size
 
         if "architectures" not in kwargs:
             kwargs["architectures"] = ["EAGLEModel"]
 
         super().__init__(**kwargs)
+
+        if self.model is not None:
+            for k, v in self.model.to_dict().items():
+                if not hasattr(self, k):
+                    setattr(self, k, v)
 
     @classmethod
     def from_pretrained(
@@ -42,9 +47,3 @@ class EAGLEConfig(PretrainedConfig):
         config_dict, kwargs = cls.get_config_dict(
             pretrained_model_name_or_path, **kwargs)
         return cls.from_dict(config_dict, **kwargs)
-
-    def __getattribute__(self, key):
-        try:
-            return super().__getattribute__(key)
-        except AttributeError:
-            return getattr(self.model, key)

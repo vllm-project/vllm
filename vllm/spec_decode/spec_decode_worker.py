@@ -357,6 +357,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # communication to inform them.
         broadcast_dict = dict(
             num_lookahead_slots=num_lookahead_slots,
+            no_spec=num_lookahead_slots == 0
+            or len(execute_model_req.seq_group_metadata_list) == 0
+            or disable_all_speculation,
             disable_all_speculation=disable_all_speculation,
         )
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
@@ -504,15 +507,21 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             return False
         num_lookahead_slots = data["num_lookahead_slots"]
 
-        # Even if num_lookahead_slots is zero, we want to run the proposer model
-        # as it may have KV.
-        #
-        # We run the proposer once per lookahead slot. In the future we should
-        # delegate how many times it runs to the proposer.
-        for _ in range(max(num_lookahead_slots, 1)):
-            self.proposer_worker.execute_model()
+        if data["no_spec"]:
+            self.scorer_worker.execute_model()
 
-        self.scorer_worker.execute_model()
+        if not data["disable_all_speculation"]:
+            # Even if num_lookahead_slots is zero, we want to run the
+            # proposer model as it may have KV.
+            #
+            # We run the proposer once per lookahead slot. In the future we
+            # should delegate how many times it runs to the proposer.
+            for _ in range(max(num_lookahead_slots, 1)):
+                self.proposer_worker.execute_model()
+
+        if not data["no_spec"]:
+            self.scorer_worker.execute_model()
+
         return True
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
