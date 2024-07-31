@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, cast
 
 import torch
 import torch.distributed
@@ -12,7 +12,6 @@ from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
@@ -45,8 +44,6 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
             "input_positions": self.input_positions,
             "encoder_input_tokens": self.encoder_input_tokens,
             "encoder_input_positions": self.encoder_input_positions,
-            "prompt_adapter_mapping": self.prompt_adapter_mapping,
-            "prompt_adapter_requests": self.prompt_adapter_requests,
             "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
@@ -89,9 +86,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         '''
         EncoderDecoderModelRunner constructor.
 
-        `lora_config` and `multimodal_config` are unused (since LoRA & 
-        multimodal are not yet supported for encoder/decoder models) 
-        but these arguments are present here for compatibility with 
+        `lora_config`, `multimodal_config`, and prompt_adapter_config are
+        unused (since these features are not yet supported for encoder/decoder
+        models) but these arguments are present here for compatibility with 
         the base-class constructor.
         '''
 
@@ -107,7 +104,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             lora_config=None,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
-            prompt_adapter_config=prompt_adapter_config,
         )
 
         # Crash for unsupported encoder/scenarios
@@ -131,13 +127,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
-
-        if self.prompt_adapter_config:
-            assert model_input.prompt_adapter_requests is not None
-            assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(
-                model_input.prompt_adapter_requests,
-                model_input.prompt_adapter_mapping)
 
         model_executable = self.model
 
@@ -311,9 +300,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         query_lens: List[int] = []
         cross_slot_mapping: List[int] = []
         cross_block_tables: List[List[int]] = []
-        prompt_adapter_index_mapping: List[int] = []
-        prompt_adapter_prompt_mapping: List[int] = []
-        prompt_adapter_requests: Set[PromptAdapterRequest] = set()
 
         if len(seq_group_metadata_list) == 0:
             # Leave the encoder/cross-attention input
@@ -356,22 +342,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             query_lens.append(query_len)
             encoder_input_tokens.extend(tokens)
             encoder_input_positions.extend(list(range(context_len, seq_len)))
-            prompt_adapter_id = seq_group_metadata.prompt_adapter_id
-
-            if prompt_adapter_id > 0 and is_prompt:
-                prompt_adapter_requests.add(
-                    seq_group_metadata.prompt_adapter_request)
-
-                num_tokens = seq_group_metadata.\
-                                        prompt_adapter_num_virtual_tokens
-                pm = [prompt_adapter_id
-                      ] * num_tokens + [0] * (query_len - num_tokens)
-                prompt_adapter_index_mapping += pm
-                prompt_adapter_prompt_mapping.extend(
-                    [prompt_adapter_id] *
-                    (query_len if seq_group_metadata.sampling_params
-                     and seq_group_metadata.sampling_params.prompt_logprobs
-                     else 1))
 
             is_profile_run = _is_single_block_table_empty(
                 seq_group_metadata.block_tables)
