@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
+import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
@@ -27,7 +28,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_PAD_SLOT_ID = -1  # NOTE(woosuk): In PyTorch XLA, index -1 is ignored.
+# Here we utilize the behavior that out-of-bound index is ignored.
+# FIXME(woosuk): Find a more reliable way to prevent possible bugs.
+_PAD_SLOT_ID = 1_000_000_000
 # FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
 _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
@@ -127,7 +130,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xm.get_ordinal()
+        xm_tp_rank = xr.global_ordinal()
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
@@ -146,7 +149,17 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         xm.wait_device_ops()
 
         model = ModelWrapper(model)
-        self.model = torch.compile(model, backend="openxla", fullgraph=True)
+        # NOTE(woosuk): There are two stages of compilation: torch.compile and
+        # XLA compilation. Setting dynamic=True can reduce the torch.compile
+        # overhead by reusing the FX graph for different shapes.
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
+        # in the first run, but can be skipped afterwards as we cache the XLA
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        self.model = torch.compile(model,
+                                   backend="openxla",
+                                   fullgraph=True,
+                                   dynamic=True)
 
     def _dummy_run(
         self,
@@ -403,10 +416,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         best_of = []
         for seq_group_metadata in seq_group_metadata_list:
             sampling_params = seq_group_metadata.sampling_params
-            # NOTE(woosuk): Here we mimic argmax sampling by applying a very
-            # low temperature. This is not accurate.
-            t.append(sampling_params.temperature
-                     if sampling_params.temperature >= 1e-5 else 1e-5)
+            t.append(sampling_params.temperature)
             if sampling_params.top_p != 1 and not _ENABLE_TOP_P:
                 raise NotImplementedError(
                     "Top-p sampling is currently disabled for the TPU backend "
@@ -667,13 +677,23 @@ class ModelWrapper(nn.Module):
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
-        logits = logits / t.unsqueeze(dim=1)
+        # Argmax sampling.
+        argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
+
+        # Zero temperature means greedy decoding. Avoid division by zero.
+        nonzero_t = torch.where(t != 0, t, 1.0)
+        logits = logits / nonzero_t.unsqueeze(dim=1)
         if _ENABLE_TOP_P:
             logits = _apply_top_p(logits, p.unsqueeze(dim=1))
+
+        # Random sampling.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-        next_token_ids = torch.multinomial(probs,
-                                           num_samples,
-                                           replacement=True)
+        sampled_token_ids = torch.multinomial(probs,
+                                              num_samples,
+                                              replacement=True)
+        next_token_ids = torch.where(t != 0, sampled_token_ids,
+                                     argmax_token_ids)
         return next_token_ids
 
 

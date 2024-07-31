@@ -452,10 +452,15 @@ __global__ void Marlin(
         B_ptr[i] += b_gl_rd_delta_o;
       }
       // Only fetch scales if this tile starts a new group
-      if (group_blocks != -1 && pipe % (group_blocks / thread_k_blocks) == 0) {
-        int4* sh_s_stage = sh_s + s_sh_stage * pipe;
-        if (s_sh_wr_pred) cp_async4(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
-        s_gl_rd += s_gl_rd_delta;
+      if constexpr (group_blocks != -1) {
+        // This assumes group_blocks >= thread_k_blocks
+        // and would need to be modified to support smaller groups.
+        static_assert(group_blocks >= thread_k_blocks);
+        if (pipe % (group_blocks / thread_k_blocks) == 0) {
+          int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+          if (s_sh_wr_pred) cp_async4(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
+          s_gl_rd += s_gl_rd_delta;
+        }
       }
     }
     // Insert a fence even when we are winding down the pipeline to ensure that
@@ -480,7 +485,10 @@ __global__ void Marlin(
     // however, this does not seem to be a significant bottleneck, while some
     // theoretically better attempts have lead to bad instruction ordering by
     // the compiler and correspondingly a noticeable drop in performance.
-    if (group_blocks != -1) {
+    if constexpr (group_blocks != -1) {
+      // This assumes group_blocks >= thread_k_blocks
+      // and would need to be modified to support smaller groups.
+      static_assert(group_blocks >= thread_k_blocks);
       int4* sh_s_stage =
           sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
                                (pipe / (group_blocks / thread_k_blocks)));
