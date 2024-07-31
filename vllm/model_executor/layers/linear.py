@@ -312,12 +312,14 @@ class ColumnParallelLinear(LinearBase):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
 
+        # Special case for GGUF
+        is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
 
-        # materialize GGUF UninitializedParameter
-        if isinstance(param, UninitializedParameter):
+        # Materialize GGUF UninitializedParameter
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
             param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
 
         param_data = param.data
@@ -406,6 +408,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
+
+        # Special case for GGUF
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
@@ -414,7 +418,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             return
 
-        if isinstance(param, UninitializedParameter):
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
             from gguf.constants import GGML_QUANT_SIZES
 
             ori_shape = param.tensor_shape
@@ -598,6 +602,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
+
+        # Special case for GGUF
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
@@ -607,7 +613,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             return
 
-        if isinstance(param, UninitializedParameter):
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
             from gguf.constants import GGML_QUANT_SIZES
 
             ori_shape = param.tensor_shape
@@ -819,12 +825,14 @@ class RowParallelLinear(LinearBase):
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
 
+        # Special case for GGUF
+        is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
 
-        # materialize GGUF UninitializedParameter
-        if isinstance(param, UninitializedParameter):
+        # Materialize GGUF UninitializedParameter
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
             param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
 
         param_data = param.data
