@@ -5,11 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
+from functools import wraps
+
 import habana_frameworks.torch as htorch
 
 
 def with_mark_steps(fn):
 
+    @wraps(fn)
     def wrapped(*args, **kwargs):
         htorch.core.mark_step()
         result = fn(*args, **kwargs)
