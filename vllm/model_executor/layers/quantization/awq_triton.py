@@ -243,7 +243,7 @@ def main():
         qweight, scales, zeros, split_k_iters, thx, thy)
       print(f"Triton result:iweights_triton = {iweights_triton}")
       print(f"Any infs in triton result? -->"
-            f"{not torch.all(torch.isinf(iweights_triton) == False)}")
+            f"{torch.any(torch.isinf(iweights_triton))}")
 
     if use_torch:
       iweights_torch = awq_dequantize_torch(
