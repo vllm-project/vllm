@@ -24,7 +24,7 @@
 import math
 import re
 from functools import partial
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -57,7 +57,7 @@ _KEYS_TO_MODIFY_MAPPING = {
 }
 
 
-def get_abs_pos(abs_pos, tgt_size):
+def get_abs_pos(abs_pos: torch.Tensor, tgt_size: torch.Tensor):
     # abs_pos: L, C
     # tgt_size: (H, W)
     # return: M, C
@@ -74,10 +74,10 @@ def get_abs_pos(abs_pos, tgt_size):
 
 
 # https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/pos_embed.py#L20
-def get_2d_sincos_pos_embed(embed_dim,
-                            grid_size,
-                            cls_token=False,
-                            version=2.0):
+def get_2d_sincos_pos_embed(embed_dim: int,
+                            grid_size: Union[int, Tuple[int, int]],
+                            cls_token: bool = False,
+                            version: float = 2.0):
     """
     grid_size: int of the grid height and width
     return:
@@ -105,7 +105,9 @@ def get_2d_sincos_pos_embed(embed_dim,
     return pos_embed
 
 
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid, version=2.0):
+def get_2d_sincos_pos_embed_from_grid(embed_dim: int,
+                                      grid: Union[int, Tuple[int, int]],
+                                      version: float = 2.0):
     assert embed_dim % 2 == 0
 
     # use half of dimensions to encode grid_h
@@ -121,7 +123,9 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim, grid, version=2.0):
     return emb
 
 
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos, version=2.0):
+def get_1d_sincos_pos_embed_from_grid(embed_dim: int,
+                                      pos: int,
+                                      version: float = 2.0):
     """
     embed_dim: output dimension for each position
     pos: a list of positions to be encoded: size (M,) / (H, W)
@@ -157,15 +161,15 @@ class Resampler(nn.Module):
     default_norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
     def __init__(self,
-                 num_queries,
-                 grid_size,
-                 embed_dim,
-                 num_heads,
-                 kv_dim=None,
-                 norm_layer=default_norm_layer,
-                 adaptive=False,
-                 max_size=(70, 70),
-                 version=2.0):
+                 num_queries: int,
+                 grid_size: int,
+                 embed_dim: int,
+                 num_heads: int,
+                 kv_dim: Optional[int] = None,
+                 norm_layer: nn.Module = default_norm_layer,
+                 adaptive: bool = False,
+                 max_size: Tuple[int, int] = (70, 70),
+                 version: float = 2.0):
         super().__init__()
 
         self.version = version
@@ -205,14 +209,16 @@ class Resampler(nn.Module):
 
         self.apply(self._init_weights)
 
-    def _set_2d_pos_cache(self, max_size, device='cpu'):
+    def _set_2d_pos_cache(self,
+                          max_size: Tuple[int, int],
+                          device: torch.device = 'cpu'):
         pos_embed = torch.from_numpy(
             get_2d_sincos_pos_embed(self.embed_dim,
                                     max_size,
                                     version=self.version)).float().to(device)
         self.register_buffer("pos_embed", pos_embed, persistent=False)
 
-    def _adjust_pos_cache(self, tgt_sizes, device):
+    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor, device: torch.device):
         max_h = torch.max(tgt_sizes[:, 0])
         max_w = torch.max(tgt_sizes[:, 1])
         if max_h > self.max_size[0] or max_w > self.max_size[1]:
@@ -222,7 +228,7 @@ class Resampler(nn.Module):
             ]
             self._set_2d_pos_cache(self.max_size, device)
 
-    def _init_weights(self, m):
+    def _init_weights(self, m: nn.Module):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -231,7 +237,7 @@ class Resampler(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_2_5(self, x, tgt_sizes=None):
+    def forward_2_5(self, x: torch.Tensor, tgt_sizes: torch.Tensor = None):
         assert x.shape[0] == tgt_sizes.shape[0]
         bs = x.shape[0]
 
@@ -277,7 +283,10 @@ class Resampler(nn.Module):
         x = x @ self.proj
         return x
 
-    def forward_2(self, x, tgt_sizes=None, attn_mask=None):
+    def forward_2(self,
+                  x: torch.Tensor,
+                  tgt_sizes: torch.Tensor = None,
+                  attn_mask: torch.Tensor = None):
         if self.adaptive:
             pos_embed = torch.Tensor(
                 get_2d_sincos_pos_embed(self.embed_dim,
@@ -301,7 +310,10 @@ class Resampler(nn.Module):
         x = x @ self.proj
         return x
 
-    def forward(self, x, tgt_sizes=None, attn_mask=None):
+    def forward(self,
+                x: torch.Tensor,
+                tgt_sizes: torch.Tensor = None,
+                attn_mask: torch.Tensor = None):
         if self.version == 2.0:
             return self.forward_2(x, tgt_sizes=tgt_sizes, attn_mask=attn_mask)
         else:
@@ -321,7 +333,7 @@ def dummy_seq_data_for_minicpmv(seq_len: int):
     return SequenceData(token_ids)
 
 
-def dummy_image_for_minicpmv(hf_config):
+def dummy_image_for_minicpmv(hf_config: PretrainedConfig):
     width = height = hf_config.image_size
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image}
@@ -380,7 +392,7 @@ class MiniCPMV(nn.Module, SupportsVision):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -407,7 +419,10 @@ class MiniCPMV(nn.Module, SupportsVision):
         self.resampler.to(device="cuda", dtype=param_dtype)
         self.sampler = Sampler()
 
-    def init_llm(self, config, cache_config, quant_config):
+    def init_llm(self,
+                 config: PretrainedConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         if self.version == 2.0:
             return MiniCPMForCausalLM(config,
                                       cache_config=cache_config,
@@ -462,7 +477,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                 model.encoder.layers = model.encoder.layers[:-1]
         return model
 
-    def init_resampler(self, embed_dim, vision_dim):
+    def init_resampler(self, embed_dim: int, vision_dim: int):
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.float16)
         if self.version == 2.0:
@@ -486,10 +501,10 @@ class MiniCPMV(nn.Module, SupportsVision):
         return resampler
 
     def get_vision_embedding(self,
-                             pixel_values,
-                             patch_attn_mask=None,
-                             tgt_sizes=None,
-                             version=2.0):
+                             pixel_values: List[List[torch.Tensor]],
+                             patch_attn_mask: Optional[torch.Tensor] = None,
+                             tgt_sizes: Optional[torch.Tensor] = None,
+                             version: float = 2.0):
         if version == 2.0:
             res = []
             dtype = self.vpm.pos_embed.data.dtype
@@ -517,7 +532,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                                         patch_attention_mask=patch_attn_mask,
                                         tgt_sizes=tgt_sizes).last_hidden_state
 
-    def get_image_bounds(self, input_ids):
+    def get_image_bounds(self, input_ids: torch.Tensor):
         tokenizer = cached_get_tokenizer(self.config._name_or_path,
                                          trust_remote_code=True)
         if not hasattr(tokenizer, "slice_start_id"):
@@ -542,7 +557,8 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         return image_bound
 
-    def get_vision_hidden_states(self, data):
+    def get_vision_hidden_states(self, data: Dict[str, Union[List,
+                                                             torch.Tensor]]):
         if "vision_hidden_states" not in data:
             pixel_values = data["pixel_values"]
             tgt_sizes = data["tgt_sizes"]
@@ -599,7 +615,7 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         return vision_hidden_states
 
-    def get_embedding(self, data):
+    def get_embedding(self, data: Dict[str, Union[List, torch.Tensor]]):
         input_ids = data["input_ids"]
 
         vision_hidden_states = self.get_vision_hidden_states(data)
@@ -630,7 +646,9 @@ class MiniCPMV(nn.Module, SupportsVision):
                 vision_hidden_states.view(-1, vision_hidden_states.shape[-1]))
         return vlm_embedding, vision_hidden_states
 
-    def process_multimodal_inputs(self, inputs):
+    def process_multimodal_inputs(self, inputs: Dict[str,
+                                                     Union[List,
+                                                           torch.Tensor]]):
         pixel_values = []
         tgt_sizes = []
         for b in range(len(inputs["pixel_values"])):
