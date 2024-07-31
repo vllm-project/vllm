@@ -221,6 +221,7 @@ steps:
   mirror_hardwares: [amd]
   fast_check: true
   commands:
+    - apt-get update
     - apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
