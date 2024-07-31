@@ -543,8 +543,7 @@ class OpenAIServingChat(OpenAIServing):
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
-
-        logprobs_content = []
+        logprobs_content: List[ChatCompletionLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
@@ -552,23 +551,32 @@ class OpenAIServingChat(OpenAIServing):
                 token = tokenizer.decode(token_id)
                 if self.return_tokens_as_token_ids:
                     token = f"token_id:{token_id}"
+
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=token,
-                        bytes=list(token.encode("utf-8", errors="replace"))))
+                        bytes=list(token.encode("utf-8", errors="replace")),
+                    ))
             else:
+                step_token = step_top_logprobs[token_id]
+                step_decoded = step_token.decoded_token
+
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=self._get_decoded_token(
-                            step_top_logprobs[token_id], token_id, tokenizer,
-                            self.return_tokens_as_token_ids),
-                        logprob=max(step_top_logprobs[token_id].logprob,
-                                    -9999.0),
-                        bytes=list(
-                            step_top_logprobs[token_id].decoded_token.encode(
-                                "utf-8", errors="replace")),
+                            step_token,
+                            token_id,
+                            tokenizer,
+                            self.return_tokens_as_token_ids,
+                        ),
+                        logprob=max(step_token.logprob, -9999.0),
+                        bytes=None if step_decoded is None else list(
+                            step_decoded.encode("utf-8", errors="replace")),
                         top_logprobs=self._get_top_logprobs(
-                            step_top_logprobs, num_output_top_logprobs,
-                            tokenizer)))
+                            step_top_logprobs,
+                            num_output_top_logprobs,
+                            tokenizer,
+                        ),
+                    ))
 
         return ChatCompletionLogProbs(content=logprobs_content)

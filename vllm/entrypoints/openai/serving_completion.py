@@ -434,17 +434,21 @@ class OpenAIServingCompletion(OpenAIServing):
                 token = tokenizer.decode(token_id)
                 if self.return_tokens_as_token_ids:
                     token = f"token_id:{token_id}"
+
                 out_tokens.append(token)
                 out_token_logprobs.append(None)
                 out_top_logprobs.append(None)
             else:
+                step_token = step_top_logprobs[token_id]
+
                 token = self._get_decoded_token(
-                    step_top_logprobs[token_id],
+                    step_token,
                     token_id,
                     tokenizer,
-                    return_as_token_id=self.return_tokens_as_token_ids)
-                token_logprob = max(step_top_logprobs[token_id].logprob,
-                                    -9999.0)
+                    return_as_token_id=self.return_tokens_as_token_ids,
+                )
+                token_logprob = max(step_token.logprob, -9999.0)
+
                 out_tokens.append(token)
                 out_token_logprobs.append(token_logprob)
 
