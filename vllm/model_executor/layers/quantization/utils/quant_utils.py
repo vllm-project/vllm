@@ -1,5 +1,5 @@
 """This file is used for /tests and /benchmarks"""
-from typing import List
+from typing import List, Union
 
 import numpy
 import torch
@@ -305,6 +305,7 @@ def pack_rows(
 
     q_res = torch.from_numpy(q_res.astype(numpy.int32)).to(orig_device)
     return q_res
+
 
 
 def pack_cols(
