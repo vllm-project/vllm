@@ -286,6 +286,27 @@ class Sequence:
         self._prompt: Optional[str] = None
         self._prompt_token_ids: Optional[List[int]] = None
 
+        # For decoder-only models, a Sequence is constructed
+        # from an LLMInputs instance (the `inputs` arg.)
+        #
+        # For encoder/decoder models the same `inputs`
+        # instance could be utilized to construct either an
+        # encoder sequence or a decoder sequence, because
+        # `LLMInputs` has both decoder- and encoder-oriented
+        # member variables (i.e. it encapsulates both an encoder
+        # and a decoder prompt.) The decision of which type of sequence
+        # to generate is determined by the `from_decoder_prompt` argument.
+        #
+        # When constructing a encoder sequence
+        # (`from_decoder_prompt` False) it matters that
+        # the `LLMInputs` instance stored in `inputs` is valid
+        # in the sense that its encoder-related member variables are
+        # populated; below, an exception is raised if this is
+        # not the case.
+        #
+        # When constructing a decoder sequence (`from_decoder_prompt` True)
+        # it does not matter whether `inputs` has its encoder-related
+        # member variables populated.
         if not (from_decoder_prompt
                 or is_valid_encoder_decoder_llm_inputs(inputs)):
             raise ValueError("Cannot extract encoder input prompt from "
