@@ -1,19 +1,19 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
 @dataclass
-class AdapterRequest:
+class AdapterRequest(ABC):
     """
     Base class for adapter requests.
     """
 
     @property
     @abstractmethod
-    def adapter_id(self):
-        ...
+    def adapter_id(self) -> int:
+        raise NotImplementedError
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.adapter_id < 1:
             raise ValueError(f"id must be > 0, got {self.adapter_id}")
 
