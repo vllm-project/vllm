@@ -1,10 +1,8 @@
+from typing import List, Optional, Tuple, Union
+from vllm.logger import init_logger
 import contextlib
 import functools
-from typing import List, Optional, Tuple, Union
-
 import torch
-
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
