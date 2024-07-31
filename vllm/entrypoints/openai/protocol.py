@@ -1,6 +1,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from functools import partial
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
@@ -8,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.openai.utils import logit_bias_logits_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -229,14 +231,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                  f"but token_id must be an integer or string "
                                  f"representing an integer") from exc
 
-            def logit_bias_logits_processor(
-                    token_ids: List[int],
-                    logits: torch.Tensor) -> torch.Tensor:
-                for token_id, bias in logit_bias.items():
-                    logits[token_id] += bias
-                return logits
-
-            logits_processors = [logit_bias_logits_processor]
+            logits_processors = [
+                partial(logit_bias_logits_processor, logit_bias)
+            ]
 
         return SamplingParams(
             n=self.n,
@@ -423,14 +420,9 @@ class CompletionRequest(OpenAIBaseModel):
                                  f"but token_id must be an integer or string "
                                  f"representing an integer") from exc
 
-            def logit_bias_logits_processor(
-                    token_ids: List[int],
-                    logits: torch.Tensor) -> torch.Tensor:
-                for token_id, bias in logit_bias.items():
-                    logits[token_id] += bias
-                return logits
-
-            logits_processors = [logit_bias_logits_processor]
+            logits_processors = [
+                partial(logit_bias_logits_processor, logit_bias)
+            ]
 
         return SamplingParams(
             n=self.n,
