@@ -1,6 +1,6 @@
 from .data import (ExplicitEncoderDecoderPrompt, LLMInputs, ParsedText,
-                   ParsedTokens, PromptInputs, TextPrompt, TokensPrompt,
-                   SingletonPromptInputs, get_prompt_type,
+                   ParsedTokens, PromptInputs, SingletonPromptInputs,
+                   TextPrompt, TokensPrompt, get_prompt_type,
                    is_valid_encoder_decoder_llm_inputs, parse_and_batch_prompt)
 from .registry import InputContext, InputRegistry
 

@@ -7,9 +7,7 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
-                    Union)
-
-from typing import cast
+                    Union, cast)
 
 import torch
 
