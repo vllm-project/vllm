@@ -25,10 +25,6 @@ def assert_enc_dec_mr_supported_scenario(
         raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ERR_STRS[
             'STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL'])
 
-    if not enc_dec_mr.model_config.enforce_eager:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CUDAGRAPH'])
-
     if getattr(enc_dec_mr.model_config.hf_config, 'attn_logit_softcapping',
                None) is not None:
         raise NotImplementedError(

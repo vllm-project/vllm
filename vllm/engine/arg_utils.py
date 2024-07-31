@@ -719,6 +719,15 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             multimodal_config=multimodal_config)
+
+        if (getattr(model_config.hf_config, 'is_encoder_decoder', False)
+                and (not self.enforce_eager)):
+            logger.info("Forcing enforce_eager == True because "
+                        "CUDAGraph is not supported with encoder/ "
+                        "decoder models.")
+            self.enforce_eager = True
+            model_config.enforce_eager = True
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,

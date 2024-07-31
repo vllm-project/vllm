@@ -25,8 +25,6 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict)
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
-import warnings
-
 logger = init_logger(__name__)
 
 
@@ -115,8 +113,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         which is currently the only supported option.
         '''
         logger.info("EncoderDecoderModelRunner requires "
-                      "XFormers backend; overriding backend "
-                      "auto-selection and forcing XFormers.")
+                    "XFormers backend; overriding backend "
+                    "auto-selection and forcing XFormers.")
         global_force_attn_backend(_Backend.XFORMERS)
 
     @torch.inference_mode()

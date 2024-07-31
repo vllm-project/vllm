@@ -47,7 +47,7 @@ if not is_cpu():
                 hf_model.generate_encoder_decoder_greedy_logprobs_limit(
                     test_case_prompts, max_tokens, num_logprobs))
 
-        with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
+        with vllm_runner(model, dtype=dtype) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 test_case_prompts, max_tokens, num_logprobs)
 

@@ -48,9 +48,6 @@ STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
     "Chunked prefill for encoder/decoder models " + \
                     "is not currently supported."
 
-STR_NOT_IMPL_ENC_DEC_CUDAGRAPH = \
-    "Currently CUDAGraph is not supported for encoder/decoder models"
-
 STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "Models with logits_soft_cap "
     "require FlashInfer backend, which is "
@@ -80,7 +77,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
     "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
     STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-    "STR_NOT_IMPL_ENC_DEC_CUDAGRAPH": STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
     "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
     "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
     "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,

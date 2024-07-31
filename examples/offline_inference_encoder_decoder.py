@@ -12,7 +12,6 @@ dtype = "float"
 # Create a BART encoder/decoder model instance
 llm = LLM(
     model="facebook/bart-large-cnn",
-    enforce_eager=True,
     dtype=dtype,
     # tensor_parallel_size=4,
 )
