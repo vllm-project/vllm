@@ -17,7 +17,7 @@ from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
-                    Union)
+                    Union, overload)
 
 import numpy as np
 import numpy.typing as npt
@@ -53,6 +53,7 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 P = ParamSpec('P')
 K = TypeVar("K")
 T = TypeVar("T")
+U = TypeVar("U")
 
 
 class _Sentinel:
@@ -94,8 +95,10 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> Optional[T]:
-        return self.get(key)
+    def __getitem__(self, key: Hashable) -> T:
+        value = self.cache[key]  # Raise KeyError if not exists
+        self.cache.move_to_end(key)
+        return value
 
     def __setitem__(self, key: Hashable, value: T) -> None:
         self.put(key, value)
@@ -109,8 +112,9 @@ class LRUCache(Generic[T]):
     def get(self,
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
+        value: Optional[T]
         if key in self.cache:
-            value: Optional[T] = self.cache[key]
+            value = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -590,8 +594,8 @@ class CudaMemoryProfiler:
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)
-            mem = torch.xpu.max_memory_allocated(self.device)
+            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):
@@ -707,6 +711,54 @@ def merge_dicts(dict1: Dict[K, List[T]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
+                 Tuple["JSONTree[T]", ...], T]
+"""A nested JSON structure where the leaves need not be JSON-serializable."""
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Dict[str, JSONTree[T]],
+) -> Dict[str, JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: List[JSONTree[T]],
+) -> List[JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Tuple[JSONTree[T], ...],
+) -> Tuple[JSONTree[U], ...]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: JSONTree[T],
+) -> JSONTree[U]:
+    ...
+
+
+def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
+    if isinstance(value, dict):
+        return {k: json_map_leaves(func, v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [json_map_leaves(func, v) for v in value]
+    elif isinstance(value, tuple):
+        return tuple(json_map_leaves(func, v) for v in value)
+    else:
+        return func(value)
 
 
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
