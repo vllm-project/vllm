@@ -360,6 +360,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
+    shutdown_task = None
     async with build_backend(args) as backend:
 
         server = await build_server(
@@ -383,7 +384,11 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             await server_task
         except asyncio.CancelledError:
             logger.info("Gracefully stopping http server")
-            await server.shutdown()
+            shutdown_task = server.shutdown()
+
+    if shutdown_task:
+        # NB: Await server shutdown only after the backend context is exited
+        await shutdown_task
 
 
 if __name__ == "__main__":

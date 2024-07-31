@@ -16,9 +16,9 @@ else:
 
 
 def init_tokenizer_from_configs(model_config: ModelConfig,
-                                 scheduler_config: SchedulerConfig,
-                                 parallel_config: ParallelConfig,
-                                 enable_lora: bool):
+                                scheduler_config: SchedulerConfig,
+                                parallel_config: ParallelConfig,
+                                enable_lora: bool):
     init_kwargs = dict(tokenizer_id=model_config.tokenizer,
                        enable_lora=enable_lora,
                        max_num_seqs=scheduler_config.max_num_seqs,

@@ -1,4 +1,5 @@
 import pickle
+from contextlib import contextmanager
 from typing import Any, AsyncIterator, Mapping, Optional
 
 import zmq
@@ -47,51 +48,54 @@ class RPCClient:
         """Destroy the ZeroMQ Context."""
         self.context.destroy()
 
+    @contextmanager
+    def socket(self):
+        # Ensure client sockets are always closed after use
+
+        # Connect to RPC socket for Request-Reply pattern,
+        # Note that we use DEALER to enable asynchronous communication
+        # to enable streaming.
+        socket = self.context.socket(zmq.constants.DEALER)
+        try:
+            socket.connect(self.path)
+            yield socket
+        finally:
+            socket.close()
+
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
                                          error_message: str) -> Any:
         """Send an RPC request that is expecting data back."""
 
-        # Connect to socket.
-        socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(self.path)
+        with self.socket() as socket:
 
-        # Ping RPCServer with a request.
-        await socket.send(pickle.dumps(request))
+            # Ping RPCServer with a request.
+            await socket.send(pickle.dumps(request))
 
-        # Await the data from the Server.
-        data = pickle.loads(await socket.recv())
+            # Await the data from the Server.
+            data = pickle.loads(await socket.recv())
+
         if not isinstance(data, expected_type):
             # LoRAConfig can be None.
             if expected_type == LoRAConfig and data is None:
                 pass
             else:
-                socket.close()
                 raise ValueError(error_message)
-
-        socket.close()
 
         return data
 
     async def _send_one_way_rpc_request(self, request: RPC_REQUEST_TYPE,
                                         error_message: str):
         """Send one-way RPC request to trigger an action."""
+        with self.socket() as socket:
+            # Ping RPC Server with request.
+            await socket.send(pickle.dumps(request, pickle.HIGHEST_PROTOCOL))
 
-        # Connect to socket.
-        socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(self.path)
-
-        # Ping RPC Server with request.
-        await socket.send(pickle.dumps(request, pickle.HIGHEST_PROTOCOL))
-
-        # Await acknowledgement from RPCServer.
-        response = pickle.loads(await socket.recv())
+            # Await acknowledgement from RPCServer.
+            response = pickle.loads(await socket.recv())
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
-            socket.close()
             raise ValueError(error_message)
-
-        socket.close()
 
         return response
 
@@ -180,56 +184,47 @@ class RPCClient:
     ) -> AsyncIterator[RequestOutput]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
-        # Connect to RPC socket for Request-Reply pattern,
-        # Note that we use DEALER to enable asynchronous communication
-        # to enable streaming.
-        socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(self.path)
+        with self.socket() as socket:
 
-        # Send RPCGenerateRequest to the RPCServer.
-        await socket.send_multipart([
-            pickle.dumps(
-                RPCGenerateRequest(
-                    inputs=inputs,
-                    sampling_params=sampling_params,
-                    request_id=request_id,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request),
-                pickle.HIGHEST_PROTOCOL)
-        ])
+            # Send RPCGenerateRequest to the RPCServer.
+            await socket.send_multipart([
+                pickle.dumps(
+                    RPCGenerateRequest(
+                        inputs=inputs,
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        prompt_adapter_request=prompt_adapter_request),
+                    pickle.HIGHEST_PROTOCOL)
+            ])
 
-        # Stream back the results from the RPC Server.
-        while True:
-            message = await socket.recv()
-            request_output = pickle.loads(message)
+            # Stream back the results from the RPC Server.
+            while True:
+                message = await socket.recv()
+                request_output = pickle.loads(message)
 
-            if isinstance(request_output, Exception):
-                socket.close()
-                raise request_output
+                if isinstance(request_output, Exception):
+                    raise request_output
 
-            if request_output.finished:
-                break
+                if request_output.finished:
+                    break
+                yield request_output
+
             yield request_output
-
-        yield request_output
-        socket.close()
 
     async def check_health(self) -> None:
         """Raise if unhealthy"""
 
-        # Connect to socket.
-        socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(self.path)
+        with self.socket() as socket:
 
-        # Ping RPCServer with CHECK_HEALTH request.
-        await socket.send(pickle.dumps(RPCUtilityRequest.CHECK_HEALTH))
+            # Ping RPCServer with CHECK_HEALTH request.
+            await socket.send(pickle.dumps(RPCUtilityRequest.CHECK_HEALTH))
 
-        # Await the reply from the server.
-        # TODO: do we need an internal timeout here?
-        # Or do we expect the external probe to timeout and let this chill?
-        health_message = pickle.loads(await socket.recv())
-        socket.close()
+            # Await the reply from the server.
+            # TODO: do we need an internal timeout here?
+            # Or do we expect the external probe to timeout and let this chill?
+            health_message = pickle.loads(await socket.recv())
 
         if isinstance(health_message, Exception):
             raise health_message
