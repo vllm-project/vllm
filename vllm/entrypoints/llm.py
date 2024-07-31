@@ -487,6 +487,8 @@ class LLM:
 
         inputs: List[PromptInputs] = []
         for i in range(num_requests):
+            item: PromptInputs
+
             if prompts is not None:
                 item = TextPrompt(prompt=prompts[i])
             elif prompt_token_ids is not None:
@@ -530,12 +532,11 @@ class LLM:
                 prompt_adapter_request=prompt_adapter_request)
 
     def _add_request(
-            self,
-            inputs: PromptInputs,
-            params: Union[SamplingParams, PoolingParams],
-            lora_request: Optional[Union[List[LoRARequest],
-                                         LoRARequest]] = None,
-            prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        self,
+        inputs: PromptInputs,
+        params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
@@ -543,7 +544,8 @@ class LLM:
             inputs,
             params,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
     def _run_engine(
             self, *, use_tqdm: bool

@@ -44,7 +44,7 @@ def get_logits_processors(
         logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
         allowed_token_ids: Optional[List[int]],
         tokenizer: PreTrainedTokenizer) -> List[LogitsProcessor]:
-    logits_processors = []
+    logits_processors: List[LogitsProcessor] = []
     if logit_bias:
         try:
             # Convert token_id to integer

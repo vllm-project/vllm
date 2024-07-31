@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
-from vllm.inputs import PromptInputs
+from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -162,9 +162,9 @@ class OpenAIServingChat(OpenAIServing):
                              lora_request=lora_request,
                              prompt_adapter_request=prompt_adapter_request)
 
-            engine_inputs: PromptInputs = {
-                "prompt_token_ids": prompt_inputs["prompt_token_ids"],
-            }
+            engine_inputs = TokensPrompt(
+                prompt_token_ids=prompt_inputs["prompt_token_ids"],
+            )
             if mm_data is not None:
                 engine_inputs["multi_modal_data"] = mm_data
 
