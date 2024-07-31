@@ -402,7 +402,7 @@ class MiniCPMV(nn.Module, SupportsVision):
         self.multimodal_config = multimodal_config
 
         if not hasattr(self.config, "version"):
-            if self.config.hidden_size == 2304:
+            if self.config.hidden_size == 2304 and self.config.query_num == 64:
                 self.version = 2.0
             else:
                 self.version = 2.5
