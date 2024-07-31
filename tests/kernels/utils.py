@@ -208,6 +208,7 @@ def override_backend_env_variable(mpatch: pytest.MonkeyPatch,
     '''
     mpatch.setenv(STR_BACKEND_ENV_VAR, backend_name)
 
+
 def ref_masked_attention(query: torch.Tensor,
                          key: torch.Tensor,
                          value: torch.Tensor,
