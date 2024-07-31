@@ -274,13 +274,6 @@ class SiglipAttention(nn.Module):
             # If the backend is not supported, fall back to the default
             self.attn_fn = self._basic_attention_forward
 
-            #
-            # if self.qkv_proj.params_dtype in [torch.float16, torch.bfloat16]:
-            #     # Flash attention only supports float16 and bfloat16
-            #     self.attn_fn = self._flash_attention_forward
-            # else:
-            #     self.attn_fn = self._basic_attention_forward
-
     def forward(
         self,
         hidden_states: torch.Tensor,
