@@ -221,7 +221,7 @@ class Resampler(nn.Module):
                                     version=self.version)).float().to(device)
         self.register_buffer("pos_embed", pos_embed, persistent=False)
 
-    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor, device: torch.device):
+    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor, device: torch.types.Device):
         max_h = torch.max(tgt_sizes[:, 0])
         max_w = torch.max(tgt_sizes[:, 1])
         if max_h > self.max_size[0] or max_w > self.max_size[1]:
