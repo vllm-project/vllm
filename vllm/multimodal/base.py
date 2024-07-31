@@ -53,9 +53,7 @@ class MultiModalInputs(_MultiModalInputsBase):
     """
 
     @staticmethod
-    def _try_concat(
-        tensors: List[NestedTensors],
-    ) -> Union[GenericSequence[NestedTensors], NestedTensors]:
+    def _try_concat(tensors: List[NestedTensors]) -> BatchedTensors:
         """
         If each input tensor in the batch has the same shape, return a single
         batched tensor; otherwise, return a list of :class:`NestedTensors` with
@@ -105,7 +103,7 @@ class MultiModalInputs(_MultiModalInputsBase):
         return {
             k: MultiModalInputs._try_concat(item_list)
             for k, item_list in item_lists.items()
-        }  # type: ignore
+        }
 
     @staticmethod
     def as_kwargs(
