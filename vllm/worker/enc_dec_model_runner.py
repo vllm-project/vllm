@@ -23,9 +23,8 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict)
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import (AttentionBackend,
-                                                  AttentionMetadata)
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata)
 
 logger = init_logger(__name__)
 
