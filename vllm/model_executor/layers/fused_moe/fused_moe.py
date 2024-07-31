@@ -52,6 +52,7 @@ def fused_moe_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     use_fp8: tl.constexpr,
+    use_int8: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -82,7 +83,7 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
-    pid = tl.program_id(axis=0)
+    pid = tl.program_id(axis=0).to(tl.int64)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -118,13 +119,16 @@ def fused_moe_kernel(
         a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
+    if use_int8:
+        a_scale = tl.load(a_scale_ptr + off_experts)
+        b_scale = tl.load(b_scale_ptr + off_experts * stride_cm + offs_bn)
+
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32 if use_int8 else tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
@@ -138,6 +142,9 @@ def fused_moe_kernel(
         # We accumulate along the K dimension.
         if use_fp8:
             accumulator = tl.dot(a, b, acc=accumulator)
+        elif use_int8:
+            a = tl.math.llrint((a / a_scale)).to(tl.int8)
+            accumulator = tl.dot(a, b, acc=accumulator, out_dtype=accumulator.dtype)
         else:
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
@@ -150,7 +157,8 @@ def fused_moe_kernel(
                              other=0)
         accumulator = accumulator * moe_weight[:, None]
 
-    if use_fp8:
+    if use_fp8 or use_int8:
+        accumulator = accumulator.to(tl.float32)
         accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
@@ -229,16 +237,19 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool, top_k: int,
                             config: Dict[str, Any], compute_type: tl.dtype,
-                            use_fp8: bool) -> None:
+                            use_fp8: bool,
+                            use_int8: bool) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    if not use_fp8:
-        assert A_scale is None
-        assert B_scale is None
-    else:
+    if use_fp8:
         A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
+    elif use_int8:
+        assert B_scale is not None
+    else:
+        assert A_scale is None
+        assert B_scale is None
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
@@ -268,6 +279,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         top_k=top_k,
         compute_type=compute_type,
         use_fp8=use_fp8,
+        use_int8=use_int8,
         **config,
     )
 
@@ -434,6 +446,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   inplace: bool = False,
                   override_config: Optional[Dict[str, Any]] = None,
                   use_fp8: bool = False,
+                  use_int8: bool = False,
                   w1_scale: Optional[torch.Tensor] = None,
                   w2_scale: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
@@ -455,12 +468,19 @@ def fused_experts(hidden_states: torch.Tensor,
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
     M = min(num_tokens, CHUNK_SIZE)
 
+    if use_fp8:
+        dtype = "float8"
+    elif use_int8:
+        dtype = "int8"
+    else:
+        dtype = None
+
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
         w1.shape,
         w2.shape,
         topk_ids.shape[1],
-        "float8" if use_fp8 else None,
+        dtype,
         override_config=override_config,
     )
 
@@ -524,7 +544,8 @@ def fused_experts(hidden_states: torch.Tensor,
                                 topk_ids.shape[1],
                                 config,
                                 compute_type=compute_type,
-                                use_fp8=use_fp8)
+                                use_fp8=use_fp8,
+                                use_int8=use_int8)
 
         ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
@@ -542,7 +563,8 @@ def fused_experts(hidden_states: torch.Tensor,
                                 1,
                                 config,
                                 compute_type=compute_type,
-                                use_fp8=use_fp8)
+                                use_fp8=use_fp8,
+                                use_int8=use_int8)
 
         torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                   dim=1,
@@ -563,6 +585,7 @@ def fused_moe(
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
     use_fp8: bool = False,
+    use_int8: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
@@ -618,6 +641,7 @@ def fused_moe(
                          inplace=inplace,
                          override_config=override_config,
                          use_fp8=use_fp8,
+                         use_int8=use_int8,
                          w1_scale=w1_scale,
                          w2_scale=w2_scale,
                          a1_scale=a1_scale,
