@@ -28,7 +28,7 @@ if TYPE_CHECKING or not core_C_available:
 
     from dataclasses import dataclass
 
-    @dataclass
+    @dataclass(frozen=True)
     class ScalarType:
         """
         ScalarType can represent a wide range of floating point and integer 
