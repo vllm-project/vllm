@@ -20,7 +20,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -43,7 +43,7 @@ MAX_IMAGE_FEATURE_SIZE_HEIGHT = 500
 
 class InternVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: BatchedTensors
+    data: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
 
@@ -193,7 +193,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
 
-    prompt = llm_inputs["prompt"]
+    prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)

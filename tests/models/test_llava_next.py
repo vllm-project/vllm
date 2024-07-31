@@ -1,7 +1,7 @@
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type, overload
 
 import pytest
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -50,6 +50,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+@overload
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
@@ -63,12 +64,54 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
+    ...
+
+
+@overload
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    sizes: List[Tuple[int, int]],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    ...
+
+
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    size_factors: Optional[List[float]] = None,
+    sizes: Optional[List[Tuple[int, int]]] = None,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    if size_factors is not None:
+        inputs_per_image = [(
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    elif sizes is not None:
+        inputs_per_image = [(
+            [prompt for _ in sizes],
+            [image.resize(size) for size in sizes],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    else:
+        raise ValueError("You must provide either `size_factors` or `sizes`")
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
@@ -150,15 +193,24 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
     )
 
 
-@pytest.mark.parametrize("height_and_width_and_result", [(1669, 2560, 2144),
-                                                         (183, 488, 776)])
-def test_image_feature_size(height_and_width_and_result):
-    # Avoid initializing CUDA too early in distributed tests
-    from vllm.model_executor.models.llava_next import (
-        get_llava_next_image_feature_size)
-
-    height, width, result = height_and_width_and_result
-    config = AutoConfig.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
-    assert get_llava_next_image_feature_size(config,
-                                             input_height=height,
-                                             input_width=width) == result
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "sizes",
+    [[(1669, 2560), (2560, 1669), (183, 488), (488, 183)]],
+)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_fixed_sizes(hf_runner, vllm_runner, image_assets, model, sizes,
+                            dtype, max_tokens, num_logprobs) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model,
+        sizes=sizes,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
