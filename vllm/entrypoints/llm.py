@@ -1,7 +1,8 @@
 from contextlib import contextmanager
-from typing import (ClassVar, Dict, List, Optional, Sequence, Union, cast,
-                    overload)
+from typing import (ClassVar, Dict, List, Optional, Sequence, TypedDict, Union,
+                    cast, overload)
 
+from pydantic import BaseModel
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -22,6 +23,16 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
 logger = init_logger(__name__)
+
+
+class LLMGuidedOptions(TypedDict, total=False):
+    guided_json: Union[Dict, BaseModel, str]
+    guided_regex: str
+    guided_choice: List[str]
+    guided_grammar: str
+    guided_decoding_backend: str
+    guided_whitespace_pattern: str
+    guided_json_object: bool
 
 
 class LLM:
@@ -265,7 +276,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[Dict,
+        guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
