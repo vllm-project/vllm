@@ -8,15 +8,13 @@
 
 namespace vllm {
 
-template <typename scalar_t,
-          bool has_residual = false>
+template <typename scalar_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_asymmetric_int8_quant_qparams(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     int32_t* __restrict__ token_azp, int32_t* __restrict__ all_token_azps,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, int const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
-
   constexpr float flt_max{std::numeric_limits<float>::max()};
   constexpr float flt_min{std::numeric_limits<float>::lowest()};
 
@@ -42,13 +40,14 @@ __device__ void compute_dynamic_per_token_asymmetric_int8_quant_qparams(
   __shared__ int32_t s_token_azp;
 
   if (threadIdx.x == 0) {
-    float const scale = (block_max_maybe - block_min_maybe) / 255.0f;;
+    float const scale = (block_max_maybe - block_min_maybe) / 255.0f;
+    ;
 
     // Use rounding to even (same as torch.round)
     float const azp_float = std::nearbyint(-128.0f - block_min_maybe / scale);
     int32_t const azp = static_cast<int32_t>(azp_float);
 
-    all_token_scales[blockIdx.x] = s_token_scale = scale; 
+    all_token_scales[blockIdx.x] = s_token_scale = scale;
     all_token_azps[blockIdx.x] = s_token_azp = azp;
   }
   __syncthreads();
@@ -59,17 +58,16 @@ __device__ void compute_dynamic_per_token_asymmetric_int8_quant_qparams(
 
 namespace vectorized {
 
-// Vectorized version of vllm::compute_dynamic_per_token_asymmetric_int8_quant_qparams
-// hidden_size must be a multiple of 4
-template <typename scalar_t,
-          bool has_residual = false>
+// Vectorized version of
+// vllm::compute_dynamic_per_token_asymmetric_int8_quant_qparams hidden_size
+// must be a multiple of 4
+template <typename scalar_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_asymmetric_int8_quant_qparams(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     int32_t* __restrict__ token_azp, int32_t* __restrict__ all_token_azps,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, int const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
-
   constexpr float flt_max{std::numeric_limits<float>::max()};
   constexpr float flt_min{std::numeric_limits<float>::lowest()};
 
@@ -122,7 +120,7 @@ __device__ void compute_dynamic_per_token_asymmetric_int8_quant_qparams(
     block_max_maybe = fmaxf(block_max_maybe, normed_x);
     block_min_maybe = fminf(block_min_maybe, normed_x);
 
-    normed_x = static_cast<scalar_t>(x.w * rms) * w.w; 
+    normed_x = static_cast<scalar_t>(x.w * rms) * w.w;
     block_max_maybe = fmaxf(block_max_maybe, normed_x);
     block_min_maybe = fminf(block_min_maybe, normed_x);
   }
@@ -135,13 +133,14 @@ __device__ void compute_dynamic_per_token_asymmetric_int8_quant_qparams(
   __shared__ int32_t s_token_azp;
 
   if (threadIdx.x == 0) {
-    float const scale = (block_max_maybe - block_min_maybe) / 255.0f;;
+    float const scale = (block_max_maybe - block_min_maybe) / 255.0f;
+    ;
 
     // Use rounding to even (same as torch.round)
     float const azp_float = std::nearbyint(-128.0f - block_min_maybe / scale);
     int32_t const azp = static_cast<int32_t>(azp_float);
 
-    all_token_scales[blockIdx.x] = s_token_scale = scale; 
+    all_token_scales[blockIdx.x] = s_token_scale = scale;
     all_token_azps[blockIdx.x] = s_token_azp = azp;
   }
   __syncthreads();
@@ -149,7 +148,6 @@ __device__ void compute_dynamic_per_token_asymmetric_int8_quant_qparams(
   *token_scale = s_token_scale;
   *token_azp = s_token_azp;
 }
-} // namespace vectorized
+}  // namespace vectorized
 
-} // namespace vllm
-
+}  // namespace vllm

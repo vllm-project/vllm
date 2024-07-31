@@ -29,10 +29,10 @@ __device__ void rms_norm_dynamic_per_token_symmetric_quant_vec(
       &rms, input, hidden_size, var_epsilon, residual);
 
   // Compute scale
-  vllm::vectorized::compute_dynamic_per_token_symmetric_quant_qparams<scalar_t, scalar_out_t,
-                                                     has_residual>(
-      &token_scale, scales, input, weight, rms, scale_ub, min_scaling_factor,
-      hidden_size, residual);
+  vllm::vectorized::compute_dynamic_per_token_symmetric_quant_qparams<
+      scalar_t, scalar_out_t, has_residual>(&token_scale, scales, input, weight,
+                                            rms, scale_ub, min_scaling_factor,
+                                            hidden_size, residual);
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
@@ -62,8 +62,8 @@ __global__ void rms_norm_dynamic_per_token_symmetric_quant_kernel(
   bool const can_vectorize = hidden_size % 4 == 0;
 
   if (can_vectorize) {
-    return rms_norm_dynamic_per_token_symmetric_quant_vec<scalar_t, scalar_out_t,
-                                                has_residual>(
+    return rms_norm_dynamic_per_token_symmetric_quant_vec<
+        scalar_t, scalar_out_t, has_residual>(
         out, scales, input, weight, scale_ub, var_epsilon, min_scaling_factor,
         hidden_size, residual);
   }
@@ -75,9 +75,10 @@ __global__ void rms_norm_dynamic_per_token_symmetric_quant_kernel(
   vllm::compute_rms<scalar_t, has_residual>(&rms, input, hidden_size,
                                             var_epsilon, residual);
   // Compute Scale
-  vllm::compute_dynamic_per_token_symmetric_quant_qparams<scalar_t, scalar_out_t, has_residual>(
-      &token_scale, scales, input, weight, rms, scale_ub, min_scaling_factor,
-      hidden_size, residual);
+  vllm::compute_dynamic_per_token_symmetric_quant_qparams<
+      scalar_t, scalar_out_t, has_residual>(&token_scale, scales, input, weight,
+                                            rms, scale_ub, min_scaling_factor,
+                                            hidden_size, residual);
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
@@ -93,16 +94,14 @@ __global__ void rms_norm_dynamic_per_token_symmetric_quant_kernel(
 // RMS norm + asymmetric quant kernel
 template <typename scalar_t, bool has_residual = false>
 __global__ void rms_norm_dynamic_per_token_asymmetric_quant_kernel(
-    int8_t* __restrict__ out,       // [..., hidden_size]
+    int8_t* __restrict__ out,             // [..., hidden_size]
     float* __restrict__ scales,           // [num_tokens]
-    int32_t* __restrict__ azps, // [num_tokens]
+    int32_t* __restrict__ azps,           // [num_tokens]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
-    float const var_epsilon,
-    int const hidden_size,
+    float const var_epsilon, int const hidden_size,
     scalar_t* __restrict__ residual = nullptr) {
-
-  bool constexpr is_scale_inverted = true; 
+  bool constexpr is_scale_inverted = true;
   bool constexpr has_azp = true;
 
   // For vectorization, token_input and token_output pointers need to be
@@ -120,11 +119,14 @@ __global__ void rms_norm_dynamic_per_token_asymmetric_quant_kernel(
         &rms, input, hidden_size, var_epsilon, residual);
 
     // Compute scale and azp
-    vllm::vectorized::compute_dynamic_per_token_asymmetric_int8_quant_qparams<scalar_t, has_residual>(
-        &token_scale, scales, &token_azp, azps, input, weight, rms, hidden_size, residual);
+    vllm::vectorized::compute_dynamic_per_token_asymmetric_int8_quant_qparams<
+        scalar_t, has_residual>(&token_scale, scales, &token_azp, azps, input,
+                                weight, rms, hidden_size, residual);
 
-    vllm::vectorized::norm_and_quant<scalar_t, int8_t, is_scale_inverted, has_residual, has_azp>(
-          out, input, weight, rms, 1.0f / token_scale, hidden_size, residual, token_azp);
+    vllm::vectorized::norm_and_quant<scalar_t, int8_t, is_scale_inverted,
+                                     has_residual, has_azp>(
+        out, input, weight, rms, 1.0f / token_scale, hidden_size, residual,
+        token_azp);
 
   } else {
     // Compute RMS
@@ -132,12 +134,15 @@ __global__ void rms_norm_dynamic_per_token_asymmetric_quant_kernel(
                                               var_epsilon, residual);
 
     // Compute scale and azp
-    vllm::compute_dynamic_per_token_asymmetric_int8_quant_qparams<scalar_t, has_residual>(
-        &token_scale, scales, &token_azp, azps, input, weight, rms, hidden_size, residual);
+    vllm::compute_dynamic_per_token_asymmetric_int8_quant_qparams<scalar_t,
+                                                                  has_residual>(
+        &token_scale, scales, &token_azp, azps, input, weight, rms, hidden_size,
+        residual);
 
     // RMS Norm + Quant
-    vllm::norm_and_quant<scalar_t, int8_t, is_scale_inverted, has_residual, has_azp>(
-          out, input, weight, rms, 1.0f / token_scale, hidden_size, residual, token_azp);
+    vllm::norm_and_quant<scalar_t, int8_t, is_scale_inverted, has_residual,
+                         has_azp>(out, input, weight, rms, 1.0f / token_scale,
+                                  hidden_size, residual, token_azp);
   }
 }
 
@@ -168,27 +173,27 @@ void rms_norm_dynamic_per_token_symmetric_quant_dispatch(
 
   if (residual.has_value()) {
     VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_dynamic_per_token_symmetric_quant_kernel", [&] {
-          vllm::rms_norm_dynamic_per_token_symmetric_quant_kernel<scalar_in_t, scalar_t,
-                                                        true>
-              <<<grid, block, 0, stream>>>(
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, min_scaling_factor, hidden_size,
-                  residual->data_ptr<scalar_in_t>());
+        out.scalar_type(), "rms_norm_dynamic_per_token_symmetric_quant_kernel",
+        [&] {
+          vllm::rms_norm_dynamic_per_token_symmetric_quant_kernel<
+              scalar_in_t, scalar_t, true><<<grid, block, 0, stream>>>(
+              out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
+              input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
+              scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
+              var_epsilon, min_scaling_factor, hidden_size,
+              residual->data_ptr<scalar_in_t>());
         });
 
   } else {
     VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_dynamic_per_token_symmetric_quant_kernel", [&] {
-          vllm::rms_norm_dynamic_per_token_symmetric_quant_kernel<scalar_in_t, scalar_t,
-                                                        false>
-              <<<grid, block, 0, stream>>>(
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, min_scaling_factor, hidden_size, nullptr);
+        out.scalar_type(), "rms_norm_dynamic_per_token_symmetric_quant_kernel",
+        [&] {
+          vllm::rms_norm_dynamic_per_token_symmetric_quant_kernel<
+              scalar_in_t, scalar_t, false><<<grid, block, 0, stream>>>(
+              out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
+              input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
+              scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
+              var_epsilon, min_scaling_factor, hidden_size, nullptr);
         });
   }
 }
@@ -196,14 +201,13 @@ void rms_norm_dynamic_per_token_symmetric_quant_dispatch(
 // Residual add + RMS norm + asymmetric dynamic per token
 template <typename scalar_in_t>
 void rms_norm_dynamic_per_token_asymmetric_quant_dispatch(
-    torch::Tensor& out,           // [..., hidden_size]
-    torch::Tensor const& input,   // [..., hidden_size]
-    torch::Tensor const& weight,  // [hidden_size]
-    torch::Tensor& scales,        // [num_tokens]
-    std::optional<at::Tensor>& azps, // [num_tokens]
-    double const var_epsilon,     // Variance epsilon used in norm calculation
+    torch::Tensor& out,               // [..., hidden_size]
+    torch::Tensor const& input,       // [..., hidden_size]
+    torch::Tensor const& weight,      // [hidden_size]
+    torch::Tensor& scales,            // [num_tokens]
+    std::optional<at::Tensor>& azps,  // [num_tokens]
+    double const var_epsilon,  // Variance epsilon used in norm calculation
     std::optional<at::Tensor>& residual) {
-
   // TODO (varun) : Make azps non-optional
   TORCH_CHECK(azps.has_value());
   TORCH_CHECK(out.dtype() == torch::kInt8);
@@ -218,17 +222,18 @@ void rms_norm_dynamic_per_token_asymmetric_quant_dispatch(
 
   if (residual.has_value()) {
     vllm::rms_norm_dynamic_per_token_asymmetric_quant_kernel<scalar_in_t, true>
-            <<<grid, block, 0, stream>>>(
-                  out.data_ptr<int8_t>(), scales.data_ptr<float>(), azps->data_ptr<int32_t>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>());
+        <<<grid, block, 0, stream>>>(
+            out.data_ptr<int8_t>(), scales.data_ptr<float>(),
+            azps->data_ptr<int32_t>(), input.data_ptr<scalar_in_t>(),
+            weight.data_ptr<scalar_in_t>(), var_epsilon, hidden_size,
+            residual->data_ptr<scalar_in_t>());
 
   } else {
     vllm::rms_norm_dynamic_per_token_asymmetric_quant_kernel<scalar_in_t, false>
-            <<<grid, block, 0, stream>>>(
-                  out.data_ptr<int8_t>(), scales.data_ptr<float>(), azps->data_ptr<int32_t>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  var_epsilon, hidden_size, nullptr);
+        <<<grid, block, 0, stream>>>(
+            out.data_ptr<int8_t>(), scales.data_ptr<float>(),
+            azps->data_ptr<int32_t>(), input.data_ptr<scalar_in_t>(),
+            weight.data_ptr<scalar_in_t>(), var_epsilon, hidden_size, nullptr);
   }
 }
 
@@ -238,8 +243,8 @@ void rms_norm_dynamic_per_token_quant(
     torch::Tensor const& weight,  // [hidden_size]
     torch::Tensor& scales,        // [num_tokens]
     double const var_epsilon,     // Variance epsilon used in norm calculation
-    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual, std::optional<at::Tensor> azps) {
-
+    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual,
+    std::optional<at::Tensor> azps) {
   bool const is_asymmetric_quant = azps.has_value();
 
   // Only int8 and fp8 quantization is supported.
@@ -247,18 +252,21 @@ void rms_norm_dynamic_per_token_quant(
               out.dtype() == torch::kInt8);
   // asymmetric_quant is only supported for int8 quant case.
   TORCH_CHECK(!is_asymmetric_quant || out.dtype() == torch::kInt8);
-  // scale_ub argument is only used in the fp8 dynamic-per-token symmetric quant case. 
+  // scale_ub argument is only used in the fp8 dynamic-per-token symmetric quant
+  // case.
   TORCH_CHECK(!scale_ub.has_value() || out.dtype() == torch::kFloat8_e4m3fn);
 
   if (is_asymmetric_quant) {
     VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "rms_norm_dynamic_per_token_asymmetric_quant_dispatch", [&] {
+        input.scalar_type(),
+        "rms_norm_dynamic_per_token_asymmetric_quant_dispatch", [&] {
           rms_norm_dynamic_per_token_asymmetric_quant_dispatch<scalar_t>(
               out, input, weight, scales, azps, var_epsilon, residual);
         });
   } else {
     VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "rms_norm_dynamic_per_token_symmetric_quant_dispatch", [&] {
+        input.scalar_type(),
+        "rms_norm_dynamic_per_token_symmetric_quant_dispatch", [&] {
           rms_norm_dynamic_per_token_symmetric_quant_dispatch<scalar_t>(
               out, input, weight, scales, var_epsilon, scale_ub, residual);
         });

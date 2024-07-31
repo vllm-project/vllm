@@ -41,7 +41,6 @@ __inline__ __device__ T _sum(T a, T b) {
 
 }  // namespace detail
 
-
 template <typename T>
 __device__ __host__ static constexpr T ceil_div(T a, T b) {
   return (a + b - 1) / b;

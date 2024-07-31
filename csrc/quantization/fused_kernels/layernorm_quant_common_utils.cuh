@@ -36,14 +36,13 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 }
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false,
-          bool has_azp = false>
+          bool has_residual = false, bool has_azp = false>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
                                float const rms, float const scale,
                                int const hidden_size,
-                               scalar_t* __restrict__ residual = nullptr, 
+                               scalar_t* __restrict__ residual = nullptr,
                                int32_t const azp = 0) {
   int const token_offset = blockIdx.x * hidden_size;
 
@@ -57,7 +56,8 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     // Quant
     output[token_offset + i] =
-        ScaledQuant<scalar_out_t, is_scale_inverted, has_azp>::quant_fn(x, scale, azp);
+        ScaledQuant<scalar_out_t, is_scale_inverted, has_azp>::quant_fn(
+            x, scale, azp);
   }
 }
 
@@ -121,8 +121,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false,
-          bool has_azp = false>
+          bool has_residual = false, bool has_azp = false>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
@@ -130,7 +129,6 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                int const hidden_size,
                                scalar_t* __restrict__ residual = nullptr,
                                int32_t const azp = 0) {
-  
   int const token_offset = blockIdx.x * hidden_size;
 
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
@@ -185,6 +183,6 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
   }
 }
 
-} // namespace vectorized
+}  // namespace vectorized
 
-} // namespace vllm
+}  // namespace vllm

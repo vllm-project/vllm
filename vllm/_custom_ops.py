@@ -186,7 +186,7 @@ def rms_norm_dynamic_per_token_quant(
     quant_dtype: torch.dtype,
     scale_ub: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None,
-    is_asymmetric_quant = False,
+    is_asymmetric_quant=False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
 
     # Support asymmetric quant only for int8 quantization.
@@ -198,12 +198,12 @@ def rms_norm_dynamic_per_token_quant(
     scales = torch.empty((input.numel() // input.shape[-1], 1),
                          device=input.device,
                          dtype=torch.float32)
-    azps = torch.empty_like(scales, device=input.device, dtype=torch.int32) if is_asymmetric_quant else None
+    azps = torch.empty_like(scales, device=input.device,
+                            dtype=torch.int32) if is_asymmetric_quant else None
 
     torch.ops._C.rms_norm_dynamic_per_token_quant(output, input, weight,
                                                   scales, epsilon, scale_ub,
-                                                  residual,
-                                                  azps)
+                                                  residual, azps)
     return output, scales, azps
 
 

@@ -8,9 +8,7 @@
 
 namespace vllm {
 
-template <typename scalar_t,
-          typename scalar_out_t,
-          bool has_residual = false>
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_symmetric_quant_qparams(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
@@ -55,9 +53,7 @@ namespace vectorized {
 
 // Vectorized version of vllm::compute_dynamic_per_token_symmetric_quant_qparams
 // hidden_size must be a multiple of 4
-template <typename scalar_t,
-          typename scalar_out_t,
-          bool has_residual = false>
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_symmetric_quant_qparams(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
@@ -130,7 +126,6 @@ __device__ void compute_dynamic_per_token_symmetric_quant_qparams(
 
   *token_scale = s_token_scale;
 }
-
 
 }  // namespace vectorized
 
