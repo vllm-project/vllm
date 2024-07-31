@@ -27,7 +27,7 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_disagg_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -58,6 +58,9 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+
+import vllm.envs as envs
+from vllm import _custom_ops as ops
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -1351,19 +1354,82 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
-        hidden_or_intermediate_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **multi_modal_kwargs,
-            **seqlen_agnostic_kwargs)
+
+        
+        # call `model_executable`
+        # and handle KV cache transfer for disaggregated prefilling
+        if any([
+            prefill_meta is None,
+            envs.VLLM_DISAGG_PREFILL_ROLE != "decode", 
+            kv_caches is None,
+            kv_caches[0] is None]):
+            
+            # model forwarding
+            # during forwarding the KV cache will be sent in prefill instance
+            # see vllm/attention/backends/flash_attn.py for sending impl
+            hidden_or_intermediate_states = model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                kv_caches=kv_caches,
+                attn_metadata=model_input.attn_metadata,
+                intermediate_tensors=intermediate_tensors,
+                **multi_modal_kwargs,
+                **seqlen_agnostic_kwargs)
+            
+            
+            if all([
+                prefill_meta is not None,
+                envs.VLLM_DISAGG_PREFILL_ROLE == "prefill",
+                kv_caches is not None,
+                kv_caches[0] is not None,]):
+                # send hidden state if disaggregated prefilling enabled
+
+                get_disagg_group().push(hidden_or_intermediate_states)
+                
+        else:
+            # receive KV cache from disaggregated prefill instance
+            for i in range(model_executable.model.start_layer,
+                           model_executable.model.end_layer):
+                    
+                # get kv cache
+                kv_cache = kv_caches[i - model_executable.model.start_layer]
+                # get corresponding layer
+                layer = model_executable.model.layers[i]
+                
+                # get kv cache shape (after sliced by tp)
+                _, _, num_head, head_size = kv_cache[0].shape
+                num_tokens = model_input.input_tokens.shape[0]
+                key = get_disagg_group().fetch(
+                    torch.Size([num_tokens, num_head, head_size]),
+                    kv_cache[0].dtype
+                )
+                value = get_disagg_group().fetch(
+                    torch.Size([num_tokens, num_head, head_size]),
+                    kv_cache[0].dtype
+                )
+                
+                key_cache, value_cache = kv_cache[0], kv_cache[1]
+                ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    model_input.attn_metadata.slot_mapping.flatten(),
+                    layer.self_attn.attn.kv_cache_dtype,
+                    layer.self_attn.attn._k_scale,
+                    layer.self_attn.attn._v_scale,
+                )
+
+            hidden_or_intermediate_states = get_disagg_group().fetch(
+                torch.Size([num_tokens, model_executable.config.hidden_size]),
+                kv_cache[0].dtype
+            )
+                
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
-
+        
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
@@ -1375,6 +1441,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token

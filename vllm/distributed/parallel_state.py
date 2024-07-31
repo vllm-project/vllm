@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import Any, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
+import queue
 
 import torch
 import torch.distributed
@@ -160,8 +162,8 @@ class GroupCoordinator:
 
         assert self.cpu_group is not None
         assert self.device_group is not None
-        
 
+        
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
@@ -210,6 +212,12 @@ class GroupCoordinator:
         if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
+
+                
+        # use a threadpool to buffer send request in disaggregated prefill
+        self.send_buffer = None
+        # use a list to cache send items.
+        self.send_queue = queue.Queue()
 
     @property
     def first_rank(self):
@@ -696,6 +704,7 @@ class GroupCoordinator:
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
+
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
 
@@ -704,16 +713,6 @@ class GroupCoordinator:
             pynccl_comm.send(tensor, dst)
         else:
             torch.distributed.send(tensor, self.ranks[dst], self.device_group)
-
-    def isend(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
-        """Sends a tensor to the destination rank in a non-blocking way"""
-        """NOTE: `dst` is the local rank of the destination rank."""
-        """NOTE: this function leverage pytorch's isend, to bypass PyNccl buffer limit"""
-        if dst is None:
-            dst = (self.rank_in_group + 1) % self.world_size
-
-        torch.distributed.isend(tensor, self.ranks[dst], self.device_group)
-
 
     def recv(self,
              size: torch.Size,
@@ -731,18 +730,60 @@ class GroupCoordinator:
         else:
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
+    
+    
+    def push(self,
+             tensor: torch.Tensor,
+             dst: Optional[int] = None,
+             enable_verification: bool = False) -> None:
+        """Push the KV cache send request into the send buffer"""
+        """NOTE: `dst` is the local rank of the destination rank."""
 
-    def irecv_wait(self,
+        if self.send_buffer is None:
+            self.send_buffer = ThreadPoolExecutor(max_workers=1)
+
+        if enable_verification:
+            # Send tensor, together with metadatas
+            # We will use this metadata to perform some sanity check
+            # But this transfer is VERY slow. 
+            # So this is a good option for debugging but not for produciton
+            self.send_buffer.submit(
+                self.send_tensor_dict,
+                # tensor needs to be cloned, if not the mean doesn't match
+                {"tensor": tensor.clone(), "mean": tensor.mean()},
+                dst
+            )
+        else:
+            # only send tensor, use NCCL if available
+            # very fast but error-prone
+            self.send_buffer.submit(
+                self.send,
+                # tensor needs to be cloned, if not the mean doesn't match
+                tensor.clone(),
+                dst
+            )
+    
+    
+    def fetch(self,
              size: torch.Size,
              dtype: torch.dtype,
-             src: Optional[int] = None) -> torch.Tensor:
-        """Receives a tensor from the src rank asynchronously."""
+             src: Optional[int] = None,
+             enable_verification: bool = False) -> torch.Tensor:
+        """Receives a tensor from the src rank (blocking)."""
+        """This API should be used together with `push`"""
         """NOTE: `src` is the local rank of the destination rank."""
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
 
-        tensor = torch.empty(size, dtype=dtype, device=self.device)
-        torch.distributed.irecv(tensor, self.ranks[src], self.device_group).wait()
+        if enable_verification:
+            # receive tensor and perform verifications
+            result = self.recv_tensor_dict(src)
+            tensor = result["tensor"]
+            mean = result["mean"]
+            assert tensor.shape == size
+            assert tensor.dtype == dtype
+            assert tensor.mean() == mean
+        else:
+            tensor = self.recv(size, dtype, src)
+
         return tensor
 
     def destroy(self):
@@ -1083,7 +1124,7 @@ def initialize_model_parallel(
         logger.debug("Distributed group is %s", str(group_ranks))
         _DISAGG = init_model_parallel_group(
             group_ranks,
-            int(envs.VLLM_DISAGG_PREFILL_ROLE == "decode"),
+            get_world_group().local_rank,
             backend,
             use_custom_allreduce=False)
         logger.debug("_DISAGG initialized for rank %d", torch.distributed.get_rank())

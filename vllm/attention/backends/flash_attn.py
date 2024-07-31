@@ -15,14 +15,12 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.utils import make_tensor_with_pad
 
-# This group is used for KV cache transfer in disaggregated prefilling
 from vllm.distributed import get_disagg_group
-
-# To identify if the VLLM_DISAGG_PREFILL_ROLE is set or no
 import vllm.envs as envs
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
+
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -495,6 +493,15 @@ class FlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
 
+            # send out the KV cache when current vllm is prefill instance
+            # the corresponding receive code is in vllm/worker/model_runner.py
+            if all([
+                envs.VLLM_DISAGG_PREFILL_ROLE == "prefill",
+                attn_metadata.prefill_metadata is not None]):
+                
+                get_disagg_group().push(key)
+                get_disagg_group().push(value)
+
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         assert key.shape[0] == num_prefill_tokens + num_decode_tokens
@@ -510,13 +517,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
-        
-        prefill_meta = attn_metadata.prefill_metadata
-        if (prefill_meta is not None) and (
-            (envs.VLLM_DISAGG_PREFILL_ROLE is None)
-            or
-            (envs.VLLM_DISAGG_PREFILL_ROLE == "prefill")
-        ): # during prefilling, and this instance is not disagg decode instance
+
+        if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if (kv_cache is None or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
@@ -542,7 +544,6 @@ class FlashAttentionImpl(AttentionImpl):
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-
                 output[:num_prefill_tokens] = flash_attn_varlen_func(
                     q=query,
                     k=key_cache,
@@ -557,23 +558,6 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table=prefill_meta.block_tables,
                 )
 
-        if (prefill_meta is not None) and (kv_cache is not None) and \
-            (envs.VLLM_DISAGG_PREFILL_ROLE is not None):
-            # transfer the output if
-            #   1). during prefilling
-            #   2). disaggregated prefill enabled
-            #   3). not in the profile run (kv_cache is not None)
-            # no need to transfer kv cache, as it is already the input of this function
-            if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
-                out = output[:num_prefill_tokens].contiguous()
-                if torch.distributed.get_rank() % 4 == 0:
-                    print("Send output, " , out.shape, out.dtype, out.device)
-                get_disagg_group().send(out)
-            else:
-                if torch.distributed.get_rank() % 4 == 0:
-                    print("Recv output, " , output[:num_prefill_tokens].shape, output.dtype, output.device)
-                output[:num_prefill_tokens] = get_disagg_group().recv(output[:num_prefill_tokens].shape, output.dtype)
-                
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             output[num_prefill_tokens:] = flash_attn_with_kvcache(

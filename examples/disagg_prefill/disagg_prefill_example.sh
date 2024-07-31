@@ -6,7 +6,7 @@
 export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_PORT=12345
 # export NCCL_DEBUG=INFO
-export NCCL_BUFFSIZE=536870912
+# export NCCL_BUFFSIZE=536870912
 
 # a function that waits vLLM server to start
 wait_for_server() {
@@ -52,7 +52,7 @@ curl http://localhost:8100/v1/completions \
 "prompt": "San Francisco is a",
 "max_tokens": 1,
 "temperature": 0
-}' &
+}'
 
 # send to decode instance
 curl http://localhost:8200/v1/completions \
