@@ -1,6 +1,6 @@
 import time
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, List,
-                    Optional)
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Final,
+                    List, Optional)
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -163,8 +163,7 @@ class OpenAIServingChat(OpenAIServing):
                              prompt_adapter_request=prompt_adapter_request)
 
             engine_inputs = TokensPrompt(
-                prompt_token_ids=prompt_inputs["prompt_token_ids"],
-            )
+                prompt_token_ids=prompt_inputs["prompt_token_ids"])
             if mm_data is not None:
                 engine_inputs["multi_modal_data"] = mm_data
 
@@ -217,7 +216,7 @@ class OpenAIServingChat(OpenAIServing):
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
         created_time = int(time.time())
-        chunk_object_type = "chat.completion.chunk"
+        chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
 
         # Send response for each token for each request.n (index)
