@@ -46,7 +46,8 @@ def apply_fp8_marlin_linear(
     return output.reshape(out_shape)
 
 
-def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
+def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
+                                 strategy: str = "tensor") -> None:
     print_warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
@@ -74,10 +75,7 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
 
     # WEIGHT SCALES
-    # Currently Marlin doesn't support per-tensor scales, so we
-    # expand it to channelwise
-    scales = layer.weight_scale.repeat(1, part_size_n).to(
-        layer.orig_dtype).to(device)
+    scales = layer.weight_scale.to(layer.orig_dtype)
     # Permute scales
     marlin_scales = marlin_permute_scales(s=scales,
                                           size_k=part_size_k,

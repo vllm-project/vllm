@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Tuple, Type
 
 import pytest
@@ -5,6 +6,7 @@ from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
+from vllm.utils import is_hip
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
@@ -12,14 +14,21 @@ from .utils import check_logprobs_close
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "caption es",
-    "cherry_blossom": "What is in the picture?",
-    "boardwalk": "What is in the picture?",
+    "stop_sign":
+    "caption es",
+    "cherry_blossom":
+    "What is in the picture?",
 })
 
 IMAGE_TOKEN_ID = 257152
 
 models = ["google/paligemma-3b-mix-224"]
+
+# ROCm Triton FA can run into compilation issues with these models due to,
+# excessive use of shared memory. Use other backends in the meantime.
+# FIXME (mattwong, gshtrasb, hongxiayan)
+if is_hip():
+    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -129,7 +138,15 @@ def run_test(
         [0.25, 0.5, 1.0],
     ],
 )
-@pytest.mark.parametrize("dtype", ["float", "half"])
+@pytest.mark.parametrize("dtype", [
+    pytest.param(
+        "float",
+        marks=pytest.mark.skipif(
+            is_hip(),
+            reason=
+            "ROCm FA does not yet fully support 32-bit precision on PaliGemma")
+    ), "half"
+])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,

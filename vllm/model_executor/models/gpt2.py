@@ -51,6 +51,7 @@ class GPT2Attention(nn.Module):
         config: GPT2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -68,12 +69,14 @@ class GPT2Attention(nn.Module):
             total_num_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_attn",
         )
         self.c_proj = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -101,6 +104,7 @@ class GPT2MLP(nn.Module):
         intermediate_size: int,
         config: GPT2Config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -109,12 +113,14 @@ class GPT2MLP(nn.Module):
             intermediate_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_fc",
         )
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
         self.act = get_act_fn(config.activation_function, quant_config,
                               intermediate_size)
@@ -133,6 +139,7 @@ class GPT2Block(nn.Module):
         config: GPT2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -140,9 +147,15 @@ class GPT2Block(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPT2Attention(config, cache_config, quant_config)
+        self.attn = GPT2Attention(config,
+                                  cache_config,
+                                  quant_config,
+                                  prefix=f"{prefix}.attn")
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = GPT2MLP(inner_dim, config, quant_config)
+        self.mlp = GPT2MLP(inner_dim,
+                           config,
+                           quant_config,
+                           prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -175,6 +188,7 @@ class GPT2Model(nn.Module):
         config: GPT2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -186,7 +200,9 @@ class GPT2Model(nn.Module):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda: GPT2Block(config, cache_config, quant_config))
+            lambda prefix: GPT2Block(
+                config, cache_config, quant_config, prefix=prefix),
+            prefix=f"{prefix}.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -229,7 +245,10 @@ class GPT2LMHeadModel(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = GPT2Model(config, cache_config, quant_config)
+        self.transformer = GPT2Model(config,
+                                     cache_config,
+                                     quant_config,
+                                     prefix="transformer")
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

@@ -12,6 +12,14 @@ class CompressedTensorsScheme(ABC):
     of different quantization schemes supported by CompressedTensors.
     """
 
+    @classmethod
+    @abstractmethod
+    def get_min_capability(cls) -> int:
+        """
+        Get minimum device capability.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def create_weights(self, *args, **kwargs):
         """

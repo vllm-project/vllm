@@ -30,7 +30,7 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     internally for each model.
 
 
-To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
+To pass an image to the model, note the following in :class:`vllm.inputs.PromptInputs`:
 
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
@@ -73,7 +73,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
         generated_text = o.outputs[0].text
         print(generated_text)
 
-A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
+A code example can be found in `examples/offline_inference_vision_language.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language.py>`_.
 
 
 Online OpenAI Vision API Compatible Inference
@@ -94,9 +94,7 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
 .. code-block:: bash
 
-    python -m vllm.entrypoints.openai.api_server \
-        --model llava-hf/llava-1.5-7b-hf \
-        --chat-template template_llava.jinja
+    vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 
 .. important::
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
