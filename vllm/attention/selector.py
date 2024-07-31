@@ -49,6 +49,7 @@ def global_force_attn_backend(attn_backend: Optional[_Backend], ) -> None:
     global forced_attn_backend
     forced_attn_backend = attn_backend
 
+
 def _get_global_forced_attn_backend() -> Optional[_Backend]:
     '''
     Get the currently-forced choice of attention backend,

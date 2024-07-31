@@ -1,9 +1,11 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, cast, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
 import torch.distributed
 
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata)
 from vllm.attention.selector import _Backend, global_force_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
@@ -22,9 +24,6 @@ from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
-
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata)
 
 logger = init_logger(__name__)
 
