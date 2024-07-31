@@ -279,7 +279,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def obtain_single_block_id(
         self,
         seq_group: SequenceGroup,
-        kv_from_block: Dict[int, int]
+        kv_from_block: Dict[int, torch.Tensor]
     ) -> None:
         abs_block_ids = self.get_block_table(seq_group.get_seqs(status=SequenceStatus.RUNNING)[0])
         rel_block_id = self.block_allocator.get_physical_block_id(abs_block_ids[0])

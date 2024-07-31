@@ -1,6 +1,8 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
+
+import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
@@ -88,6 +90,7 @@ class RequestOutput:
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
+        kv_from_block: Optional[Dict[int, torch.Tensor]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -97,6 +100,7 @@ class RequestOutput:
         self.finished = finished
         self.metrics = metrics
         self.lora_request = lora_request
+        self.kv_from_block = kv_from_block
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":

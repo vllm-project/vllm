@@ -59,6 +59,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                outputs: List[SequenceGroupOutput]) -> None:
         assert len(outputs) == 1, ("Single step should only has 1 output.")
         output = outputs[0]
+        seq_group.kv_from_block = output.kv_from_block
         prompt_logprobs = output.prompt_logprobs
 
         # If this is the first (or only) "chunk" of the prefill, we need

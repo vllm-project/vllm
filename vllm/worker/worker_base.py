@@ -127,7 +127,7 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     kv_to_block_buffer: Optional[torch.Tensor] = None
-    kv_from_block: Optional[torch.Tensor] = None
+    kv_from_block: Optional[Dict[int, torch.Tensor]] = None
     virtual_engine: int = 0
 
     @classmethod
@@ -281,6 +281,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             get_pp_group().send_tensor_dict(output.tensors)
             return [None]
 
+        # hacky and likely incorrect:
+        output[0].outputs[0].kv_from_block = execute_model_req.kv_from_block
+        
         # output is List[SamplerOutput]
         return output
 

@@ -6,6 +6,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
+import torch
+
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import Policy, PolicyFactory
@@ -134,7 +136,7 @@ class SchedulerOutputs:
     kv_to_block_buffer: List[int]
     # Buffer containing the block we want to extract
     # the KV cache (torch.Tensor) from
-    kv_from_block: Dict[int, int]
+    kv_from_block: Dict[int, torch.Tensor]
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
@@ -204,7 +206,7 @@ class SchedulerRunningOutputs:
     kv_to_block_buffer: List[int]
     # Buffer containing the block we want to extract
     # the KV cache (torch.Tensor) from
-    kv_from_block: Dict[int, int]
+    kv_from_block: Dict[int, torch.Tensor]
 
     @classmethod
     def create_empty(cls) -> "SchedulerRunningOutputs":
@@ -449,7 +451,7 @@ class Scheduler:
         # currently, neither this nor the previous
         # object are modified within this function
         # {Block : torch.Tensor}
-        kv_from_block: Dict[int, int] = {}
+        kv_from_block: Dict[int, torch.Tensor] = {}
 
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
@@ -1127,7 +1129,7 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
-        kv_from_block: Dict[int, int],
+        kv_from_block: Dict[int, torch.Tensor],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
@@ -1195,7 +1197,7 @@ class Scheduler:
     def _obtain_single_block_id(
         self,
         seq_group: SequenceGroup,
-        kv_from_block: Dict[int, int]
+        kv_from_block: Dict[int, torch.Tensor]
     ) -> None:
         self.block_manager.obtain_single_block_id(seq_group, kv_from_block)
 

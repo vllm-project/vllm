@@ -101,7 +101,7 @@ class CacheEngine:
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
     
-    def echo(self, kv_cache: torch.Tensor, kv_from_block: Dict[int, int]) -> None:
+    def get_kv_cache_from_block(self, kv_cache: torch.Tensor, kv_from_block: Dict[int, torch.Tensor]) -> None:
         for block_id in kv_from_block:
             kv_from_block[block_id] = kv_cache
 
@@ -117,7 +117,7 @@ class CacheEngine:
     #     '''
     #     pass
 
-    # def get_kv_cache_from_block(self, kv_from_block: Dict[int, int]):
+    # def get_kv_cache_from_block(self, kv_from_block: Dict[int, torch.Tensor]):
     #     '''TODO 
     #             1) dereference the ptr to the buffer,
     #               convert into Block object
