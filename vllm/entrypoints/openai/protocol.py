@@ -225,7 +225,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tokenizer=tokenizer,
         )
 
-        return SamplingParams(
+        return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
@@ -404,7 +404,7 @@ class CompletionRequest(OpenAIBaseModel):
             tokenizer=tokenizer,
         )
 
-        return SamplingParams(
+        return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
