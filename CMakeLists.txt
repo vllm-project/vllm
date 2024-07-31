@@ -170,6 +170,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
     "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
+    "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
     "csrc/quantization/gptq_marlin/awq_marlin_repack.cu"

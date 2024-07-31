@@ -149,6 +149,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("fp8_marlin_gemm", &fp8_marlin_gemm);
   ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
 
+  // marlin_qqq_gemm for QQQ.
+  ops.def("marlin_qqq_gemm", &marlin_qqq_gemm);
+  ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
+
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
   ops.def(
