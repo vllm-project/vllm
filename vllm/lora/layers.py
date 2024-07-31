@@ -147,7 +147,7 @@ def _apply_lora_packed_nslice(
                 bias = bias[indices]
                 bias[indices == -1] = 0
                 output[:, offset_left:offset_left +
-                        output_slices[slice_idx]] += bias
+                       output_slices[slice_idx]] += bias
 
             offset_left += output_slices[slice_idx]
 
