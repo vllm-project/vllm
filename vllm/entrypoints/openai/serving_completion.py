@@ -106,10 +106,10 @@ class OpenAIServingCompletion(OpenAIServing):
 
             for i, prompt_inputs in enumerate(prompts):
                 sampling_params = request.to_sampling_params(
-                    tokenizer, guided_decode_logits_processor)
-                if sampling_params.max_tokens is None:
-                    sampling_params.max_tokens = self.max_model_len - \
-                        len(prompt_inputs["prompt_token_ids"])
+                    tokenizer,
+                    guided_decode_logits_processor,
+                    default_max_tokens=self.max_model_len -
+                    len(prompt_inputs["prompt_token_ids"]))
 
                 request_id_item = f"{request_id}-{i}"
 

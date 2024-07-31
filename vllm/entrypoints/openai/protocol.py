@@ -216,9 +216,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(
-        self, tokenizer: PreTrainedTokenizer,
-        guided_decode_logits_processor: Optional[LogitsProcessor]
-    ) -> SamplingParams:
+            self, tokenizer: PreTrainedTokenizer,
+            guided_decode_logits_processor: Optional[LogitsProcessor],
+            default_max_tokens: int) -> SamplingParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
         # We now allow logprobs being true without top_logrobs.
         logits_processors = get_logits_processors(
             logit_bias=self.logit_bias,
@@ -244,7 +248,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=self.top_logprobs if self.echo else None,
             ignore_eos=self.ignore_eos,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens,
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
@@ -399,9 +403,13 @@ class CompletionRequest(OpenAIBaseModel):
     # doc: end-completion-extra-params
 
     def to_sampling_params(
-        self, tokenizer: PreTrainedTokenizer,
-        guided_decode_logits_processor: Optional[LogitsProcessor]
-    ) -> SamplingParams:
+            self, tokenizer: PreTrainedTokenizer,
+            guided_decode_logits_processor: Optional[LogitsProcessor],
+            default_max_tokens: int) -> SamplingParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
         echo_without_generation = self.echo and self.max_tokens == 0
 
         logits_processors = get_logits_processors(
@@ -427,7 +435,7 @@ class CompletionRequest(OpenAIBaseModel):
             stop_token_ids=self.stop_token_ids,
             logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
-            max_tokens=self.max_tokens if not echo_without_generation else 1,
+            max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
