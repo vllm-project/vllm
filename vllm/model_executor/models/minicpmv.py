@@ -288,8 +288,8 @@ class Resampler(nn.Module):
 
     def forward_2(self,
                   x: torch.Tensor,
-                  tgt_sizes: torch.Tensor = None,
-                  attn_mask: torch.Tensor = None):
+                  tgt_sizes: Optional[torch.Tensor] = None,
+                  attn_mask: Optional[torch.Tensor] = None):
         if self.adaptive:
             pos_embed = torch.Tensor(
                 get_2d_sincos_pos_embed(self.embed_dim,
