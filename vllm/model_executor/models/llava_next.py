@@ -72,8 +72,6 @@ def _get_llava_next_num_unpadded_features(
 ) -> Tuple[int, int]:
     current_height = npatches * num_patch_height
     current_width = npatches * num_patch_width
-    current_height = torch.tensor(current_height).to("cuda")
-    current_width = torch.tensor(current_width).to("cuda")
 
     aspect_ratio = original_width / original_height
     current_aspect_ratio = current_width / current_height
@@ -344,9 +342,12 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             if patch_embeddings.shape[0] > 1:
                 other_patch_embeds = patch_embeddings[1:]
 
+                # Move to CPU to avoid floating-point errors
+                orig_height, orig_width = image_size.tolist()
+
                 # image_aspect_ratio == "anyres"
                 num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                    image_size,
+                    (orig_height, orig_width),
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
@@ -358,7 +359,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                         .permute(4, 0, 2, 1, 3).contiguous() \
                         .flatten(1, 2).flatten(2, 3)
                     other_patch_embeds = unpad_image(other_patch_embeds,
-                                                     image_size)
+                                                     (orig_height, orig_width))
                     other_patch_embeds = torch.cat((
                         other_patch_embeds,
                         self.image_newline[:, None, None] \
