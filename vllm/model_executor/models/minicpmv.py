@@ -28,8 +28,8 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import torch.types
 import torch.nn.functional as F
+import torch.types
 from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
@@ -221,7 +221,8 @@ class Resampler(nn.Module):
                                     version=self.version)).float().to(device)
         self.register_buffer("pos_embed", pos_embed, persistent=False)
 
-    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor, device: torch.types.Device):
+    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor,
+                          device: torch.types.Device):
         max_h = torch.max(tgt_sizes[:, 0])
         max_w = torch.max(tgt_sizes[:, 1])
         if max_h > self.max_size[0] or max_w > self.max_size[1]:
@@ -240,7 +241,9 @@ class Resampler(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_2_5(self, x: torch.Tensor, tgt_sizes: Optional[torch.Tensor] = None):
+    def forward_2_5(self,
+                    x: torch.Tensor,
+                    tgt_sizes: Optional[torch.Tensor] = None):
         assert x.shape[0] == tgt_sizes.shape[0]
         bs = x.shape[0]
 
@@ -564,8 +567,9 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         return image_bound
 
-    def get_vision_hidden_states(self, data: Dict[str, Union[List[torch.Tensor],
-                                                             torch.Tensor]]):
+    def get_vision_hidden_states(self, data: Dict[str,
+                                                  Union[List[torch.Tensor],
+                                                        torch.Tensor]]):
         if "vision_hidden_states" not in data:
             pixel_values = data["pixel_values"]
             tgt_sizes = data["tgt_sizes"]
@@ -622,7 +626,8 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         return vision_hidden_states
 
-    def get_embedding(self, data: Dict[str, Union[List[torch.Tensor], torch.Tensor]]):
+    def get_embedding(self, data: Dict[str, Union[List[torch.Tensor],
+                                                  torch.Tensor]]):
         input_ids = data["input_ids"]
 
         vision_hidden_states = self.get_vision_hidden_states(data)
