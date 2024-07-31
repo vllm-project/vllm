@@ -314,8 +314,8 @@ class Resampler(nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                tgt_sizes: torch.Tensor = None,
-                attn_mask: torch.Tensor = None):
+                tgt_sizes: Optional[torch.Tensor] = None,
+                attn_mask: Optional[torch.Tensor] = None):
         if self.version == 2.0:
             return self.forward_2(x, tgt_sizes=tgt_sizes, attn_mask=attn_mask)
         else:
