@@ -32,6 +32,9 @@ from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
 
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
+
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
