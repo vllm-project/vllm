@@ -7,6 +7,9 @@ from typing import Sequence, Tuple
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def ensure_divisibility(numerator, denominator):
@@ -66,11 +69,10 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
             raise ValueError("Invalid partition string: {}".format(
                 partition_list_str)) from err
         if len(partitions) != pp_size:
-            raise ValueError(
-                "Number of partitions does not match the number of workers.")
+            raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:
             raise ValueError(
-                "Sum of partitions does not match the number of layers.")
+                f"{sum(partitions)=} does not match {num_hidden_layers=}.")
         start_layer = sum(partitions[:pp_rank])
         end_layer = start_layer + partitions[pp_rank]
     else:
@@ -80,5 +82,8 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
 
         if pp_rank == pp_size - 1:
             end_layer = num_hidden_layers
+
+    logger.info("PP rank: %d, start layer: %d, end layer: %d", pp_rank,
+                start_layer, end_layer)
 
     return (start_layer, end_layer)
