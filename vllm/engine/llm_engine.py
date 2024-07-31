@@ -5,8 +5,6 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
-from transformers import PreTrainedTokenizer
-
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -40,7 +38,8 @@ from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
+from vllm.transformers_utils.tokenizer_group import (AnyTokenizer,
+                                                     BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
@@ -477,13 +476,12 @@ class LLMEngine:
         return self.tokenizer
 
     def get_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
-    def get_tokenizer_for_seq(self,
-                              sequence: Sequence) -> "PreTrainedTokenizer":
+    def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(
             sequence.lora_request)
 
