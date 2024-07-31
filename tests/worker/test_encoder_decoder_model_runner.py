@@ -60,27 +60,6 @@ def test_empty_seq_group(enforce_eager, ):
         encoder_input_tokens,
         encoder_input_positions,
         attn_metadata,
-    ) = (
-        model_input.input_tokens,
-        model_input.input_positions,
-        model_input.encoder_input_tokens,
-        model_input.encoder_input_positions,
-        model_input.attn_metadata,
-    )
-    assert input_tokens is None
-    assert input_positions is None
-    assert encoder_input_tokens is None
-    assert encoder_input_positions is None
-    assert attn_metadata is None
-
-    model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
-    (
-        input_tokens,
-        input_positions,
-        encoder_input_tokens,
-        encoder_input_positions,
-        attn_metadata,
         return_seq_lens,
     ) = (
         model_input.input_tokens,
