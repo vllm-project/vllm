@@ -222,7 +222,7 @@ Vision Language Models
     -
   * - :code:`MiniCPM-V`
     - MiniCPM-V
-    - :code:`openbmb/MiniCPM-V-2(Incoming...)`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
+    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
     -
 
 .. note::
