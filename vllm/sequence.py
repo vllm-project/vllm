@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
                     Union)
 
+from typing import cast
+
 import torch
 
 from vllm.inputs import is_valid_encoder_decoder_llm_inputs
@@ -317,11 +319,11 @@ class Sequence:
 
         # Select decoder or encoder input prompt str,
         # as appropriate
-        prompt_key = ("prompt"
-                      if self.from_decoder_prompt else "encoder_prompt")
+        prompt_key: str = ("prompt"
+                           if self.from_decoder_prompt else "encoder_prompt")
 
         # Cache prompt
-        self._prompt = self.inputs.get(prompt_key)
+        self._prompt = cast(Optional[str], self.inputs.get(prompt_key))
         return self._prompt
 
     @property
@@ -332,11 +334,13 @@ class Sequence:
 
         # Select decoder or encoder input prompt
         # token ids, as appropriate
-        prompt_key = ("prompt_token_ids" if self.from_decoder_prompt else
-                      "encoder_prompt_token_ids")
+        prompt_token_ids_key: str = ("prompt_token_ids"
+                                     if self.from_decoder_prompt else
+                                     "encoder_prompt_token_ids")
 
         # Cache computed prompt token ids
-        self._prompt_token_ids = self.inputs.get(prompt_key)
+        self._prompt_token_ids = cast(List[int],
+                                      self.inputs.get(prompt_token_ids_key))
         return self._prompt_token_ids
 
     @property
