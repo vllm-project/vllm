@@ -133,6 +133,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_marlin_24_gemm", &gptq_marlin_24_gemm);
   ops.impl("gptq_marlin_24_gemm", torch::kCUDA, &gptq_marlin_24_gemm);
 
+  // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
+  ops.def("machete_supported_schedules", &machete::supported_schedules);
+  ops.impl("machete_supported_schedules", torch::kCPU,
+           &machete::supported_schedules);
+  ops.def("machete_supported_types", &machete::supported_types);
+  ops.impl("machete_supported_types", torch::kCPU, &machete::supported_types);
+  ops.def("machete_gemm", &machete::gemm);
+  ops.impl("machete_gemm", torch::kCUDA, &machete::gemm);
+  ops.def("machete_prepack_B", &machete::prepack_B);
+  ops.impl("machete_prepack_B", torch::kCUDA, &machete::prepack_B);
+
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def("gptq_marlin_gemm", &gptq_marlin_gemm);
   ops.impl("gptq_marlin_gemm", torch::kCUDA, &gptq_marlin_gemm);
