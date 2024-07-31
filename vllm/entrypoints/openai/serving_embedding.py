@@ -1,9 +1,10 @@
 import base64
 import time
-from typing import AsyncIterator, List, Optional, Tuple, cast
+from typing import AsyncIterator, List, Literal, Optional, Tuple, Union, cast
 
 import numpy as np
 from fastapi import Request
+from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -13,7 +14,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
-from vllm.outputs import EmbeddingRequestOutput
+from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -21,18 +22,28 @@ logger = init_logger(__name__)
 TypeTokenIDs = List[int]
 
 
+def _get_embedding(
+    output: EmbeddingOutput,
+    encoding_format: Literal["float", "base64"],
+) -> Union[List[float], str]:
+    if encoding_format == "float":
+        return output.embedding
+    elif encoding_format == "base64":
+        embedding_bytes = np.array(output.embedding).tobytes()
+        return base64.b64encode(embedding_bytes).decode("utf-8")
+
+    assert_never(encoding_format)
+
+
 def request_output_to_embedding_response(
         final_res_batch: List[EmbeddingRequestOutput], request_id: str,
         created_time: int, model_name: str,
-        encoding_format: str) -> EmbeddingResponse:
+        encoding_format: Literal["float", "base64"]) -> EmbeddingResponse:
     data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
         prompt_token_ids = final_res.prompt_token_ids
-        embedding = final_res.outputs.embedding
-        if encoding_format == "base64":
-            embedding_bytes = np.array(embedding).tobytes()
-            embedding = base64.b64encode(embedding_bytes).decode("utf-8")
+        embedding = _get_embedding(final_res.outputs, encoding_format)
         embedding_data = EmbeddingResponseData(index=idx, embedding=embedding)
         data.append(embedding_data)
 
@@ -81,8 +92,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        encoding_format = (request.encoding_format
-                           if request.encoding_format else "float")
+        encoding_format = request.encoding_format
         if request.dimensions is not None:
             return self.create_error_response(
                 "dimensions is currently not supported")

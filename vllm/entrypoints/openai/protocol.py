@@ -468,7 +468,7 @@ class EmbeddingRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str
     input: Union[List[int], List[List[int]], str, List[str]]
-    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
+    encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
 
