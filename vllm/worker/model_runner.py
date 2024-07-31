@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import asyncio
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -51,7 +52,7 @@ from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, flatten_2d_lists,
                         get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available)
+                        is_pin_memory_available, async_event)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -136,7 +137,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     # Used for speculative decoding. We do not broadcast it because it is only
     # used by the driver worker.
     is_prompt: Optional[bool] = None
-
+    async_event: Optional[asyncio.Event] = None
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
@@ -1370,6 +1371,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not self.is_driver_worker:
             return []
 
+        async_event.set()
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,

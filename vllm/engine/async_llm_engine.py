@@ -25,7 +25,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.sequence import SequenceGroupMetadata
-from vllm.utils import make_async
+from vllm.utils import make_async, async_event
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -251,6 +251,7 @@ class _AsyncLLMEngine(LLMEngine):
                                      output,
                                      scheduler_outputs,
                                      seq_group_metadata_list):
+        await async_event.wait()
         request_outputs = self._process_model_outputs(output=output,
                                                       scheduled_seq_groups=scheduler_outputs.scheduled_seq_groups,
                                                       ignored_seq_groups=scheduler_outputs.ignored_seq_groups,
@@ -270,14 +271,14 @@ class _AsyncLLMEngine(LLMEngine):
         the sequences and returns the newly generated results.
         """
         request_outputs = None
-        if (self.previous_output) and (len(self.previous_output) > 0):
-            request_outputs = asyncio.create_task(self.output_processor_async(self.previous_output, 
-                                                                              self.previous_scheduler_outputs,
-                                                                              self.previous_seq_group_metadata_list))
 
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
 
+        if (self.previous_output) and (len(self.previous_output) > 0):
+            request_outputs = asyncio.create_task(self.output_processor_async(self.previous_output,
+                                                                              self.previous_scheduler_outputs,
+                                                                              self.previous_seq_group_metadata_list))
         if not scheduler_outputs.is_empty():
             # Execute the model.
             finished_requests_ids = self.scheduler[
@@ -301,7 +302,7 @@ class _AsyncLLMEngine(LLMEngine):
             output = list(done)[0].result()
         else:
             output, request_outputs = await asyncio.gather(output, request_outputs)
-        print(output, request_outputs)
+
         self.previous_output = output
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list
@@ -316,6 +317,7 @@ class _AsyncLLMEngine(LLMEngine):
         # Tracing
         # self.do_tracing(scheduler_outputs)
 
+        async_event.clear()
         return request_outputs
 
     async def stop_remote_worker_execution_loop_async(self) -> None:

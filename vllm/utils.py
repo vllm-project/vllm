@@ -30,6 +30,11 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
+# Global asyncio event 
+# TO DO: pass this as modelinput
+global async_event
+async_event = asyncio.Event()
+
 logger = init_logger(__name__)
 
 STR_DTYPE_TO_TORCH_DTYPE = {
