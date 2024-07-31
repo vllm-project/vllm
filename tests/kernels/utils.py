@@ -1,11 +1,9 @@
 """Kernel test utils"""
 
 import itertools
-import os
 import random
-from contextlib import contextmanager
 from numbers import Number
-from typing import Any, Generator, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, List, NamedTuple, Optional, Tuple, Union
 
 import pytest
 import torch
