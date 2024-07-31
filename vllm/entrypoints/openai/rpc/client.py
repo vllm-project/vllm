@@ -5,7 +5,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import DecodingConfig, ModelConfig
-from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE, VLLM_RPC_PATH,
+from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.inputs import PromptInputs
@@ -18,13 +18,14 @@ from vllm.sampling_params import SamplingParams
 class RPCClient:
 
     # TODO: check if opening all these sockets is an antipattern?
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, port: int):
         # ZMQ context.
         self.context = zmq.asyncio.Context()
 
         # TODO: do the tokenizer properly.
         self.tokenizer = tokenizer
         self.decoding_config = DecodingConfig()
+        self.path = f"tcp://localhost:{port}"
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -36,7 +37,7 @@ class RPCClient:
 
         # Connect to socket.
         socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(VLLM_RPC_PATH)
+        socket.connect(self.path)
 
         # Ping RPC Server with request.
         socket.send(pickle.dumps(request, pickle.HIGHEST_PROTOCOL))
@@ -76,7 +77,7 @@ class RPCClient:
 
         # Connect to socket.
         socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(VLLM_RPC_PATH)
+        socket.connect(self.path)
 
         # Ping RPCServer with GET_MODEL_CONFIG request.
         socket.send(pickle.dumps(RPCUtilityRequest.GET_MODEL_CONFIG))
@@ -122,7 +123,7 @@ class RPCClient:
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(VLLM_RPC_PATH)
+        socket.connect(self.path)
 
         # Send RPCGenerateRequest to the RPCServer.
         socket.send_multipart([

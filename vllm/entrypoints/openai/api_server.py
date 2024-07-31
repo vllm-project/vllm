@@ -45,7 +45,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, get_open_port
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -107,15 +107,18 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
     else:
         # remote backend
         ## First need to start the backend process
+        port = get_open_port(envs.VLLM_RPC_PORT)
         rpc_server_process = Process(target=run_rpc_server,
-                                     args=(engine_args, 
-                                           UsageContext.OPENAI_API_SERVER))
+                                     args=(engine_args,
+                                           UsageContext.OPENAI_API_SERVER,
+                                           port))
         rpc_server_process.start()
 
         ## Then build the client for the backend process
         # TODO: figure out a way around passing the tokenizer
-        backend = RPCClient(
-            tokenizer=AutoTokenizer.from_pretrained(args.model))
+        backend = RPCClient(tokenizer=AutoTokenizer.from_pretrained(
+            args.model),
+                            port=port)
         await backend.wait_for_server()
 
         try:

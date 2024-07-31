@@ -8,9 +8,8 @@ import zmq.asyncio
 from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_PATH, VLLM_RPC_SUCCESS_STR,
-                                         RPCAbortRequest, RPCGenerateRequest,
-                                         RPCUtilityRequest)
+from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         RPCGenerateRequest, RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
@@ -23,7 +22,7 @@ class RPCServer:
     # Alternative, use a smaller number of sockets with conditioning on the
     # data that is passed through the socket.
     def __init__(self, async_engine_args: AsyncEngineArgs,
-                 usage_context: UsageContext):
+                 usage_context: UsageContext, port: int):
         # Initialize engine first.
         self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
                                                       usage_context)
@@ -33,7 +32,7 @@ class RPCServer:
 
         # Init socket for readiness state.
         self.socket = self.context.socket(zmq.constants.ROUTER)
-        self.socket.bind(VLLM_RPC_PATH)
+        self.socket.bind(f"tcp://localhost:{port}")
 
     def cleanup(self):
         """Cleanup all resources."""
@@ -51,10 +50,9 @@ class RPCServer:
         """Send the ModelConfig """
         model_config = await self.engine.get_model_config()
 
-        self.socket.send_multipart([
-            identity,
-            pickle.dumps(model_config, pickle.HIGHEST_PROTOCOL)
-        ])
+        self.socket.send_multipart(
+            [identity,
+             pickle.dumps(model_config, pickle.HIGHEST_PROTOCOL)])
 
     async def do_log_stats(self, identity):
         await self.engine.do_log_stats()
@@ -166,6 +164,6 @@ async def run_server(server: RPCServer):
 
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
-                   usage_context: UsageContext):
-    server = RPCServer(async_engine_args, usage_context)
+                   usage_context: UsageContext, port: int):
+    server = RPCServer(async_engine_args, usage_context, port)
     asyncio.run(run_server(server))
