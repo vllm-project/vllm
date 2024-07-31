@@ -5,10 +5,12 @@ from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform, RocmPlatform
 
 
 def cutlass_fp8_supported() -> bool:
+    if isinstance(current_platform, RocmPlatform):
+        return False
     capability = current_platform.get_device_capability()
     capability = capability[0] * 10 + capability[1]
 
@@ -147,7 +149,7 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            output, _ = torch._scaled_mm(qinput,
+            output = torch._scaled_mm(qinput,
                                          weight,
                                          out_dtype=input.dtype,
                                          scale_a=x_scale,

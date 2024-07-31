@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     create_per_tensor_scale_param, cutlass_fp8_supported,
     per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform, RocmPlatform
 from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -182,6 +182,11 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
+            if isinstance(current_platform, RocmPlatform):
+                weight_as_int8 = layer.weight.view(torch.int8)
+                weight_as_int8[weight_as_int8 == -128] = 0
+                layer.weight = Parameter(layer.weight.view(torch.float8_e4m3fnuz), 
+                                         requires_grad=False)
             # If using marlin (w8a16), kernel uses channelwise weights,
             # so extend the weight scales to be channelwise.
             if self.use_marlin:
@@ -207,6 +212,13 @@ class Fp8LinearMethod(LinearMethodBase):
                                               requires_grad=False)
             else:
                 layer.input_scale = None
+
+            if isinstance(current_platform, RocmPlatform):
+                layer.weight_scale = Parameter(layer.weight_scale * 2, 
+                                               requires_grad=False)
+                if layer.input_scale is not None:
+                    layer.input_scale = Parameter(layer.input_scale * 2,
+                                                  requires_grad=False)
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer)

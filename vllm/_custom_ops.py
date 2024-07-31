@@ -3,6 +3,7 @@ import functools
 from typing import List, Optional, Tuple, Type
 
 import torch
+import torch.version
 
 from vllm.logger import init_logger
 
@@ -334,13 +335,14 @@ def scaled_fp8_quant(
         Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
             scaling factor.
     """
+    output_type = torch.float8_e4m3fnuz if torch.version.hip is not None else torch.float8_e4m3fn
     if batch_dim_padding:
         shape = (max(batch_dim_padding, input.shape[0]), *input.shape[1:])
         output = torch.empty(shape,
                              device=input.device,
-                             dtype=torch.float8_e4m3fn)
+                             dtype=output_type)
     else:
-        output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+        output = torch.empty_like(input, dtype=output_type)
     if scale is None:
         if use_per_token_if_dynamic:
             scale = torch.empty((input.numel() // input.shape[-1], 1),
