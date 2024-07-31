@@ -1,6 +1,6 @@
 import contextlib
 import functools
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -336,7 +336,7 @@ def scaled_fp8_quant(
     """
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
-    shape = input.shape
+    shape: Union[Tuple[int, int], torch.Size] = input.shape
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
