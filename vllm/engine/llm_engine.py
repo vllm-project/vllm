@@ -657,22 +657,23 @@ class LLMEngine:
             originally_list = True
 
         if decoder_input_ids is None:
-            # no decoder prompt input -> 
+            # no decoder prompt input ->
             # use decoder_start_token_id as decoder_input_ids
-            (_,
-            decoder_input_ids,
-            ) = (
-                self._get_default_enc_dec_decoder_prompt(request_id=request_id)
-                )
-            decoder_input_ids=torch.tensor(decoder_input_ids,dtype=torch.int)
+            (
+                _,
+                decoder_input_ids,
+            ) = (self._get_default_enc_dec_decoder_prompt(
+                request_id=request_id))
+            decoder_input_ids = torch.tensor(decoder_input_ids,
+                                             dtype=torch.int)
 
         assert isinstance(decoder_input_ids, torch.Tensor)
         # Reshape: (batch_size=1,num_tokens)
         decoder_input_ids = decoder_input_ids.view(1, -1)
 
-        if (decoder_input_ids.shape[1] ==0 or ( 
-              decoder_input_ids[:, 0] !=
-              decoder_start_token_id[:, 0]).all().item()):
+        if (decoder_input_ids.shape[1] == 0
+                or (decoder_input_ids[:, 0] !=
+                    decoder_start_token_id[:, 0]).all().item()):
             # Encoder-decoder models expect the `decoder_input_ids` to start
             # with a special token. Let's ensure that.
             decoder_input_ids = (torch.cat(
@@ -764,7 +765,7 @@ class LLMEngine:
         ptype = (get_prompt_type(inputs) if ptype is None else ptype)
 
         if inputs is None:
-            # 
+            #
 
             prompt = None
 
@@ -791,7 +792,8 @@ class LLMEngine:
             # decoder prompts
             prompt_token_ids = (self._prepare_decoder_input_ids_for_generation(
                 prompt_token_ids,
-                request_id=request_id,))
+                request_id=request_id,
+            ))
 
         assert prompt_token_ids is not None
 
@@ -843,11 +845,7 @@ class LLMEngine:
         '''
 
         prompt = ""
-        prompt_token_ids = []
-        # prompt_token_ids = (self._tokenize_prompt(
-        #     prompt,
-        #     request_id=request_id,
-        # ))
+        prompt_token_ids: List[int] = []
         return prompt, prompt_token_ids
 
     def _process_encoder_decoder_prompt(
@@ -898,15 +896,15 @@ class LLMEngine:
             extracted_encoder_prompt = inputs.get('encoder_prompt')
             encoder_ptype = None
         else:
-            # If input is singleton encoder prompt, then 
+            # If input is singleton encoder prompt, then
             # we know the encoder prompt type
             extracted_encoder_prompt = inputs
             encoder_ptype = ptype
 
         # Invoke helper function to obtain encoder
-        # prompt and prompt token ids, either from 
-        # singleton encoder prompt or from the 
-        # encoder sub-prompt of an explicit 
+        # prompt and prompt token ids, either from
+        # singleton encoder prompt or from the
+        # encoder sub-prompt of an explicit
         # encoder/decode scenario 2), special
         # processing is applied to the returned decoder token ids
         (
@@ -925,11 +923,11 @@ class LLMEngine:
         if ptype == "ExplicitEncoderDecoder":
             # Extract decoder prompt from explicit
             # encoder/decoder prompt
-            extracted_decoder_prompt=inputs.get('decoder_prompt')
+            extracted_decoder_prompt = inputs.get('decoder_prompt')
         else:
             # Decoder prompt is always unknown if
             # encoder/decoder prompt is not explicit
-            extracted_decoder_prompt=None
+            extracted_decoder_prompt = None
 
         # Invoke helper method to obtain
         # decoder prompt and prompt token ids.
