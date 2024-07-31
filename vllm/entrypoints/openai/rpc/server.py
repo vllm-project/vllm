@@ -18,9 +18,6 @@ logger = init_logger('vllm.entrypoints.openai.rpc.server')
 
 class RPCServer:
 
-    # TODO: check if opening all these sockets is an antipattern.
-    # Alternative, use a smaller number of sockets with conditioning on the
-    # data that is passed through the socket.
     def __init__(self, async_engine_args: AsyncEngineArgs,
                  usage_context: UsageContext, port: int):
         # Initialize engine first.
@@ -41,7 +38,7 @@ class RPCServer:
 
     async def _send_success_message(self, identity):
         """Send message to client indicating an action was successful."""
-        self.socket.send_multipart([
+        await self.socket.send_multipart([
             identity,
             pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
         ])
@@ -50,20 +47,20 @@ class RPCServer:
         """Send the ModelConfig """
         model_config = await self.engine.get_model_config()
 
-        self.socket.send_multipart(
+        await self.socket.send_multipart(
             [identity,
              pickle.dumps(model_config, pickle.HIGHEST_PROTOCOL)])
 
     async def do_log_stats(self, identity):
         await self.engine.do_log_stats()
 
-        self.socket.send_multipart([
+        await self.socket.send_multipart([
             identity,
             pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
         ])
 
     async def is_server_ready(self, identity):
-        self.socket.send_multipart([
+        await self.socket.send_multipart([
             identity,
             pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
         ])
@@ -73,7 +70,7 @@ class RPCServer:
         await self.engine.abort(request.request_id)
 
         # Send confirmation to the client.
-        self.socket.send_multipart([
+        await self.socket.send_multipart([
             identity,
             pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
         ])
@@ -86,14 +83,14 @@ class RPCServer:
                 request_id=generate_request.request_id)
 
             async for request_output in results_generator:
-                self.socket.send_multipart([
+                await self.socket.send_multipart([
                     identity,
                     pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL)
                 ])
 
         except Exception as e:
             ### Notify client of all failures
-            self.socket.send_multipart(
+            await self.socket.send_multipart(
                 [identity, pickle.dumps(e, pickle.HIGHEST_PROTOCOL)])
 
     def _make_handler_coro(self, identity,

@@ -138,7 +138,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--disable-frontend-multiprocessing",
         action="store_true",
         help="If specified, will run the OpenAI frontend server in the same "
-        "proecss as the model servinge engine.")
+        "process as the model serving engine.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

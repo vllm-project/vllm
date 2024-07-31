@@ -302,7 +302,7 @@ def merge_async_iterators(
     queue: asyncio.Queue[Union[Tuple[int, T], ProducerFinished,
                                Exception]] = asyncio.Queue()
 
-    finished = [False] * len(iterators)
+    producers = len(iterators)
 
     async def producer(i: int, iterator: AsyncIterator[T]):
         try:
@@ -310,7 +310,6 @@ def merge_async_iterators(
                 await queue.put((i, item))
         except Exception as e:
             await queue.put(e)
-        finished[i] = True
         # Signal to the consumer that we've finished
         await queue.put(ProducerFinished())
 
@@ -320,13 +319,15 @@ def merge_async_iterators(
     ]
 
     async def consumer():
+        remaining = producers
         try:
-            while not all(finished) or not queue.empty():
+            while remaining or not queue.empty():
                 # we think there is a race condition here
                 item = await queue.get()
 
                 if isinstance(item, ProducerFinished):
                     # Signal that a producer finished- not a real item
+                    remaining -= 1
                     continue
 
                 if isinstance(item, Exception):

@@ -40,12 +40,12 @@ class RPCClient:
         socket.connect(self.path)
 
         # Ping RPC Server with request.
-        socket.send(pickle.dumps(request, pickle.HIGHEST_PROTOCOL))
+        await socket.send(pickle.dumps(request, pickle.HIGHEST_PROTOCOL))
 
         # Await acknowledgement from RPCServer.
         response = pickle.loads(await socket.recv())
 
-        if (not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR):
+        if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
             socket.close()
             raise ValueError(error_message)
 
@@ -80,7 +80,7 @@ class RPCClient:
         socket.connect(self.path)
 
         # Ping RPCServer with GET_MODEL_CONFIG request.
-        socket.send(pickle.dumps(RPCUtilityRequest.GET_MODEL_CONFIG))
+        await socket.send(pickle.dumps(RPCUtilityRequest.GET_MODEL_CONFIG))
 
         # Await the MODEL_CONFIG from the Server.
         model_config = pickle.loads(await socket.recv())
@@ -126,7 +126,7 @@ class RPCClient:
         socket.connect(self.path)
 
         # Send RPCGenerateRequest to the RPCServer.
-        socket.send_multipart([
+        await socket.send_multipart([
             pickle.dumps(
                 RPCGenerateRequest(
                     inputs=inputs,
