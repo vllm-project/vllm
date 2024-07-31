@@ -184,9 +184,6 @@ def test_prepare_prompt(
         encoder_decoder_model_input.encoder_input_positions)
     attn_metadata = encoder_decoder_model_input.attn_metadata
     cross_slot_mapping = attn_metadata.cross_slot_mapping
-    # return_encoder_seq_lens = (
-    #     encoder_decoder_model_input.attn_metadata.encoder_seq_lens)
-    # assert return_encoder_seq_lens == encoder_seq_lens
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
     # Verify input metadata is correct for prompts.
@@ -218,13 +215,7 @@ def test_prepare_prompt(
         torch.tensor(start_loc, dtype=torch.int32, device=device),
     )
 
-    # Test decoder seq start locs. Note that for normal prefill it is
-    # equivalent to query_start_loc.
-    start_idx = 0
-    seq_start_loc = [start_idx]
-    for seq_len in seq_lens:
-        start_idx += seq_len
-        seq_start_loc.append(start_idx)
+    # Test decoder seq start locs.
 
     assert torch.equal(
         attn_metadata.seq_start_loc,
