@@ -1,10 +1,11 @@
 import pickle
-from typing import AsyncIterator, Mapping, Optional
+from typing import Any, AsyncIterator, Mapping, Optional
 
 import zmq
 import zmq.asyncio
 
-from vllm.config import DecodingConfig, ModelConfig
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTHY_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
@@ -14,23 +15,63 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 
 class RPCClient:
 
-    # TODO: check if opening all these sockets is an antipattern?
-    def __init__(self, tokenizer, port: int):
-        # ZMQ context.
+    def __init__(self, port: int):
         self.context = zmq.asyncio.Context()
-
-        # TODO: do the tokenizer properly.
-        self.tokenizer = tokenizer
-        self.decoding_config = DecodingConfig()
         self.path = f"tcp://localhost:{port}"
+
+    async def setup(self):
+        """Setup the client before it starts sending server requests."""
+
+        # Wait until server is ready.
+        await self.wait_for_server()
+
+        # Get the configs.
+        self.model_config = await self._get_model_config_rpc()
+        self.decoding_config = await self._get_decoding_config_rpc()
+
+        # Create the tokenizer group.
+        # TODO: refactor OAI server to avoid needing this info.
+        self.tokenizer = init_tokenizer_from_configs(
+            model_config=self.model_config,
+            scheduler_config=(await self._get_scheduler_config_rpc()),
+            parallel_config=(await self._get_parallel_config_rpc()),
+            enable_lora=bool(await self._get_lora_config_rpc()),
+        )
 
     def close(self):
         """Destroy the ZeroMQ Context."""
         self.context.destroy()
+
+    async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
+                                         expected_type: Any,
+                                         error_message: str) -> Any:
+        """Send an RPC request that is expecting data back."""
+
+        # Connect to socket.
+        socket = self.context.socket(zmq.constants.DEALER)
+        socket.connect(self.path)
+
+        # Ping RPCServer with a request.
+        await socket.send(pickle.dumps(request))
+
+        # Await the data from the Server.
+        data = pickle.loads(await socket.recv())
+        if not isinstance(data, expected_type):
+            # LoRAConfig can be None.
+            if expected_type == LoRAConfig and data is None:
+                pass
+            else:
+                socket.close()
+                raise ValueError(error_message)
+
+        socket.close()
+
+        return data
 
     async def _send_one_way_rpc_request(self, request: RPC_REQUEST_TYPE,
                                         error_message: str):
@@ -55,12 +96,13 @@ class RPCClient:
         return response
 
     async def get_tokenizer(self, lora_request: LoRARequest):
-        # TODO: handle this via get data? - or avoid doing via RPC
-        return self.tokenizer
+        return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
     async def get_decoding_config(self):
-        # TODO: handle this via get data? -  or avoid doing via RPC
         return self.decoding_config
+
+    async def get_model_config(self):
+        return self.model_config
 
     async def is_tracing_enabled(self):
         # TODO: what is this?
@@ -73,30 +115,48 @@ class RPCClient:
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server.")
 
-    async def get_model_config(self) -> ModelConfig:
+    async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
 
-        # Connect to socket.
-        socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(self.path)
+        return await self._send_get_data_rpc_request(
+            RPCUtilityRequest.GET_MODEL_CONFIG,
+            expected_type=ModelConfig,
+            error_message="Could not get ModelConfig from RPC Server")
 
-        # Ping RPCServer with GET_MODEL_CONFIG request.
-        await socket.send(pickle.dumps(RPCUtilityRequest.GET_MODEL_CONFIG))
+    async def _get_decoding_config_rpc(self) -> DecodingConfig:
+        """Get DecodingConfig from the RPCServer"""
 
-        # Await the MODEL_CONFIG from the Server.
-        model_config = pickle.loads(await socket.recv())
+        return await self._send_get_data_rpc_request(
+            RPCUtilityRequest.GET_DECODING_CONFIG,
+            expected_type=DecodingConfig,
+            error_message="Could not get DecodingConfig from RPC Server")
 
-        if not isinstance(model_config, ModelConfig):
-            socket.close()
-            raise ValueError("Expected ModelConfig object from RPC, but "
-                             f"got {model_config}")
+    async def _get_parallel_config_rpc(self) -> ParallelConfig:
+        """Get ParallelConfig from the RPCServer"""
 
-        socket.close()
+        return await self._send_get_data_rpc_request(
+            RPCUtilityRequest.GET_PARALLEL_CONFIG,
+            expected_type=ParallelConfig,
+            error_message="Could not get ModelConfig from RPC Server")
 
-        return model_config
+    async def _get_scheduler_config_rpc(self) -> SchedulerConfig:
+        """Get SchedulerConfig from the RPCServer"""
+
+        return await self._send_get_data_rpc_request(
+            RPCUtilityRequest.GET_SCHEDULER_CONFIG,
+            expected_type=SchedulerConfig,
+            error_message="Could not get SchedulerConfig from RPC Server")
+
+    async def _get_lora_config_rpc(self):
+        """Get LoRAConfig from the RPCServer"""
+
+        return await self._send_get_data_rpc_request(
+            RPCUtilityRequest.GET_LORA_CONFIG,
+            expected_type=LoRAConfig,
+            error_message="Could not get LoRAConfig from RPC Server")
 
     async def abort(self, request_id: str):
-        """Send an RPCAbortRequest to the RPC Server"""
+        """Send an ABORT_REQUEST signal to the RPC Server"""
 
         await self._send_one_way_rpc_request(
             request=RPCAbortRequest(request_id),

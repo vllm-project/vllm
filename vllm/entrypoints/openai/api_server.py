@@ -16,7 +16,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
-from transformers import AutoTokenizer
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -115,11 +114,8 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
         rpc_server_process.start()
 
         ## Then build the client for the backend process
-        # TODO: figure out a way around passing the tokenizer
-        backend = RPCClient(tokenizer=AutoTokenizer.from_pretrained(
-            args.model),
-                            port=port)
-        await backend.wait_for_server()
+        backend = RPCClient(port)
+        await backend.setup()
 
         try:
             yield backend

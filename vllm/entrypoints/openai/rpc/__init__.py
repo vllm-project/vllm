@@ -29,8 +29,12 @@ class RPCAbortRequest:
 class RPCUtilityRequest(Enum):
     IS_SERVER_READY = 1
     GET_MODEL_CONFIG = 2
-    DO_LOG_STATS = 3
-    CHECK_HEALTH = 4
+    GET_DECODING_CONFIG = 3
+    GET_PARALLEL_CONFIG = 4
+    GET_SCHEDULER_CONFIG = 5
+    GET_LORA_CONFIG = 6
+    DO_LOG_STATS = 7
+    CHECK_HEALTH = 8
 
 
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,

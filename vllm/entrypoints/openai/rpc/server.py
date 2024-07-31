@@ -37,22 +37,47 @@ class RPCServer:
         self.socket.close()
         self.context.destroy()
 
-    async def _send_success_message(self, identity):
-        """Send message to client indicating an action was successful."""
-        await self.socket.send_multipart([
-            identity,
-            pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
-        ])
-
     async def get_model_config(self, identity):
-        """Send the ModelConfig """
+        """Send the ModelConfig"""
         model_config = await self.engine.get_model_config()
 
         await self.socket.send_multipart(
             [identity,
              pickle.dumps(model_config, pickle.HIGHEST_PROTOCOL)])
 
+    async def get_decoding_config(self, identity):
+        """Send the DecodingConfig"""
+        decoding_config = await self.engine.get_decoding_config()
+
+        await self.socket.send_multipart(
+            [identity,
+             pickle.dumps(decoding_config, pickle.HIGHEST_PROTOCOL)])
+
+    async def get_lora_config(self, identity):
+        lora_config = await self.engine.get_lora_config()
+
+        await self.socket.send_multipart(
+            [identity,
+             pickle.dumps(lora_config, pickle.HIGHEST_PROTOCOL)])
+
+    async def get_scheduler_config(self, identity):
+        """Send the SchedulerConfig"""
+        parallel_config = await self.engine.get_scheduler_config()
+
+        await self.socket.send_multipart(
+            [identity,
+             pickle.dumps(parallel_config, pickle.HIGHEST_PROTOCOL)])
+
+    async def get_parallel_config(self, identity):
+        """Send the ParallelConfig"""
+        parallel_config = await self.engine.get_parallel_config()
+
+        await self.socket.send_multipart(
+            [identity,
+             pickle.dumps(parallel_config, pickle.HIGHEST_PROTOCOL)])
+
     async def do_log_stats(self, identity):
+        """Log stats and confirm success."""
         await self.engine.do_log_stats()
 
         await self.socket.send_multipart([
@@ -61,12 +86,14 @@ class RPCServer:
         ])
 
     async def is_server_ready(self, identity):
+        """Notify the client that we are ready."""
         await self.socket.send_multipart([
             identity,
             pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
         ])
 
     async def abort(self, identity, request: RPCAbortRequest):
+        """Abort request and notify the client of success."""
         # Abort the request in the llm engine.
         await self.engine.abort(request.request_id)
 
@@ -81,7 +108,10 @@ class RPCServer:
             results_generator = self.engine.generate(
                 generate_request.inputs,
                 sampling_params=generate_request.sampling_params,
-                request_id=generate_request.request_id)
+                request_id=generate_request.request_id,
+                lora_request=generate_request.lora_request,
+                trace_headers=generate_request.trace_headers,
+                prompt_adapter_request=generate_request.prompt_adapter_request)
 
             async for request_output in results_generator:
                 await self.socket.send_multipart([
@@ -120,6 +150,14 @@ class RPCServer:
         elif isinstance(request, RPCUtilityRequest):
             if request == RPCUtilityRequest.GET_MODEL_CONFIG:
                 return self.get_model_config(identity)
+            elif request == RPCUtilityRequest.GET_PARALLEL_CONFIG:
+                return self.get_parallel_config(identity)
+            elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
+                return self.get_decoding_config(identity)
+            elif request == RPCUtilityRequest.GET_SCHEDULER_CONFIG:
+                return self.get_scheduler_config(identity)
+            elif request == RPCUtilityRequest.GET_LORA_CONFIG:
+                return self.get_lora_config(identity)
             elif request == RPCUtilityRequest.DO_LOG_STATS:
                 return self.do_log_stats(identity)
             elif request == RPCUtilityRequest.IS_SERVER_READY:
