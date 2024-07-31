@@ -9,8 +9,8 @@ from collections import defaultdict
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
 
 import filelock
-import huggingface_hub.constants
 import gguf
+import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
@@ -424,7 +424,10 @@ def get_gguf_extra_tensor_names(
 def gguf_quant_weights_iterator(
     gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    """Iterate over the quant weights in the model gguf files and convert them to torch tensors"""
+    """
+    Iterate over the quant weights in the model gguf files and convert
+    them to torch tensors
+    """
 
     reader = gguf.GGUFReader(gguf_file)
 

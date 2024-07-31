@@ -1,4 +1,3 @@
-from abc import abstractmethod
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -11,32 +10,13 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
 from vllm.model_executor.utils import set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
 
-class EmbeddingMethodBase(QuantizeMethodBase):
-    """Base class for different quantized methods."""
-
-    @abstractmethod
-    def create_weights(self, layer: torch.nn.Module, *weight_args,
-                       **extra_weight_attrs):
-        """Create weights for a layer.
-
-        The weights will be set as attributes of the layer."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
-        """Apply the weights in embeddings layer to the input tensor.
-        
-        Expects create_weights to have been called before on the layer."""
-        raise NotImplementedError
-
-
-class UnquantizedEmbeddingMethod(EmbeddingMethodBase):
+class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
 
     def create_weights(self, layer: torch.nn.Module,
@@ -53,8 +33,14 @@ class UnquantizedEmbeddingMethod(EmbeddingMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
-    def apply(self, layer: torch.nn.Module,
-              input_: torch.Tensor) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return F.linear(x, layer.weight, bias)
+
+    def embedding(self, layer: torch.nn.Module,
+                  input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
 
 
@@ -237,17 +223,16 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                self.tp_size)
         self.embedding_dim = embedding_dim
 
-        embedding_method, linear_method = None, None
+        linear_method = None
         if quant_config is not None:
-            methods = quant_config.get_quant_method(self, prefix=prefix)
-            if methods is not None:
-                embedding_method, linear_method = methods
-        if embedding_method is None:
-            embedding_method = UnquantizedEmbeddingMethod()
+            linear_method = quant_config.get_quant_method(self, prefix=prefix)
         if linear_method is None:
-            linear_method = UnquantizedLinearMethod()
-        self.embedding_method = embedding_method
-        self.linear_method = linear_method
+            linear_method = UnquantizedEmbeddingMethod()
+        if not method_has_implemented_embedding(type(linear_method)):
+            raise NotImplementedError(
+                f"The class {type(linear_method).__name__} must implement "
+                "the 'embedding' method.")
+        self.linear_method: QuantizeMethodBase = linear_method
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -399,8 +384,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             masked_input = input_
         # Get the embeddings.
-        output_parallel = self.embedding_method.apply(self,
-                                                      masked_input.long())
+        output_parallel = self.linear_method.embedding(self,
+                                                       masked_input.long())
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
@@ -445,8 +430,10 @@ class ParallelLMHead(VocabParallelEmbedding):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
                          org_num_embeddings, padding_size, quant_config,
                          prefix)
+
         if isinstance(self.linear_method, UnquantizedEmbeddingMethod):
             self.linear_method = UnquantizedLinearMethod()
+
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,

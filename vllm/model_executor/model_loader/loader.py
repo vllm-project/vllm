@@ -922,10 +922,12 @@ class GGUFModelLoader(BaseModelLoader):
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """
-        GGUF uses the following naming convention for their tensors from HF checkpoint:
+        GGUF uses this naming convention for their tensors from HF checkpoint:
         `blk.N.BB.weight` and `blk.N.BB.bias`
-        where N signifies the block number of a layer, and BB signifies the attention/mlp layer components.
-        See https://github.com/ggerganov/ggml/blob/master/docs/gguf.md#standardized-tensor-names for more details.
+        where N signifies the block number of a layer, and BB signifies the
+        attention/mlp layer components.
+        See "Standardized tensor names" in
+        https://github.com/ggerganov/ggml/blob/master/docs/gguf.md for details.
         """
         config = model_config.hf_config
         model_type = config.model_type
