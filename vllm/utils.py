@@ -31,7 +31,7 @@ from vllm import _custom_ops as ops
 from vllm.inputs import (
     ExplicitEncoderDecoderPrompt,
     PromptInputs,
-    DecoderOnlyPromptInputs,
+    SingletonPromptInputs,
 )
 from vllm.logger import enable_trace_function_call, init_logger
 
@@ -1133,16 +1133,16 @@ def is_embedding_model_config(model_config) -> bool:
 
 
 def build_explicit_enc_dec_prompt(
-    encoder_prompt: DecoderOnlyPromptInputs,
-    decoder_prompt: DecoderOnlyPromptInputs,
+    encoder_prompt: SingletonPromptInputs,
+    decoder_prompt: SingletonPromptInputs,
 ) -> ExplicitEncoderDecoderPrompt:
     return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
                                         decoder_prompt=decoder_prompt)
 
 
 def zip_enc_dec_prompt_lists(
-    enc_prompt_list: List[DecoderOnlyPromptInputs],
-    dec_prompt_list: List[DecoderOnlyPromptInputs],
+    enc_prompt_list: List[SingletonPromptInputs],
+    dec_prompt_list: List[SingletonPromptInputs],
 ) -> List[ExplicitEncoderDecoderPrompt]:
     return [
         build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)

@@ -748,8 +748,6 @@ class LLMEngine:
         # or TextPrompt that is not a dict
         if ptype in ['None', 'str']:
 
-            # prompt = inputs
-            # prompt_token_ids = tokenize(inputs)
             # no multi-modal data
             return (inputs,
                     self._tokenize_prompt(

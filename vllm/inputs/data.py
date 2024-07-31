@@ -94,33 +94,53 @@ class TokensPrompt(TypedDict):
     """
 
 
-DecoderOnlyPromptInputs = Union[str, TextPrompt, TokensPrompt]
+SingletonPromptInputs = Union[str, TextPrompt, TokensPrompt]
 """
 Set of possible schemas for a single LLM input:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+
+Note that "singleton" is as opposed to a data structure
+which encapsulates multiple prompts, i.e. of the sort
+which may be utilized for encoder/decoder models when
+the user desires to express both the encoder & decoder
+prompts explicitly, i.e. ExplicitEncoderDecoderPrompt
+
+A prompt of type SingletonPromptInputs may be employed
+as (1) input to a decoder-only model, (2) input to
+the encoder of an encoder/decoder model, in the scenario
+where the decoder-prompt is not specified explicitly, or
+(3) as a member of a larger data structure encapsulating
+more than one prompt, i.e. ExplicitEncoderDecoderPrompt
 """
 
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
     """Represents an encoder/decoder model input prompt,
-    comprising an encoder prompt and a decoder prompt.
+    comprising an explicit encoder prompt and a 
+    decoder prompt.
 
     The encoder and decoder prompts, respectively,
     may formatted according to any of the
-    DecoderOnlyPromptInputs schemas, and are not
+    SingletonPromptInputs schemas, and are not
     required to have the same schema.
 
     Only the encoder prompt may have multi-modal data.
+
+    Note that an ExplicitEncoderDecoderPrompt may not
+    be used as an input to a decoder-only model,
+    and that the `encoder_prompt` and `decoder_prompt`
+    fields of this data structure may not themselves
+    must be SingletonPromptInputs instances.
     """
 
-    encoder_prompt: DecoderOnlyPromptInputs
+    encoder_prompt: SingletonPromptInputs
 
-    decoder_prompt: DecoderOnlyPromptInputs
+    decoder_prompt: SingletonPromptInputs
 
 
-PromptInputs = Union[DecoderOnlyPromptInputs, ExplicitEncoderDecoderPrompt]
+PromptInputs = Union[SingletonPromptInputs, ExplicitEncoderDecoderPrompt]
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:
