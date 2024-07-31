@@ -12,10 +12,10 @@ namespace vllm {
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
 struct sm75_config_default {
-  // TODO (varun) : figure out shared mem usage
   // This config is used in 2 cases,
   // - M in (256, inf]
   // - M in (64, 128]
+  // Shared memory required by this Gemm 32768
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
@@ -29,6 +29,7 @@ template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
 struct sm75_config_M256 {
   // M in (128, 256]
+  // Shared memory required by this Gemm 65536
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<128, 128, 128>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
@@ -42,6 +43,7 @@ template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
 struct sm75_config_M64 {
   // M in (32, 64]
+  // Shared memory required by this Gemm 49152
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<64, 128, 128>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
@@ -55,6 +57,7 @@ template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
 struct sm75_config_M32 {
   // M in [1, 32]
+  // Shared memory required by this Gemm 49152
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<32, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
@@ -88,10 +91,7 @@ inline void cutlass_gemm_sm75_dispatch(torch::Tensor& out,
   // Due to shared memory requirements, some Gemms may fail to run on some
   // GPUs. As the name indicates, the Fallback Gemm is used as an alternative
   // in such cases.
-  // sm75_config_M16 has the least shared-memory requirement. However,
-  // based on some profiling, we select sm75_config_M32 as a better alternative
-  // performance wise.
-  // TODO (varun) : fix fallback gemm
+  // sm75_config_default has the least shared-memory requirements.
   using FallbackGemm = Cutlass2xGemmDefault;
 
   uint32_t const m = a.size(0);
