@@ -83,7 +83,4 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
         if pp_rank == pp_size - 1:
             end_layer = num_hidden_layers
 
-    logger.info("PP rank: %d, start layer: %d, end layer: %d", pp_rank,
-                start_layer, end_layer)
-
     return (start_layer, end_layer)
