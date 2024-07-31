@@ -1,11 +1,14 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, List, Optional, Tuple, Type
 
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder)
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 # Placeholder attention backend for models like Mamba that don't have attention.
 # Mainly exists to sidestep get_attn_backend.
@@ -38,7 +41,7 @@ class PlaceholderAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return None
+        return (1, 1, 1, 1, 1)
 
     @staticmethod
     def swap_blocks(
@@ -159,6 +162,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
+
 
 class PlaceholderAttentionMetadataBuilder(
         AttentionMetadataBuilder[PlaceholderAttentionMetadata]):

@@ -87,6 +87,8 @@ def get_attn_backend(
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
     elif backend == _Backend.NO_ATTENTION:
+        from vllm.attention.backends.placeholder_attn import (
+            PlaceholderAttentionBackend)
         return PlaceholderAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
