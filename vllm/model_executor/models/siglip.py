@@ -9,7 +9,11 @@ from einops import rearrange
 from PIL import Image
 from torch import nn
 from transformers import SiglipConfig, SiglipVisionConfig
-from vllm_flash_attn import flash_attn_varlen_func
+from transformers.modeling_flash_attention_utils import (
+    _upad_input,
+    pad_input,
+)
+from vllm_flash_attn import flash_attn_func
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig
@@ -365,6 +369,8 @@ class SiglipAttention(nn.Module):
 
         return attn_output
 
+    # Ported from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L449
+    # and https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/modeling_flash_attention_utils.py#L133
     def _flash_attention_forward(self, q, k, v, batch_size, q_len, *args,
                                  **kwargs):
         """Implements the multihead softmax attention.
@@ -377,43 +383,18 @@ class SiglipAttention(nn.Module):
         q = q.view(batch_size, q_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, q_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, q_len, self.num_heads, self.head_dim)
-
-        seqlen_k = k.shape[1]
-
-        # goes for cuda device
-        q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
-        cu_seqlens_q = torch.arange(
-            0,
-            (batch_size + 1) * q_len,
-            step=q_len,
-            dtype=torch.int32,
-            device=q.device,
-        )
-
-        # during training q,k,v always have same seqlen
-        assert seqlen_k == q_len
-
-        cu_seqlens_k = cu_seqlens_q
-        dropout_p = self.dropout if self.training else 0.0
-
-        output = flash_attn_varlen_func(
+        
+        attn_output = flash_attn_func(
             q,
             k,
             v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            q_len,
-            seqlen_k,
-            dropout_p,
-            softmax_scale=None,
+            dropout_p=0.0,
             causal=False,
         )
+        
+        attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim).contiguous()
 
-        output = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
-        output = output.reshape(batch_size, q_len, self.embed_dim).contiguous()
-
-        return output
-
+        return attn_output
 
 class SiglipMLP(nn.Module):
 
@@ -534,19 +515,19 @@ class SiglipEncoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> Tuple:
-        last_hidden_state = inputs_embeds
-        hidden_states = (last_hidden_state, )
+        hidden_states = inputs_embeds
         for encoder_layer in self.layers:
+            encoder_states = (hidden_states, )
             layer_outputs = encoder_layer(
-                hidden_states=last_hidden_state,
+                hidden_states=hidden_states,
                 kv_caches=kv_caches,
                 attn_metadata=attn_metadata,
             )
+            hidden_states = layer_outputs[0]
+        
+        encoder_states = encoder_states + (hidden_states, )
 
-            last_hidden_state = layer_outputs[0]
-            hidden_states = hidden_states + (last_hidden_state, )
-
-        return (last_hidden_state, hidden_states)
+        return (hidden_states, encoder_states)
 
 
 class SiglipVisionTransformer(nn.Module):
@@ -616,8 +597,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         super().__init__()
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
-        self.head_size = config.hidden_size // config.num_attention_heads
-        self.scaling = self.head_size**-0.5
+        # TODO(ChristopherCho): Implement vLLM version of MultiheadAttention
         self.attention = torch.nn.MultiheadAttention(
             config.hidden_size, config.num_attention_heads, batch_first=True)
         self.layernorm = nn.LayerNorm(config.hidden_size,
@@ -662,7 +642,7 @@ class SiglipVisionModel(nn.Module):
             pixel_values,
             kv_caches: List[torch.Tensor] = None,
             attn_metadata: AttentionMetadata = None,
-            interpolate_pos_encoding: Optional[bool] = False,  # added by eric
+            interpolate_pos_encoding: Optional[bool] = False,
     ) -> Tuple:
         return self.vision_model(
             pixel_values=pixel_values,
