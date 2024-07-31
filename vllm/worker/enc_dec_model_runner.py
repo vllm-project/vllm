@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, cast, Tuple
 
 import torch
 import torch.distributed
@@ -24,7 +24,8 @@ from vllm.worker.model_runner_base import (
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.attention.backends.abstract import (AttentionBackend,
+                                                  AttentionMetadata)
 
 logger = init_logger(__name__)
 
@@ -181,12 +182,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
 
-        (attn_metadata, 
-         encoder_input_tokens_tensor,
-         encoder_input_positions_tensor,
-         ) = (
-             self._prepare_encoder_model_input_tensors(
-            seq_group_metadata_list, model_input))
+        (
+            attn_metadata,
+            encoder_input_tokens_tensor,
+            encoder_input_positions_tensor,
+        ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
+                                                       model_input))
 
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
@@ -262,8 +263,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         return
 
     def _prepare_encoder_model_input_tensors(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            model_input: EncoderDecoderModelInput) -> EncoderDecoderModelInput:
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        model_input: EncoderDecoderModelInput,
+    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
         are used to augment an already-computed `EncoderDecoderModelInput`
@@ -311,7 +315,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # Leave the encoder/cross-attention input
             # fields at default values if the seq group
             # metadata list arg is an empty list
-            return model_input
+            return (model_input.attn_metadata, None, None)
 
         for seq_group_metadata in seq_group_metadata_list:
             is_prompt = seq_group_metadata.is_prompt
@@ -423,8 +427,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         attn_metadata.cross_slot_mapping = cross_slot_mapping_tensor
         attn_metadata.cross_block_tables = cross_block_tables
 
-        return (attn_metadata, 
-                encoder_input_tokens_tensor,
+        return (attn_metadata, encoder_input_tokens_tensor,
                 encoder_input_positions_tensor)
 
 

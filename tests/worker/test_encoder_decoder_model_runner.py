@@ -176,12 +176,12 @@ def test_prepare_prompt(
     # Augment model input data structure with encoder model
     # inputs & encoder/decoder cross-attention KV caching
     # data structures
-    (attn_metadata, 
+    (
+        attn_metadata,
         encoder_input_tokens,
         encoder_input_positions,
-        ) = (
-        model_runner._prepare_encoder_model_input_tensors(
-            seq_group_metadata_list, decoder_only_model_input))
+    ) = (model_runner._prepare_encoder_model_input_tensors(
+        seq_group_metadata_list, decoder_only_model_input))
     cross_slot_mapping = attn_metadata.cross_slot_mapping
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
@@ -382,12 +382,12 @@ def test_prepare_decode(
     # Augment model input data structure with encoder model
     # inputs & encoder/decoder cross-attention KV caching
     # data structures
-    (attn_metadata, 
+    (
+        attn_metadata,
         encoder_input_tokens,
         encoder_input_positions,
-        ) = (
-        model_runner._prepare_encoder_model_input_tensors(
-            seq_group_metadata_list, decoder_only_model_input))
+    ) = (model_runner._prepare_encoder_model_input_tensors(
+        seq_group_metadata_list, decoder_only_model_input))
     cross_slot_mapping = attn_metadata.cross_slot_mapping
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
