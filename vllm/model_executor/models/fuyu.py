@@ -169,7 +169,7 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
     # process prompts
-    prompt = llm_inputs["prompt"]
+    prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     tokenizer = cached_get_tokenizer(model_config.model)
     # dim0 is batch_size, dim1 is subseq_size which will always be 1

@@ -36,7 +36,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
@@ -261,7 +261,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
 class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: BatchedTensors
+    data: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
 
