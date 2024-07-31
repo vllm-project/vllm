@@ -219,7 +219,7 @@ class SchedulerRunningOutputs:
             blocks_to_copy=[],
             num_lookahead_slots=0,
             kv_to_block_buffer=[],
-            kv_from_block=[],
+            kv_from_block={},
         )
 
 
@@ -488,7 +488,8 @@ class Scheduler:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = running_queue.pop()
                     preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out, kv_from_block)
+                                                   blocks_to_swap_out,
+                                                   kv_from_block)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:
@@ -497,7 +498,8 @@ class Scheduler:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
                     preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out, kv_from_block)
+                                                   blocks_to_swap_out,
+                                                   kv_from_block)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(seq_group)
                     else:
@@ -1195,10 +1197,8 @@ class Scheduler:
         self._swap_out(seq_group, blocks_to_swap_out)
 
     def _obtain_single_block_id(
-        self,
-        seq_group: SequenceGroup,
-        kv_from_block: Dict[int, torch.Tensor]
-    ) -> None:
+            self, seq_group: SequenceGroup,
+            kv_from_block: Dict[int, torch.Tensor]) -> None:
         self.block_manager.obtain_single_block_id(seq_group, kv_from_block)
 
     def _swap_in(

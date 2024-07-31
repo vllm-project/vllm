@@ -281,9 +281,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             get_pp_group().send_tensor_dict(output.tensors)
             return [None]
 
-        # hacky and likely incorrect:
+        # hacky and incorrect:
         output[0].outputs[0].kv_from_block = execute_model_req.kv_from_block
-        
+
         # output is List[SamplerOutput]
         return output
 

@@ -269,16 +269,6 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    async def get_kv_cache_from_block(self,
-                                      block: Block) -> List[torch.Tensor]:
-        pass
-
-    @abstractmethod
-    async def put_kv_cache_into_block(self, block: Block,
-                                      kv_cache: List[torch.Tensor]) -> None:
-        pass
-
-    @abstractmethod
     def get_physical_block_id(self, device: Device, absolute_id: int) -> int:
         pass
 

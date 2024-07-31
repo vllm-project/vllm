@@ -468,7 +468,7 @@ class SequenceGroup:
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self._first_seq = next(iter(self.seqs_dict.values()))
-        self.kv_from_block: Optional[Dict[int, torch.Tensor]] = None 
+        self.kv_from_block: Optional[Dict[int, torch.Tensor]] = None
 
     @property
     def prompt(self) -> Optional[str]:
@@ -789,7 +789,7 @@ class CompletionSequenceGroupOutput(SequenceGroupOutput):
         # Prompt logprob for each prompt query token.
         self.prompt_logprobs = prompt_logprobs
         # Optional mapping from Block to its KV cache tensor
-        self.kv_from_block: Optional[Dict[int, torch.Tensor]] = None 
+        self.kv_from_block: Optional[Dict[int, torch.Tensor]] = None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
@@ -874,7 +874,6 @@ class SamplerOutput:
 
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None
-
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]

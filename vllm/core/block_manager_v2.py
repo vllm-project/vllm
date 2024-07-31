@@ -4,6 +4,8 @@ from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
+import torch
+
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block
@@ -275,14 +277,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_ids = self.cross_block_tables[request_id].physical_block_ids
         assert all(b is not None for b in block_ids)
         return block_ids  # type: ignore
-    
-    def obtain_single_block_id(
-        self,
-        seq_group: SequenceGroup,
-        kv_from_block: Dict[int, torch.Tensor]
-    ) -> None:
-        abs_block_ids = self.get_block_table(seq_group.get_seqs(status=SequenceStatus.RUNNING)[0])
-        rel_block_id = self.block_allocator.get_physical_block_id(abs_block_ids[0])
+
+    def obtain_single_block_id(self, seq_group: SequenceGroup,
+                               kv_from_block: Dict[int, torch.Tensor]) -> None:
+        abs_block_ids = self.get_block_table(
+            seq_group.get_seqs(status=SequenceStatus.RUNNING)[0])
+        rel_block_id = self.block_allocator.get_physical_block_id(
+            Device.GPU, abs_block_ids[0])
         kv_from_block[rel_block_id] = -1
 
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):
