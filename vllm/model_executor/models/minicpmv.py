@@ -40,11 +40,13 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsVision
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.models.minicpm import MiniCPMModel
+from vllm.model_executor.models.qwen2 import Qwen2Model
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_image_processor,
@@ -52,8 +54,8 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 _KEYS_TO_MODIFY_MAPPING = {
-    "language_model.lm_head": "lm_head",
-    "language_model.model": "language_model",
+    "llm.lm_head": "lm_head",
+    "llm.model": "llm",
 }
 
 
@@ -414,9 +416,13 @@ class MiniCPMV(nn.Module, SupportsVision):
         self.vpm.to(dtype=param_dtype)
         self.vision_dim = self.vpm.embed_dim if self.version == 2.0 \
             else self.vpm.embeddings.embed_dim
-        self.embed_dim = self.llm.config.hidden_size
+        self.embed_dim = self.config.hidden_size
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
         self.resampler.to(device="cuda", dtype=param_dtype)
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
     def init_llm(self,
@@ -424,17 +430,17 @@ class MiniCPMV(nn.Module, SupportsVision):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         if self.version == 2.0:
-            return MiniCPMForCausalLM(config,
-                                      cache_config=cache_config,
-                                      quant_config=quant_config)
+            return MiniCPMModel(config,
+                                cache_config=cache_config,
+                                quant_config=quant_config)
         elif self.version == 2.5:
-            return LlamaForCausalLM(config,
-                                    cache_config=cache_config,
-                                    quant_config=quant_config)
+            return LlamaModel(config,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
         else:
-            return Qwen2ForCausalLM(config,
-                                    cache_config=cache_config,
-                                    quant_config=quant_config)
+            return Qwen2Model(config,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def init_vision_module(self):
         if self.version == 2.0:
@@ -624,11 +630,11 @@ class MiniCPMV(nn.Module, SupportsVision):
         else:
             image_bounds = []
 
-        if hasattr(self.llm.config, 'scale_emb'):
-            vlm_embedding = self.llm.model.embed_tokens(
-                input_ids) * self.llm.config.scale_emb
+        if hasattr(self.config, 'scale_emb'):
+            vlm_embedding = self.llm.embed_tokens(
+                input_ids) * self.config.scale_emb
         else:
-            vlm_embedding = self.llm.model.embed_tokens(input_ids)
+            vlm_embedding = self.llm.embed_tokens(input_ids)
         vision_hidden_states = [
             i.type(vlm_embedding.dtype) if isinstance(i, torch.Tensor) else i
             for i in vision_hidden_states
@@ -688,14 +694,17 @@ class MiniCPMV(nn.Module, SupportsVision):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        return self.llm.compute_logits(hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
 
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.llm.sample(logits, sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -709,9 +718,9 @@ class MiniCPMV(nn.Module, SupportsVision):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            #     for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
-            #         if key_to_modify in name:
-            #             name = name.replace(key_to_modify, new_key)
+            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
