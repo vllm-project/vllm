@@ -48,6 +48,8 @@ class EAGLE(nn.Module):
         inputs_embeds = self.fc(
             torch.cat([tok_embeds, previous_hidden_states], dim=-1))
 
+        inputs_embeds[positions == 0] = 0  # masking inputs at position=0
+
         hidden_states = self.model.model(
             input_ids=None,
             inputs_embeds=inputs_embeds,

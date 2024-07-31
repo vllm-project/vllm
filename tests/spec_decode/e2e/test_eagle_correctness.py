@@ -15,7 +15,7 @@ However, we still need to verify below scenario could be passed:
     * Test greedy equality under preemption
     * Test greedy equality under various number of speculative tokens.
 
-With those tests, we can say at least, Medusa would not break the
+With those tests, we can say at least, EAGLE would not break the
 correctess for the target model outputs.
 """
 
