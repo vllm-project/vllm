@@ -919,19 +919,23 @@ class LLMEngine:
             is_encoder_prompt=True,
         )
 
-        # if True or ptype == "ExplicitEncoderDecoder":
-
+        # Obtain decoder prompt tokens. Note
+        # that, no matter what, the decoder
+        # prompt type is unknown.
         if ptype == "ExplicitEncoderDecoder":
+            # Extract decoder prompt from explicit
+            # encoder/decoder prompt
             extracted_decoder_prompt=inputs.get('decoder_prompt')
         else:
-            extracted_decoder_prompt=inputs
+            # Decoder prompt is always unknown if
+            # encoder/decoder prompt is not explicit
+            extracted_decoder_prompt=None
 
-        # If input is explicit encoder/decoder
-        # prompt, invoke helper method to obtain
+        # Invoke helper method to obtain
         # decoder prompt and prompt token ids.
-        # The decoder sub-prompt type remains
-        # to be determined; the helper method
-        # will determine this.
+        #
+        # The helper method will detect the decoder
+        # prompt type.
         #
         # Helper method will also apply special
         # preprocessing unique to decoder prompts.
@@ -944,19 +948,6 @@ class LLMEngine:
             ptype=None,
             is_encoder_prompt=False,
         )
-
-        # else:
-        #     # # If user supplied a singleton encoder prompt,
-        #     # # then the default decoder prompt must be inferred.
-        #     # (
-        #     #     decoder_prompt,
-        #     #     decoder_prompt_token_ids,
-        #     # ) = self._get_default_enc_dec_decoder_prompt(request_id)
-
-        #     # Apply decoder-prompt preprocessing
-        #     decoder_prompt_token_ids = (
-        #         self._prepare_decoder_input_ids_for_generation(
-        #             None))
 
         return LLMInputs(
             prompt_token_ids=decoder_prompt_token_ids,
