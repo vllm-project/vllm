@@ -253,10 +253,10 @@ class Qwen2Model(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        input_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if input_embeds is not None:
-            hidden_states = input_embeds
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
         else:
             hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -340,11 +340,11 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        input_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
-                                   input_embeds)
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

@@ -683,7 +683,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                           kv_caches=kv_caches,
                           attn_metadata=attn_metadata,
                           intermediate_tensors=intermediate_tensors,
-                          input_embeds=vlm_embeddings)
+                          inputs_embeds=vlm_embeddings)
         return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
