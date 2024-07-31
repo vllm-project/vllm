@@ -827,17 +827,26 @@ class LLMEngine:
 
         ptype = get_prompt_type(inputs)
 
+        # Obtain encoder and decoder prompt tokens. Note
+        # that, no matter what, the decoder
+        # prompt type is unknown.
         if ptype == "ExplicitEncoderDecoder":
             # If input is explicit encoder/decoder prompt,
             # then it remains to be determined what type
             # of encoder prompt we have
             extracted_encoder_prompt = inputs.get('encoder_prompt')
             encoder_ptype = None
+            # Extract decoder prompt from explicit
+            # encoder/decoder prompt
+            extracted_decoder_prompt = inputs.get('decoder_prompt')
         else:
             # If input is singleton encoder prompt, then
             # we know the encoder prompt type
             extracted_encoder_prompt = inputs
             encoder_ptype = ptype
+            # Decoder prompt is always unknown if
+            # encoder/decoder prompt is not explicit
+            extracted_decoder_prompt = None
 
         # Invoke helper function to obtain encoder
         # prompt and prompt token ids, either from
@@ -854,18 +863,6 @@ class LLMEngine:
             ptype=encoder_ptype,
             is_encoder_prompt=True,
         )
-
-        # Obtain decoder prompt tokens. Note
-        # that, no matter what, the decoder
-        # prompt type is unknown.
-        if ptype == "ExplicitEncoderDecoder":
-            # Extract decoder prompt from explicit
-            # encoder/decoder prompt
-            extracted_decoder_prompt = inputs.get('decoder_prompt')
-        else:
-            # Decoder prompt is always unknown if
-            # encoder/decoder prompt is not explicit
-            extracted_decoder_prompt = None
 
         # Invoke helper method to obtain
         # decoder prompt and prompt token ids.
@@ -899,6 +896,23 @@ class LLMEngine:
         request_id: Optional[str] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
+        '''
+        For decoder-only models:
+        Process any decoder-only-model-compatible input prompt
+        into an `LLMInputs` instance.
+        
+        Arguments:
+
+        * inputs: any valid decoder-only prompt
+        * lora_request
+        * request_id
+        * prompt_adapter_request
+
+        Returns:
+
+        * Decoder-only-model-compatible `LLMInputs` instance
+        '''
+
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
         prompt = inputs.get("prompt")
