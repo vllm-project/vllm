@@ -654,7 +654,7 @@ class MiniCPMV(nn.Module, SupportsVision):
         return vlm_embedding, vision_hidden_states
 
     def process_multimodal_inputs(self, inputs: Dict[str,
-                                                     Union[List,
+                                                     Union[List[torch.Tensor],
                                                            torch.Tensor]]):
         pixel_values = []
         tgt_sizes = []
