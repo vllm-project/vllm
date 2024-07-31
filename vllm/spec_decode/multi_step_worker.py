@@ -48,8 +48,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
     def set_should_modify_greedy_probs_inplace(self) -> None:
         self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
-            True
-        )
+            True)
 
     @torch.inference_mode()
     def sampler_output(

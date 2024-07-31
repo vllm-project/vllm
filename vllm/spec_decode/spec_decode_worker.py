@@ -295,8 +295,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
          ) = True
-        (self.scorer_worker.model_runner.model.sampler
-         .should_modify_greedy_probs_inplace) = True
+        (self.scorer_worker.model_runner.model.sampler.
+         should_modify_greedy_probs_inplace) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
 

@@ -1066,7 +1066,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     @property
     def include_gpu_probs_tensor(self):
         return self.base_layer.include_gpu_probs_tensor
-    
+
     @property
     def should_modify_greedy_probs_inplace(self):
         return self.base_layer.should_modify_greedy_probs_inplace
