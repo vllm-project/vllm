@@ -79,3 +79,6 @@ class VLLMBackend(Protocol):
         model_output: Optional[List[SamplerOutput]] = None,
     ) -> None:
         pass
+
+    async def check_health(self) -> None:
+        """Raise if unhealthy"""

@@ -8,6 +8,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
+VLLM_RPC_HEALTHY_STR = "HEALTHY"
 
 
 @dataclass
@@ -29,6 +30,7 @@ class RPCUtilityRequest(Enum):
     IS_SERVER_READY = 1
     GET_MODEL_CONFIG = 2
     DO_LOG_STATS = 3
+    CHECK_HEALTH = 4
 
 
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,

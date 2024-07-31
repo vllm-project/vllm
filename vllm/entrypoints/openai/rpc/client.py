@@ -6,6 +6,7 @@ import zmq.asyncio
 
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
+                                         VLLM_RPC_HEALTHY_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.inputs import PromptInputs
@@ -153,3 +154,26 @@ class RPCClient:
 
         yield request_output
         socket.close()
+
+    async def check_health(self) -> None:
+        """Raise if unhealthy"""
+
+        # Connect to socket.
+        socket = self.context.socket(zmq.constants.DEALER)
+        socket.connect(self.path)
+
+        # Ping RPCServer with CHECK_HEALTH request.
+        await socket.send(pickle.dumps(RPCUtilityRequest.CHECK_HEALTH))
+
+        # Await the reply from the server.
+        # TODO: do we need an internal timeout here?
+        # Or do we expect the external probe to timeout and let this chill?
+        health_message = pickle.loads(await socket.recv())
+        socket.close()
+
+        if isinstance(health_message, Exception):
+            raise health_message
+
+        if health_message != VLLM_RPC_HEALTHY_STR:
+            raise ValueError("Expected healthy response from backend but got "
+                             "f{health_message}")

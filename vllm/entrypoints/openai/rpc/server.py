@@ -8,7 +8,8 @@ import zmq.asyncio
 from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+from vllm.entrypoints.openai.rpc import (VLLM_RPC_HEALTHY_STR,
+                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -93,6 +94,17 @@ class RPCServer:
             await self.socket.send_multipart(
                 [identity, pickle.dumps(e, pickle.HIGHEST_PROTOCOL)])
 
+    async def check_health(self, identity):
+        try:
+            await self.engine.check_health()
+            await self.socket.send_multipart([
+                identity,
+                pickle.dumps(VLLM_RPC_HEALTHY_STR, pickle.HIGHEST_PROTOCOL)
+            ])
+        except Exception as e:
+            await self.socket.send_multipart(
+                [identity, pickle.dumps(e, pickle.HIGHEST_PROTOCOL)])
+
     def _make_handler_coro(self, identity,
                            message) -> Coroutine[Any, Any, Never]:
         """Route the zmq message to the handler coroutine."""
@@ -112,6 +124,8 @@ class RPCServer:
                 return self.do_log_stats(identity)
             elif request == RPCUtilityRequest.IS_SERVER_READY:
                 return self.is_server_ready(identity)
+            elif request == RPCUtilityRequest.CHECK_HEALTH:
+                return self.check_health(identity)
             else:
                 raise ValueError(f"Unknown RPCUtilityRequest type: {request}")
 
