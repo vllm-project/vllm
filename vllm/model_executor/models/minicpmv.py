@@ -622,7 +622,7 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         return vision_hidden_states
 
-    def get_embedding(self, data: Dict[str, Union[List, torch.Tensor]]):
+    def get_embedding(self, data: Dict[str, Union[List[torch.Tensor], torch.Tensor]]):
         input_ids = data["input_ids"]
 
         vision_hidden_states = self.get_vision_hidden_states(data)
