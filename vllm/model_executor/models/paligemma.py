@@ -303,7 +303,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
             if "vision" in name:
                 if self.vision_tower is not None:
                     for (param_name, shard_name,
-                        shard_id) in stacked_params_mapping:
+                         shard_id) in stacked_params_mapping:
                         if shard_name not in name:
                             continue
                         name = name.replace(shard_name, param_name)
