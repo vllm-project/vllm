@@ -227,7 +227,7 @@ Vision Language Models
 
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
-  For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+  For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 ----
 
