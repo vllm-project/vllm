@@ -375,7 +375,7 @@ class Sequence:
         https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
         """
         if seq_len is None:
-            seq_len = self.get_len()
+            seq_len = self.get_output_len()
             # NOTE: HF implementation does not count the EOS token
             # towards the length, we align with that here for testing.
             if (eos_token_id is not None
