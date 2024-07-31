@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def awq_dequantize_kernel(qweight_ptr,   # quantized matrix
                           scales_ptr,    # scales, per group

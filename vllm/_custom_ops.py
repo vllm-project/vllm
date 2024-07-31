@@ -1,8 +1,10 @@
-from typing import List, Optional, Tuple, Union
-from vllm.logger import init_logger
 import contextlib
 import functools
+from typing import List, Optional, Tuple, Union
+
 import torch
+
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -188,7 +190,8 @@ def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
     if use_awq_triton:
-        from vllm.model_executor.layers.quantization.awq_triton import awq_dequantize_triton
+        from vllm.model_executor.layers.quantization.awq_triton import (
+            awq_dequantize_triton)
         return awq_dequantize_triton(qweight, scales, zeros, split_k_iters,
                                            thx, thy)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
