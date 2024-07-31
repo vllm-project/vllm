@@ -132,7 +132,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
-    prefix: str = "",
+    prefix: str,
 ) -> Tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
