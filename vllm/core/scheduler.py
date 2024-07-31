@@ -36,6 +36,7 @@ class PreemptionMode(enum.Enum):
     """
     SWAP = enum.auto()
     RECOMPUTE = enum.auto()
+    OFFLOAD = enum.auto()
 
 
 @dataclass
@@ -133,7 +134,7 @@ class SchedulerOutputs:
     kv_to_block_buffer: List[int]
     # Buffer containing the block we want to extract
     # the KV cache (torch.Tensor) from
-    kv_from_block_buffer: List[int]
+    kv_from_block: Dict[int, int]
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
@@ -203,7 +204,7 @@ class SchedulerRunningOutputs:
     kv_to_block_buffer: List[int]
     # Buffer containing the block we want to extract
     # the KV cache (torch.Tensor) from
-    kv_from_block_buffer: List[int]
+    kv_from_block: Dict[int, int]
 
     @classmethod
     def create_empty(cls) -> "SchedulerRunningOutputs":
@@ -216,7 +217,7 @@ class SchedulerRunningOutputs:
             blocks_to_copy=[],
             num_lookahead_slots=0,
             kv_to_block_buffer=[],
-            kv_from_block_buffer=[],
+            kv_from_block=[],
         )
 
 
@@ -447,7 +448,8 @@ class Scheduler:
 
         # currently, neither this nor the previous
         # object are modified within this function
-        kv_from_block_buffer: List[int] = []
+        # {Block : torch.Tensor}
+        kv_from_block: Dict[int, int] = {}
 
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
@@ -484,7 +486,7 @@ class Scheduler:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = running_queue.pop()
                     preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out)
+                                                   blocks_to_swap_out, kv_from_block)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:
@@ -492,8 +494,8 @@ class Scheduler:
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
-                    preempted_mode = self._preempt(seq_group,
-                                                   blocks_to_swap_out)
+                    preempted_mode = self._preempt(victim_seq_group,
+                                                   blocks_to_swap_out, kv_from_block)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(seq_group)
                     else:
@@ -533,7 +535,7 @@ class Scheduler:
             num_lookahead_slots=self._get_num_lookahead_slots(
                 is_prefill=False),
             kv_to_block_buffer=kv_to_block_buffer,
-            kv_from_block_buffer=kv_from_block_buffer),
+            kv_from_block=kv_from_block),
 
     def _schedule_swapped(
         self,
@@ -873,7 +875,7 @@ class Scheduler:
             blocks_to_copy=running_scheduled.blocks_to_copy +
             swapped_in.blocks_to_copy,
             kv_to_block_buffer=running_scheduled.kv_to_block_buffer,
-            kv_from_block_buffer=running_scheduled.kv_from_block_buffer,
+            kv_from_block=running_scheduled.kv_from_block,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
@@ -964,7 +966,7 @@ class Scheduler:
             blocks_to_copy=running_scheduled.blocks_to_copy +
             swapped_in.blocks_to_copy,
             kv_to_block_buffer=running_scheduled.kv_to_block_buffer,
-            kv_from_block_buffer=running_scheduled.kv_from_block_buffer,
+            kv_from_block=running_scheduled.kv_from_block,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
@@ -1125,6 +1127,7 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
+        kv_from_block: Dict[int, int],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
@@ -1146,6 +1149,8 @@ class Scheduler:
 
         elif self.user_specified_preemption_mode == "swap":
             preemption_mode = PreemptionMode.SWAP
+        elif self.user_specified_preemption_mode == "offload":
+            preemption_mode = PreemptionMode.OFFLOAD
         else:
             preemption_mode = PreemptionMode.RECOMPUTE
 
@@ -1163,6 +1168,8 @@ class Scheduler:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
+        elif preemption_mode == PreemptionMode.OFFLOAD:
+            self._obtain_single_block_id(seq_group, kv_from_block)
         else:
             raise AssertionError("Invalid preemption mode.")
         return preemption_mode
@@ -1184,6 +1191,13 @@ class Scheduler:
         blocks_to_swap_out: List[Tuple[int, int]],
     ) -> None:
         self._swap_out(seq_group, blocks_to_swap_out)
+
+    def _obtain_single_block_id(
+        self,
+        seq_group: SequenceGroup,
+        kv_from_block: Dict[int, int]
+    ) -> None:
+        self.block_manager.obtain_single_block_id(seq_group, kv_from_block)
 
     def _swap_in(
         self,

@@ -998,7 +998,7 @@ class ExecuteModelRequest:
 
     # Buffer containing the block we want to extract
     # the KV cache (torch.Tensor) from
-    kv_from_block_buffer: List[int] = []
+    kv_from_block: Dict[int, int] = {}
 
     # The number of requests in the running queue.
     running_queue_size: int = 0

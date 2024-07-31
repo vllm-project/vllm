@@ -270,8 +270,8 @@ class Worker(LocalOrDistributedWorkerBase):
         kv_to_block_buffer = torch.tensor(execute_model_req.kv_to_block_buffer,
                                           device=self.device,
                                           dtype=torch.int64).view(-1, 2)
-        kv_from_block_buffer = torch.tensor(
-            execute_model_req.kv_from_block_buffer,
+        kv_from_block = torch.tensor(
+            execute_model_req.kv_from_block,
             device=self.device,
             dtype=torch.int64).view(-1, 2)
 
@@ -281,7 +281,7 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             kv_to_block_buffer=kv_to_block_buffer,
-            kv_from_block_buffer=kv_from_block_buffer,
+            kv_from_block=kv_from_block,
             virtual_engine=virtual_engine,
         )
 
@@ -304,10 +304,10 @@ class Worker(LocalOrDistributedWorkerBase):
                 and worker_input.kv_to_block_buffer.numel() > 0):
             self.cache_engine[virtual_engine].copy(
                 worker_input.kv_to_block_buffer)
-        if (worker_input.kv_from_block_buffer is not None
-                and worker_input.kv_from_block_buffer.numel() > 0):
-            self.cache_engine[virtual_engine].copy(
-                worker_input.kv_from_block_buffer)
+        if (worker_input.kv_from_block is not None
+                and worker_input.kv_from_block.numel() > 0):
+            self.cache_engine[virtual_engine].echo(
+                worker_input.kv_from_block)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
