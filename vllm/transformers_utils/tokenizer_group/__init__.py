@@ -3,10 +3,9 @@ from typing import Optional, Type
 from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig,
                          TokenizerPoolConfig)
 from vllm.executor.ray_utils import ray
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-    BaseTokenizerGroup)
-from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
-    TokenizerGroup)
+
+from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
+from .tokenizer_group import TokenizerGroup
 
 if ray:
     from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (
@@ -51,4 +50,4 @@ def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],
     return tokenizer_cls.from_config(tokenizer_pool_config, **init_kwargs)
 
 
-__all__ = ["get_tokenizer_group", "BaseTokenizerGroup"]
+__all__ = ["AnyTokenizer", "get_tokenizer_group", "BaseTokenizerGroup"]

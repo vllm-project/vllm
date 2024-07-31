@@ -13,7 +13,7 @@ from weight_shapes import WEIGHT_SHAPES
 from vllm import _custom_ops as ops
 from vllm.utils import FlexibleArgumentParser
 
-DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())[1:]
+DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
 DEFAULT_TP_SIZES = [1]
 
@@ -112,12 +112,19 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
 
     timers = []
-    # pytorch impl
+    # pytorch impl - bfloat16
     timers.append(
         bench_fn(a.to(dtype=torch.bfloat16, device="cuda"),
                  b.to(dtype=torch.bfloat16, device="cuda"), scale_a, scale_b,
                  torch.bfloat16, label, sub_label, pytorch_mm_impl,
                  "pytorch_bf16_bf16_bf16_matmul-no-scales"))
+
+    # pytorch impl - float16
+    timers.append(
+        bench_fn(a.to(dtype=torch.float16, device="cuda"),
+                 b.to(dtype=torch.float16, device="cuda"), scale_a, scale_b,
+                 torch.float16, label, sub_label, pytorch_mm_impl,
+                 "pytorch_fp16_fp16_fp16_matmul-no-scales"))
 
     # cutlass impl
     timers.append(
