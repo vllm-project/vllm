@@ -295,9 +295,9 @@ struct ScaledEpilogueBiasAzp
 };
 
 /*
- * This epilogue directly supports per-token azp by materializing the correction
- * term using an outer product. If the term was precomputed, it would require
- * O(m*n) space, and this way it only requires O(m+n) space.
+ * This epilogue supports per-token azp by computing and applying
+ * the correction term using a rank-1 update. If the term were materialized, 
+ * it would require O(m*n) space, and this way it only requires O(m+n) space.
  * The azp term is a 1D tensor of shape (m,1), and represents the unscaled zero
  * point for each row of A.
  * The azp_adj term is a 1D tensor of shape (1,n), computed as J @ B.
