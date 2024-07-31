@@ -5,14 +5,9 @@ import math
 from typing import Iterable, List, Optional, Tuple
 
 import torch
-from einops import rearrange
 from PIL import Image
 from torch import nn
 from transformers import SiglipConfig, SiglipVisionConfig
-from transformers.modeling_flash_attention_utils import (
-    _upad_input,
-    pad_input,
-)
 from vllm_flash_attn import flash_attn_func
 
 from vllm.attention import Attention, AttentionMetadata
@@ -271,25 +266,20 @@ class SiglipAttention(nn.Module):
                 quant_config=quant_config,
             )
             self.attn_fn = self._vllm_attention_forward
-            self.use_paged_attn = True
         except Exception:
             # For some pretrained Siglip models, the backend is not supported
             # (e.g. google/siglip-so400m-patch14-384 has hidden_size=1152
             #  with num_attention_heads=16, which is not supported)
             # If the backend is not supported, fall back to the default
 
-            # TODO(ChristopherCho): flash_attn_varlen_func
-            #                       is not working properly
+            # TODO(ChristopherCho): flash_attn_func is not working properly
             # if self.qkv_proj.params_dtype in [torch.float16, torch.bfloat16]:
             #     # Flash attention only supports float16 and bfloat16
             #     self.attn_fn = self._flash_attention_forward
-            #     self.use_paged_attn = False
             # else:
             #     self.attn_fn = self._basic_attention_forward
-            #     self.use_paged_attn = False
 
             self.attn_fn = self._basic_attention_forward
-            self.use_paged_attn = False
 
     def forward(
         self,
@@ -380,10 +370,17 @@ class SiglipAttention(nn.Module):
                      query, key, and value. (B, S, H, D)
         """
 
-        q = q.view(batch_size, q_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, q_len, self.num_heads, self.head_dim)
-        v = v.view(batch_size, q_len, self.num_heads, self.head_dim)
-        
+        q = q.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
         attn_output = flash_attn_func(
             q,
             k,
@@ -391,10 +388,12 @@ class SiglipAttention(nn.Module):
             dropout_p=0.0,
             causal=False,
         )
-        
-        attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim).contiguous()
+
+        attn_output = attn_output.reshape(batch_size, q_len,
+                                          self.embed_dim).contiguous()
 
         return attn_output
+
 
 class SiglipMLP(nn.Module):
 
@@ -524,7 +523,7 @@ class SiglipEncoder(nn.Module):
                 attn_metadata=attn_metadata,
             )
             hidden_states = layer_outputs[0]
-        
+
         encoder_states = encoder_states + (hidden_states, )
 
         return (hidden_states, encoder_states)
@@ -638,11 +637,11 @@ class SiglipVisionModel(nn.Module):
         return self.vision_model.embeddings.patch_embedding
 
     def forward(
-            self,
-            pixel_values,
-            kv_caches: List[torch.Tensor] = None,
-            attn_metadata: AttentionMetadata = None,
-            interpolate_pos_encoding: Optional[bool] = False,
+        self,
+        pixel_values,
+        kv_caches: List[torch.Tensor] = None,
+        attn_metadata: AttentionMetadata = None,
+        interpolate_pos_encoding: Optional[bool] = False,
     ) -> Tuple:
         return self.vision_model(
             pixel_values=pixel_values,
