@@ -240,7 +240,7 @@ class Resampler(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_2_5(self, x: torch.Tensor, tgt_sizes: torch.Tensor = None):
+    def forward_2_5(self, x: torch.Tensor, tgt_sizes: Optional[torch.Tensor] = None):
         assert x.shape[0] == tgt_sizes.shape[0]
         bs = x.shape[0]
 
