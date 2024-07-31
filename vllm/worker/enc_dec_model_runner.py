@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
+from typing import Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
 import torch.distributed
