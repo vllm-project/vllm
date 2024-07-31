@@ -10,6 +10,9 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+from vllm.model_executor.layers.quantization.qqq import (
+    MARLIN_QQQ_MAX_PARALLEL, MARLIN_QQQ_MIN_THREAD_N,
+    MARLIN_QQQ_SUPPORTED_GROUP_SIZES, MARLIN_QQQ_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_SUPPORTED_NUM_BITS,
@@ -21,6 +24,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_weights)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_test_qqq import (  # noqa: E501
+    marlin_qqq_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     awq_pack, gptq_pack, quantize_weights, quantize_weights_with_zp,
     sort_weights)
@@ -418,6 +423,67 @@ def test_awq_marlin_gemm(
         use_fp32_reduce=use_fp32_reduce,
     )
     output_ref = torch.matmul(a_input, w_ref)
+
+    torch.cuda.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
+    print("max_diff = {}".format(max_diff))
+
+    assert max_diff < 0.04
+
+
+@pytest.mark.skipif(not is_quant_method_supported("qqq"),
+                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
+@pytest.mark.parametrize("num_bits", MARLIN_QQQ_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", MARLIN_QQQ_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+def test_marlin_qqq_gemm(
+    k_chunk,
+    n_chunk,
+    num_bits,
+    group_size,
+    mnk_factors,
+):
+    int8_traits = torch.iinfo(torch.int8)
+    m_factor, n_factor, k_factor = mnk_factors
+
+    size_m = m_factor
+    size_k = k_chunk * k_factor
+    size_n = n_chunk * n_factor
+
+    print(f"MNK = {size_m} {size_n} {size_k}")
+    print(f"groupsize = {group_size}")
+
+    a_input = rand_data((size_m, size_k))
+    b_weight = rand_data((size_k, size_n))
+
+    # Quantize activations
+    s_a = a_input.abs().max(dim=-1, keepdim=True)[0].div(int8_traits.max).to(
+        torch.float)
+    q_a = (a_input / s_a).round().clamp(int8_traits.min,
+                                        int8_traits.max).to(torch.int8)
+
+    # Quantize weights
+    w_ref, marlin_qqq_q_w, marlin_qqq_s_group, marlin_qqq_s_channel = \
+    marlin_qqq_quantize(b_weight, num_bits, group_size)
+
+    workspace = MarlinWorkspace(size_n, MARLIN_QQQ_MIN_THREAD_N,
+                                MARLIN_QQQ_MAX_PARALLEL)
+
+    output = ops.marlin_qqq_gemm(
+        q_a,
+        marlin_qqq_q_w,
+        s_a,
+        marlin_qqq_s_channel,
+        marlin_qqq_s_group,
+        workspace.scratch,
+        a_input.shape[0],
+        b_weight.shape[1],
+        a_input.shape[1],
+    )
+    output_ref = torch.matmul(q_a.half() * s_a.half(), w_ref)
 
     torch.cuda.synchronize()
 
