@@ -1,9 +1,9 @@
 import functools
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, Any
 
 import torch
 
-from vllm.config import ModelConfig
+# from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
@@ -75,7 +75,7 @@ class MultiModalRegistry:
         """
         return self.register_input_mapper("image", mapper)
 
-    def map_input(self, model_config: ModelConfig,
+    def map_input(self, model_config: Any,
                   data: MultiModalDataDict) -> MultiModalInputs:
         """
         Apply an input mapper to the data passed to the model.
@@ -102,7 +102,7 @@ class MultiModalRegistry:
 
         return MultiModalInputs(merged_dict)
 
-    def create_input_mapper(self, model_config: ModelConfig):
+    def create_input_mapper(self, model_config: Any):
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
@@ -130,7 +130,7 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
-    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
+    def get_max_multimodal_tokens(self, model_config: Any) -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.

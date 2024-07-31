@@ -3,10 +3,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from vllm.adapter_commons.request import AdapterRequest
+import msgspec
 
 
-@dataclass
-class LoRARequest(AdapterRequest):
+class LoRARequest(msgspec.Struct, AdapterRequest):
     """
     Request for a LoRA adapter.
 
@@ -22,7 +22,7 @@ class LoRARequest(AdapterRequest):
     lora_name: str
     lora_int_id: int
     lora_path: str = ""
-    lora_local_path: Optional[str] = field(default=None, repr=False)
+    lora_local_path: Optional[str] = msgspec.field(default=None)
     long_lora_max_len: Optional[int] = None
     __hash__ = AdapterRequest.__hash__
 

@@ -34,7 +34,8 @@ try:
                     deserialized.frombytes(obj)
                     return deserialized
 
-            self.decoder = msgspec.msgpack.Decoder(ExecuteModelRequest, dec_hook=dec_hook)
+            self.decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
+                                                   dec_hook=dec_hook)
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -49,7 +50,8 @@ try:
             enabled."""
             s = time.time()
 
-            execute_model_req: ExecuteModelRequest = self.decoder.decode(execute_model_req)
+            execute_model_req: ExecuteModelRequest = self.decoder.decode(
+                execute_model_req)
             # execute_model_req: ExecuteModelRequest = pickle.loads(execute_model_req)
             # print(f"SANG-TODO input deserialization takes {(time.time() - s) * 1000} ms index: {self.i}")
             # TODO(swang): This is needed right now because Ray aDAG executes

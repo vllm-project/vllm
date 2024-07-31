@@ -334,7 +334,8 @@ class Scheduler:
                                        else 0)
         self.num_cumulative_preemption: int = 0
         from collections import defaultdict
-        self._block_table_cache: Dict[int, Dict[int, List[int]]] = defaultdict(dict)
+        self._block_table_cache: Dict[int, Dict[int,
+                                                List[int]]] = defaultdict(dict)
 
     @property
     def lora_enabled(self) -> bool:
@@ -1001,15 +1002,19 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                if is_prompt or not envs.VLLM_USE_RAY_SPMD_WORKER:
+                if is_prompt or not envs.VLLM_USE_RAY_SPMD_WORKER or True:
                     block_table = self.block_manager.get_block_table(seq)
                     block_tables[seq_id] = block_table
-                    self._block_table_cache[seq_group.request_id][seq_id] = block_table
+                    self._block_table_cache[
+                        seq_group.request_id][seq_id] = block_table
                 else:
                     block_table = self.block_manager.get_block_table(seq)
-                    if len(self._block_table_cache[seq_group.request_id][seq_id]) < len(block_table):
+                    if len(self._block_table_cache[seq_group.request_id]
+                           [seq_id]) < len(block_table):
                         block_tables[seq_id] = [block_table[-1]]
-                        self._block_table_cache[seq_group.request_id][seq_id].append(block_table[-1])
+                        self._block_table_cache[
+                            seq_group.request_id][seq_id].append(
+                                block_table[-1])
                     else:
                         block_tables[seq_id] = []
                 self.block_manager.access_all_blocks_in_seq(seq, now)

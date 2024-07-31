@@ -67,6 +67,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._init_workers_ray(placement_group)
 
         self.forward_dag: Optional["ray.dag.CompiledDAG"] = None
+
         def enc_hook(obj: Any) -> Any:
             if isinstance(obj, array):
                 # convert the complex to a tuple of real, imag

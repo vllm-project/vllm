@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 
 from vllm.adapter_commons.request import AdapterRequest
+import msgspec
 
 
-@dataclass
-class PromptAdapterRequest(AdapterRequest):
+class PromptAdapterRequest(msgspec.Struct, AdapterRequest, array_like=True):
     """
     Request for a Prompt adapter.
     """

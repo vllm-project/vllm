@@ -19,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
-    from vllm.multimodal import MultiModalDataDict
+    from vllm.multimodal.base import MultiModalDataDict
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -135,15 +135,15 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
-    def __post_init__(
-        self,
-    ) -> None:
+    def __post_init__(self, ) -> None:
         if not isinstance(self._prompt_token_ids, array):
             self._prompt_token_ids = array('l', self._prompt_token_ids)
         if not isinstance(self._output_token_ids, array):
             self._output_token_ids = array(
-            'l', self._output_token_ids if self._output_token_ids is not None else [])
-        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(self._prompt_token_ids)
+                'l', self._output_token_ids
+                if self._output_token_ids is not None else [])
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
+            self._prompt_token_ids)
         self._update_cached_all_tokens()
 
     def _update_cached_all_tokens(self):
@@ -650,7 +650,10 @@ class SequenceGroup:
                 f"num_seqs={len(self.seqs_dict)})")
 
 
-class SequenceGroupMetadataDecode(msgspec.Struct, tag=True, array_like=True, omit_defaults=True):
+class SequenceGroupMetadataDecode(msgspec.Struct,
+                                  tag=True,
+                                  array_like=True,
+                                  omit_defaults=True):
     """Delta sequence group metadata."""
     seq_data_delta: Dict[int, SequenceDataDelta]
     request_id: str
@@ -659,7 +662,10 @@ class SequenceGroupMetadataDecode(msgspec.Struct, tag=True, array_like=True, omi
     token_chunk_size: Optional[int] = None
 
 
-class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defaults=True):
+class SequenceGroupMetadata(msgspec.Struct,
+                            tag=True,
+                            array_like=True,
+                            omit_defaults=True):
     """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
     Args:
@@ -696,15 +702,15 @@ class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defa
     sampling_params: SamplingParams
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
-    # pooling_params: Optional[PoolingParams] = None
-    # lora_request: Optional[LoRARequest] = None
+    pooling_params: Optional[PoolingParams] = None
+    lora_request: Optional[LoRARequest] = None
     computed_block_nums: Optional[List[int]] = None
-    # state: Optional[SequenceGroupState] = None
-    # # from vllm.multimodal import MultiModalDataDict
+    # "MultiModalDataDict" types. We have to use Any due to msgspec
+    # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
-    # encoder_seq_data: Optional[SequenceData] = None
-    # cross_block_table: Optional[List[int]] = None
-    # prompt_adapter_request: Optional[PromptAdapterRequest] = None
+    encoder_seq_data: Optional[SequenceData] = None
+    cross_block_table: Optional[List[int]] = None
+    prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
 
     ### Stateful fields that are lazily defined. ###
@@ -717,7 +723,8 @@ class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defa
     def __post_init__(self):
         if self.token_chunk_size is None:
             if self.is_prompt:
-                self.token_chunk_size = list(self.seq_data.values())[0].get_len()
+                self.token_chunk_size = list(
+                    self.seq_data.values())[0].get_len()
             else:
                 self.token_chunk_size = 1
 
@@ -740,10 +747,10 @@ class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defa
         for id, delta in sequence_group_metadata_decode.seq_data_delta.items():
             self.seq_data[id].apply_delta(delta)
         self.request_id = sequence_group_metadata_decode.request_id
-        for seq_id, block_table in sequence_group_metadata_decode.block_tables.items():
-            if len(block_table) > 0:
-                self.block_tables[seq_id].append(block_table[0])
-        # self.block_tables = sequence_group_metadata_decode.block_tables
+        # for seq_id, block_table in sequence_group_metadata_decode.block_tables.items():
+        #     if len(block_table) > 0:
+        #         self.block_tables[seq_id].append(block_table[0])
+        self.block_tables = sequence_group_metadata_decode.block_tables
         self.token_chunk_size = sequence_group_metadata_decode.token_chunk_size
         self.do_sample = sequence_group_metadata_decode.do_sample
         self.is_prompt = False
@@ -999,11 +1006,14 @@ class ExecuteModelRequest(msgspec.Struct, array_like=True, omit_defaults=True):
     """The model execution request, containing CPU metadata only. The LLM
     engine should create an instance of this class for each request batch."""
     # The sequence group metadata list.
-    seq_group_metadata_list: List[Union[SequenceGroupMetadata, SequenceGroupMetadataDecode]]
+    seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                        SequenceGroupMetadataDecode]]
     # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: List[Tuple[int, int]] = msgspec.field(default_factory=list)
+    blocks_to_swap_in: List[Tuple[int,
+                                  int]] = msgspec.field(default_factory=list)
     # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: List[Tuple[int, int]] = msgspec.field(default_factory=list)
+    blocks_to_swap_out: List[Tuple[int,
+                                   int]] = msgspec.field(default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = msgspec.field(default_factory=list)
     # Virtual engine ID for pipeline parallel.
