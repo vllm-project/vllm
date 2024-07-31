@@ -20,6 +20,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
 from functools import partial
@@ -388,7 +389,13 @@ class MiniCPMV(nn.Module, SupportsVision):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.version = float(self.config.version)
+        if not hasattr(self.config, "version"):
+            if self.config.hidden_size == 2304:
+                self.version = 2.0
+            else:
+                self.version = 2.5
+        else:
+            self.version = float(self.config.version)
         self.llm = self.init_llm(config, cache_config, quant_config)
         self.vpm = self.init_vision_module()
         param_dtype = torch.get_default_dtype()
