@@ -1,10 +1,10 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizer
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-    BaseTokenizerGroup)
+
+from .tokenizer_group import AnyTokenizer, BaseTokenizerGroup
 
 # Used eg. for marking rejected tokens in spec decoding.
 INVALID_TOKEN_ID = -1
@@ -174,7 +174,7 @@ def _replace_none_with_empty(tokens: List[Optional[str]]):
 
 
 def _convert_tokens_to_string_with_added_encoders(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: AnyTokenizer,
     output_tokens: List[str],
     skip_special_tokens: bool,
     spaces_between_special_tokens: bool,
@@ -213,7 +213,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
 def convert_prompt_ids_to_tokens(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: AnyTokenizer,
     prompt_ids: List[int],
     skip_special_tokens: bool = False,
 ) -> Tuple[List[str], int, int]:
@@ -240,7 +240,7 @@ def convert_prompt_ids_to_tokens(
 # https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
 def detokenize_incrementally(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: AnyTokenizer,
     all_input_ids: List[int],
     prev_tokens: Optional[List[str]],
     prefix_offset: int,

@@ -3,7 +3,9 @@ from contextlib import contextmanager
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, TypeVar, Union
+from typing import Set, Type, Union
+
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
@@ -38,9 +40,9 @@ from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer_group import (AnyTokenizer,
-                                                     BaseTokenizerGroup,
+from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
@@ -63,6 +65,7 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     return config.to_diff_dict()
 
 
+_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
@@ -468,12 +471,21 @@ class LLMEngine:
                                    "skip_tokenizer_init is True")
 
     def get_tokenizer_group(
-            self,
-            fail_msg: str = MISSING_TOKENIZER_GROUP_MSG) -> BaseTokenizerGroup:
-        if self.tokenizer is None:
-            raise ValueError(fail_msg)
+        self,
+        group_type: Type[_G] = BaseTokenizerGroup,
+        *,
+        missing_msg: str = MISSING_TOKENIZER_GROUP_MSG,
+    ) -> _G:
+        tokenizer_group = self.tokenizer
 
-        return self.tokenizer
+        if tokenizer_group is None:
+            raise ValueError(missing_msg)
+        if not isinstance(tokenizer_group, group_type):
+            raise TypeError("Invalid type of tokenizer group. "
+                            f"Expected type: {group_type}, but "
+                            f"found type: {type(tokenizer_group)}")
+
+        return tokenizer_group
 
     def get_tokenizer(
         self,
@@ -581,8 +593,9 @@ class LLMEngine:
             inputs = {"prompt": inputs}
 
         if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
+            tokenizer = self.get_tokenizer_group(
+                missing_msg=
+                "prompts must be None if skip_tokenizer_init is True")
 
             prompt_token_ids = tokenizer.encode(request_id=request_id,
                                                 prompt=inputs["prompt"],

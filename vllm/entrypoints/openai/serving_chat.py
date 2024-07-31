@@ -5,7 +5,6 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from fastapi import Request
-from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -32,6 +31,7 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -213,7 +213,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         conversation: List[ConversationMessage],
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: AnyTokenizer,
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
         created_time = int(time.time())
@@ -438,7 +438,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         conversation: List[ConversationMessage],
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: AnyTokenizer,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = self.served_model_names[0]
@@ -522,7 +522,7 @@ class OpenAIServingChat(OpenAIServing):
 
     def _get_top_logprobs(
             self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
-            tokenizer: PreTrainedTokenizer) -> List[ChatCompletionLogProb]:
+            tokenizer: AnyTokenizer) -> List[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
                 p[1],
@@ -540,7 +540,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""

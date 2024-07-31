@@ -156,7 +156,7 @@ def get_internvl_num_patches(image_size: int, patch_size: int,
 
 
 def get_max_internvl_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
     image_size = vision_config.image_size
     patch_size = vision_config.patch_size
@@ -172,7 +172,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
 
     image_data = multi_modal_data["image"]
@@ -227,7 +227,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
 
     image_feature_size = get_max_internvl_image_tokens(ctx)
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)

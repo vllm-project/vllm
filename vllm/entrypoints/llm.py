@@ -2,7 +2,6 @@ from contextlib import contextmanager
 from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
 from tqdm import tqdm
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
@@ -14,7 +13,8 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import get_cached_tokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, get_cached_tokenizer
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
@@ -156,22 +156,19 @@ class LLM:
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
-    def get_tokenizer(
-            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-        return self.llm_engine.tokenizer.tokenizer
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
 
-    def set_tokenizer(
-        self,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    ) -> None:
+    def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+        tokenizer_group = self.llm_engine.get_tokenizer_group(TokenizerGroup)
+
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
         if tokenizer.__class__.__name__.startswith("Cached"):
-            self.llm_engine.tokenizer.tokenizer = tokenizer
+            tokenizer_group.tokenizer = tokenizer
         else:
-            self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(
-                tokenizer)
+            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def generate(

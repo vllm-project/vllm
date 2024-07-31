@@ -282,8 +282,9 @@ class _AsyncLLMEngine(LLMEngine):
             inputs = {"prompt": inputs}
 
         if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
+            tokenizer = self.get_tokenizer_group(
+                missing_msg=
+                "prompts must be None if skip_tokenizer_init is True")
 
             prompt_token_ids = await tokenizer.encode_async(
                 request_id=request_id,

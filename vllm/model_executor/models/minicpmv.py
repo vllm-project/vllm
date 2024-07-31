@@ -32,7 +32,7 @@ import torch.nn.functional as F
 from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers.configuration_utils import PretrainedConfig
+from transformers import PretrainedConfig
 from transformers.models.idefics2.modeling_idefics2 import (
     Idefics2VisionTransformer)
 
@@ -313,7 +313,7 @@ class Resampler(nn.Module):
 
 
 def get_max_minicpmv_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     return getattr(hf_config, "query_num", 64)
 
 
@@ -329,7 +329,7 @@ def dummy_image_for_minicpmv(hf_config):
 
 
 def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
 
     # image_feature_size = get_max_minicpmv_image_tokens(ctx)
 
@@ -381,7 +381,7 @@ class MiniCPMV(nn.Module, SupportsVision):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
