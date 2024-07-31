@@ -178,6 +178,37 @@ def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
                 "usage": completion.usage,
             })
 
+            # test seeded random sampling
+            completion = client.completions.create(model=model,
+                                                   prompt=prompt,
+                                                   max_tokens=5,
+                                                   seed=33,
+                                                   temperature=1.0)
+
+            results.append({
+                "test": "seeded_sampling",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
+
+            # test seeded random sampling with multiple prompts
+            completion = client.completions.create(model=model,
+                                                   prompt=[prompt, prompt],
+                                                   max_tokens=5,
+                                                   seed=33,
+                                                   temperature=1.0)
+
+            results.append({
+                "test":
+                "seeded_sampling",
+                "text": [choice.text for choice in completion.choices],
+                "finish_reason":
+                [choice.finish_reason for choice in completion.choices],
+                "usage":
+                completion.usage,
+            })
+
             # test simple list
             batch = client.completions.create(
                 model=model,
