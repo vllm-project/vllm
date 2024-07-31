@@ -18,11 +18,11 @@ from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 from transformers import AutoTokenizer
 
-from vllm.config import ModelConfig
 import vllm.envs as envs
+from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import VLLMBackend
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import VLLMBackend
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 # yapf conflicts with isort for this block
@@ -70,10 +70,10 @@ async def lifespan(app: fastapi.FastAPI):
             await asyncio.sleep(10)
             await backend.do_log_stats()
 
-    # if not engine_args.disable_log_stats:
-    #     task = asyncio.create_task(_force_log())
-    #     _running_tasks.add(task)
-    #     task.add_done_callback(_running_tasks.remove)
+    if not engine_args.disable_log_stats:
+        task = asyncio.create_task(_force_log())
+        _running_tasks.add(task)
+        task.add_done_callback(_running_tasks.remove)
 
     yield
 
@@ -82,6 +82,7 @@ async def lifespan(app: fastapi.FastAPI):
 async def build_backend(args) -> AsyncIterator[VLLMBackend]:
     # Context manager to handle backend lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
+    global engine_args
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     # Backend itself still global for the silly lil' health handler
@@ -97,7 +98,6 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
                                dtype="float16")
     if model_config.embedding_mode or args.disable_frontend_multiprocessing:
         # local backend
-        logger.info("Initializing in-process AsyncLLMEmgine")
         backend = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
         yield backend
@@ -107,9 +107,9 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
     else:
         # remote backend
         ## First need to start the backend process
-        logger.info("Initializing AsyncLLMEmgine in separate process")
         rpc_server_process = Process(target=run_rpc_server,
-                                     args=(engine_args, ))
+                                     args=(engine_args, 
+                                           UsageContext.OPENAI_API_SERVER))
         rpc_server_process.start()
 
         ## Then build the client for the backend process
@@ -117,7 +117,6 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
         backend = RPCClient(
             tokenizer=AutoTokenizer.from_pretrained(args.model))
         await backend.wait_for_server()
-        logger.info("RPC Client connected to RPC server.")
 
         try:
             yield backend
@@ -127,7 +126,6 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
             rpc_server_process.terminate()
 
             # Close all open connections to the backend
-            logger.info("Cleaning up ZMQ client context")
             backend.close()
 
             # Wait for server process to join

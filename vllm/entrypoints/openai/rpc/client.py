@@ -5,10 +5,9 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import DecodingConfig, ModelConfig
-from vllm.entrypoints.openai.rpc import (VLLM_GENERATE_RPC_PATH,
-                                         VLLM_GET_DATA_RPC_PATH,
-                                         VLLM_IS_READY_RPC_PATH,
-                                         GenerateRequest, GetDataRequest)
+from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE, VLLM_RPC_PATH,
+                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         RPCGenerateRequest, RPCUtilityRequest)
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -20,31 +19,38 @@ class RPCClient:
 
     # TODO: check if opening all these sockets is an antipattern?
     def __init__(self, tokenizer):
+        # ZMQ context.
         self.context = zmq.asyncio.Context()
 
         # TODO: do the tokenizer properly.
         self.tokenizer = tokenizer
         self.decoding_config = DecodingConfig()
 
-        # Socket to check if the RPC server is ready.
-        self.is_ready_socket = self.context.socket(zmq.constants.REP)
-        self.is_ready_socket.connect(VLLM_IS_READY_RPC_PATH)
-
-        # Socket to query data (e.g. get_model_config)
-        self.get_data_socket = self.context.socket(zmq.constants.REQ)
-        self.get_data_socket.connect(VLLM_GET_DATA_RPC_PATH)
-
-    async def wait_for_server(self):
-        await self.is_ready_socket.recv()
-
     def close(self):
-        """Destroy the zmq context and close all sockets"""
+        """Destroy the ZeroMQ Context."""
         self.context.destroy()
 
-    async def get_model_config(self) -> ModelConfig:
-        self.get_data_socket.send(pickle.dumps(GetDataRequest.MODEL_CONFIG))
-        model_config = await self.get_data_socket.recv()
-        return pickle.loads(model_config)
+    async def _send_one_way_rpc_request(self, request: RPC_REQUEST_TYPE,
+                                        error_message: str):
+        """Send one-way RPC request to trigger an action."""
+
+        # Connect to socket.
+        socket = self.context.socket(zmq.constants.DEALER)
+        socket.connect(VLLM_RPC_PATH)
+
+        # Ping RPC Server with request.
+        socket.send(pickle.dumps(request, pickle.HIGHEST_PROTOCOL))
+
+        # Await acknowledgement from RPCServer.
+        response = pickle.loads(await socket.recv())
+
+        if (not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR):
+            socket.close()
+            raise ValueError(error_message)
+
+        socket.close()
+
+        return response
 
     async def get_tokenizer(self, lora_request: LoRARequest):
         # TODO: handle this via get data? - or avoid doing via RPC
@@ -54,12 +60,52 @@ class RPCClient:
         # TODO: handle this via get data? -  or avoid doing via RPC
         return self.decoding_config
 
-    async def abort(self, request_id: str):
-        # TODO: actually handle this with a new socket.
-        pass
-
     async def is_tracing_enabled(self):
+        # TODO: what is this?
         return False
+
+    async def wait_for_server(self):
+        """Wait for the RPCServer to start up."""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.IS_SERVER_READY,
+            error_message="Unable to start RPC Server.")
+
+    async def get_model_config(self) -> ModelConfig:
+        """Get the ModelConfig object from the RPC Server"""
+
+        # Connect to socket.
+        socket = self.context.socket(zmq.constants.DEALER)
+        socket.connect(VLLM_RPC_PATH)
+
+        # Ping RPCServer with GET_MODEL_CONFIG request.
+        socket.send(pickle.dumps(RPCUtilityRequest.GET_MODEL_CONFIG))
+
+        # Await the MODEL_CONFIG from the Server.
+        model_config = pickle.loads(await socket.recv())
+
+        if not isinstance(model_config, ModelConfig):
+            socket.close()
+            raise ValueError("Expected ModelConfig object from RPC, but "
+                             f"got {model_config}")
+
+        socket.close()
+
+        return model_config
+
+    async def abort(self, request_id: str):
+        """Send an RPCAbortRequest to the RPC Server"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCAbortRequest(request_id),
+            error_message=f"RPCAbortRequest {request_id} failed")
+
+    async def do_log_stats(self):
+        """Send a DO_LOG_STATS signal to the RPC Server"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.DO_LOG_STATS,
+            error_message="RPCRequest DO_LOG_STATS failed.")
 
     async def generate(
         self,
@@ -70,22 +116,24 @@ class RPCClient:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncIterator[RequestOutput]:
+        """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # Connect to RPC socket for Request-Reply pattern,
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
-        socket.connect(VLLM_GENERATE_RPC_PATH)
+        socket.connect(VLLM_RPC_PATH)
 
-        # Send GenerateRequest to the RPC Server.
-        await socket.send_multipart([
+        # Send RPCGenerateRequest to the RPCServer.
+        socket.send_multipart([
             pickle.dumps(
-                GenerateRequest(inputs=inputs,
-                                sampling_params=sampling_params,
-                                request_id=request_id,
-                                lora_request=lora_request,
-                                trace_headers=trace_headers,
-                                prompt_adapter_request=prompt_adapter_request),
+                RPCGenerateRequest(
+                    inputs=inputs,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request),
                 pickle.HIGHEST_PROTOCOL)
         ])
 

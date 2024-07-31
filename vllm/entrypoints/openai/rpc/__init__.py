@@ -1,19 +1,18 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Union
 
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
-VLLM_GENERATE_RPC_PATH = "tcp://localhost:5570"
-VLLM_GET_DATA_RPC_PATH = "tcp://localhost:5571"
-VLLM_IS_READY_RPC_PATH = "tcp://localhost:5572"
+VLLM_RPC_PATH = "tcp://localhost:5570"
+VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
 
 @dataclass
-class GenerateRequest:
+class RPCGenerateRequest:
     inputs: PromptInputs
     sampling_params: SamplingParams
     request_id: str
@@ -22,5 +21,16 @@ class GenerateRequest:
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
 
 
-class GetDataRequest(Enum):
-    MODEL_CONFIG = 1
+@dataclass
+class RPCAbortRequest:
+    request_id: str
+
+
+class RPCUtilityRequest(Enum):
+    IS_SERVER_READY = 1
+    GET_MODEL_CONFIG = 2
+    DO_LOG_STATS = 3
+
+
+RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,
+                         RPCUtilityRequest]
