@@ -80,13 +80,13 @@ inline void cutlass_gemm_sm75_dispatch(torch::Tensor& out,
 
   using Cutlass2xGemmDefault =
       typename sm75_config_default<InType, OutType, Epilogue>::Cutlass2xGemm;
-  using Cutlass2xGemmM256 = 
+  using Cutlass2xGemmM256 =
       typename sm75_config_M256<InType, OutType, Epilogue>::Cutlass2xGemm;
   using Cutlass2xGemmM128 = Cutlass2xGemmDefault;
-  using Cutlass2xGemmM64 = 
+  using Cutlass2xGemmM64 =
       typename sm75_config_M64<InType, OutType, Epilogue>::Cutlass2xGemm;
-  using Cutlass2xGemmM32 = 
-      typename sm75_config_M64<InType, OutType, Epilogue>::Cutlass2xGemm;
+  using Cutlass2xGemmM32 =
+      typename sm75_config_M32<InType, OutType, Epilogue>::Cutlass2xGemm;
 
   // Due to shared memory requirements, some Gemms may fail to run on some
   // GPUs. As the name indicates, the Fallback Gemm is used as an alternative

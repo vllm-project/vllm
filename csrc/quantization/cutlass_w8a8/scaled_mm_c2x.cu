@@ -27,8 +27,7 @@ void cutlass_scaled_mm_sm75_epilogue(torch::Tensor& out, torch::Tensor const& a,
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return vllm::cutlass_gemm_sm75_dispatch<int8_t, cutlass::half_t,
-                                            Epilogue>(
+    return vllm::cutlass_gemm_sm75_dispatch<int8_t, cutlass::half_t, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   }
 }
