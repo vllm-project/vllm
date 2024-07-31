@@ -80,7 +80,7 @@ def get_abs_pos(abs_pos: torch.Tensor, tgt_size: torch.Tensor):
 def get_2d_sincos_pos_embed(embed_dim: int,
                             grid_size: Union[int, Tuple[int, int]],
                             cls_token: bool = False,
-                            version: float = 2.0):
+                            version: Tuple[int, int] = (2, 0)):
     """
     grid_size: int of the grid height and width
     return:
@@ -97,7 +97,7 @@ def get_2d_sincos_pos_embed(embed_dim: int,
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
     grid = np.stack(grid, axis=0)
 
-    if version == 2.0:
+    if version == (2, 0):
         grid = grid.reshape([2, 1, grid_h_size, grid_w_size])
         pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid, version)
         if cls_token:
@@ -110,7 +110,7 @@ def get_2d_sincos_pos_embed(embed_dim: int,
 
 def get_2d_sincos_pos_embed_from_grid(embed_dim: int,
                                       grid: Union[int, Tuple[int, int]],
-                                      version: float = 2.0):
+                                      version: Tuple[int, int] = (2, 0)):
     assert embed_dim % 2 == 0
 
     # use half of dimensions to encode grid_h
@@ -119,7 +119,7 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim: int,
     emb_w = get_1d_sincos_pos_embed_from_grid(
         embed_dim // 2, grid[1], version)  # (H*W, D/2) or (H, W, D/2)
 
-    if version == 2.0:
+    if version == (2, 0):
         emb = np.concatenate([emb_h, emb_w], axis=1)  # (H*W, D)
     else:
         emb = np.concatenate([emb_h, emb_w], axis=-1)  # (H, W, D)
@@ -128,7 +128,7 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim: int,
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim: int,
                                       pos: int,
-                                      version: float = 2.0):
+                                      version: Tuple[int, int] = (2, 0)):
     """
     embed_dim: output dimension for each position
     pos: a list of positions to be encoded: size (M,) / (H, W)
@@ -139,7 +139,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim: int,
     omega /= embed_dim / 2.
     omega = 1. / 10000**omega  # (D/2,)
 
-    if version == 2.0:
+    if version == (2, 0):
         pos = pos.reshape(-1)  # (M,)
         out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
         emb_sin = np.sin(out)  # (M, D/2)
@@ -172,11 +172,11 @@ class Resampler(nn.Module):
                  norm_layer: nn.Module = default_norm_layer,
                  adaptive: bool = False,
                  max_size: Tuple[int, int] = (70, 70),
-                 version: float = 2.0):
+                 version: Tuple[int, int] = (2, 0)):
         super().__init__()
 
         self.version = version
-        if self.version == 2.0:
+        if self.version == (2, 0):
             self.num_queries = grid_size**2
         else:
             self.num_queries = num_queries
@@ -201,7 +201,7 @@ class Resampler(nn.Module):
         self.proj = nn.Parameter(
             (embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
 
-        if self.version == 2.0:
+        if self.version == (2, 0):
             self.pos_embed = nn.Parameter(
                 torch.from_numpy(
                     get_2d_sincos_pos_embed(
@@ -320,7 +320,7 @@ class Resampler(nn.Module):
                 x: torch.Tensor,
                 tgt_sizes: Optional[torch.Tensor] = None,
                 attn_mask: Optional[torch.Tensor] = None):
-        if self.version == 2.0:
+        if self.version == (2, 0):
             return self.forward_2(x, tgt_sizes=tgt_sizes, attn_mask=attn_mask)
         else:
             return self.forward_2_5(x, tgt_sizes=tgt_sizes)
@@ -409,16 +409,17 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         if not hasattr(self.config, "version"):
             if self.config.hidden_size == 2304 and self.config.query_num == 64:
-                self.version = 2.0
+                self.version = (2, 0)
             else:
-                self.version = 2.5
+                self.version = (2, 5)
         else:
-            self.version = float(self.config.version)
+            self.version = str(self.config.version).split(".")
+            self.version = tuple([int(x) for x in self.version])
         self.llm = self.init_llm(config, cache_config, quant_config)
         self.vpm = self.init_vision_module()
         param_dtype = torch.get_default_dtype()
         self.vpm.to(dtype=param_dtype)
-        self.vision_dim = self.vpm.embed_dim if self.version == 2.0 \
+        self.vision_dim = self.vpm.embed_dim if self.version == (2, 0) \
             else self.vpm.embeddings.embed_dim
         self.embed_dim = self.config.hidden_size
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
@@ -433,11 +434,11 @@ class MiniCPMV(nn.Module, SupportsVision):
                  config: PretrainedConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
-        if self.version == 2.0:
+        if self.version == (2, 0):
             return MiniCPMModel(config,
                                 cache_config=cache_config,
                                 quant_config=quant_config)
-        elif self.version == 2.5:
+        elif self.version == (2, 5):
             return LlamaModel(config,
                               cache_config=cache_config,
                               quant_config=quant_config)
@@ -447,7 +448,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                               quant_config=quant_config)
 
     def init_vision_module(self):
-        if self.version == 2.0:
+        if self.version == (2, 0):
             try:
                 import timm
             except ImportError:
@@ -467,7 +468,7 @@ class MiniCPMV(nn.Module, SupportsVision):
 
             if self.config.drop_vision_last_layer:
                 model.blocks = model.blocks[:-1]
-        elif self.version == 2.5:
+        elif self.version == (2, 5):
             from transformers.models.idefics2.modeling_idefics2 import (
                 Idefics2VisionTransformer)
             model = Idefics2VisionTransformer(self.config.vision_config)
@@ -490,7 +491,7 @@ class MiniCPMV(nn.Module, SupportsVision):
     def init_resampler(self, embed_dim: int, vision_dim: int):
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.float16)
-        if self.version == 2.0:
+        if self.version == (2, 0):
             resampler = Resampler(grid_size=int(
                 math.sqrt(self.config.query_num)),
                                   num_queries=None,
@@ -514,8 +515,8 @@ class MiniCPMV(nn.Module, SupportsVision):
                              pixel_values: List[List[torch.Tensor]],
                              patch_attn_mask: Optional[torch.Tensor] = None,
                              tgt_sizes: Optional[torch.Tensor] = None,
-                             version: float = 2.0):
-        if version == 2.0:
+                             version: Tuple[int, int] = (2, 0)):
+        if version == (2, 0):
             res = []
             dtype = self.vpm.pos_embed.data.dtype
             for pixel_value in pixel_values:
@@ -532,7 +533,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                                                         num_prefix_tokens:]
                 res.append(self.resampler(vision_embedding, tgt_size))
             return torch.vstack(res)
-        elif version == 2.5:
+        elif version == (2, 5):
             vision_embedding = self.vpm(
                 pixel_values.type(dtype),
                 patch_attention_mask=patch_attn_mask).last_hidden_state
@@ -574,7 +575,7 @@ class MiniCPMV(nn.Module, SupportsVision):
             pixel_values = data["pixel_values"]
             tgt_sizes = data["tgt_sizes"]
             vision_hidden_states = []
-            if self.version == 2.0:
+            if self.version == (2, 0):
                 if pixel_values is not None and len(pixel_values) > 0:
                     vision_hidden_states = self.get_vision_embedding(
                         pixel_values)
@@ -598,7 +599,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                     patch_attn_mask = torch.zeros((B, 1, max_patches),
                                                   dtype=torch.bool,
                                                   device=device)
-                    if self.version == 2.5:
+                    if self.version == (2, 5):
                         for i in range(B):
                             patch_attn_mask[i, :tgt_sizes[i][0] *
                                             tgt_sizes[i][1]] = True
