@@ -52,10 +52,10 @@ def device_loading_context(module: torch.nn.Module,
     original_device_states: Dict[str, torch.device] = {}
 
     # Store original device states and move parameters to GPU if they're on CPU
-    for name, param in module.named_parameters():
-        if param.device.type == "cpu":
-            original_device_states[name] = param.device
-            param.data = param.data.to(target_device)
+    for name, p in module.named_parameters():
+        if p.device.type == "cpu":
+            original_device_states[name] = p.device
+            p.data = p.data.to(target_device)
         # Parameters already on target device are not touched
 
     try:
@@ -64,21 +64,21 @@ def device_loading_context(module: torch.nn.Module,
     finally:
         # Restore parameters to their original devices, ignoring new parameters
         pin_memory = is_pin_memory_available()
-        for name, param in module.named_parameters():
+        for name, p in module.named_parameters():
             if name in original_device_states:
                 original_device: torch.device = original_device_states[name]
                 if original_device.type == "cpu":
                     # `torch.empty_like` does not support `pin_memory` argument
-                    cpu_data = torch.empty_strided(size=param.data.size(),
-                                                   stride=param.data.stride(),
-                                                   dtype=param.data.dtype,
-                                                   layout=param.data.layout,
+                    cpu_data = torch.empty_strided(size=p.data.size(),
+                                                   stride=p.data.stride(),
+                                                   dtype=p.data.dtype,
+                                                   layout=p.data.layout,
                                                    device="cpu",
                                                    pin_memory=pin_memory)
-                    cpu_data.copy_(param.data)
-                    param.data = cpu_data
+                    cpu_data.copy_(p.data)
+                    p.data = cpu_data
                 else:
-                    param.data = param.data.to(original_device)
+                    p.data = p.data.to(original_device)
         # New parameters or parameters already on target device are untouched
 
 
