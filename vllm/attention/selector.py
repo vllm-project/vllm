@@ -39,6 +39,9 @@ def global_force_attn_backend(attn_backend: Optional[_Backend], ) -> None:
     '''
     Force all attention operations to use a specified backend.
 
+    Passing `None` for the argument re-enables automatic
+    backend selection.,
+
     Arguments:
 
     * attn_backend: backend selection (None to revert to auto)
@@ -46,15 +49,7 @@ def global_force_attn_backend(attn_backend: Optional[_Backend], ) -> None:
     global forced_attn_backend
     forced_attn_backend = attn_backend
 
-
-def global_auto_attn_backend() -> None:
-    '''
-    Re-enable auto backend selection.
-    '''
-    global_force_attn_backend(None)
-
-
-def get_global_forced_attn_backend() -> Optional[_Backend]:
+def _get_global_forced_attn_backend() -> Optional[_Backend]:
     '''
     Get the currently-forced choice of attention backend,
     or None if auto-selection is currently enabled.
@@ -145,7 +140,7 @@ def which_attn_to_use(
     # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
     # ENVIRONMENT VARIABLE.
     backend_by_global_setting: Optional[_Backend] = (
-        get_global_forced_attn_backend())
+        _get_global_forced_attn_backend())
     if backend_by_global_setting is not None:
         selected_backend = backend_by_global_setting
     else:
@@ -262,7 +257,7 @@ def global_force_attn_backend_context_manager(
     '''
 
     # Save the current state of the global backend override (if any)
-    original_value = get_global_forced_attn_backend()
+    original_value = _get_global_forced_attn_backend()
 
     # Globally force the new backend override
     global_force_attn_backend(attn_backend)
