@@ -9,10 +9,12 @@ import torch
 import torch.types
 from PIL import Image
 from torch import nn
+from typing_extensions import TypeAlias
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
+from vllm.utils import JSONTree, json_map_leaves
 
 logger = init_logger(__name__)
 
@@ -22,11 +24,16 @@ Use a list instead of a tensor if the dimensions of each element do not match.
 Currently only supports up to singly nested list of tensors.
 """
 
-BatchedTensors = Union[GenericSequence[NestedTensors], NestedTensors]
+BatchedTensors: TypeAlias = JSONTree[torch.Tensor]
 """
-If each input tensor in the batch has the same size, this is a single batched
-tensor; otherwise, this is a list of :class:`NestedTensors` with one element
-per item in the batch.
+A nested JSON structure of tensors which have been batched via
+:meth:`MultiModalInputs.batch`.
+"""
+
+BatchedTensorInputs: TypeAlias = Dict[str, JSONTree[torch.Tensor]]
+"""
+A dictionary containing nested tensors which have been batched via
+:meth:`MultiModalInputs.batch`.
 """
 
 if sys.version_info < (3, 9):
@@ -46,14 +53,17 @@ class MultiModalInputs(_MultiModalInputsBase):
     """
 
     @staticmethod
-    def try_concat(
+    def _try_concat(
         tensors: List[NestedTensors],
-        *,
-        device: torch.types.Device,
-    ) -> BatchedTensors:
+    ) -> Union[GenericSequence[NestedTensors], NestedTensors]:
+        """
+        If each input tensor in the batch has the same shape, return a single
+        batched tensor; otherwise, return a list of :class:`NestedTensors` with
+        one element per item in the batch.
+        """
         # may be list rather than tensors
         if isinstance(tensors[0], list):
-            return [[t.to(device=device) for t in tensor[0]]
+            return [[t for t in tensor[0]]
                     for tensor in cast(List[List[torch.Tensor]], tensors)]
 
         tensors_ = cast(List[torch.Tensor], tensors)
@@ -62,18 +72,21 @@ class MultiModalInputs(_MultiModalInputsBase):
 
         for tensor in tensors_:
             if tensor.shape[1:] != unbatched_shape:
-                return [
-                    tensor.squeeze(0).to(device=device) for tensor in tensors_
-                ]
+                return [tensor.squeeze(0) for tensor in tensors_]
 
-        return torch.cat(tensors_, dim=0).to(device=device)
+        return torch.cat(tensors_, dim=0)
 
     @staticmethod
-    def batch(
-        inputs_list: List["MultiModalInputs"],
-        device: torch.types.Device,
-    ) -> Dict[str, BatchedTensors]:
-        """Batch multiple inputs together into a dictionary."""
+    def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
+        """
+        Batch multiple inputs together into a dictionary.
+
+        The resulting dictionary has the same keys as the inputs.
+        If the corresponding value from each input is a tensor and they all
+        share the same shape, the output value is a single batched tensor;
+        otherwise, the output value is a list containing the original value
+        from each input.
+        """
         if len(inputs_list) == 0:
             return {}
 
@@ -90,9 +103,18 @@ class MultiModalInputs(_MultiModalInputsBase):
                 item_lists[k].append(v)
 
         return {
-            k: MultiModalInputs.try_concat(item_list, device=device)
+            k: MultiModalInputs._try_concat(item_list)
             for k, item_list in item_lists.items()
-        }
+        }  # type: ignore
+
+    @staticmethod
+    def as_kwargs(
+        batched_inputs: BatchedTensorInputs,
+        *,
+        device: torch.types.Device,
+    ) -> BatchedTensorInputs:
+        return json_map_leaves(lambda x: x.to(device, non_blocking=True),
+                               batched_inputs)
 
 
 class MultiModalDataBuiltins(TypedDict, total=False):

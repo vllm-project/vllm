@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -10,7 +9,7 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
@@ -32,7 +31,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     input_positions: Optional[torch.Tensor] = None
     input_block_ids: Optional[torch.Tensor] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
+    multi_modal_kwargs: Optional[BatchedTensorInputs] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -84,8 +83,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int], Mapping[
-            str, BatchedTensors]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int],
+               BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -134,8 +133,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                        dtype=torch.long,
                                        device=self.device)
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return (input_tokens, input_positions, input_block_ids, seq_lens,
                 multi_modal_kwargs)
@@ -244,7 +242,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             input_block_ids=model_input.input_block_ids,
-            **(model_input.multi_modal_kwargs or {}),
+            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                         device=self.device),
         )
 
         # Compute the logits.

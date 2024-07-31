@@ -1,14 +1,12 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Type
 
 import pytest
 from transformers import AutoConfig, AutoTokenizer
 
-from vllm.model_executor.models.llava_next import (
-    get_llava_next_image_feature_size)
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ..conftest import IMAGE_ASSETS
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
@@ -26,6 +24,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 IMAGE_TOKEN_ID = 32000
+
+models = ["llava-hf/llava-v1.6-vicuna-7b-hf"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -50,34 +50,19 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-@pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-vicuna-7b-hf"])
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        # No image
-        [],
-        # Single-scale
-        [1.0],
-        # Single-scale, batched
-        [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
-    ],
-)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
-                dtype, max_tokens, num_logprobs) -> None:
-    """Inference result should be the same between hf and vllm.
-
-    All the image fixtures for the test is under tests/images.
-    For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
-    Note, the text input is also adjusted to abide by vllm contract.
-    The text output is sanitized to be able to compare with hf.
-    """
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    size_factors: List[float],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -89,6 +74,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
     with vllm_runner(model,
                      dtype=dtype,
                      max_model_len=4096,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
@@ -122,9 +109,54 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         )
 
 
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # No image
+        [],
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ],
+)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+                dtype, max_tokens, num_logprobs) -> None:
+    """Inference result should be the same between hf and vllm.
+
+    All the image fixtures for the test is under tests/images.
+    For huggingface runner, we provide the PIL images as input.
+    For vllm runner, we provide MultiModalDataDict objects 
+    and corresponding vision language config as input.
+    Note, the text input is also adjusted to abide by vllm contract.
+    The text output is sanitized to be able to compare with hf.
+    """
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model,
+        size_factors=size_factors,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
 @pytest.mark.parametrize("height_and_width_and_result", [(1669, 2560, 2144),
                                                          (183, 488, 776)])
 def test_image_feature_size(height_and_width_and_result):
+    # Avoid initializing CUDA too early in distributed tests
+    from vllm.model_executor.models.llava_next import (
+        get_llava_next_image_feature_size)
+
     height, width, result = height_and_width_and_result
     config = AutoConfig.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
     assert get_llava_next_image_feature_size(config,

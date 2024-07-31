@@ -19,10 +19,10 @@ from vllm.utils import cuda_device_count_stateless
 
 model = os.environ["TEST_DIST_MODEL"]
 
-if model.startswith("llava-hf/llava"):
+if model.startswith("llava-hf/llava-1.5"):
     from ..models.test_llava import models, run_test
-elif model.startswith("microsoft/Phi-3-vision"):
-    from ..models.test_phi3v import models, run_test
+elif model.startswith("llava-hf/llava-v1.6"):
+    from ..models.test_llava_next import models, run_test
 else:
     raise NotImplementedError(f"Unsupported model: {model}")
 
@@ -45,7 +45,8 @@ def test_models(hf_runner, vllm_runner, image_assets,
         vllm_runner,
         image_assets,
         model=models[0],
-        size_factors=[1.0],
+        # So that LLaVA-NeXT processor may return nested list
+        size_factors=[0.25, 0.5, 1.0],
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
