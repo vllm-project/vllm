@@ -743,12 +743,8 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
                                 c10::optional<torch::Tensor> const& bias) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(!bias || bias->dtype() == out.dtype(),
-              "currently bias dtype must match output dtype ", out.dtype());
-  TORCH_CHECK(azp_adj.dtype() == torch::kInt32);
 
   if (azp) {
-    TORCH_CHECK(azp->dtype() == torch::kInt32);
     return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBiasAzpToken>(
         out, a, b, a_scales, b_scales, azp_adj, *azp, bias);
   } else {
