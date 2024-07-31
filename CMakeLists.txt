@@ -132,6 +132,14 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 #
+# Add warning-related flags to VLLM_GPU_FLAGS
+#
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+    # Treat warnings as errors
+    list(APPEND VLLM_GPU_FLAGS -Werror all-warnings)
+endif()
+
+#
 # Define extension targets
 #
 
