@@ -33,8 +33,6 @@ from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
 from transformers.configuration_utils import PretrainedConfig
-from transformers.models.idefics2.modeling_idefics2 import (
-    Idefics2VisionTransformer)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -51,6 +49,13 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+
+from .idefics2_vision_model import Idefics2VisionTransformer
+
+# from transformers.models.idefics2.modeling_idefics2 import (
+#     Idefics2VisionTransformer)
+
+
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
