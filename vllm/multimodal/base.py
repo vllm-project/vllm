@@ -63,7 +63,8 @@ class MultiModalInputs(_MultiModalInputsBase):
         """
         # may be list rather than tensors
         if isinstance(tensors[0], list):
-            return cast(List[List[torch.Tensor]], tensors)
+            return [[t for t in tensor[0]]
+                    for tensor in cast(List[List[torch.Tensor]], tensors)]
 
         tensors_ = cast(List[torch.Tensor], tensors)
 
