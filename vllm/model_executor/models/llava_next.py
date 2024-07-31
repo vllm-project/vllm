@@ -62,12 +62,10 @@ class LlavaNextImagePixelInputs(TypedDict):
 LlavaNextImageInputs = LlavaNextImagePixelInputs
 
 
-# Taken from: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L91
-# NOTE: new_height and new_width are further incremented to properly invert the
-# floordiv operation: https://github.com/huggingface/transformers/blob/v4.42.2/src/transformers/models/llava_next/modeling_llava_next.py#L133
+# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L79
 def _get_llava_next_num_unpadded_features(
-    height: int,
-    width: int,
+    original_height: int,
+    original_width: int,
     npatches: int,
     num_patch_height: int,
     num_patch_width: int,
@@ -77,16 +75,15 @@ def _get_llava_next_num_unpadded_features(
     current_height = torch.tensor(current_height).to("cuda")
     current_width = torch.tensor(current_width).to("cuda")
 
-    aspect_ratio: float = width / height
-    current_aspect_ratio: float = current_width / current_height
+    aspect_ratio = original_width / original_height
+    current_aspect_ratio = current_width / current_height
+
     if aspect_ratio > current_aspect_ratio:
-        scale_factor = current_width / width
-        new_height = int(height * scale_factor)
+        new_height = (original_height * current_width) // original_width
         padding = (current_height - new_height) // 2
         current_height -= padding * 2
     else:
-        scale_factor = current_height / height
-        new_width = int(width * scale_factor)
+        new_width = (original_width * current_height) // original_height
         padding = (current_width - new_width) // 2
         current_width -= padding * 2
 
@@ -95,7 +92,7 @@ def _get_llava_next_num_unpadded_features(
     return (unpadded_features, newline_features)
 
 
-# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L111
+# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
 def get_llava_next_image_feature_size(
     hf_config: LlavaNextConfig,
     *,
@@ -111,9 +108,7 @@ def get_llava_next_image_feature_size(
         )
         base_feature_size = num_patches * num_patches
 
-        # Note: We follow the "wrong" width/height order
-        # [ref: PR huggingface/transformers#31588]
-        num_patch_width, num_patch_height = get_anyres_image_grid_shape(
+        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
             image_size=(input_height, input_width),
             grid_pinpoints=hf_config.image_grid_pinpoints,
             patch_size=vision_config.image_size,
@@ -350,9 +345,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                 other_patch_embeds = patch_embeddings[1:]
 
                 # image_aspect_ratio == "anyres"
-                # Note: We follow the "wrong" width/height order
-                # [ref: PR huggingface/transformers#31588]
-                num_patch_width, num_patch_height = get_anyres_image_grid_shape(
+                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
                     image_size,
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
