@@ -9,6 +9,7 @@ from PIL import Image
 from torch import nn
 from transformers import SiglipConfig, SiglipVisionConfig
 from vllm_flash_attn import flash_attn_func
+from xformers.ops import memory_efficient_attention
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig
@@ -271,15 +272,14 @@ class SiglipAttention(nn.Module):
             # (e.g. google/siglip-so400m-patch14-384 has hidden_size=1152
             #  with num_attention_heads=16, which is not supported)
             # If the backend is not supported, fall back to the default
+            self.attn_fn = self._basic_attention_forward
 
-            # TODO(ChristopherCho): flash_attn_func is not working properly
+            #
             # if self.qkv_proj.params_dtype in [torch.float16, torch.bfloat16]:
             #     # Flash attention only supports float16 and bfloat16
             #     self.attn_fn = self._flash_attention_forward
             # else:
             #     self.attn_fn = self._basic_attention_forward
-
-            self.attn_fn = self._basic_attention_forward
 
     def forward(
         self,
@@ -359,6 +359,15 @@ class SiglipAttention(nn.Module):
 
         return attn_output
 
+
+# TODO(ChristopherCho): flash_attn_func is not working properly.
+#                       It constantly throws a CUDA error.
+class SiglipFlashAttention2(SiglipAttention):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attn_fn = self._flash_attention_forward
+
     # Ported from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L449
     # and https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/modeling_flash_attention_utils.py#L133
     def _flash_attention_forward(self, q, k, v, batch_size, q_len, *args,
@@ -370,16 +379,9 @@ class SiglipAttention(nn.Module):
                      query, key, and value. (B, S, H, D)
         """
 
-        q = q.view(batch_size, q_len, self.num_heads,
-                   self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, q_len, self.num_heads,
-                   self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, q_len, self.num_heads,
-                   self.head_dim).transpose(1, 2)
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        q = q.view(batch_size, q_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, q_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, q_len, self.num_heads, self.head_dim)
 
         attn_output = flash_attn_func(
             q,
@@ -393,6 +395,62 @@ class SiglipAttention(nn.Module):
                                           self.embed_dim).contiguous()
 
         return attn_output
+
+
+class SiglipSdpaAttention(SiglipAttention):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_causal = False
+        self.attn_fn = self._sdpa_attention_forward
+
+    def _sdpa_attention_forward(self, q, k, v, batch_size, q_len, *args,
+                                **kwargs):
+        q = q.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, q_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, is_causal=False, scale=self.scale)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, q_len, self.embed_dim)
+
+        return attn_output
+
+
+class SiglipxFormersAttention(SiglipAttention):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attn_fn = self._xformers_attention_forward
+
+    def _xformers_attention_forward(self, q, k, v, batch_size, q_len, *args,
+                                    **kwargs):
+        q = q.view(batch_size, q_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, q_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, q_len, self.num_heads, self.head_dim)
+
+        attn_output = memory_efficient_attention(q,
+                                                 k,
+                                                 v,
+                                                 p=0.0,
+                                                 scale=self.scale)
+        attn_output = attn_output.reshape(batch_size, q_len,
+                                          self.embed_dim).contiguous()
+
+        return attn_output
+
+
+SIGLIP_ATTENTION_CLASSES = {
+    "eager": SiglipAttention,
+    "flash_attention_2": SiglipFlashAttention2,
+    "sdpa": SiglipSdpaAttention,
+    "xformers": SiglipxFormersAttention,
+}
 
 
 class SiglipMLP(nn.Module):
@@ -438,7 +496,7 @@ class SiglipEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
 
-        self.self_attn = SiglipAttention(
+        self.self_attn = SIGLIP_ATTENTION_CLASSES[config._attn_implementation](
             config,
             cache_config=cache_config,
             quant_config=quant_config,
