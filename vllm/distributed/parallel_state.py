@@ -45,7 +45,7 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
+    tensor_dict: Dict[str, Union[torch.Tensor, Any]]
 ) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
@@ -56,7 +56,7 @@ def _split_tensor_dict(
     metadata will be "key1%key2".
     """
     metadata_list: List[Tuple[str, Any]] = []
-    tensor_list = []
+    tensor_list: List[torch.Tensor] = []
     for key, value in tensor_dict.items():
         assert "%" not in key, (
             "Avoid having '%' in key "
