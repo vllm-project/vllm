@@ -564,7 +564,7 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         return image_bound
 
-    def get_vision_hidden_states(self, data: Dict[str, Union[List,
+    def get_vision_hidden_states(self, data: Dict[str, Union[List[torch.Tensor],
                                                              torch.Tensor]]):
         if "vision_hidden_states" not in data:
             pixel_values = data["pixel_values"]
