@@ -57,7 +57,7 @@ def get_logits_processors(
             raise ValueError(
                 "Found token_id in logit_bias that is not "
                 "an integer or string representing an integer") from exc
-        
+
         # Check if token_id is within the vocab size
         for token_id, bias in clamped_logit_bias.items():
             if token_id < 0 or token_id >= len(tokenizer.vocab_size):
