@@ -190,9 +190,11 @@ def rms_norm_dynamic_per_token_quant(
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
 
     # Support asymmetric quant only for int8 quantization.
-    assert not is_asymmetric_quant or input.dtype() == torch.int8
+    assert not is_asymmetric_quant or quant_dtype == torch.int8
+    # scale_ub arg is only supported for fp8 quant
+    assert scale_ub is None or quant_dtype == torch.float8_e4m3fn
 
-    output = torch.empty_like(input, dtype=quant_dtype)
+    output = torch.empty_like(input, device=input.device, dtype=quant_dtype)
     scales = torch.empty((input.numel() // input.shape[-1], 1),
                          device=input.device,
                          dtype=torch.float32)

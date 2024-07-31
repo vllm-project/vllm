@@ -59,7 +59,6 @@ def ref_asymmetric_dynamic_per_token_quant(x: torch.tensor,
     assert quant_dtype == torch.int8
 
     qtype_traits = torch.iinfo(quant_dtype)
-    qtype_max = as_float32_tensor(qtype_traits.max)
     qtype_min = as_float32_tensor(qtype_traits.min)
     s_1 = as_float32_tensor(1.0)
     s_255 = as_float32_tensor(255.0)
@@ -72,6 +71,10 @@ def ref_asymmetric_dynamic_per_token_quant(x: torch.tensor,
 
     scales = (x_token_max - x_token_min) / s_255
     azps = torch.round(qtype_min - x_token_min / scales).to(torch.int32)
+
+    # Expand dims
+    scales = scales[:, None]
+    azps = azps[:, None]
 
     # Quant
     iscales = as_float32_tensor(s_1 / scales)
