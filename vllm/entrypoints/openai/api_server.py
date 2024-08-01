@@ -90,12 +90,12 @@ def validate_api_key(
     auth_credentials: Annotated[Optional[HTTPAuthorizationCredentials],
                                 Depends(api_key_auth_scheme)]
 ) -> None:
-    if api_key is not None:
-        if auth_credentials is None or auth_credentials.credentials != api_key:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"error": "Unauthorized"},
-            )
+    if api_key is not None and (auth_credentials is None or 
+                                auth_credentials.credentials != api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Unauthorized"},
+        )
 
 
 router = APIRouter()
