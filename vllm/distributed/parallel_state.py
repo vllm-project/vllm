@@ -653,8 +653,10 @@ class GroupCoordinator:
                     continue
 
                 # send-allgather: send only a slice, then do allgather.
-                if (all_gather_group is not None and
-                    tensor.numel() % all_gather_size == 0):
+                use_all_gather = (all_gather_group is not None and
+                                  tensor.numel() % all_gather_size == 0)
+
+                if use_all_gather:
                     orig_shape = tensor.shape
                     tensor = (
                         tensor.reshape(all_gather_size, -1)[all_gather_rank])
@@ -669,7 +671,7 @@ class GroupCoordinator:
                     torch.distributed.recv(tensor,
                                            src=self.ranks[src],
                                            group=group)
-                if all_gather_group is not None:
+                if use_all_gather:
                     # do the allgather
                     tensor = all_gather_group.all_gather(tensor, dim=0)
                     tensor = tensor.reshape(orig_shape)
