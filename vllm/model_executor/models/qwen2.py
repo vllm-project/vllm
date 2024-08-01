@@ -389,4 +389,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if name == "model.embed_tokens.weight":
+                    if loaded_weight.shape[0] == 151936:
+                        padding = torch.zeros((128, 1024), dtype=loaded_weight.dtype, device=loaded_weight.device)
+                        loaded_weight = torch.cat([loaded_weight, padding], dim=0)
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight)

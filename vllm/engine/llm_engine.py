@@ -36,6 +36,7 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
+from vllm.spec_decode.spec_decode_params import SpecDecodeParams
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -522,6 +523,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        spec_decode_params: Optional[SpecDecodeParams],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
@@ -541,6 +543,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
+                spec_decode_params=spec_decode_params,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request)
         elif isinstance(params, PoolingParams):
@@ -550,6 +553,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
+                spec_decode_params=spec_decode_params,
                 prompt_adapter_request=prompt_adapter_request)
         else:
             raise ValueError(
@@ -604,6 +608,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
@@ -623,6 +628,7 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            spec_decode_params: The speculative decoding parameters, if any.
             trace_headers: OpenTelemetry trace headers.
 
         Details:
@@ -667,6 +673,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            spec_decode_params=spec_decode_params,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
         )
@@ -678,6 +685,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> SequenceGroup:
@@ -704,6 +712,7 @@ class LLMEngine:
             arrival_time=arrival_time,
             sampling_params=sampling_params,
             lora_request=lora_request,
+            spec_decode_params=spec_decode_params,
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request)
 
@@ -716,6 +725,7 @@ class LLMEngine:
         pooling_params: PoolingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        spec_decode_params: Optional[SpecDecodeParams],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
@@ -727,6 +737,7 @@ class LLMEngine:
             seqs=[seq],
             arrival_time=arrival_time,
             lora_request=lora_request,
+            spec_decode_params=spec_decode_params,
             pooling_params=pooling_params,
             prompt_adapter_request=prompt_adapter_request)
         return seq_group
