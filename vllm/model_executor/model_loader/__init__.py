@@ -10,8 +10,6 @@ from vllm.model_executor.model_loader.loader import (BaseModelLoader,
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name, get_model_architecture)
 
-import torch
-import time
 
 def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               device_config: DeviceConfig, parallel_config: ParallelConfig,
@@ -20,14 +18,15 @@ def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               multimodal_config: Optional[MultiModalConfig],
               cache_config: CacheConfig) -> nn.Module:
     loader = get_model_loader(load_config)
-    m =loader.load_model(model_config=model_config,
-                             device_config=device_config,
-                             lora_config=lora_config,
-                             multimodal_config=multimodal_config,
-                             parallel_config=parallel_config,
-                             scheduler_config=scheduler_config,
-                             cache_config=cache_config)
+    m = loader.load_model(model_config=model_config,
+                          device_config=device_config,
+                          lora_config=lora_config,
+                          multimodal_config=multimodal_config,
+                          parallel_config=parallel_config,
+                          scheduler_config=scheduler_config,
+                          cache_config=cache_config)
     return m
+    #return torch.compile(m, backend='eager')
     #return torch.compile(m, backend='eager', fullgraph=True)
 
 
