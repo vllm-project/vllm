@@ -72,9 +72,10 @@ async def get_outlines_guided_decoding_logits_processor(
             max_workers=2)
     loop = asyncio.get_running_loop()
 
-    return await loop.run_in_executor(global_thread_pool,
-                                      _get_logits_processor, guide, tokenizer,
-                                      mode, request.guided_whitespace_pattern)
+    # return await loop.run_in_executor(global_thread_pool,
+    #                                   _get_logits_processor, guide, tokenizer,
+    #                                   mode, request.guided_whitespace_pattern)
+    return _get_logits_processor(guide, tokenizer, mode, request.guided_whitespace_pattern)
 
 
 def _get_guide_and_mode(

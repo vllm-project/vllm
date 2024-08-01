@@ -26,7 +26,8 @@ from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
-
+from lark import Lark
+from outlines import grammars
 
 class BaseLogitsProcessor:
 
@@ -44,6 +45,17 @@ class BaseLogitsProcessor:
             last_seq_id = hash(tuple(input_ids[:-1]))
             self._fsm_state[seq_id] = self._guide.get_next_state(
                 state=self._fsm_state[last_seq_id], token_id=last_token)
+        else:
+            if isinstance(self._guide, CFGGuide):
+                self._guide.parser = Lark(
+                    self._guide.cfg_string,
+                    parser="lalr",
+                    lexer="contextual",
+                    propagate_positions=False,
+                    maybe_placeholders=False,
+                    regex=True,
+                    import_paths=[grammars.GRAMMAR_PATH],
+                )
 
         instruction = self._guide.get_next_instruction(
             state=self._fsm_state[seq_id])
@@ -68,7 +80,6 @@ class BaseLogitsProcessor:
 class RegexLogitsProcessor(BaseLogitsProcessor):
 
     @classmethod
-    @cache()
     def _get_guide(cls, regex_string: str,
                    tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
@@ -127,7 +138,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
 class CFGLogitsProcessor(BaseLogitsProcessor):
 
     @classmethod
-    @cache()
+    # @cache()
     def _get_guide(cls, cfg: str, tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
         return CFGGuide(cfg, tokenizer)
@@ -147,7 +158,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         self._guide = self._guide.copy()
 
 
-@lru_cache(maxsize=32)
+# @lru_cache(maxsize=32)
 def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
     """Adapt vLLM's tokenizer to use to compile the FSM.
 
