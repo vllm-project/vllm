@@ -512,8 +512,19 @@ class LLMEngine:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-    def _get_eos_token_id(
-            self, lora_request: Optional[LoRARequest]) -> Optional[int]:
+    def _get_bos_token_id(self,
+                          lora_request: Optional[LoRARequest] = None
+                          ) -> Optional[int]:
+        if self.tokenizer is None:
+            logger.warning("Using None for BOS token id because tokenizer "
+                           "is not initialized")
+            return None
+
+        return self.tokenizer.get_lora_tokenizer(lora_request).bos_token_id
+
+    def _get_eos_token_id(self,
+                          lora_request: Optional[LoRARequest] = None
+                          ) -> Optional[int]:
         if self.tokenizer is None:
             logger.warning("Using None for EOS token id because tokenizer "
                            "is not initialized")
@@ -768,9 +779,12 @@ class LLMEngine:
         model variety.
 
         Absent a special case, the default behavior
-        of this method is to return an empty token
-        list. If all models worked this way,
-        then this helper method would be unnecessary.
+        of this method is to mirror the behavior of
+        the HuggingFace (HF) GenerationMixin for a None
+        decoder prompt, which is to employ a logit processor
+        setting to force the first decoded token to be <BOS>.
+        Here, this behavior is approximated by having the
+        "default" decoder prompt be <BOS>.
 
         However, it is possible that in the future
         other models may have different or more 
@@ -783,7 +797,9 @@ class LLMEngine:
         * prompt_token_ids
         '''
 
-        prompt_token_ids: List[int] = []
+        bos_token_id = self._get_bos_token_id()
+        assert bos_token_id is not None
+        prompt_token_ids: List[int] = [bos_token_id]
         return prompt_token_ids
 
     def _process_encoder_decoder_prompt(
