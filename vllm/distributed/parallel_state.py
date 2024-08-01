@@ -579,10 +579,10 @@ class GroupCoordinator:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
 
-        all_gather_size = (1 if all_gather_group is None
-                           else all_gather_group.world_size)
-        all_gather_rank = (0 if all_gather_group is None
-                           else all_gather_group.rank_in_group)
+        all_gather_size = (1 if all_gather_group is None else
+                           all_gather_group.world_size)
+        all_gather_rank = (0 if all_gather_group is None else
+                           all_gather_group.rank_in_group)
 
         group = self.device_group
         metadata_group = self.cpu_group
@@ -606,8 +606,8 @@ class GroupCoordinator:
                 continue
 
             # send-allgather: send only a slice, then do allgather.
-            if (all_gather_group is not None and
-                tensor.numel() % all_gather_size == 0):
+            if (all_gather_group is not None
+                    and tensor.numel() % all_gather_size == 0):
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
             if tensor.is_cpu:
@@ -634,10 +634,10 @@ class GroupCoordinator:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None
 
-        all_gather_size = (1 if all_gather_group is None
-                           else all_gather_group.world_size)
-        all_gather_rank = (0 if all_gather_group is None
-                           else all_gather_group.rank_in_group)
+        all_gather_size = (1 if all_gather_group is None else
+                           all_gather_group.world_size)
+        all_gather_rank = (0 if all_gather_group is None else
+                           all_gather_group.rank_in_group)
 
         group = self.device_group
         metadata_group = self.cpu_group
@@ -659,13 +659,13 @@ class GroupCoordinator:
                     continue
 
                 # send-allgather: send only a slice, then do allgather.
-                use_all_gather = (all_gather_group is not None and
-                                  tensor.numel() % all_gather_size == 0)
+                use_all_gather = (all_gather_group is not None
+                                  and tensor.numel() % all_gather_size == 0)
 
                 if use_all_gather:
                     orig_shape = tensor.shape
-                    tensor = (
-                        tensor.reshape(all_gather_size, -1)[all_gather_rank])
+                    tensor = tensor.reshape(all_gather_size,
+                                            -1)[all_gather_rank]
 
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
@@ -679,7 +679,7 @@ class GroupCoordinator:
                                            group=group)
                 if use_all_gather:
                     # do the allgather
-                    tensor = all_gather_group.all_gather(tensor, dim=0)
+                    tensor = all_gather_group.all_gather(tensor, dim=0)  # type: ignore[union-attr]
                     tensor = tensor.reshape(orig_shape)
 
                 tensor_dict[key] = tensor
