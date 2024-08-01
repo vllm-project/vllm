@@ -76,40 +76,4 @@ __device__ void scaled_quant_conversion(quant_type_t* __restrict__ output,
   }
 }
 
-namespace vectorized {
-
-// Vectorized version of scaled_quant_conversion
-template <typename scalar_t, typename quant_type_t, bool is_scale_inverted>
-__device__ void scaled_quant_conversion(quant_type_t* __restrict__ out,
-                                        scalar_t const* __restrict__ input,
-                                        float const scale, int const tid,
-                                        int const num_elems, int const step) {
-  // Vectorized input/output to better utilize memory bandwidth.
-  vec4_t<scalar_t> const* vectorized_in =
-      reinterpret_cast<vec4_t<scalar_t> const*>(input);
-  q8x4_t<quant_type_t>* vectorized_out =
-      reinterpret_cast<q8x4_t<quant_type_t>*>(out);
-
-  int const num_vec_elems = num_elems >> 2;
-
-#pragma unroll 4
-  for (int i = tid; i < num_vec_elems; i += step) {
-    vec4_t<scalar_t> in_vec = vectorized_in[i];
-    q8x4_t<quant_type_t> out_vec;
-
-    out_vec.x = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.x, scale);
-    out_vec.y = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.y, scale);
-    out_vec.z = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.z, scale);
-    out_vec.w = ScaledQuant<quant_type_t, is_scale_inverted>(in_vec.w, scale);
-    vectorized_out[i] = out_vec;
-  }
-
-  // Handle the remaining elements if num_elems is not divisible by 4
-  for (int i = num_vec_elems * 4 + tid; i < num_elems; i += step) {
-    out[i] = ScaledQuant<quant_type_t, is_scale_inverted>(input[i], scale);
-  }
-}
-
-}  // namespace vectorized
-
 }  // namespace vllm
