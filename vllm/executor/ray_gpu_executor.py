@@ -150,8 +150,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # Else, added to the list of workers.
                     self.workers.append(worker)
 
-        logger.info("workers: %s", self.workers)
-        logger.info("driver_dummy_worker: %s", self.driver_dummy_worker)
+        logger.debug("workers: %s", self.workers)
+        logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
         if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
             raise ValueError(
                 "Ray does not allocate any GPUs on the driver node. Consider "
