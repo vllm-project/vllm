@@ -138,7 +138,7 @@ steps:
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"
   source_file_dependency:
-    - /vllm
+    - vllm/
   mirror_hardwares: [amd]
   commands:
     # install tensorizer for tensorize_vllm_model.py
