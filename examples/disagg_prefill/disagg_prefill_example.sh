@@ -4,7 +4,9 @@
 # and then transfer the KV cache between them.
 
 export VLLM_LOGGING_LEVEL=DEBUG
-export VLLM_PORT=12345
+export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+# export NCCL_DEBUG=INFO
+export NCCL_BUFFSIZE=67108864
 
 # a function that waits vLLM server to start
 wait_for_server() {
@@ -16,22 +18,24 @@ wait_for_server() {
 }
 
 # prefilling instance
-VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+VLLM_LOGGING_LEVEL=DEBUG VLLM_HOST_IP=$(hostname -I | awk '{print $1}') VLLM_PORT=2345 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model neuralmagic/Meta-Llama-3-70B-Instruct-FP8 \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
-    -tp 4 \
+    -tp 1 \
     --enable-prefix-caching \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.8 \
+    --max-model-len 10000 &
 
 # decoding instance
-VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+VLLM_LOGGING_LEVEL=DEBUG VLLM_HOST_IP=$(hostname -I | awk '{print $1}') VLLM_PORT=2345 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model neuralmagic/Meta-Llama-3-70B-Instruct-FP8 \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
-    -tp 4 \
+    -tp 1 \
     --enable-prefix-caching \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.8 \
+    --max-model-len 10000 &
 
 # wait until prefill and decode instances are ready
 wait_for_server 8100
@@ -42,23 +46,39 @@ wait_for_server 8200
 #   1. send the request to prefill instance, with max_tokens set to 1
 #   2. send the request again to decode instance, no modification
 
-# send to prefill instance
-curl http://localhost:8100/v1/completions \
--H "Content-Type: application/json" \
--d '{
-"model": "neuralmagic/Meta-Llama-3-70B-Instruct-FP8",
-"prompt": "San Francisco is a",
-"max_tokens": 1,
-"temperature": 0
-}'
 
-# send to decode instance
-curl http://localhost:8200/v1/completions \
--H "Content-Type: application/json" \
--d '{
-"model": "neuralmagic/Meta-Llama-3-70B-Instruct-FP8",
-"prompt": "San Francisco is a",
-"max_tokens": 5,
-"temperature": 0
-}'
+for i in {0..0}
+do
+  # send to prefill instance
+  curl -m 5 http://localhost:8100/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+  "prompt": "'$i' San Francisco is a",
+  "max_tokens": 1,
+  "temperature": 0
+  }'
 
+  curl -m 5 http://localhost:8100/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+  "prompt": "'$i' San Francisco is a",
+  "max_tokens": 1,
+  "temperature": 0
+  }'
+
+  # # send to decode instance
+  # curl -m 60 http://localhost:8200/v1/completions \
+  # -H "Content-Type: application/json" \
+  # -d '{
+  # "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+  # "prompt": "'$i' San Francisco is a",
+  # "max_tokens": 5,
+  # "temperature": 0
+  # }'
+
+done
+
+# kill command:
+# ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
