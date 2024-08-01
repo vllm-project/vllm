@@ -679,8 +679,8 @@ class GroupCoordinator:
                                            group=group)
                 if use_all_gather:
                     # do the allgather
-                    tensor = all_gather_group.all_gather(
-                        tensor, dim=0)  # type: ignore[union-attr]
+                    tensor = all_gather_group.all_gather(  # type: ignore
+                        tensor, dim=0)
                     tensor = tensor.reshape(orig_shape)
 
                 tensor_dict[key] = tensor
