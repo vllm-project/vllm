@@ -5,6 +5,7 @@ import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear)
@@ -40,6 +41,9 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
+        if get_tensor_model_parallel_world_size() > 1:
+            raise ValueError(
+                "GGUF quantization hasn't supported tensor parallelism yet.")
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
