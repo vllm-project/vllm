@@ -62,8 +62,8 @@ _KEYS_TO_MODIFY_MAPPING = {
 
 class MiniCPMVInputs(TypedDict):
     input_ids: torch.Tensor
-    pixel_values: Union[torch.Tensor, List[torch.Tensor]]
-    tgt_sizes: List[List[int]]
+    pixel_values: List[torch.Tensor]
+    tgt_sizes: List[torch.Tensor]
 
 
 def get_abs_pos(abs_pos: torch.Tensor, tgt_size: torch.Tensor):
@@ -213,11 +213,11 @@ class Resampler(nn.Module):
 
         if self.version == (2, 0):
             assert grid_size is not None
+            pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
+                                                    grid_size,
+                                                    version=self.version)
             self.pos_embed = nn.Parameter(
-                torch.from_numpy(
-                    get_2d_sincos_pos_embed(
-                        embed_dim, grid_size,
-                        version=self.version)).float()).requires_grad_(False)
+                torch.from_numpy(pos_embed_arr).float()).requires_grad_(False)
         else:
             self._set_2d_pos_cache(self.max_size)
 
@@ -226,10 +226,10 @@ class Resampler(nn.Module):
     def _set_2d_pos_cache(self,
                           max_size: Tuple[int, int],
                           device: torch.types.Device = 'cpu'):
-        pos_embed = torch.from_numpy(
-            get_2d_sincos_pos_embed(self.embed_dim,
-                                    max_size,
-                                    version=self.version)).float().to(device)
+        pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
+                                                max_size,
+                                                version=self.version)
+        pos_embed = torch.from_numpy(pos_embed_arr).float().to(device)
         self.register_buffer("pos_embed", pos_embed, persistent=False)
 
     def _adjust_pos_cache(self, tgt_sizes: torch.Tensor,
@@ -307,10 +307,9 @@ class Resampler(nn.Module):
                   tgt_sizes: torch.Tensor,
                   attn_mask: Optional[torch.Tensor] = None):
         if self.adaptive:
-            pos_embed = torch.Tensor(
-                get_2d_sincos_pos_embed(self.embed_dim,
-                                        tgt_sizes)).float().to(device=x.device,
-                                                               dtype=x.dtype)
+            pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim, tgt_sizes)
+            pos_embed = torch.from_numpy(pos_embed_arr).to(device=x.device,
+                                                           dtype=x.dtype)
         else:
             pos_embed = get_abs_pos(self.pos_embed, tgt_sizes)
 
@@ -528,11 +527,11 @@ class MiniCPMV(nn.Module, SupportsVision):
 
     def get_vision_embedding(
             self,
-            pixel_values: Union[List[torch.Tensor], torch.Tensor],
+            pixel_values: List[torch.Tensor],
             patch_attn_mask: Optional[torch.Tensor] = None,
             tgt_sizes: Optional[torch.Tensor] = None,
             version: Tuple[int, int] = (2, 0),
-    ):
+    ) -> torch.Tensor:
         if version == (2, 0):
             res = []
             dtype = self.vpm.pos_embed.data.dtype
@@ -554,13 +553,16 @@ class MiniCPMV(nn.Module, SupportsVision):
             vision_embedding = self.vpm(
                 pixel_values.type(dtype),
                 patch_attention_mask=patch_attn_mask).last_hidden_state
-            vision_embedding = self.resampler(vision_embedding, tgt_sizes)
+            return self.resampler(vision_embedding, tgt_sizes)
         else:
-            vision_embedding = self.vpm(pixel_values.type(dtype),
-                                        patch_attention_mask=patch_attn_mask,
-                                        tgt_sizes=tgt_sizes).last_hidden_state
+            return self.vpm(pixel_values.type(dtype),
+                            patch_attention_mask=patch_attn_mask,
+                            tgt_sizes=tgt_sizes).last_hidden_state
 
-    def get_image_bounds(self, input_ids: torch.Tensor):
+    def get_image_bounds(
+        self,
+        input_ids: torch.Tensor,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
         tokenizer = cached_get_tokenizer(self.config._name_or_path,
                                          trust_remote_code=True)
         if not hasattr(tokenizer, "slice_start_id"):
@@ -585,18 +587,18 @@ class MiniCPMV(nn.Module, SupportsVision):
 
         return image_bound
 
-    def get_vision_hidden_states(self, data: MiniCPMVInputs):
+    def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
+        in_device = data["input_ids"].device
+
         if "vision_hidden_states" not in data:
             pixel_values = data["pixel_values"]
             tgt_sizes = data["tgt_sizes"]
-            vision_hidden_states = []
             if self.version == (2, 0):
                 if pixel_values is not None and len(pixel_values) > 0:
                     vision_hidden_states = self.get_vision_embedding(
                         pixel_values)
                 else:
-                    vision_hidden_states = torch.tensor([]).to(
-                        data["input_ids"].device)
+                    vision_hidden_states = torch.tensor([], device=in_device)
             else:
                 device = self.vpm.embeddings.position_embedding.weight.device
                 dtype = self.vpm.embeddings.position_embedding.weight.dtype
@@ -605,7 +607,11 @@ class MiniCPMV(nn.Module, SupportsVision):
                 ]
                 if all_pixel_values:
                     tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
-                    max_patches = torch.max(tgt_sizes[:, 0] * tgt_sizes[:, 1])
+
+                    max_patches = (tgt_sizes[:, 0] *
+                                   tgt_sizes[:, 1]).max().item()
+                    assert isinstance(max_patches, int)
+
                     all_pixel_values = torch.nn.utils.rnn.pad_sequence(
                         all_pixel_values, batch_first=True, padding_value=0.0)
                     B, L, _ = all_pixel_values.shape
@@ -635,8 +641,7 @@ class MiniCPMV(nn.Module, SupportsVision):
                         vision_embedding, tgt_sizes)
 
                 else:  # no image
-                    dummy_feature = []
-                    vision_hidden_states = dummy_feature
+                    vision_hidden_states = torch.tensor([], device=in_device)
         else:
             vision_hidden_states = data["vision_hidden_states"]
 
@@ -679,8 +684,8 @@ class MiniCPMV(nn.Module, SupportsVision):
         input_ids: torch.Tensor,
         tgt_sizes: torch.Tensor,
     ):
-        pixel_values_lst = []
-        tgt_sizes_lst = []
+        pixel_values_lst: List[torch.Tensor] = []
+        tgt_sizes_lst: List[torch.Tensor] = []
         for b in range(len(pixel_values)):
             pixel_values += pixel_values[b]
             tgt_sizes += tgt_sizes[b]
