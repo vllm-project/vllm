@@ -7,6 +7,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform, RocmPlatform
 
+scale_one = torch.Tensor([1.0]).cuda()
 
 def cutlass_fp8_supported() -> bool:
     if isinstance(current_platform, RocmPlatform):
@@ -141,7 +142,7 @@ def apply_fp8_linear(
         qinput, x_scale = ops.scaled_fp8_quant(
             input,
             input_scale,
-            num_token_padding=17,
+            num_token_padding=0,
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         per_tensor_weights = (weight_scale.numel() == 1)
@@ -154,6 +155,7 @@ def apply_fp8_linear(
                                          out_dtype=input.dtype,
                                          scale_a=x_scale,
                                          scale_b=weight_scale,
+                                         scale_result=scale_one,
                                          bias=bias)
             return torch.narrow(output, 0, 0, input.shape[0])
 

@@ -30,9 +30,8 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 
 #define FP8_E4M3_MAX std::numeric_limits<FP8_TYPE>::max()
 
-#ifndef USE_ROCM
 template <bool is_scale_inverted>
-__device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(
+__device__ __forceinline__ FP8_TYPE scaled_fp8_conversion(
     float const val, float const scale) {
   float x = 0.0f;
   if constexpr (is_scale_inverted) {
@@ -41,24 +40,14 @@ __device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(
     x = val / scale;
   }
 
+#ifndef USE_ROCM
   float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
   return static_cast<c10::Float8_e4m3fn>(r);
-}
 #else
-template <bool is_scale_inverted>
-__device__ __forceinline__ c10::Float8_e4m3fnuz scaled_fp8_conversion(
-    float const val, float const scale) {
-  float x = 0.0f;
-  if constexpr (is_scale_inverted) {
-    x = val * scale;
-  } else {
-    x = val / scale;
-  }
-
   return c10::Float8_e4m3fnuz(hip_fp8(x).data, 
                       c10::Float8_e4m3fnuz::from_bits());
-}
 #endif
+}
 
 // Compute the absolute maximum m of the input tensor and store
 // m / float8_e4m3::max() in *scale. Each thread block performs a
