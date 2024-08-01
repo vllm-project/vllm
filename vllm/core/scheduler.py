@@ -25,7 +25,7 @@ ARTIFICIAL_PREEMPTION_MAX_CNT = 500
 
 
 class PreemptionMode(enum.Enum):
-    """Preemption modes.
+    """Preemption modes.s
 
     1. Swapping: Swap out the blocks of the preempted sequences to CPU memory
     and swap them back in when the sequences are resumed.
