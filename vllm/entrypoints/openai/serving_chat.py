@@ -54,7 +54,7 @@ class ConversationMessage(TypedDict):
     role: str
     content: Optional[str]  # optional IFF tool_calls is specified
     tool_call_id: Optional[str]
-    name: str | None
+    name: Optional[str]
     tool_calls: Optional[List]
 
 
