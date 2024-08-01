@@ -88,6 +88,9 @@ class OpenAIServingChat(OpenAIServing):
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
+        if self.enable_auto_tools:
+            logger.info('"Auto" tool choice has been enabled please note that while the parallel_tool_calls client '
+                        'option is preset for compatibility reasons, it will be ignored.')
 
         if self.enable_auto_tools and not tool_parser:
             raise TypeError('Error: --enable-auto-tool-choice requires --tool-choice-parser')

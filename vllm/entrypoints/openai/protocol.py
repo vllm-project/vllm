@@ -161,6 +161,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ChatCompletionNamedToolChoiceParam
         ]
     ] = "none"
+    parallel_tool_calls: Optional[bool] = False # NOTE this will be ignored by VLLM as the behavior is determined by the model
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
