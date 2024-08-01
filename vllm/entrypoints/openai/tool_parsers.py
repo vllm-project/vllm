@@ -1,7 +1,7 @@
 from vllm.entrypoints.openai.protocol import ToolCall, FunctionCall, ChatCompletionResponse, \
     ExtractedToolCallInformation, DeltaToolCall, InitialDeltaToolCall, DeltaFunctionCall, DeltaMessage
 from vllm.logger import init_logger
-from typing import List, Dict
+from typing import List, Dict, Optional
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 import json
@@ -106,7 +106,10 @@ class ToolParser:
     derived classes.
     """
 
-    def __init__(self):
+    def __init__(
+            self,
+            tokenizer: Optional[PreTrainedTokenizer | PreTrainedTokenizerFast | PreTrainedTokenizerFast | AutoTokenizer]=None
+    ):
         # the tool call array derived from partial JSON parsing from the previous execution of the function
         self.prev_tool_call_arr: List[Dict] = []
         # the index of the tool call that is currently being parsed
@@ -119,6 +122,8 @@ class ToolParser:
         self.current_tool_initial_sent: bool = False
         # array of the argument strings (one for each tool) that have been streamed to the client.
         self.streamed_args_for_tool: List[str] = []  # map what has been streamed for each tool so far to a list
+
+        self.model_tokenizer = tokenizer
 
     @staticmethod
     def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
@@ -215,8 +220,12 @@ class MistralToolParser(ToolParser):
                     content=model_output
                 )
 
-    def __init__(self):
-        super().__init__()
+    def __init__(
+            self,
+            tokenizer: Optional[
+                PreTrainedTokenizer | PreTrainedTokenizerFast | PreTrainedTokenizerFast | AutoTokenizer] = None
+    ):
+        super().__init__(tokenizer)
 
         # initialize properties used for state when parsing tool calls in streaming mode
         self.prev_tool_call_arr: List[Dict] = []
@@ -388,8 +397,7 @@ class MistralToolParser(ToolParser):
 class Hermes2ProToolParser(ToolParser):
     tool_call_start_token: str = '<tool_call>'
     tool_call_end_token: str = '</tool_call>'
-    tool_call_start_token_id: int = 128004
-    tool_call_end_token_id: int = 128011
+
 
     # regex to match between <tool_call> and </tool_call> OR between <tool_call> and EOS (happens sometimes :))
     tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>|<tool_call>(.*)', re.DOTALL)
@@ -443,14 +451,25 @@ class Hermes2ProToolParser(ToolParser):
                     content=model_output
                 )
 
-    def __init__(self):
-        super().__init__()
+    def __init__(
+            self,
+            tokenizer: Optional[
+                PreTrainedTokenizer | PreTrainedTokenizerFast | PreTrainedTokenizerFast | AutoTokenizer] = None
+    ):
+        super().__init__(tokenizer)
         self.current_tool_name_sent: bool = False  # reset each time we encounter a new tool in the array
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
         self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = []  # map what has been streamed for each tool so far to a list
+
+        if not self.model_tokenizer:
+            raise ValueError('The model tokenizer must be passed to the ToolParser constructor during construction.')
+        self.tool_call_start_token_id: int = self.model_tokenizer.vocab['<tool_call>']
+        self.tool_call_end_token_id: int = self.model_tokenizer.vocab['</tool_call>']
+        if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
+            raise RuntimeError('Hermes 2 Pro Tool parser could not locate tool call start/end tokens in the tokenizer!')
 
     def extract_tool_calls_streaming(self,
                                      previous_text: str,

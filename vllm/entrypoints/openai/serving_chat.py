@@ -413,7 +413,7 @@ class OpenAIServingChat(OpenAIServing):
         previous_num_tokens = [0] * request.n
         finish_reason_sent = [False] * request.n
 
-        tool_parser: ToolParser = self.tool_parser()
+        tool_parser: ToolParser = self.tool_parser(self.tokenizer)
         try:
             async for res in result_generator:
                 # We need to do it here, because if there are exceptions in
