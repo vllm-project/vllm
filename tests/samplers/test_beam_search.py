@@ -5,6 +5,8 @@ Run `pytest tests/samplers/test_beam_search.py`.
 
 import pytest
 
+from vllm.sequence import Sequence, SequenceData
+
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
@@ -44,3 +46,23 @@ def test_beam_search_single_input(
             assert hf_output_ids[j] == vllm_output_ids[j], (
                 f"Test{i} output{j}:\nHF: {hf_output_ids}\n"
                 f"vLLM: {vllm_output_ids}")
+
+
+def test_get_beam_search_score():
+    # Create a Sequence object with dummy prompt and output tokens
+    prompt_tokens = [1, 2, 3, 4]
+    output_tokens = [5, 6, 7]
+    seq = Sequence(seq_id=0,
+                   block_size=32,
+                   inputs={
+                       "prompt": "dummy prompt",
+                       "prompt_token_ids": prompt_tokens
+                   })
+    seq.data = SequenceData(prompt_tokens, output_tokens)
+    # Set a dummy cumulative logprob
+    seq.data.cumulative_logprob = -10.0
+
+    expected_score = seq.data.cumulative_logprob / len(output_tokens)
+    actual_score = seq.get_beam_search_score()
+
+    assert actual_score == pytest.approx(expected_score)
