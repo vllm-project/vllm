@@ -6,11 +6,11 @@ from typing import List
 
 import pytest
 
+from tests.kernels.utils import override_backend_env_variable
 from vllm.block import PhysicalTokenBlock
 from vllm.core.block_manager_v1 import CachedBlockAllocator
 from vllm.utils import Device
 
-from tests.kernels.utils import override_backend_env_variable
 from ..models.utils import check_outputs_equal
 
 MODELS = [
