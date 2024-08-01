@@ -12,13 +12,13 @@ namespace vllm {
 // has_residual must be true, if residual is not a nullptr
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
-                            int const hidden_size, float const epsilon,
+                            int32_t const hidden_size, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
-  int const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * hidden_size;
   // sum of squares
   float ss = 0.0f;
 
-  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -41,13 +41,13 @@ __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
-    float const min_scaling_factor, int const hidden_size,
+    float const min_scaling_factor, int32_t const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
-  int const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * hidden_size;
   constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
 
   float block_absmax_val_maybe = 0.0f;
-  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -82,11 +82,11 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
                                float const rms, float const scale,
-                               int const hidden_size,
+                               int32_t const hidden_size,
                                scalar_t* __restrict__ residual = nullptr) {
-  int const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * hidden_size;
 
-  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -106,9 +106,9 @@ namespace vectorized {
 // hidden_size must be a multiple of 4
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
-                            int const hidden_size, float const epsilon,
+                            int32_t const hidden_size, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
-  int const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * hidden_size;
 
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
@@ -122,11 +122,10 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   // sum of squares
   float ss = 0.0f;
 
-  int const tid = threadIdx.x;
-  int const num_vec_elems = hidden_size >> 2;
+  int32_t const num_vec_elems = hidden_size >> 2;
 
 #pragma unroll 4
-  for (int i = tid; i < num_vec_elems; i += blockDim.x) {
+  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> in = vec_input[i];
 
     vec4_t<float> x;
@@ -165,9 +164,9 @@ __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
-    float const min_scaling_factor, int const hidden_size,
+    float const min_scaling_factor, int32_t const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
-  int const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * hidden_size;
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
@@ -181,13 +180,12 @@ __device__ void compute_dynamic_per_token_scales(
   }
 
   constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
-  int const tid = threadIdx.x;
 
-  int const num_vec_elems = hidden_size >> 2;
+  int32_t const num_vec_elems = hidden_size >> 2;
   float block_absmax_val_maybe = 0.0f;
 
 #pragma unroll 4
-  for (int i = tid; i < num_vec_elems; i += blockDim.x) {
+  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> in = vec_input[i];
     vec4_t<scalar_t> const w = vec_weight[i];
 
@@ -241,9 +239,9 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
                                float const rms, float const scale,
-                               int const hidden_size,
+                               int32_t const hidden_size,
                                scalar_t* __restrict__ residual = nullptr) {
-  int const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * hidden_size;
 
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
@@ -257,11 +255,10 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     vec_residual = reinterpret_cast<vec4_t<scalar_t>*>(&residual[token_offset]);
   }
 
-  int const tid = threadIdx.x;
-  int const num_vec_elems = hidden_size >> 2;
+  int32_t const num_vec_elems = hidden_size >> 2;
 
 #pragma unroll 4
-  for (int i = tid; i < num_vec_elems; i += blockDim.x) {
+  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> const in = vec_input[i];
     vec4_t<scalar_t> const w = vec_weight[i];
 

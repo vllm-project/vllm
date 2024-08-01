@@ -1,6 +1,5 @@
 
 #include <ATen/cuda/CUDAContext.h>
-// #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
 #include "../../dispatch_utils.h"
@@ -17,7 +16,7 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon,
-    float const min_scaling_factor, int const hidden_size,
+    float const min_scaling_factor, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr) {
   // Compute RMS
   float rms = 0.0f;
@@ -54,7 +53,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon,
-    float const min_scaling_factor, int const hidden_size,
+    float const min_scaling_factor, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr) {
   // For vectorization, token_input and token_output pointers need to be
   // aligned at 8-byte and 4-byte addresses respectively.
@@ -100,8 +99,8 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     double const var_epsilon,     // Variance epsilon used in norm calculation
     std::optional<at::Tensor> const& scale_ub,
     std::optional<at::Tensor>& residual) {
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
+  int32_t hidden_size = input.size(-1);
+  int32_t num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
