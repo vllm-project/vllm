@@ -283,12 +283,15 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
             "Alibi not support for blocksparse flash attention.")
         assert sliding_window is None, ValueError(
             "sliding_window is invalid for blocksparse attention.")
+        assert logits_soft_cap is None, ValueError(
+            "logits_soft_cap is invalid for blocksparse attention.")
 
         if "num_heads" not in blocksparse_params:
             blocksparse_params["num_heads"] = num_heads
