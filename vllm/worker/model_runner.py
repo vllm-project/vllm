@@ -423,8 +423,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if lora_id > 0:
             inter_data.lora_requests.add(seq_group_metadata.lora_request)
         query_len = inter_data.query_lens[seq_idx]
-        inter_data.lora_index_mapping.append([lora_id] * query_len)
-        inter_data.lora_prompt_mapping.append(
+        inter_data.lora_index_mapping[seq_idx] = [lora_id] * query_len
+        inter_data.lora_prompt_mapping[seq_idx] = (
             [lora_id] *
             (query_len if seq_group_metadata.sampling_params
              and seq_group_metadata.sampling_params.prompt_logprobs is not None
