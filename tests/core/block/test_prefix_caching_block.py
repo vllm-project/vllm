@@ -319,6 +319,10 @@ class TestPrefixCachingBlockAllocator:
     @pytest.mark.parametrize("num_blocks", [4])
     @pytest.mark.parametrize("block_size", [8])
     def test_get_num_blocks_touched(num_blocks, block_size):
+        """ Verify the allocator can correctly return the number of
+        blocks touched, when there are cached prefixes and different
+        lookahead slots.
+        """
         allocator_src = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                     block_size=block_size)
         allocator_dst = PrefixCachingBlockAllocator(num_blocks=num_blocks,

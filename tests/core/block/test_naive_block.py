@@ -105,6 +105,9 @@ class TestNaiveBlockAllocator:
     @pytest.mark.parametrize("num_blocks", [4])
     @pytest.mark.parametrize("block_size", [8])
     def test_get_num_blocks_touched(num_blocks, block_size):
+        """ Verify the allocator can correctly return the number of
+        blocks touched, with different lookahead slots.
+        """
         allocator_src = NaiveBlockAllocator(create_block=NaiveBlock,
                                             num_blocks=num_blocks,
                                             block_size=block_size)
