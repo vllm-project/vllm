@@ -951,7 +951,7 @@ class HiddenStates:
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
         self.hidden_states: torch.Tensor = hidden_states
-        self.bonus_token_previous_hidden_states: Optional[
+        self.last_non_bonus_token_hidden_states: Optional[
             torch.Tensor] = bonus_token_previous_hidden_states
 
     def update(
@@ -964,7 +964,7 @@ class HiddenStates:
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
         # Adding dummy hidden_states to this to maintain same shape
-        self.bonus_token_previous_hidden_states = torch.cat([
+        self.last_non_bonus_token_hidden_states = torch.cat([
             self.hidden_states,
             hidden_states if bonus_token_previous_hidden_states is None else
             bonus_token_previous_hidden_states
@@ -978,14 +978,14 @@ class HiddenStates:
             # Batch contents changed - prune removed sequences.
             index = [self.seq_ids.index(seq_id) for seq_id in seq_ids]
             self.hidden_states = self.hidden_states[index]
-            if self.bonus_token_previous_hidden_states is not None:
-                self.bonus_token_previous_hidden_states = self\
-                    .bonus_token_previous_hidden_states[index]
+            if self.last_non_bonus_token_hidden_states is not None:
+                self.last_non_bonus_token_hidden_states = self\
+                    .last_non_bonus_token_hidden_states[index]
             self.seq_ids = seq_ids
 
     def expand_with_bonus_tokens(
             self, seq_with_bonus_token_in_last_step: set) -> None:
-        if self.bonus_token_previous_hidden_states is None \
+        if self.last_non_bonus_token_hidden_states is None \
             or not seq_with_bonus_token_in_last_step:
             return
 
@@ -998,7 +998,7 @@ class HiddenStates:
 
         self.hidden_states = torch.cat(
             [self.hidden_states,
-             self.bonus_token_previous_hidden_states])[index]
+             self.last_non_bonus_token_hidden_states])[index]
 
 
 @dataclass

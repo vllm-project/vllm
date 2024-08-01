@@ -477,8 +477,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     execute_model_req.seq_group_metadata_list, hidden_states)
 
         if not skip_proposer:
-            execute_model_req.previous_hidden_states = sampler_output\
-                .prefill_hidden_states
+            # For prefill step in proposer, we run the model for N-1 tokens
+            # because Nth token will be processed in the first decode step. For
+            # N-1 tokens, the input should be 0:N-1 hidden states which should
+            # be concatanated with 1:N token (since output of scorer has to be
+            # the input for proposer). Therefore, we shift the hidden states to
+            # align n-1th hidden state with nth token.
+            if sampler_output.prefill_hidden_states is not None:
+                execute_model_req.previous_hidden_states = sampler_output\
+                    .prefill_hidden_states.roll(shifts=1, dims=0)
+
             self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
@@ -507,6 +515,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             return False
         num_lookahead_slots = data["num_lookahead_slots"]
 
+        # In case of prefill, scorer_worker has to be run before proposer so
+        # that the hidden states can be propagated to proposer when needed.
         if data["no_spec"]:
             self.scorer_worker.execute_model()
 
