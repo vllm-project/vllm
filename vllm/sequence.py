@@ -550,8 +550,7 @@ class SequenceGroup:
     ) -> List[Sequence]:
         if status is None:
             return self.seqs
-        else:
-            return [seq for seq in self.seqs if seq.status == status]
+        return [seq for seq in self.seqs if seq.status == status]
 
     def is_encoder_decoder(self) -> bool:
         return self.encoder_seq is not None
@@ -604,10 +603,9 @@ class SequenceGroup:
         self.seqs.append(seq)
 
     def remove(self, seq_id: int) -> None:
-        seq = self.seqs_dict.get(seq_id, None)
+        seq = self.seqs_dict.pop(seq_id, None)
         if seq is None:
             raise ValueError(f"Sequence {seq_id} not found.")
-        del self.seqs_dict[seq_id]
         self.seqs.remove(seq)
 
     def is_finished(self) -> bool:
