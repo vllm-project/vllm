@@ -10,6 +10,8 @@ steps:
 - label: Async Engine, Inputs, Utils, Worker Test
   fast_check: true
   fast_check_only: true
+  source_file_dependency:
+    - vllm/
   commands:
   - pytest -v -s async_engine # Async Engine
   - pytest -v -s test_inputs.py
@@ -20,6 +22,8 @@ steps:
 - label: Metrics, Tracing Test
   fast_check: true
   fast_check_only: true
+  source_file_dependency:
+    - vllm/
   commands:
   - pytest -v -s metrics # Metrics
   - "pip install \
@@ -31,6 +35,8 @@ steps:
 
 - label: Regression Test
   mirror_hardwares: [amd]
+  source_file_dependency:
+    - vllm/
   fast_check: true
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
@@ -41,6 +47,8 @@ steps:
 
 - label: Basic Correctness Test
   mirror_hardwares: [amd]
+  source_file_dependency:
+    - vllm/
   fast_check: true
   commands:
   # This flashinfer installation will fail on AMD ROCm, so it is set as optional.
@@ -53,6 +61,9 @@ steps:
 
 - label: Core Test
   mirror_hardwares: [amd]
+  source_file_dependency:
+    - vllm/core
+    - vllm/distributed
   fast_check: true
   commands:
   - pytest -v -s core
@@ -225,10 +236,6 @@ steps:
     - apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
-
-- label: Metrics Test
-  mirror_hardwares: [amd]
-  command: pytest -v -s metrics
 
 - label: Quantization Test
   #mirror_hardwares: [amd]
