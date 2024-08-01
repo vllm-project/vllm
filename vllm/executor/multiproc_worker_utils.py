@@ -76,7 +76,7 @@ class ResultHandler(threading.Thread):
     """Handle results from all workers (in background thread)"""
 
     def __init__(self) -> None:
-        super().__init__(daemon=True)
+        super().__init__(daemon=False)
         self.result_queue = mp.Queue()
         self.tasks: Dict[uuid.UUID, Union[ResultFuture, asyncio.Future]] = {}
 
@@ -100,7 +100,7 @@ class WorkerMonitor(threading.Thread):
 
     def __init__(self, workers: List['ProcessWorkerWrapper'],
                  result_handler: ResultHandler):
-        super().__init__(daemon=True)
+        super().__init__(daemon=False)
         self.workers = workers
         self.result_handler = result_handler
         self._close = False
@@ -111,16 +111,23 @@ class WorkerMonitor(threading.Thread):
         if not self._close:
             self._close = True
 
-            # Kill / cleanup all workers
-            for worker in self.workers:
-                process = worker.process
-                if process.sentinel in dead_sentinels:
-                    process.join(JOIN_TIMEOUT_S)
-                if process.exitcode is not None and process.exitcode != 0:
-                    logger.error("Worker %s pid %s died, exit code: %s",
-                                 process.name, process.pid, process.exitcode)
+            if not sys.is_finalizing():
+                # Kill / cleanup all workers
+                died_count = 0
+                for worker in self.workers:
+                    process = worker.process
+                    if process.sentinel in dead_sentinels:
+                        process.join(JOIN_TIMEOUT_S)
+                    if process.exitcode is not None and process.exitcode != 0:
+                        died_count += 1
+                        logger.error("Worker %s pid %s died, exit code: %s",
+                                     process.name, process.pid,
+                                     process.exitcode)
+                if died_count < len(self.workers):
+                    logger.info(
+                        "Killing remaining local vLLM worker processes")
+
             # Cleanup any remaining workers
-            logger.info("Killing local vLLM worker processes")
             for worker in self.workers:
                 worker.kill_worker()
             # Must be done after worker task queues are all closed
