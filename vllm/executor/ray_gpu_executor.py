@@ -8,6 +8,8 @@ import msgspec
 import pickle
 from array import array
 
+from regex import P
+
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
