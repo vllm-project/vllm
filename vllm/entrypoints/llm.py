@@ -1,8 +1,6 @@
 from contextlib import contextmanager
-from typing import (ClassVar, Dict, List, Optional, Sequence, TypedDict, Union,
-                    cast, overload)
+from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
-from pydantic import BaseModel
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -14,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
+from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -23,16 +22,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
 logger = init_logger(__name__)
-
-
-class LLMGuidedOptions(TypedDict, total=False):
-    guided_json: Union[Dict, BaseModel, str]
-    guided_regex: str
-    guided_choice: List[str]
-    guided_grammar: str
-    guided_decoding_backend: str
-    guided_whitespace_pattern: str
-    guided_json_object: bool
 
 
 class LLM:

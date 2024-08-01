@@ -1,7 +1,17 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, TypedDict, Union
 
 from pydantic import BaseModel
+
+
+class LLMGuidedOptions(TypedDict, total=False):
+    guided_json: Union[Dict, BaseModel, str]
+    guided_regex: str
+    guided_choice: List[str]
+    guided_grammar: str
+    guided_decoding_backend: str
+    guided_whitespace_pattern: str
+    guided_json_object: bool
 
 
 @dataclass
