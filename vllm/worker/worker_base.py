@@ -333,8 +333,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        if isinstance(execute_model_req.previous_hidden_states,
-                        torch.Tensor):
+        if isinstance(execute_model_req.previous_hidden_states, torch.Tensor):
             kwargs = {
                 "previous_hidden_states":
                 execute_model_req.previous_hidden_states
