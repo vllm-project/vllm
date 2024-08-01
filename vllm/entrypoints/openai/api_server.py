@@ -5,14 +5,15 @@ import re
 import signal
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, Set
+from typing import Annotated, Optional, Set
 
 import fastapi
 import uvicorn
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
@@ -73,6 +74,7 @@ async def lifespan(app: fastapi.FastAPI):
 
 
 router = APIRouter()
+auth_enabled_router = APIRouter()
 
 
 def mount_metrics(app: fastapi.FastAPI):
@@ -88,6 +90,11 @@ async def health() -> Response:
     """Health check."""
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
+
+@router.get("/version")
+async def show_version():
+    ver = {"version": VLLM_VERSION}
+    return JSONResponse(content=ver)
 
 
 @router.post("/tokenize")
@@ -112,19 +119,13 @@ async def detokenize(request: DetokenizeRequest):
         return JSONResponse(content=generator.model_dump())
 
 
-@router.get("/v1/models")
+@auth_enabled_router.get("/v1/models")
 async def show_available_models():
     models = await openai_serving_completion.show_available_models()
     return JSONResponse(content=models.model_dump())
 
 
-@router.get("/version")
-async def show_version():
-    ver = {"version": VLLM_VERSION}
-    return JSONResponse(content=ver)
-
-
-@router.post("/v1/chat/completions")
+@auth_enabled_router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
@@ -140,7 +141,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return JSONResponse(content=generator.model_dump())
 
 
-@router.post("/v1/completions")
+@auth_enabled_router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
@@ -154,7 +155,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-@router.post("/v1/embeddings")
+@auth_enabled_router.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     generator = await openai_serving_embedding.create_embedding(
         request, raw_request)
@@ -166,8 +167,21 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 
 def build_app(args):
+    API_KEY = envs.VLLM_API_KEY or args.api_key
+    token_auth_scheme = HTTPBearer(scheme_name="ApiKeyAuth")
+
+    def validate_api_key(auth_credentials: Annotated[HTTPAuthorizationCredentials, Depends(token_auth_scheme)]) -> None:
+        if API_KEY is not None and auth_credentials.credentials != API_KEY:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail={"error": "Unauthorized"}
+            )
+
+    if API_KEY is not None:
+        auth_enabled_router.dependencies.append(Depends(validate_api_key))
+
     app = fastapi.FastAPI(lifespan=lifespan)
     app.include_router(router)
+    app.include_router(auth_enabled_router)
     app.root_path = args.root_path
 
     mount_metrics(app)
@@ -185,20 +199,6 @@ def build_app(args):
         err = openai_serving_chat.create_error_response(message=str(exc))
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
-
-    if token := envs.VLLM_API_KEY or args.api_key:
-
-        @app.middleware("http")
-        async def authentication(request: Request, call_next):
-            root_path = "" if args.root_path is None else args.root_path
-            if request.method == "OPTIONS":
-                return await call_next(request)
-            if not request.url.path.startswith(f"{root_path}/v1"):
-                return await call_next(request)
-            if request.headers.get("Authorization") != "Bearer " + token:
-                return JSONResponse(content={"error": "Unauthorized"},
-                                    status_code=401)
-            return await call_next(request)
 
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)
