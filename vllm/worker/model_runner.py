@@ -1283,7 +1283,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        # do_no_processor: bool = None,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
+        # print("[zyl] model_runner execute_model")
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
@@ -1364,8 +1366,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
 
+        # hidden_or_intermediate_states = self.model._get_logits(
+        #     hidden_or_intermediate_states, model_input.sampling_metadata
+        # )
+        # if do_no_processor is not None and do_no_processor is True:
+        #     return hidden_or_intermediate_states
+
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
+
+        # if do_no_processor is not None and do_no_processor is False:
+        #     return logits
 
         if not self.is_driver_worker:
             return []

@@ -12,7 +12,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+                         SpeculativeConfig, ClassifierFreeGuidanceConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -168,6 +168,7 @@ class LLMEngine:
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        classifier_free_guidance_config: Optional[ClassifierFreeGuidanceConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -186,7 +187,7 @@ class LLMEngine:
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
-            "enable_prefix_caching=%s)",
+            "enable_prefix_caching=%s, classifier_free_guidance_config=%r)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -216,6 +217,7 @@ class LLMEngine:
             model_config.served_model_name,
             scheduler_config.use_v2_block_manager,
             cache_config.enable_prefix_caching,
+            classifier_free_guidance_config,
         )
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -230,6 +232,7 @@ class LLMEngine:
         self.load_config = load_config
         self.decoding_config = decoding_config or DecodingConfig()
         self.prompt_adapter_config = prompt_adapter_config
+        self.classifier_free_guidance_config = classifier_free_guidance_config
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
@@ -259,6 +262,7 @@ class LLMEngine:
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
+            classifier_free_guidance_config=classifier_free_guidance_config
         )
 
         if not self.model_config.embedding_mode:
@@ -314,6 +318,8 @@ class LLMEngine:
                       parallel_config.pipeline_parallel_size)
             for _ in range(parallel_config.pipeline_parallel_size)
         ]
+
+        print("scheduler_config:", scheduler_config)
 
         # Metric Logging.
         if self.log_stats:
@@ -586,6 +592,17 @@ class LLMEngine:
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
 
+        if "negative_prompt" in inputs and "negative_prompt_token_ids" not in inputs:
+            tokenizer = self.get_tokenizer_group("negative prompts must be None if "
+                                                 "skip_tokenizer_init is True")
+            negative_prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                prompt=inputs["negative_prompt"],
+                                                lora_request=lora_request)
+        elif "negative_prompt_token_ids" in inputs:
+            negative_prompt_token_ids = inputs.get("negative_prompt_token_ids")
+        else:
+            negative_prompt_token_ids = None
+
         if prompt_adapter_request:
             prompt_token_ids = \
                 [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
@@ -593,7 +610,9 @@ class LLMEngine:
 
         llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
                                prompt=inputs.get("prompt"),
-                               multi_modal_data=inputs.get("multi_modal_data"))
+                               multi_modal_data=inputs.get("multi_modal_data"),
+                               negative_prompt_token_ids=negative_prompt_token_ids,
+                               negative_prompt=inputs.get("negative_prompt"))
 
         return self.input_processor(llm_inputs)
 

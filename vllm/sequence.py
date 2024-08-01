@@ -118,11 +118,16 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
+        negative_prompt_token_ids: Optional[List[int]] = None,
     ) -> None:
         self._prompt_token_ids: List[int] = list(prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids: List[int] = (
             list(output_token_ids) if output_token_ids is not None else [])
+
+        self._negative_prompt_token_ids: List[int] = (
+            list(negative_prompt_token_ids) if negative_prompt_token_ids is not None else [])
+        self._negative_prompt_token_ids_tuple: Tuple[int, ...] = tuple(negative_prompt_token_ids or [])
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -144,6 +149,15 @@ class SequenceData:
         self._prompt_token_ids = list(new_prompt_token_ids)
         self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
         self._update_cached_all_tokens()
+
+    @property
+    def negative_prompt_token_ids(self) -> Tuple[int, ...]:
+        return tuple(self._negative_prompt_token_ids)
+
+    @negative_prompt_token_ids.setter
+    def negative_prompt_token_ids(self, new_negative_prompt_token_ids) -> None:
+        self._negative_prompt_token_ids = list(new_negative_prompt_token_ids)
+        self._negative_prompt_token_ids_tuple = tuple(new_negative_prompt_token_ids)
 
     @property
     def output_token_ids(self) -> Tuple[int, ...]:
@@ -228,6 +242,7 @@ class SequenceData:
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self._prompt_token_ids}, "
+                f"negative_prompt_token_ids={self._negative_prompt_token_ids}, "
                 f"output_token_ids={self._output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob})")
 
@@ -261,7 +276,9 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
 
-        self.data = SequenceData(self.prompt_token_ids)
+        self.data = SequenceData(
+            self.prompt_token_ids, 
+            negative_prompt_token_ids=self.negative_prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -289,6 +306,14 @@ class Sequence:
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         return self.inputs.get("multi_modal_data") or {}
+
+    @property
+    def negative_prompt(self) -> Optional[str]:
+        return self.inputs.get("negative_prompt")
+
+    @property
+    def negative_prompt_token_ids(self) -> List[int]:
+        return self.inputs.get("negative_prompt_token_ids") or []
 
     @property
     def lora_int_id(self) -> int:
@@ -399,7 +424,8 @@ class Sequence:
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
-                f"num_blocks={self.n_blocks}, ")
+                f"num_blocks={self.n_blocks}, "
+                f"data={self.data})")
 
 
 @dataclass
@@ -477,6 +503,14 @@ class SequenceGroup:
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
         return self._first_seq.multi_modal_data
+
+    @property
+    def negative_prompt(self) -> Optional[str]:
+        return self._first_seq.negative_prompt
+
+    @property
+    def negative_prompt_token_ids(self) -> List[int]:
+        return self._first_seq.negative_prompt_token_ids
 
     @property
     def lora_int_id(self) -> int:

@@ -4,7 +4,7 @@ from typing import List, Optional, Set, Tuple
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+                         SpeculativeConfig, ClassifierFreeGuidanceConfig)
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
@@ -32,6 +32,7 @@ class ExecutorBase(ABC):
         multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        classifier_free_guidance_config: Optional[ClassifierFreeGuidanceConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -43,6 +44,7 @@ class ExecutorBase(ABC):
         self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
         self.prompt_adapter_config = prompt_adapter_config
+        self.classifier_free_guidance_config = classifier_free_guidance_config
 
         self._init_executor()
 

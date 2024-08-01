@@ -91,8 +91,21 @@ class TokensPrompt(TypedDict):
     if the model supports it.
     """
 
+class NegativeTextPrompt(TypedDict):
+    """Schema for a text prompt."""
 
-PromptInputs = Union[str, TextPrompt, TokensPrompt]
+    negative_prompt: str
+    """The input text to be tokenized before passing to the model."""
+
+
+class NegativeTokensPrompt(TypedDict):
+    """Schema for a tokenized prompt."""
+
+    negative_prompt_token_ids: List[int]
+    """A list of token IDs to pass to the model."""
+
+
+PromptInputs = Union[str, TextPrompt, TokensPrompt, NegativeTextPrompt, NegativeTokensPrompt]
 """
 The inputs to the LLM, which can take one of the following forms:
 
@@ -119,3 +132,7 @@ class LLMInputs(TypedDict):
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
+
+    negative_prompt_token_ids: NotRequired[Optional[List[int]]]
+
+    negative_prompt: NotRequired[Optional[str]]

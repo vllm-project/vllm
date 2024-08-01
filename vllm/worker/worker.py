@@ -9,7 +9,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+                         SpeculativeConfig, ClassifierFreeGuidanceConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -48,6 +48,7 @@ class Worker(LocalOrDistributedWorkerBase):
         multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        classifier_free_guidance_config: Optional[ClassifierFreeGuidanceConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:

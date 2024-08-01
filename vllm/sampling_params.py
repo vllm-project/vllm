@@ -138,6 +138,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        guidance_scale: Optional[float] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -179,6 +180,7 @@ class SamplingParams:
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
         self.truncate_prompt_tokens = truncate_prompt_tokens
+        self.guidance_scale = guidance_scale
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
         if self.stop and not include_stop_str_in_output:
@@ -359,4 +361,5 @@ class SamplingParams:
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens})")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}), "
+            f"guidance_scale={self.guidance_scale})")

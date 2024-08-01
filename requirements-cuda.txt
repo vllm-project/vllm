@@ -4,8 +4,8 @@
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
 nvidia-ml-py # for pynvml package
-torch == 2.3.1
+# torch == 2.3.1
 # These must be updated alongside torch
-torchvision == 0.18.1   # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
-xformers == 0.0.27  # Requires PyTorch 2.3.1
-vllm-flash-attn == 2.5.9.post1  # Requires PyTorch 2.3.1
+# torchvision == 0.18.1   # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+# xformers == 0.0.27  # Requires PyTorch 2.3.1
+# vllm-flash-attn == 2.5.9.post1  # Requires PyTorch 2.3.1

@@ -30,13 +30,13 @@ from transformers import LlamaConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size, tensor_model_parallel_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor, _prune_hidden_states
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -136,7 +136,7 @@ class LlamaAttention(nn.Module):
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
-            bias=bias,
+            bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -406,10 +406,29 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
-                                                    logit_scale)
+                                                    logit_scale,
+                                                    logits_as_input=True)
             self.sampler = Sampler()
+            self.org_vocab_size = config.vocab_size
         else:
             self.lm_head = PPMissingLayer()
+
+    def _get_logits(self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
+        # Get the logits for the next tokens.
+        logits = self.lm_head.linear_method.apply(
+            self.lm_head,
+            hidden_states,
+            bias=None,
+        )
+        logits = tensor_model_parallel_gather(logits)
+        # Remove paddings in vocab (if any).
+        if logits is not None:
+            logits = logits[:, :self.org_vocab_size]
+        return logits
 
     def forward(
         self,

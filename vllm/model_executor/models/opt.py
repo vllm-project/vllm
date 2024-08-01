@@ -25,13 +25,13 @@ from transformers import OPTConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_gather
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor, _prune_hidden_states
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
@@ -295,8 +295,26 @@ class OPTForCausalLM(nn.Module):
         self.quant_config = quant_config
         self.model = OPTModel(config, cache_config, quant_config)
         self.lm_head = self.model.decoder.embed_tokens
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size, logits_as_input=True)
         self.sampler = Sampler()
+        self.org_vocab_size = config.vocab_size
+
+    def _get_logits(self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
+        # Get the logits for the next tokens.
+        logits = self.lm_head.linear_method.apply(
+            self.lm_head,
+            hidden_states,
+            bias=None,
+        )
+        logits = tensor_model_parallel_gather(logits)
+        # Remove paddings in vocab (if any).
+        if logits is not None:
+            logits = logits[:, :self.org_vocab_size]
+        return logits
 
     def forward(
         self,
