@@ -340,6 +340,8 @@ class LLMEngine:
 
         tokenizer_group = self.get_tokenizer_group()
 
+        # Ensure that the function doesn't contain a reference to self,
+        # to avoid engine GC issues
         def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
