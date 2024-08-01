@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-from vllm.distributed import broadcast_tensor_dict, get_pp_group
+from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
@@ -266,7 +266,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict())
+                get_pp_group().recv_tensor_dict(all_gather_group=get_tp_group()))
 
         output = self.model_runner.execute_model(
             model_input, self.kv_cache[worker_input.virtual_engine]
@@ -274,7 +274,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             num_steps)
 
         if not get_pp_group().is_last_rank:
-            get_pp_group().send_tensor_dict(output.tensors)
+            get_pp_group().send_tensor_dict(output.tensors, all_gather_group=get_tp_group())
             return [None]
 
         # Worker only supports single-step execution. Wrap the output in a
