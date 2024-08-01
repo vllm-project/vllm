@@ -12,7 +12,8 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_world_size, get_pp_group)
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              get_pp_group)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -201,8 +202,7 @@ class QWenModel(nn.Module):
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: QWenBlock(config, cache_config, quant_config),
-            prefix=f"{prefix}.h"
-        )
+            prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
