@@ -112,6 +112,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            "cpu",
         )
 
         # Multi-modal data support
@@ -387,3 +388,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             sampling_metadata=model_input.sampling_metadata,
         )
         return [output]
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()

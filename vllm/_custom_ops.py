@@ -10,6 +10,7 @@ logger = init_logger(__name__)
 
 try:
     import vllm._C
+    import vllm._C_cpu
 except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
@@ -44,27 +45,45 @@ def hint_on_error(fn):
 
 # activation ops
 def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.silu_and_mul(out, x)
+    if x.device.type == "cuda":
+        torch.ops._C.silu_and_mul(out, x)
+    elif x.device.type == "cpu":
+        torch.ops._C_cpu.silu_and_mul(out, x)
 
 
 def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_and_mul(out, x)
+    if x.device.type == "cuda":
+        torch.ops._C.gelu_and_mul(out, x)
+    elif x.device.type == "cpu":
+        torch.ops._C_cpu.gelu_and_mul(out, x)
 
 
 def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_tanh_and_mul(out, x)
+    if x.device.type == "cuda":
+        torch.ops._C.gelu_tanh_and_mul(out, x)
+    elif x.device.type == "cpu":
+        torch.ops._C_cpu.gelu_tanh_and_mul(out, x)
 
 
 def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_fast(out, x)
+    if x.device.type == "cuda":
+        torch.ops._C.gelu_fast(out, x)
+    elif x.device.type == "cpu":
+        torch.ops._C_cpu.gelu_fast(out, x)
 
 
 def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_new(out, x)
+    if x.device.type == "cuda":
+        torch.ops._C.gelu_new(out, x)
+    elif x.device.type == "cpu":
+        torch.ops._C_cpu.gelu_new(out, x)
 
 
 def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_quick(out, x)
+    if x.device.type == "cuda":
+        torch.ops._C.gelu_quick(out, x)
+    elif x.device.type == "cpu":
+        torch.ops._C_cpu.gelu_quick(out, x)
 
 
 # page attention ops
@@ -89,12 +108,20 @@ def paged_attention_v1(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    torch.ops._C.paged_attention_v1(
-        out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
-        seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
-        k_scale, v_scale, tp_rank, blocksparse_local_blocks,
-        blocksparse_vert_stride, blocksparse_block_size,
-        blocksparse_head_sliding_step)
+    if query.device.type == "cuda":
+        torch.ops._C.paged_attention_v1(
+            out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
+            seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
+            k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+            blocksparse_vert_stride, blocksparse_block_size,
+            blocksparse_head_sliding_step)
+    elif query.device.type == "cpu":
+        torch.ops._C_cpu.paged_attention_v1(
+            out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
+            seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
+            k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+            blocksparse_vert_stride, blocksparse_block_size,
+            blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -121,12 +148,20 @@ def paged_attention_v2(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    torch.ops._C.paged_attention_v2(
-        out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
-        num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
-        alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
-        blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step)
+    if query.device.type == "cuda":
+        torch.ops._C.paged_attention_v2(
+            out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
+            num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
+            alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
+            blocksparse_local_blocks, blocksparse_vert_stride,
+            blocksparse_block_size, blocksparse_head_sliding_step)
+    elif query.device.type == "cpu":
+        torch.ops._C_cpu.paged_attention_v2(
+            out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
+            num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
+            alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
+            blocksparse_local_blocks, blocksparse_vert_stride,
+            blocksparse_block_size, blocksparse_head_sliding_step)
 
 
 # pos encoding ops
@@ -138,8 +173,12 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    torch.ops._C.rotary_embedding(positions, query, key, head_size,
-                                  cos_sin_cache, is_neox)
+    if query.device.type == "cuda":
+        torch.ops._C.rotary_embedding(positions, query, key, head_size,
+                                      cos_sin_cache, is_neox)
+    elif query.device.type == "cpu":
+        torch.ops._C_cpu.rotary_embedding(positions, query, key, head_size,
+                                          cos_sin_cache, is_neox)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -155,24 +194,18 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    if input.device.type == "cuda":
+        torch.ops._C.rms_norm(out, input, weight, epsilon)
+    elif input.device.type == "cpu":
+        torch.ops._C_cpu.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
-
-
-def advance_step(num_seqs: int, num_queries: int, block_size: int,
-                 input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
-                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
-                 slot_mapping: torch.Tensor,
-                 block_tables: torch.Tensor) -> None:
-    """Advance a step on GPU for existing inputs for a multi-step runner"""
-    return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
-                                     input_tokens, sampled_token_ids,
-                                     input_positions, seq_lens, slot_mapping,
-                                     block_tables)
+    if input.device.type == "cuda":
+        torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    elif input.device.type == "cpu":
+        torch.ops._C_cpu.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
 # quantization ops
@@ -422,9 +455,14 @@ def reshape_and_cache(
     k_scale: float,
     v_scale: float,
 ) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
-                                             value_cache, slot_mapping,
-                                             kv_cache_dtype, k_scale, v_scale)
+    if key.device.type == "cuda":
+        torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
+                                                 value_cache, slot_mapping,
+                                                 kv_cache_dtype, k_scale, v_scale)
+    elif key.device.type == "cpu":
+        torch.ops._C_cpu_cache_ops.reshape_and_cache(key, value, key_cache,
+                                                     value_cache, slot_mapping,
+                                                     kv_cache_dtype, k_scale, v_scale)
 
 
 def reshape_and_cache_flash(
@@ -437,7 +475,13 @@ def reshape_and_cache_flash(
     k_scale: float,
     v_scale: float,
 ) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
+    if key.device.type == "cuda":
+        torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
+                                                   value_cache, slot_mapping,
+                                                   kv_cache_dtype, k_scale,
+                                                   v_scale)
+    elif key.device.type == "cpu":
+        torch.ops._C_cpu_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
                                                    kv_cache_dtype, k_scale,
                                                    v_scale)
@@ -446,12 +490,20 @@ def reshape_and_cache_flash(
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    if key_caches[0].device.type == "cuda":
+        torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches,
+                                           block_mapping)
+    elif key_caches[0].device.type == "cpu":
+        torch.ops._C_cpu_cache_ops.copy_blocks(key_caches, value_caches,
+                                               block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
+    if src.device.type == "cuda":
+        torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
+    elif src.device.type == "cpu":
+        torch.ops._C_cpu_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
 def convert_fp8(output: torch.Tensor,
