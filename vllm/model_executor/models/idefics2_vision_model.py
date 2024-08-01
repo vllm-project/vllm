@@ -23,6 +23,7 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2Config, Idefics2VisionConfig)
 from xformers import ops as xops
 
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -38,11 +39,11 @@ class Idefics2VisionEmbeddings(nn.Module):
     ` to enable images of variable
     resolution.
 
-    The modifications are adapted from [Patch n' Pack: NaViT, a Vision 
+    The modifications are adapted from [Patch n' Pack: NaViT, a Vision
     Transformer for any Aspect Ratio and Resolution](https://arxiv.org/abs/2307.06304)
-    which allows treating images in their native aspect ratio and without the 
+    which allows treating images in their native aspect ratio and without the
     need to resize them to the same fixed size. In particular, we start from the
-    original pre-trained SigLIP model(which uses images of fixed-size square 
+    original pre-trained SigLIP model(which uses images of fixed-size square
     images) and adapt it by training on images of variable resolutions.
     """
 
@@ -143,7 +144,8 @@ class Idefics2VisionAttention(nn.Module):
             bias=True,
             quant_config=quant_config,
         )
-        # Ignore copy
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
         self.is_causal = False
 
     def forward(
@@ -153,14 +155,18 @@ class Idefics2VisionAttention(nn.Module):
     ) -> torch.Tensor:
         batch_size, q_len, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(
-            hidden_states)  # batch_size, q_len, 3 * num_heads * head_dim
+            hidden_states
+        )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
 
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
-        query_states = query_states.view(batch_size, q_len, self.num_heads,
+        query_states = query_states.view(batch_size, q_len,
+                                         self.num_heads_per_partition,
                                          self.head_dim)
-        key_states = key_states.view(batch_size, q_len, self.num_heads,
+        key_states = key_states.view(batch_size, q_len,
+                                     self.num_heads_per_partition,
                                      self.head_dim)
-        value_states = value_states.view(batch_size, q_len, self.num_heads,
+        value_states = value_states.view(batch_size, q_len,
+                                         self.num_heads_per_partition,
                                          self.head_dim)
         # see: https://facebookresearch.github.io/xformers/components/ops.html
         out = xops.memory_efficient_attention_forward(
@@ -170,7 +176,7 @@ class Idefics2VisionAttention(nn.Module):
             p=self.dropout,
             scale=self.scale,
         )
-        out = out.view_as(hidden_states)
+        out = out.view(batch_size, q_len, -1)
         attn_output, _ = self.out_proj(out)
 
         return attn_output
@@ -229,10 +235,10 @@ class Idefics2EncoderLayer(nn.Module):
             hidden_states (`torch.FloatTensor`):
                 Input to the layer of shape `(batch, seq_len, embed_dim)`.
             attention_mask (`torch.FloatTensor`):
-                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` where 
+                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` where
                 padding elements are indicated by very large negative values.
             output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all 
+                Whether or not to return the attentions tensors of all
                 attention layers. See `attentions` under
                 returned tensors for more detail.
         """
@@ -257,7 +263,7 @@ class Idefics2EncoderLayer(nn.Module):
 # with Siglip->Idefics2
 class Idefics2Encoder(nn.Module):
     """
-    Transformer encoder consisting of `config.num_hidden_layers` self attention 
+    Transformer encoder consisting of `config.num_hidden_layers` self attention
     layers. Each layer is a
     [`Idefics2EncoderLayer`].
 
@@ -281,16 +287,16 @@ class Idefics2Encoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, 
+            inputs_embeds (`torch.FloatTensor` of shape `(batch_size,
                 sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to 
+                Optionally, instead of passing `input_ids` you can choose to
                 directly pass an embedded representation.
-                This is useful if you want more control over how to convert 
-                `input_ids` indices into associated vectorsthan the model's 
+                This is useful if you want more control over how to convert
+                `input_ids` indices into associated vectorsthan the model's
                 internal embedding lookup matrix.
             attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`
                 , *optional*):
-                Mask to avoid performing attention on padding token indices. 
+                Mask to avoid performing attention on padding token indices.
                 Mask values selected in `[0, 1]`:
 
                 - 1 for tokens that are **not masked**,
@@ -298,11 +304,11 @@ class Idefics2Encoder(nn.Module):
 
                 [What are attention masks?](../glossary#attention-mask)
             output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention 
+                Whether or not to return the attentions tensors of all attention
                 layers. See `attentions` under
                 returned tensors for more detail.
             output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See 
+                Whether or not to return the hidden states of all layers. See
                 `hidden_states` under returned tensors
                 for more detail.
             return_dict (`bool`, *optional*):
