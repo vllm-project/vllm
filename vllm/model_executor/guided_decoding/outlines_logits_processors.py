@@ -21,13 +21,14 @@ from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Union
 
 import torch
+from lark import Lark
+from outlines import grammars
 from outlines.caching import cache
 from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
-from lark import Lark
-from outlines import grammars
+
 
 class BaseLogitsProcessor:
 
@@ -46,7 +47,7 @@ class BaseLogitsProcessor:
             self._fsm_state[seq_id] = self._guide.get_next_state(
                 state=self._fsm_state[last_seq_id], token_id=last_token)
         else:
-            # Note: this is a hack. 
+            # Note: this is a hack.
             # Lark pickling does not work properly (silent failure),
             # which breaks the RPC (which uses python pickleing).
             # We need to find a better solution.

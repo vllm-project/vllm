@@ -1,7 +1,7 @@
-import cloudpickle
 from contextlib import contextmanager
 from typing import Any, AsyncIterator, Mapping, Optional
 
+import cloudpickle
 import zmq
 import zmq.asyncio
 
@@ -218,7 +218,8 @@ class RPCClient:
         with self.socket() as socket:
 
             # Ping RPCServer with CHECK_HEALTH request.
-            await socket.send(cloudpickle.dumps(RPCUtilityRequest.CHECK_HEALTH))
+            await socket.send(cloudpickle.dumps(RPCUtilityRequest.CHECK_HEALTH)
+                              )
 
             # Await the reply from the server.
             # TODO: do we need an internal timeout here?

@@ -1,8 +1,8 @@
 import asyncio
-import cloudpickle
 import signal
 from typing import Any, Coroutine
 
+import cloudpickle
 import zmq
 import zmq.asyncio
 from typing_extensions import Never
@@ -42,39 +42,34 @@ class RPCServer:
         model_config = await self.engine.get_model_config()
 
         await self.socket.send_multipart(
-            [identity,
-             cloudpickle.dumps(model_config)])
+            [identity, cloudpickle.dumps(model_config)])
 
     async def get_decoding_config(self, identity):
         """Send the DecodingConfig"""
         decoding_config = await self.engine.get_decoding_config()
 
         await self.socket.send_multipart(
-            [identity,
-             cloudpickle.dumps(decoding_config)])
+            [identity, cloudpickle.dumps(decoding_config)])
 
     async def get_lora_config(self, identity):
         lora_config = await self.engine.get_lora_config()
 
         await self.socket.send_multipart(
-            [identity,
-             cloudpickle.dumps(lora_config)])
+            [identity, cloudpickle.dumps(lora_config)])
 
     async def get_scheduler_config(self, identity):
         """Send the SchedulerConfig"""
         parallel_config = await self.engine.get_scheduler_config()
 
         await self.socket.send_multipart(
-            [identity,
-             cloudpickle.dumps(parallel_config)])
+            [identity, cloudpickle.dumps(parallel_config)])
 
     async def get_parallel_config(self, identity):
         """Send the ParallelConfig"""
         parallel_config = await self.engine.get_parallel_config()
 
         await self.socket.send_multipart(
-            [identity,
-             cloudpickle.dumps(parallel_config)])
+            [identity, cloudpickle.dumps(parallel_config)])
 
     async def do_log_stats(self, identity):
         """Log stats and confirm success."""
@@ -114,26 +109,20 @@ class RPCServer:
                 prompt_adapter_request=generate_request.prompt_adapter_request)
 
             async for request_output in results_generator:
-                await self.socket.send_multipart([
-                    identity,
-                    cloudpickle.dumps(request_output)
-                ])
+                await self.socket.send_multipart(
+                    [identity, cloudpickle.dumps(request_output)])
 
         except Exception as e:
             ### Notify client of all failures
-            await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(e)])
+            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     async def check_health(self, identity):
         try:
             await self.engine.check_health()
-            await self.socket.send_multipart([
-                identity,
-                cloudpickle.dumps(VLLM_RPC_HEALTHY_STR)
-            ])
-        except Exception as e:
             await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(e)])
+                [identity, cloudpickle.dumps(VLLM_RPC_HEALTHY_STR)])
+        except Exception as e:
+            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     def _make_handler_coro(self, identity,
                            message) -> Coroutine[Any, Any, Never]:
