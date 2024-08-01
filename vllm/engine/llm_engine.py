@@ -43,11 +43,11 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
+from vllm import utils
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
-
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     config = try_get_generation_config(
@@ -357,6 +357,7 @@ class LLMEngine:
         self.previous_output = None
         self.previous_scheduler_outputs = None
         self.previous_seq_group_metadata_list = None
+        self.request_outputs = None
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -803,11 +804,7 @@ class LLMEngine:
         return
 
     def _process_model_outputs(
-        self,
-        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
-        scheduled_seq_groups: List[ScheduledSequenceGroup],
-        ignored_seq_groups: List[SequenceGroup],
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        self
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
@@ -815,6 +812,11 @@ class LLMEngine:
         """
 
         now = time.time()
+
+        scheduled_seq_groups = self.previous_scheduler_outputs.scheduled_seq_groups
+        ignored_seq_groups = self.previous_scheduler_outputs.ignored_seq_groups
+        output = self.previous_output
+        seq_group_metadata_list = self.previous_seq_group_metadata_list
 
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].
@@ -851,7 +853,8 @@ class LLMEngine:
         for seq_group in ignored_seq_groups:
             request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
-        return request_outputs
+        self.request_outputs = request_outputs
+        return
 
     def _advance_to_next_step(
         self,
@@ -931,12 +934,6 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
-        request_outputs = None
-        if (self.previous_output) and (len(self.previous_output) > 0):
-            request_outputs = self._process_model_outputs(
-                self.previous_output, self.previous_scheduler_outputs.scheduled_seq_groups,
-                self.previous_scheduler_outputs.ignored_seq_groups, self.previous_seq_group_metadata_list)
-
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
 
@@ -952,10 +949,12 @@ class LLMEngine:
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
-                execute_model_req=execute_model_req)
+                execute_model_req=execute_model_req, callback_fn=self._process_model_outputs)
         else:
             output = []
 
+        # hack to avoid callback function for first step
+        utils.flag_for_callback_fn = True
         self.previous_output = output
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list
@@ -978,7 +977,7 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
-        return request_outputs
+        return self.request_outputs
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
         if logger_name in self.stat_loggers:

@@ -53,6 +53,7 @@ from vllm.sequence import (IntermediateTensors, SamplerOutput,
 from vllm.utils import (CudaMemoryProfiler, flatten_2d_lists,
                         get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available)
+from vllm import utils
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -137,7 +138,6 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     # Used for speculative decoding. We do not broadcast it because it is only
     # used by the driver worker.
     is_prompt: Optional[bool] = None
-
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
@@ -1292,6 +1292,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        callback_fn = None
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1380,6 +1381,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not self.is_driver_worker:
             return []
 
+        if utils.flag_for_callback_fn and callback_fn is not None:
+            callback_fn()
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,
