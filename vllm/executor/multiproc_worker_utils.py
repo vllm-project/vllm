@@ -5,6 +5,7 @@ import sys
 import threading
 import traceback
 import uuid
+import weakref
 from dataclasses import dataclass
 from multiprocessing import Queue
 from multiprocessing.connection import wait
@@ -105,7 +106,24 @@ class WorkerMonitor(threading.Thread):
         self.result_handler = result_handler
         self._close = False
 
+        # Set up a handler to ensure that the threads and worker
+        # processes are shut down in the case the interpreter exits due
+        # to an unhandled exception. GC does not appear to be reliable
+        # for this.
+        ref = weakref.ref(self)
+        old_handler = sys.excepthook
+
+        def handler(*args):
+            old_handler(*args)
+            if (monitor := ref()) is not None:
+                monitor.close()
+
+        sys.excepthook = handler
+
     def run(self) -> None:
+        # We are responsible for starting the result handler thread
+        self.result_handler.start()
+
         # Blocks until any worker exits
         dead_sentinels = wait([w.process.sentinel for w in self.workers])
         if not self._close:

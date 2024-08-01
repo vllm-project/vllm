@@ -115,7 +115,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                     self.non_driver_workers.append(worker)
 
             self.worker_monitor = WorkerMonitor(self.workers, result_handler)
-            result_handler.start()
             self.worker_monitor.start()
 
         self.driver_worker = self._create_worker(
