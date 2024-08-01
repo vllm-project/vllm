@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -34,6 +34,7 @@ class RPCClient:
         # Get the configs.
         self.model_config = await self._get_model_config_rpc()
         self.decoding_config = await self._get_decoding_config_rpc()
+        self.tracing_flag = await self._is_tracing_enabled_rpc()
 
         # Create the tokenizer group.
         # TODO: refactor OAI server to avoid needing this info.
@@ -102,15 +103,14 @@ class RPCClient:
     async def get_tokenizer(self, lora_request: LoRARequest):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
-    async def get_decoding_config(self):
+    async def get_decoding_config(self) -> DecodingConfig:
         return self.decoding_config
 
-    async def get_model_config(self):
+    async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
-    async def is_tracing_enabled(self):
-        # TODO: what is this?
-        return False
+    async def is_tracing_enabled(self) -> bool:
+        return self.tracing_flag
 
     async def wait_for_server(self):
         """Wait for the RPCServer to start up."""
@@ -141,7 +141,7 @@ class RPCClient:
         return await self._send_get_data_rpc_request(
             RPCUtilityRequest.GET_PARALLEL_CONFIG,
             expected_type=ParallelConfig,
-            error_message="Could not get ModelConfig from RPC Server")
+            error_message="Could not get ParallelConfig from RPC Server")
 
     async def _get_scheduler_config_rpc(self) -> SchedulerConfig:
         """Get SchedulerConfig from the RPCServer"""
@@ -158,6 +158,15 @@ class RPCClient:
             RPCUtilityRequest.GET_LORA_CONFIG,
             expected_type=LoRAConfig,
             error_message="Could not get LoRAConfig from RPC Server")
+
+    async def _is_tracing_enabled_rpc(self) -> ParallelConfig:
+        """Get is_tracing_enabled flag from the RPCServer"""
+
+        return await self._send_get_data_rpc_request(
+            RPCUtilityRequest.IS_TRACING_ENABLED,
+            expected_type=bool,
+            error_message="Could not get is_tracing_enabled flag from RPC "
+            "Server")
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
@@ -232,3 +241,8 @@ class RPCClient:
         if health_message != VLLM_RPC_HEALTHY_STR:
             raise ValueError("Expected healthy response from backend but got "
                              "f{health_message}")
+
+    async def encode(self, *args,
+                     **kwargs) -> AsyncIterator[EmbeddingRequestOutput]:
+        raise NotImplementedError(
+            "Embeddings not supported with multiprocessing backend")

@@ -35,6 +35,7 @@ class RPCUtilityRequest(Enum):
     GET_LORA_CONFIG = 6
     DO_LOG_STATS = 7
     CHECK_HEALTH = 8
+    IS_TRACING_ENABLED = 9
 
 
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,

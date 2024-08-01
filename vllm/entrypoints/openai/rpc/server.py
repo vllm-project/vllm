@@ -71,6 +71,13 @@ class RPCServer:
         await self.socket.send_multipart(
             [identity, cloudpickle.dumps(parallel_config)])
 
+    async def is_tracing_enabled(self, identity):
+        """Send the is_tracing_enabled flag"""
+        tracing_flag = await self.engine.is_tracing_enabled()
+
+        await self.socket.send_multipart(
+            [identity, cloudpickle.dumps(tracing_flag)])
+
     async def do_log_stats(self, identity):
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
@@ -153,6 +160,8 @@ class RPCServer:
                 return self.is_server_ready(identity)
             elif request == RPCUtilityRequest.CHECK_HEALTH:
                 return self.check_health(identity)
+            elif request == RPCUtilityRequest.IS_TRACING_ENABLED:
+                return self.is_tracing_enabled(identity)
             else:
                 raise ValueError(f"Unknown RPCUtilityRequest type: {request}")
 
