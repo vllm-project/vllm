@@ -297,8 +297,6 @@ class LLMEngine:
                     model_config.enforce_eager,
                     "disable_custom_all_reduce":
                     parallel_config.disable_custom_all_reduce,
-                    "use_allgather_pipeline_comm":
-                    parallel_config.use_allgather_pipeline_comm,
                 })
 
         if self.tokenizer:
