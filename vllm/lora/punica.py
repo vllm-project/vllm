@@ -11,34 +11,23 @@ import torch
 
 from vllm.triton_utils import HAS_TRITON
 
-PUNICA_SUPPORT = ops.is_custom_op_supported("_punica_C::dispatch_bgmv")
+if HAS_TRITON:
+    from vllm.lora.ops.bgmv_expand import bgmv_expand
+    from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
+    from vllm.lora.ops.bgmv_shrink import bgmv_shrink
+    from vllm.lora.ops.sgmv_expand import sgmv_expand
+    from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
+    from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+
+if TYPE_CHECKING:
+    # avoid circuit import
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.models import LongContextLoRAContext
 
 
-def _check_punica_support():
-#    if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
-#        return
-
-    if PUNICA_SUPPORT:
-        return
-
-    if current_platform.get_device_capability() < (8, 0):
-        raise ImportError(
-            "punica LoRA kernels require compute capability >= 8.0")
-    else:
-        raise ImportError(
-            "punica LoRA kernels could not be imported. If you built vLLM "
-            "from source, make sure VLLM_INSTALL_PUNICA_KERNELS=1 env var "
-            "was set.")
-
-
-def bgmv(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.LongTensor,
-    layer_idx: int,
-    scale: float,
-):
+def compute_meta(
+    token_lora_tensor: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, bool]:
     """
     Get the information required for the sgmv kernel. With the  features:
     1. If consecutive requests in the batch use the same LoRA, this function
