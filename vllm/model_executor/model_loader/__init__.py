@@ -9,8 +9,6 @@ from vllm.model_executor.model_loader.loader import (BaseModelLoader,
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name, get_model_architecture)
 
-import torch
-import time
 
 def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               device_config: DeviceConfig, parallel_config: ParallelConfig,
