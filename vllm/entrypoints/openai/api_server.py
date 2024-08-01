@@ -308,28 +308,35 @@ async def run_server(args, llm_engine=None, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
-    server = await build_server(
-        args,
-        llm_engine,
-        **uvicorn_kwargs,
-    )
-
-    loop = asyncio.get_running_loop()
-
-    server_task = loop.create_task(server.serve())
-
-    def signal_handler() -> None:
-        # prevents the uvicorn signal handler to exit early
-        server_task.cancel()
-
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
-
     try:
-        await server_task
-    except asyncio.CancelledError:
-        print("Gracefully stopping http server")
-        await server.shutdown()
+        server = await build_server(
+            args,
+            llm_engine,
+            **uvicorn_kwargs,
+        )
+
+        loop = asyncio.get_running_loop()
+
+        server_task = loop.create_task(server.serve())
+
+        def signal_handler() -> None:
+            # prevents the uvicorn signal handler to exit early
+            server_task.cancel()
+
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            print("Gracefully stopping http server")
+            await server.shutdown()
+    finally:
+        # Clean up globals
+        for var in ("openai_serving_chat", "openai_serving_completion",
+                    "openai_serving_embedding", "openai_serving_tokenization",
+                    "engine_args", "engine"):
+            globals().pop(var, None)
 
 
 if __name__ == "__main__":
