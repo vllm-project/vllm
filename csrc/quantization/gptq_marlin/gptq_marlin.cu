@@ -1128,12 +1128,13 @@ __global__ void Marlin(
   };
 
   auto fetch_zp_to_registers = [&](int k, int full_pipe) {
-    if constexpr (has_zp) {
-      // This code does not handle group_blocks == 0,
-      // which signifies act_order.
-      // has_zp implies AWQ, which doesn't have act_order,
-      static_assert(group_blocks != 0);
+    // This code does not handle group_blocks == 0,
+    // which signifies act_order.
+    // has_zp implies AWQ, which doesn't have act_order,
+    static_assert(!has_azp || !group_blocks);
 
+    // The constexpr check on group_blocks prevents divide-by-zero warnings
+    if constexpr (has_zp && group_blocks != 0) {
       int pipe = full_pipe % stages;
 
       if constexpr (group_blocks == -1) {

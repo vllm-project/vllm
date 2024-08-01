@@ -200,6 +200,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           "-gencode arch=compute_90a,code=sm_90a")
   endif()
 
+
+  # Include CUTLASS headers as system headers to avoid warnings
+  target_include_directories(my_executable SYSTEM PRIVATE
+      ${CUTLASS_INCLUDE_DIR}
+      ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  )
+)
+
 endif()
 
 define_gpu_extension_target(
