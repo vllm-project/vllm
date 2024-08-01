@@ -237,8 +237,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
         self._disable_logprobs = disable_logprobs
-        print("[zyl] proposer_worker:", self.proposer_worker)
-        print("[zyl] scorer_worker:", self.scorer_worker)
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -325,7 +323,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
-        print("[zyl] spec_decode_worker.execute_model")
         if self.rank != self._driver_rank:
             self._run_non_driver_rank()
             return []
@@ -453,12 +450,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-        print("[zyl] spec_decode_worker._run_no_spec")
         if not skip_proposer:
-            print("[zyl] self.proposer_worker.execute_model", self.proposer_worker.execute_model)
             self.proposer_worker.execute_model(execute_model_req)
 
-        print("[zyl] self.scorer_worker.execute_model:", self.scorer_worker.execute_model)
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
@@ -522,7 +516,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
-        print("[zyl] _run_speculative_decoding_step")
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         # Pass last hidden states from target model to proposer
@@ -530,7 +523,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.previous_hidden_states = None
 
         # Generate proposals using draft worker.
-        print("[zyl] self.proposer_worker.get_spec_proposals:", self.proposer_worker.get_spec_proposals)
         proposals = self.proposer_worker.get_spec_proposals(
             execute_model_req, self._seq_with_bonus_token_in_last_step)
 
@@ -539,7 +531,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
 
-        print("[zyl] self.scorer.score_proposals:", self.scorer.score_proposals)
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
             proposals,

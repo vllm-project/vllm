@@ -319,8 +319,6 @@ class LLMEngine:
             for _ in range(parallel_config.pipeline_parallel_size)
         ]
 
-        print("scheduler_config:", scheduler_config)
-
         # Metric Logging.
         if self.log_stats:
             if stat_loggers is not None:

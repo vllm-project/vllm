@@ -27,10 +27,6 @@ def create_cfg_worker(*args, **kwargs) -> "CFGWorker":
     kwargs["model_runner_cls"] = CFGModelRunner
     root_worker = SeparatedWorker(*args, **kwargs)
 
-    print("create_cfg_worker")
-    print("args", args)
-    print("kwargs", kwargs)
-
     guidance_model_config = classifier_free_guidance_config.guidance_model_config
     guidance_parallel_config = classifier_free_guidance_config.guidance_parallel_config
     kwargs.update(
@@ -82,7 +78,6 @@ class CFGWorker(LoraNotSupportedWorkerBase):
         num_gpu_blocks: int,
         num_cpu_blocks: int
         ):
-        print("num_gpu_blocks:", num_gpu_blocks) 
         self.root_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                           num_cpu_blocks=num_cpu_blocks)
         self.guidance_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
@@ -93,15 +88,6 @@ class CFGWorker(LoraNotSupportedWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-
-        # print("==>[zyl] execute_model_req:", execute_model_req)
-        # for seq_group_metadata in execute_model_req.seq_group_metadata_list:
-        #     for seq_data in seq_group_metadata.seq_data.values():
-        #         seq_len = seq_data.get_len()
-        #         print("[zyl] seq_len:", seq_len)
-        #         print("[zyl] seq_data:", seq_data)
-        #         print("[zyl] seq_data.prompt_token_ids:", seq_data.prompt_token_ids)
-        #         print("[zyl] seq_data.negative_prompt_token_ids:", seq_data.negative_prompt_token_ids)
 
         # get root models's logits
         scores = self.root_worker.execute_model_part(execute_model_req)
@@ -120,28 +106,17 @@ class CFGWorker(LoraNotSupportedWorkerBase):
             negative_seq_group_metadata.seq_data = negative_seq_data
             negative_seq_group_metadata_list.append(negative_seq_group_metadata)
         negative_excute_model_req.seq_group_metadata_list = negative_seq_group_metadata_list
-        # print("==>[zyl] negative_excute_model_req:", negative_excute_model_req)
-        # for seq_group_metadata in negative_excute_model_req.seq_group_metadata_list:
-        #     for seq_data in seq_group_metadata.seq_data.values():
-        #         seq_len = seq_data.get_len()
-        #         print("[zyl] seq_data:", seq_data)
-        #         print("[zyl] seq_len:", seq_len)
-        #         print("[zyl] seq_data.prompt_token_ids:", seq_data.prompt_token_ids)
-        #         print("[zyl] seq_data.negative_prompt_token_ids:", seq_data.negative_prompt_token_ids)
 
         # get unconditional logits
         unconditional_logits = self.guidance_worker.execute_model_part(negative_excute_model_req)
-        # print("unconditional_logits:", unconditional_logits.shape, unconditional_logits)       
 
         # do logist_processor
         scores = self.root_worker.compute_logits(scores)
-        # print("scores:", scores.shape, scores)
 
         # do classifier free guidance logist process
         for seq_group in self.root_worker.model_input.sampling_metadata.seq_groups:
             seq_ids = seq_group.seq_ids
             guidance_scale = seq_group.sampling_params.guidance_scale
-            # print("guidance_scale:", guidance_scale)
             if guidance_scale == 1.0:
                 break
             for seq_id, logits_row_idx in zip(seq_ids, seq_group.sample_indices):

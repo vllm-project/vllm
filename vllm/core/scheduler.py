@@ -769,12 +769,6 @@ class Scheduler:
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
         """
-        # print("!!!!!!!!_schedule_default!!!!!!!!")
-        # print("self.waiting:", self.waiting)
-        # print("self.running:", self.running)
-        # print("self.swapped:", self.swapped)
-        # print("max_num_batched_tokens:", self.scheduler_config.max_num_batched_tokens)
-        # print("max_num_seqs:", self.scheduler_config.max_num_seqs)
         # Include running requests to the budget.
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
@@ -796,7 +790,6 @@ class Scheduler:
         remaining_swapped, swapped_in = (
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
-        # print("not self.swapped:", (not self.swapped))
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
             remaining_waiting, prefills = self._schedule_prefills(
@@ -806,7 +799,6 @@ class Scheduler:
         # Don't schedule decodes if prefills are scheduled.
         # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running
         # only contains decode requests, not chunked prefills.
-        # print("len(prefills.seq_groups):", len(prefills.seq_groups))
         if len(prefills.seq_groups) == 0:
             remaining_running, running_scheduled = self._schedule_running(
                 self.running,
@@ -825,10 +817,6 @@ class Scheduler:
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
-
-        # print("prefills:", prefills)
-        # print("running_scheduled:", running_scheduled)
-        # print("swapped_in:", swapped_in)
 
         # Update waiting requests.
         self.waiting = remaining_waiting

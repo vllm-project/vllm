@@ -1,11 +1,10 @@
-import copy
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput, SequenceGroupMetadata, SequenceData
+from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -32,21 +31,9 @@ class GPUExecutor(ExecutorBase):
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
 
-        print("[zyl] gpu executor _create_worker:")
         self.driver_worker = self._create_worker()
-        print("[zyl] gpu executor init_device:")
         self.driver_worker.init_device()
-        print("[zyl] gpu executor load_model:")
         self.driver_worker.load_model()
-        print("[zyl] driver_worker:", self.driver_worker)
-
-        # print("[zyl] gpu executor _create_worker:")
-        # self.cfg_worker = self._create_worker()
-        # print("[zyl] gpu executor init_device:")
-        # self.cfg_worker.init_device()
-        # print("[zyl] gpu executor load_model:")
-        # self.cfg_worker.load_model()
-        # print("[zyl] cfg_worker:", self.cfg_worker)
 
     def _get_worker_kwargs(
             self,
@@ -110,16 +97,6 @@ class GPUExecutor(ExecutorBase):
         underlying worker.
         """
         return self.driver_worker.determine_num_available_blocks()
-        # num_gpu_blocks, num_cpu_blocks = self.driver_worker.determine_num_available_blocks()
-
-        # driver_cache_block_size_bytes = self.driver_worker.get_cache_block_size_bytes()
-        # cfg_cache_block_size_bytes = self.cfg_worker.get_cache_block_size_bytes()
-
-        # new_num_gpu_blocks = int(
-        #     num_gpu_blocks * driver_cache_block_size_bytes /
-        #     (cfg_cache_block_size_bytes + driver_cache_block_size_bytes))
-
-        # return new_num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         """Initialize the KV cache by invoking the underlying worker.
@@ -131,106 +108,12 @@ class GPUExecutor(ExecutorBase):
                     num_cpu_blocks)
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-        # self.cfg_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
-        # print("[zyl] gpu_executor execute_model_req:", execute_model_req)
-        # for i, seq_group_metadata in enumerate(execute_model_req.seq_group_metadata_list):
-        #     seq_data = next(iter(seq_group_metadata.seq_data.values()))
-        #     seq_len = seq_data.get_len()
-        #     print("[zyl] driver seq_data:", seq_data)
-        #     print("[zyl] driver seq_len:", seq_len)
-        # print("[zyl] gpu executor driver_worker.execute_model:", self.driver_worker.execute_model)
         output = self.driver_worker.execute_model(execute_model_req)
-        # print("[zyl] gpu_executor output:", output)
-        # print("[zyl] gpu_executor sampled_token_ids:", output[0].sampled_token_ids)
-        # exit(0)
         return output
-
-    # def execute_model(
-    #     self, execute_model_req: ExecuteModelRequest
-    # ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
-    #     # print("[zyl] gpu_executor execute_model_req:", execute_model_req)
-    #     # for i, seq_group_metadata in enumerate(execute_model_req.seq_group_metadata_list):
-    #     #     seq_data = next(iter(seq_group_metadata.seq_data.values()))
-    #     #     seq_len = seq_data.get_len()
-    #     #     print("[zyl] driver seq_data:", seq_data)
-    #     #     print("[zyl] driver seq_len:", seq_len)
-    #     # print("[zyl] gpu_executor self.driver_worker:", self.driver_worker)
-    #     logits_driver, model_input_driver = self.driver_worker.execute_model(execute_model_req, do_no_processor=False)
-    #     # print("[zyl] gpu_executor logits_driver:", logits_driver)
-
-    #     # cfg_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    #     # cfg_execute_model_req = execute_model_req.clone(cfg_seq_group_metadata_list)
-    #     # for seq_group_metadata in execute_model_req.seq_group_metadata_list:
-    #     #     new_seq_group_metadata = copy.copy(seq_group_metadata)
-    #     #     new_seq_data: Dict[int, SequenceData] = {}
-    #     #     for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
-    #     #         if len(old_seq_data.output_token_ids) == 0:
-    #     #             new_seq_data[seq_id] = copy.copy(old_seq_data)
-    #     #             new_seq_data[seq_id].prompt_token_ids = old_seq_data.prompt_token_ids[-1:]
-    #     #             new_seq_data[seq_id].output_token_ids = ()
-    #     #         else:
-    #     #             new_seq_data[seq_id] = copy.copy(old_seq_data)
-    #     #             new_seq_data[seq_id].prompt_token_ids = old_seq_data.prompt_token_ids[-1:]
-    #     #             new_seq_data[seq_id].output_token_ids = old_seq_data.output_token_ids[:]
-    #     #     new_seq_group_metadata.seq_data = new_seq_data
-    #     #     cfg_seq_group_metadata_list.append(new_seq_group_metadata)
-    #     # cfg_execute_model_req.seq_group_metadata_list = cfg_seq_group_metadata_list
-
-
-    #     # cfg_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    #     # cfg_execute_model_req = execute_model_req.clone(cfg_seq_group_metadata_list)
-    #     # for seq_group_metadata in execute_model_req.seq_group_metadata_list:
-    #     #     new_seq_group_metadata = copy.copy(seq_group_metadata)
-    #     #     new_seq_data: Dict[int, SequenceData] = {}
-    #     #     for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
-    #     #         # if seq_group_metadata.is_prompt:
-    #     #         new_seq_data[seq_id] = copy.copy(old_seq_data)
-    #     #         new_seq_data[seq_id].prompt_token_ids = old_seq_data.negative_prompt_token_ids
-    #     #         new_seq_data[seq_id].negative_prompt_token_ids = []
-    #     #         new_seq_data[seq_id].output_token_ids = old_seq_data.output_token_ids[:]
-
-    #     #     new_seq_group_metadata.seq_data = new_seq_data
-    #     #     cfg_seq_group_metadata_list.append(new_seq_group_metadata)
-    #     # cfg_execute_model_req.seq_group_metadata_list = cfg_seq_group_metadata_list
-
-
-    #     cfg_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    #     cfg_execute_model_req = execute_model_req.clone(cfg_seq_group_metadata_list)
-    #     for seq_group_metadata in execute_model_req.seq_group_metadata_list:
-    #         new_seq_group_metadata = copy.deepcopy(seq_group_metadata)
-    #         new_seq_data: Dict[int, SequenceData] = {}
-    #         for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
-    #             # if seq_group_metadata.is_prompt:
-    #             new_seq_data[seq_id] = copy.deepcopy(old_seq_data)
-    #             new_seq_data[seq_id].prompt_token_ids = old_seq_data.negative_prompt_token_ids
-    #             new_seq_data[seq_id].negative_prompt_token_ids = []
-    #             new_seq_data[seq_id].output_token_ids = old_seq_data.output_token_ids[:]
-
-    #         new_seq_group_metadata.seq_data = new_seq_data
-    #         cfg_seq_group_metadata_list.append(new_seq_group_metadata)
-    #     cfg_execute_model_req.seq_group_metadata_list = cfg_seq_group_metadata_list
-
-
-    #     # print("[zyl] gpu_executor cfg_execute_model_req:", cfg_execute_model_req)
-    #     # for i, seq_group_metadata in enumerate(cfg_execute_model_req.seq_group_metadata_list):
-    #     #     seq_data = next(iter(seq_group_metadata.seq_data.values()))
-    #     #     seq_len = seq_data.get_len()
-    #     #     print("[zyl] cfg seq_data:", seq_data)
-    #     #     print("[zyl] cfg seq_len:", seq_len)
-    #     logits_cfg, _ = self.cfg_worker.execute_model(cfg_execute_model_req, do_no_processor=True)
-    #     # print("[zyl] gpu_executor logits_cfg:", logits_cfg)
-
-    #     logits = logits_cfg + 5.0 * (logits_driver - logits_cfg)
-    #     # print("[zyl] gpu_executor logits:", logits)
-    #     output: SamplerOutput = self.driver_worker.model_runner.model.sample(logits=logits, sampling_metadata=model_input_driver.sampling_metadata)
-    #     # print("[zyl] gpu_executor output:", output)
-    #     # print("[zyl] gpu_executor sampled_token_ids:", output.sampled_token_ids)
-    #     # exit(0)
-    #     return [output]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
