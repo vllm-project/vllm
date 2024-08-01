@@ -23,6 +23,7 @@ from transformers import Gemma2Config
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -40,6 +41,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
+
+logger = init_logger(__name__)
 
 
 class Gemma2MLP(nn.Module):
@@ -390,6 +393,6 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
 
         unloaded_params = params_dict.keys() - loaded_params
         if unloaded_params:
-            raise RuntimeError(
-                "Some weights are not initialized from checkpoints: "
-                f"{unloaded_params}")
+            logger.warning(
+                "Some weights are not initialized from checkpoints: %s",
+                unloaded_params)

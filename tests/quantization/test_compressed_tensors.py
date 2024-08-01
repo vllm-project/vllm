@@ -1,4 +1,4 @@
-"""Test model set-up and weight loading for sparseml-quantized models.
+"""Test model set-up and weight loading for llmcompressor-quantized models.
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
