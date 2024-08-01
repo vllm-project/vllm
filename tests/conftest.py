@@ -524,7 +524,7 @@ class VllmRunner:
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
-        enforce_eager: bool = False,
+        enforce_eager: Optional[bool] = False,
         **kwargs,
     ) -> None:
         self.model = LLM(

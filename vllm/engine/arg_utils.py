@@ -69,7 +69,7 @@ class EngineArgs:
     rope_theta: Optional[float] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    enforce_eager: bool = False
+    enforce_eager: Optional[bool] = None
     max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
@@ -720,13 +720,27 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             multimodal_config=multimodal_config)
 
+        # Choose a default enforce_eager value if the user did not specify
+        # a value (enforce_eager is None)
         if (getattr(model_config.hf_config, 'is_encoder_decoder', False)
-                and (not self.enforce_eager)):
+                and self.enforce_eager is None):
+            # *Only for encoder/decoder models* and
+            # *only if enforce_eager is unset*, override to enforce_eager=True
+            #
+            # Add a logger message since it is *somewhat* non-intuitive that
+            # enforce_eager is True when the user has not specified its value.
             logger.info("Forcing enforce_eager == True because "
+                        "enforce_eager setting was unspecified and "
                         "CUDAGraph is not supported with encoder/ "
                         "decoder models.")
             self.enforce_eager = True
             model_config.enforce_eager = True
+        elif self.enforce_eager is None:
+            # *Only for decoder-only models*, enforce_eager
+            # defaults to False if unset. This is intuitive
+            # so not logging message needed.
+            self.enforce_eager = False
+            model_config.enforce_eager = False
 
         cache_config = CacheConfig(
             block_size=self.block_size,
