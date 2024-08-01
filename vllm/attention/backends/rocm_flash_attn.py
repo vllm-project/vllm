@@ -244,9 +244,15 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
-        assert blocksparse_params is None, ValueError(
-            "ROCFlashAttention does not support blocksparse attention.")
+        if blocksparse_params is not None:
+            raise ValueError(
+                "ROCmFlashAttention does not support blocksparse attention.")
+        if logits_soft_cap is not None:
+            raise ValueError(
+                "ROCmFlashAttention does not support attention logits soft "
+                "capping.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

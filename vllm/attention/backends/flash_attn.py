@@ -288,15 +288,6 @@ class FlashAttentionMetadataBuilder(
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
 
-        logits_soft_cap = getattr(self.runner.model_config.hf_config,
-                                  "attn_logit_softcapping", None)
-        if logits_soft_cap is not None:
-            raise ValueError(
-                "Please use Flashinfer backend for models with logits_soft_cap"
-                " (i.e., Gemma-2). Otherwise, the output might be wrong."
-                " Set Flashinfer backend by "
-                "export VLLM_ATTENTION_BACKEND=FLASHINFER.")
-
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
@@ -405,9 +396,11 @@ class FlashAttentionImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
-        assert blocksparse_params is None, ValueError(
-            "FlashAttention does not support block-sparse attention.")
+        if blocksparse_params is not None:
+            raise ValueError(
+                "FlashAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -418,6 +411,10 @@ class FlashAttentionImpl(AttentionImpl):
         self.sliding_window = ((sliding_window, sliding_window)
                                if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
+        if logits_soft_cap is None:
+            # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
+            logits_soft_cap = 0
+        self.logits_soft_cap = logits_soft_cap
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -525,6 +522,7 @@ class FlashAttentionImpl(AttentionImpl):
                     causal=True,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
+                    softcap=self.logits_soft_cap,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
@@ -544,6 +542,7 @@ class FlashAttentionImpl(AttentionImpl):
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
                     block_table=prefill_meta.block_tables,
+                    softcap=self.logits_soft_cap,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
