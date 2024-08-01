@@ -7,8 +7,8 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -50,6 +50,7 @@ class Worker(LocalOrDistributedWorkerBase):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -72,6 +73,7 @@ class Worker(LocalOrDistributedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
         self.multimodal_config = multimodal_config
+        self.observability_config = observability_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
@@ -99,6 +101,7 @@ class Worker(LocalOrDistributedWorkerBase):
             is_driver_worker=is_driver_worker,
             prompt_adapter_config=prompt_adapter_config,
             multimodal_config=multimodal_config,
+            observability_config=observability_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by

@@ -25,8 +25,8 @@ except ImportError:
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
@@ -646,6 +646,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -658,6 +659,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
+        self.observability_config = observability_config
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -1354,6 +1356,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
+        model_forward_start = torch.cuda.Event(enable_timing=True)
+        model_forward_end = torch.cuda.Event(enable_timing=True)
+        model_forward_start.record()
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1363,7 +1368,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
             **seqlen_agnostic_kwargs)
-
+        model_forward_end.record()
+        
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
@@ -1379,6 +1385,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+        if self.observability_config.collect_model_forward_time:
+            model_forward_end.synchronize()
+            model_forward_time = model_forward_start.elapsed_time(model_forward_end)    
+            # If there are multiple workers, we are still tracking the latency from the start time
+            # of the driver worker to the end time of the driver worker. The model forward time wil
+            # then end up covering the communication time as well.
+            output.model_forward_time = model_forward_time
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token

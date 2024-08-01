@@ -128,7 +128,6 @@ class ModelRunnerInputBuilderBase(ABC, Generic[T]):
         """Build metadata with on-device tensors."""
         raise NotImplementedError
 
-
 class ModelRunnerBase(ABC, Generic[T]):
     """
     Model runner interface that abstracts a particular hardware and/or type of

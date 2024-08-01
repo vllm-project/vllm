@@ -1584,6 +1584,11 @@ class ObservabilityConfig:
     """Configuration for observability."""
     otlp_traces_endpoint: Optional[str] = None
 
+    # If set, collects the model forward time for the request. This introduces a possibly
+    # blocking operation to accurately collect the GPU time. It can have a performance 
+    # impact on the request latency.
+    collect_model_forward_time: bool = False
+
     def __post_init__(self):
         if not is_otel_installed() and self.otlp_traces_endpoint is not None:
             raise ValueError("OpenTelemetry packages must be installed before "

@@ -977,6 +977,7 @@ class Scheduler:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
+        scheduler_start_time = time.time()
         scheduler_outputs = self._schedule()
         now = time.time()
 
@@ -1048,7 +1049,16 @@ class Scheduler:
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
-
+    
+        scheduler_time = time.time() - scheduler_start_time
+        # Add this to scheduler time to all the sequences that are currently running.
+        # This will help estimate if the scheduler is a significant component in the e2e latency.
+        for seq_group in self.running:
+            if seq_group.metrics.scheduler_time is not None:
+                seq_group.metrics.scheduler_time += scheduler_time
+            else:
+                seq_group.metrics.scheduler_time = scheduler_time
+    
         return seq_group_metadata_list, scheduler_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:

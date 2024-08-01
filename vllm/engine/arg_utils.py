@@ -117,6 +117,7 @@ class EngineArgs:
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
     otlp_traces_endpoint: Optional[str] = None
+    collect_model_forward_time: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -660,6 +661,14 @@ class EngineArgs:
             type=str,
             default=None,
             help='Target URL to which OpenTelemetry traces will be sent.')
+        parser.add_argument(
+            '--collect-model-forward-time',
+             type=bool,
+            default=EngineArgs.collect_model_forward_time,
+            help="If set to True and otlp-traces-endpoint is set, "
+            "collects model forward time in traces. This involves "
+            "use of a blocking operation and hence might have a "
+            "performance impact.")
 
         return parser
 
@@ -849,7 +858,8 @@ class EngineArgs:
             guided_decoding_backend=self.guided_decoding_backend)
 
         observability_config = ObservabilityConfig(
-            otlp_traces_endpoint=self.otlp_traces_endpoint)
+            otlp_traces_endpoint=self.otlp_traces_endpoint,
+            collect_model_forward_time=self.collect_model_forward_time)
 
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled
