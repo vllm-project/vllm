@@ -17,7 +17,7 @@ from vllm.usage.usage_lib import UsageContext
 logger = init_logger('vllm.entrypoints.openai.rpc.server')
 
 
-class RPCServer:
+class AsyncEngineRPCServer:
 
     def __init__(self, async_engine_args: AsyncEngineArgs,
                  usage_context: UsageContext, port: int):
@@ -188,7 +188,7 @@ class RPCServer:
             task.add_done_callback(running_tasks.discard)
 
 
-async def run_server(server: RPCServer):
+async def run_server(server: AsyncEngineRPCServer):
     # Put the server task into the asyncio loop.
     loop = asyncio.get_running_loop()
     server_task = loop.create_task(server.run_server_loop())
@@ -212,5 +212,5 @@ async def run_server(server: RPCServer):
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
                    usage_context: UsageContext, port: int):
-    server = RPCServer(async_engine_args, usage_context, port)
+    server = AsyncEngineRPCServer(async_engine_args, usage_context, port)
     asyncio.run(run_server(server))

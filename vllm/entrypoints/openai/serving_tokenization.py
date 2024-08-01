@@ -3,7 +3,7 @@ from typing import List, Optional, Union
 from vllm.config import ModelConfig
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.engine.protocol import VLLMBackend
+from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          load_chat_template,
                                          parse_chat_message_content)
@@ -24,7 +24,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
     def __init__(
         self,
-        vllm_backend: VLLMBackend,
+        async_engine_client: AsyncEngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -32,7 +32,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
     ):
-        super().__init__(vllm_backend=vllm_backend,
+        super().__init__(async_engine_client=async_engine_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -57,7 +57,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.vllm_backend.get_tokenizer(lora_request)
+        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
 
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
@@ -113,7 +113,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.vllm_backend.get_tokenizer(lora_request)
+        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,

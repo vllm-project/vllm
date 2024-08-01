@@ -15,8 +15,8 @@ from vllm.sequence import SamplerOutput
 
 
 @runtime_checkable
-class VLLMBackend(Protocol):
-    """Protocol class for asynchronous vllm backends"""
+class AsyncEngineClient(Protocol):
+    """Protocol class for Clients to AsyncLLMEngine"""
 
     @property
     def is_running(self) -> bool:

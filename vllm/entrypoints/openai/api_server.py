@@ -21,7 +21,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.protocol import VLLMBackend
+from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 # yapf conflicts with isort for this block
@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest, ErrorResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
-from vllm.entrypoints.openai.rpc.client import RPCClient
+from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -54,7 +54,7 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
-backend: VLLMBackend
+async_engine_client: AsyncEngineClient
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -67,7 +67,7 @@ async def lifespan(app: fastapi.FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(10)
-            await backend.do_log_stats()
+            await async_engine_client.do_log_stats()
 
     if not engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
@@ -78,14 +78,14 @@ async def lifespan(app: fastapi.FastAPI):
 
 
 @asynccontextmanager
-async def build_backend(args) -> AsyncIterator[VLLMBackend]:
-    # Context manager to handle backend lifecycle
+async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
+    # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     # Backend itself still global for the silly lil' health handler
-    global backend
+    global async_engine_client
 
     # First need to determine if this is an embeddings model
     # (no remote backend for those)
@@ -96,16 +96,13 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
                                seed=0,
                                dtype="float16")
     if model_config.embedding_mode or args.disable_frontend_multiprocessing:
-        # local backend
-        backend = AsyncLLMEngine.from_engine_args(
+        async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-        yield backend
-        # No cleanup
+        yield async_engine_client
         return
 
     else:
-        # remote backend
-        ## First need to start the backend process
+        # Start the RPC Server, which has the AsyncLLMEngine.
         port = get_open_port(envs.VLLM_RPC_PORT)
         rpc_server_process = Process(target=run_rpc_server,
                                      args=(engine_args,
@@ -113,19 +110,18 @@ async def build_backend(args) -> AsyncIterator[VLLMBackend]:
                                            port))
         rpc_server_process.start()
 
-        ## Then build the client for the backend process
-        backend = RPCClient(port)
-        await backend.setup()
+        # Build the RPC Client, which conforms to the AsyncEngineClient protocol.
+        async_engine_client = AsyncEngineRPCClient(port)
+        await async_engine_client.setup()
 
         try:
-            yield backend
+            yield async_engine_client
         finally:
-            ## Cleanup:
-            # Ensure backend process was terminated
+            # Ensure rpc server process was terminated
             rpc_server_process.terminate()
 
             # Close all open connections to the backend
-            backend.close()
+            async_engine_client.close()
 
             # Wait for server process to join
             rpc_server_process.join()
@@ -145,7 +141,7 @@ def mount_metrics(app: fastapi.FastAPI):
 @router.get("/health")
 async def health() -> Response:
     """Health check."""
-    await backend.check_health()
+    await async_engine_client.check_health()
     return Response(status_code=200)
 
 
@@ -274,7 +270,7 @@ def build_app(args):
 
 
 async def build_server(
-    backend: VLLMBackend,
+    async_engine_client: AsyncEngineClient,
     args,
     **uvicorn_kwargs,
 ) -> uvicorn.Server:
@@ -285,7 +281,7 @@ async def build_server(
     else:
         served_model_names = [args.model]
 
-    model_config = await backend.get_model_config()
+    model_config = await async_engine_client.get_model_config()
 
     if args.disable_log_requests:
         request_logger = None
@@ -298,7 +294,7 @@ async def build_server(
     global openai_serving_tokenization
 
     openai_serving_chat = OpenAIServingChat(
-        backend,
+        async_engine_client,
         model_config,
         served_model_names,
         args.response_role,
@@ -309,7 +305,7 @@ async def build_server(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_completion = OpenAIServingCompletion(
-        backend,
+        async_engine_client,
         model_config,
         served_model_names,
         lora_modules=args.lora_modules,
@@ -318,13 +314,13 @@ async def build_server(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_embedding = OpenAIServingEmbedding(
-        backend,
+        async_engine_client,
         model_config,
         served_model_names,
         request_logger=request_logger,
     )
     openai_serving_tokenization = OpenAIServingTokenization(
-        backend,
+        async_engine_client,
         model_config,
         served_model_names,
         lora_modules=args.lora_modules,
@@ -361,10 +357,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("args: %s", args)
 
     shutdown_task = None
-    async with build_backend(args) as backend:
+    async with build_async_engine_client(args) as async_engine_client:
 
         server = await build_server(
-            backend,
+            async_engine_client,
             args,
             **uvicorn_kwargs,
         )

@@ -19,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 
-class RPCClient:
+class AsyncEngineRPCClient:
 
     def __init__(self, port: int):
         self.context = zmq.asyncio.Context()
