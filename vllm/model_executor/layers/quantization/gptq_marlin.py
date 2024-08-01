@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -23,29 +24,45 @@ class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
-                 is_sym: bool, lm_head_quantized: bool) -> None:
+                 is_sym: bool, lm_head_quantized: bool, dynamic_bits: Dict[str, int]) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
 
-        self.weight_bits = weight_bits
-        self.pack_factor = 32 // self.weight_bits  # packed into int32
+        self.dynamic_bits = dynamic_bits
+        self._weight_bits = weight_bits
+        self._pack_factor = 32 // self._weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
         self.is_sym = is_sym
         self.lm_head_quantized = lm_head_quantized
 
         # Verify supported on platform.
-        verify_gptq_marlin_supported(num_bits=self.weight_bits,
+        verify_gptq_marlin_supported(num_bits=self._weight_bits,
                                      group_size=self.group_size,
                                      is_sym=self.is_sym)
 
+    def get_weight_bits(self, prefix: str):
+        real_bits = self._weight_bits
+        if len(self.dynamic_bits) > 0 and prefix:
+            remove_prefix = r'^.*?(?=\d)'
+            match_name = re.sub(remove_prefix, '', prefix)
+            for pattern, dm_bits in self.dynamic_bits.items():
+                if re.match(pattern, match_name):
+                    real_bits = dm_bits
+                    break
+        return real_bits
+
+    def get_pack_factor(self, prefix: str):
+        return 32 // self.get_weight_bits(prefix)  # packed into int32
+
     def __repr__(self) -> str:
-        return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
+        return (f"GPTQMarlinConfig(weight_bits={self._weight_bits}, "
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}, "
-                f"lm_head_quantized={self.lm_head_quantized})")
+                f"lm_head_quantized={self.lm_head_quantized}), "
+                f"dynamic_bits={self.dynamic_bits}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -65,6 +82,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
+        dynamic_bits = cls.get_from_keys_or(config, ["dynamic_bits"], default={})
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -72,7 +90,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
         return cls(weight_bits, group_size, desc_act, is_sym,
-                   lm_head_quantized)
+                   lm_head_quantized, dynamic_bits)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -150,6 +168,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         del output_size
+        self.prefix = extra_weight_attrs.get("prefix", "")
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
 
@@ -178,11 +197,10 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             # shard the scales in TP>1 case.
             scales_and_zp_input_dim = 0
             scales_and_zp_size = input_size_per_partition // group_size
-
         # Quantized weights
         qweight = Parameter(
             torch.empty(
-                input_size_per_partition // self.quant_config.pack_factor,
+                input_size_per_partition // self.quant_config.get_pack_factor(self.prefix),
                 output_size_per_partition,
                 dtype=torch.int32,
             ),
@@ -195,7 +213,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 0,
-                "pack_factor": self.quant_config.pack_factor,
+                "pack_factor": self.quant_config.get_pack_factor(self.prefix),
             },
         )
 
@@ -238,7 +256,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         qzeros = Parameter(
             torch.empty(
                 scales_and_zp_size,
-                output_size_per_partition // self.quant_config.pack_factor,
+                output_size_per_partition // self.quant_config.get_pack_factor(self.prefix),
                 dtype=torch.int32,
                 device="meta",
             ),
@@ -251,7 +269,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
+                "pack_factor": self.quant_config.get_pack_factor(self.prefix),
             },
         )
 
@@ -293,7 +311,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             perm=layer.g_idx_sort_indices,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            num_bits=self.quant_config.weight_bits)
+            num_bits=self.quant_config.get_weight_bits(self.prefix))
         replace_tensor(layer, "qweight", marlin_qweight)
 
         # Permute scales from autogptq format to marlin format.
@@ -319,7 +337,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
-            num_bits=self.quant_config.weight_bits,
+            num_bits=self.quant_config.get_weight_bits(self.prefix),
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
             is_k_full=layer.is_k_full,
