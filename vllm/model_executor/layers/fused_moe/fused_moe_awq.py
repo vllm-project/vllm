@@ -46,9 +46,9 @@ def fused_experts_awq(
         # TODO: why is this not contiguous already?
         # from @dsikka: because of the permutation operation
         dequant_w1 = ops.awq_dequantize(w1, w1_scales, w1_qzeros, 0, 0,
-                                        0).permute(0, 2, 1).contiguous()
+                                        0).permute(0, 2, 1)
         dequant_w2 = ops.awq_dequantize(w2, w2_scales, w2_qzeros, 0, 0,
-                                        0).permute(0, 2, 1).contiguous()
+                                        0).permute(0, 2, 1)
 
         return fused_experts(hidden_states, dequant_w1, dequant_w2,
                              topk_weights, topk_ids)
