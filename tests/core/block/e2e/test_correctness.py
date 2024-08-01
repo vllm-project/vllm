@@ -183,7 +183,7 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
 
             # Allow only 2 sequences of ~128 tokens in worst case.
             # Note 16 = 128/block_size
-            "num_gpu_blocks_override": 2 * (16 + 1),
+            "num_gpu_blocks_override": 2 * (16 + 2),
         }
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
