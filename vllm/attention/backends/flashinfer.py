@@ -148,6 +148,7 @@ class FlashInferMetadata(AttentionMetadata):
                                                device=self.device)
             self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
                 self.device)
+            self.paged_kv_indices = self.paged_kv_indices.to(self.device)
             self.prefill_wrapper.end_forward()
             self.prefill_wrapper.begin_forward(
                 self.query_start_loc, self.paged_kv_indptr,
