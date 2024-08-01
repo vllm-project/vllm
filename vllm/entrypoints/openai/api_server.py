@@ -60,6 +60,13 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
+def model_is_embedding(model_name: str) -> bool:
+    return ModelConfig(model=model_name,
+                       tokenizer=model_name,
+                       tokenizer_mode="auto",
+                       trust_remote_code=False,
+                       seed=0, dtype="float16").embedding_mode
+
 
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
@@ -87,22 +94,19 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
     # Backend itself still global for the silly lil' health handler
     global async_engine_client
 
-    # First need to determine if this is an embeddings model
-    # (no remote backend for those)
-    model_config = ModelConfig(model=args.model,
-                               tokenizer=args.tokenizer,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16")
-    if model_config.embedding_mode or args.disable_frontend_multiprocessing:
+
+    # If manually triggered or embedding model, use AsyncLLMEngine in process.
+    # TODO: support embedding model via RPC.
+    if (model_is_embedding(args.model) or 
+        args.disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
         yield async_engine_client
         return
 
+    # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        # Start the RPC Server, which has the AsyncLLMEngine.
+        # Start the RPC Server in separate process (holds the AsyncLLMEngine).
         port = get_open_port(envs.VLLM_RPC_PORT)
         rpc_server_process = Process(target=run_rpc_server,
                                      args=(engine_args,
