@@ -1,6 +1,6 @@
 import contextlib
 import functools
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -14,11 +14,8 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
-    import vllm._moe_C
-
-with contextlib.suppress(ImportError):
     # ruff: noqa: F401
-    import vllm._punica_C
+    import vllm._moe_C
 
 
 def is_custom_op_supported(op_name: str) -> bool:
@@ -239,7 +236,7 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
                       scale_b: torch.Tensor,
-                      out_dtype: Type[torch.dtype],
+                      out_dtype: torch.dtype,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
@@ -336,7 +333,7 @@ def scaled_fp8_quant(
     """
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
-    shape = input.shape
+    shape: Union[Tuple[int, int], torch.Size] = input.shape
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
@@ -387,6 +384,15 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
     return output, input_scales
+
+
+# qqq ops
+def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                    s_tok: torch.Tensor, s_ch: torch.Tensor,
+                    s_group: torch.Tensor, workspace: torch.Tensor,
+                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
+    return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
+                                        workspace, size_m, size_n, size_k)
 
 
 # moe
@@ -508,43 +514,6 @@ def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
 def register_graph_buffers(fa: int, handles: List[str],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
-
-
-# punica
-def dispatch_bgmv(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
-                                      scale)
-
-
-def dispatch_bgmv_low_level(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-    h_in: int,
-    h_out: int,
-    y_offset: int,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv_low_level(
-        y,
-        x,
-        w_t_all,
-        indicies,
-        layer_idx,
-        scale,
-        h_in,
-        h_out,
-        y_offset,
-    )
 
 
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456
