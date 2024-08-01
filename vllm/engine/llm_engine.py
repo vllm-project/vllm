@@ -793,9 +793,8 @@ class LLMEngine:
     ) -> LLMInputs:
         '''
         For encoder/decoder models only:
-        Process any encoder/decoder input-prompt
-        into an encoder/decoder-model-compatible
-        `LLMInputs` instance.
+        Process an input prompt
+        into an `LLMInputs` instance.
 
         There are two types of input prompts:
         singleton prompts which carry only the
@@ -817,12 +816,12 @@ class LLMEngine:
         
         Arguments:
 
-        * inputs: any valid encoder/decoder prompt
+        * inputs: an input prompt
         * request_id
 
         Returns:
 
-        * Encoder/decoder-model-compatible `LLMInputs` instance
+        * `LLMInputs` instance
         '''
 
         ptype = get_prompt_type(inputs)
@@ -898,19 +897,19 @@ class LLMEngine:
     ) -> LLMInputs:
         '''
         For decoder-only models:
-        Process any decoder-only-model-compatible input prompt
+        Process an input prompt
         into an `LLMInputs` instance.
-        
+
         Arguments:
 
-        * inputs: any valid decoder-only prompt
+        * inputs: input prompt
         * lora_request
         * request_id
         * prompt_adapter_request
 
         Returns:
 
-        * Decoder-only-model-compatible `LLMInputs` instance
+        * `LLMInputs` instance
         '''
 
         if isinstance(inputs, str):
