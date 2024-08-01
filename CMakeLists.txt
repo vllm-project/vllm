@@ -33,7 +33,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # versions are derived from Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.3.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.4.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -101,7 +101,7 @@ elseif(HIP_FOUND)
   # ROCm 5.X and 6.X
   if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
       NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM})
-    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM} "
+    message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
 else()
@@ -151,6 +151,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
+  "csrc/prepare_inputs/advance_step.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -169,8 +170,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
     "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
+    "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
+    "csrc/quantization/gptq_marlin/awq_marlin_repack.cu"
     "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
@@ -220,61 +223,7 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-#
-# _punica_C extension
-#
 
-set(VLLM_PUNICA_EXT_SRC
-  "csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp32_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp32_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
-  "csrc/punica/punica_ops.cu"
-  "csrc/punica/torch_bindings.cpp")
-
-#
-# Copy GPU compilation flags+update for punica
-#
-set(VLLM_PUNICA_GPU_FLAGS ${VLLM_GPU_FLAGS})
-list(REMOVE_ITEM VLLM_PUNICA_GPU_FLAGS
-  "-D__CUDA_NO_HALF_OPERATORS__"
-  "-D__CUDA_NO_HALF_CONVERSIONS__"
-  "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
-  "-D__CUDA_NO_HALF2_OPERATORS__")
-
-#
-# Filter out CUDA architectures < 8.0 for punica.
-#
-if (${VLLM_GPU_LANG} STREQUAL "CUDA")
-  set(VLLM_PUNICA_GPU_ARCHES)
-  foreach(ARCH ${VLLM_GPU_ARCHES})
-    string_to_ver(CODE_VER ${ARCH})
-    if (CODE_VER GREATER_EQUAL 8.0)
-      list(APPEND VLLM_PUNICA_GPU_ARCHES ${ARCH})
-    endif()
-  endforeach()
-  message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
-elseif(${VLLM_GPU_LANG} STREQUAL "HIP")
-  set(VLLM_PUNICA_GPU_ARCHES ${VLLM_GPU_ARCHES})
-  message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
-endif()
-
-if (VLLM_PUNICA_GPU_ARCHES)
-  define_gpu_extension_target(
-    _punica_C
-    DESTINATION vllm
-    LANGUAGE ${VLLM_GPU_LANG}
-    SOURCES ${VLLM_PUNICA_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_PUNICA_GPU_FLAGS}
-    ARCHITECTURES ${VLLM_PUNICA_GPU_ARCHES}
-    USE_SABI 3
-    WITH_SOABI)
-else()
-  message(WARNING "Unable to create _punica_C target because none of the "
-    "requested architectures (${VLLM_GPU_ARCHES}) are supported, i.e. >= 8.0")
-endif()
 
 #
 # Add the `default` target which detects which extensions should be
@@ -298,12 +247,4 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
 
-  # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
-  # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and
-  # there are supported target arches.
-  if (VLLM_PUNICA_GPU_ARCHES AND
-      (ENV{VLLM_INSTALL_PUNICA_KERNELS} OR VLLM_INSTALL_PUNICA_KERNELS))
-    message(STATUS "Enabling punica extension.")
-    add_dependencies(default _punica_C)
-  endif()
 endif()

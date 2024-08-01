@@ -28,7 +28,7 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
-HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256
+HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256
               ] if not is_hip() else [64, 80, 96, 112, 128]
 
 BLOCK_SIZES = [16, 32]
@@ -134,6 +134,8 @@ def test_paged_attention(
     seed: int,
     device: str,
 ) -> None:
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -175,7 +177,7 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
-    kv_scale = 1.0
+    k_scale = v_scale = 1.0
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -193,7 +195,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            kv_scale,
+            k_scale,
+            v_scale,
         )
     elif version == "v2":
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
@@ -224,7 +227,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            kv_scale,
+            k_scale,
+            v_scale,
         )
     else:
         raise AssertionError(f"Unknown version: {version}")

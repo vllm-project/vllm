@@ -5,6 +5,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonMetadataBuilder
 from vllm.attention.ops.blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -92,6 +93,10 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return BlocksparseFlashAttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["BlocksparseFlashAttentionMetadataBuilder"]:
+        return BlocksparseFlashAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -244,6 +249,12 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
         return self._cached_decode_metadata
 
 
+class BlocksparseFlashAttentionMetadataBuilder(
+        CommonMetadataBuilder[BlocksparseFlashAttentionMetadata]):
+
+    _metadata_cls = BlocksparseFlashAttentionMetadata
+
+
 class BlocksparseFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
@@ -327,7 +338,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -368,7 +380,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                kv_scale,
+                k_scale,
+                v_scale,
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
@@ -405,7 +418,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                k_scale,
+                v_scale,
                 tp_rank=self.tp_rank,
                 blocksparse_local_blocks=self.local_blocks,
                 blocksparse_vert_stride=self.vert_stride,
