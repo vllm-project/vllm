@@ -198,10 +198,10 @@ class QWenModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.start_layer, self.end_layer, self.layers = make_layers(
+        self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: QWenBlock(config, cache_config, quant_config, prefix),
-            prefix=f"{prefix}.layers"
+            lambda prefix: QWenBlock(config, cache_config, quant_config),
+            prefix=f"{prefix}.h"
         )
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
@@ -324,9 +324,6 @@ class QWenLMHeadModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
                 # Skip loading visual weights to support Qwen-VL models
                 # in cases with text-only inputs
                 # TODO: add support for Qwen-VL
@@ -335,6 +332,9 @@ class QWenLMHeadModel(nn.Module):
                     print_warning_once(
                         "Only text inputs are allowed. Images won't be handled "
                         "until Qwen-VL models are fully supported.")
+                    continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
