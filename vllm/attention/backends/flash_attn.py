@@ -209,6 +209,7 @@ class FlashAttentionMetadataBuilder(
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
+        self.has_prefix_cache_hit = False
 
         self.input_builder = input_builder
         self.runner = input_builder.runner
@@ -252,10 +253,11 @@ class FlashAttentionMetadataBuilder(
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
-            if inter_data.prefix_cache_hit:
+            if inter_data.prefix_cache_hit or self.has_prefix_cache_hit:
                 # NOTE(woosuk): For flash-attn, the block table should
                 # include the entries for the incoming prefill tokens.
                 block_table = block_tables[seq_id]
+                self.has_prefix_cache_hit = True
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
                 block_table = block_tables[seq_id][-curr_sliding_window_block:]
