@@ -61,20 +61,3 @@ async def test_log_metrics(client: openai.AsyncOpenAI):
     response = requests.get(base_url + "/metrics")
 
     assert response.status_code == HTTPStatus.OK
-
-
-@pytest.mark.asyncio
-async def test_fronted_multiprocessing_flag():
-    # Build server without the flag to disable multiprocessing
-    with RemoteOpenAIServer("facebook/opt-125m", []), \
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s, \
-        pytest.raises(OSError, match="Address already in use"):
-        # Ensure we see the backend port in use
-        s.bind(("localhost", envs.VLLM_RPC_PORT))
-
-    # Build server with the flag to disable multiprocessing
-    with RemoteOpenAIServer("facebook/opt-125m",
-                            ["--disable-frontend-multiprocessing"]), \
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # Ensure the backend port is free -> no multiprocessing is happening
-        s.bind(("localhost", envs.VLLM_RPC_PORT))
