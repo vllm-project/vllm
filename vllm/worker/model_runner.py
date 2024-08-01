@@ -49,8 +49,8 @@ from vllm.prompt_adapter.worker_manager import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, flatten_2d_lists,
-                        get_kv_cache_torch_dtype, is_hip,
+from vllm.utils import (CudaMemoryProfiler, create_torch_tensor_from_1d_list,
+                        flatten_2d_lists, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -548,12 +548,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Tokens and positions.
         input_tokens.extend([0] * cuda_graph_pad_size)
         input_positions.extend([0] * cuda_graph_pad_size)
-        input_tokens_tensor = torch.tensor(input_tokens,
-                                           dtype=torch.long,
-                                           device=self.runner.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.runner.device)
+        input_tokens_tensor = create_torch_tensor_from_1d_list(
+            input_tokens, dtype=torch.long, device=self.runner.device)
+        input_positions_tensor = create_torch_tensor_from_1d_list(
+            input_positions, dtype=torch.long, device=self.runner.device)
 
         # Sequence and query lengths.
         seq_lens.extend([1] * cuda_graph_pad_size)

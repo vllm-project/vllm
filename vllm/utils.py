@@ -1,4 +1,5 @@
 import argparse
+import array
 import asyncio
 import contextlib
 import datetime
@@ -763,7 +764,28 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
 
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     """Flatten a list of lists to a single list."""
+    if len(lists) == 1:
+        return lists[0]
     return [item for sublist in lists for item in sublist]
+
+
+def create_torch_tensor_from_1d_list(
+        py_list: List[Any],
+        dtype: torch.dtype,
+        device: Optional[Union[str, torch.device]] = None) -> torch.Tensor:
+    """Convert a list to a torch tensor."""
+    if dtype == torch.int:
+        array_dtype = "i"
+    elif dtype == torch.float:
+        array_dtype = "f"
+    elif dtype == torch.long:
+        array_dtype = "l"
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    tensor = torch.frombuffer(array.array(array_dtype, py_list), dtype=dtype)
+    if device is not None:
+        tensor = tensor.to(device)
+    return tensor
 
 
 def init_cached_hf_modules() -> None:

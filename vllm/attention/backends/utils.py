@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Dict, List, Type, TypeVar, Union
 import torch
 
 from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import create_torch_tensor_from_1d_list, make_tensor_with_pad
 
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
@@ -200,15 +200,14 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             )
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
-        context_lens_tensor = torch.tensor(self.context_lens,
-                                           dtype=torch.int,
-                                           device=device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
+        context_lens_tensor = create_torch_tensor_from_1d_list(
+            self.context_lens, dtype=torch.int, device=device)
+        seq_lens_tensor = create_torch_tensor_from_1d_list(seq_lens,
+                                                           dtype=torch.int,
+                                                           device=device)
+        query_lens_tensor = create_torch_tensor_from_1d_list(query_lens,
+                                                             dtype=torch.long,
+                                                             device=device)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -224,9 +223,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
+        slot_mapping_tensor = create_torch_tensor_from_1d_list(
+            self.slot_mapping, dtype=torch.long, device=device)
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,

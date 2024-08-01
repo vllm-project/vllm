@@ -21,7 +21,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.utils import get_kv_cache_torch_dtype, make_tensor_with_pad
+from vllm.utils import (create_torch_tensor_from_1d_list,
+                        get_kv_cache_torch_dtype, make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
@@ -366,12 +367,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
+        seq_lens_tensor = create_torch_tensor_from_1d_list(seq_lens,
+                                                           dtype=torch.int,
+                                                           device=device)
+        query_lens_tensor = create_torch_tensor_from_1d_list(query_lens,
+                                                             dtype=torch.long,
+                                                             device=device)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -387,21 +388,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
+        slot_mapping_tensor = create_torch_tensor_from_1d_list(
+            self.slot_mapping, dtype=torch.long, device=device)
 
         logits_soft_cap = getattr(self.runner.model_config.hf_config,
                                   "attn_logit_softcapping", None)
 
         if len(self.paged_kv_indptr) > 0:
-            paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
-                                                   device="cpu",
-                                                   dtype=torch.int)
-            paged_kv_indptr_tensor = torch.tensor(self.paged_kv_indptr,
-                                                  device="cpu",
-                                                  dtype=torch.int)
-            paged_kv_last_page_len_tensor = torch.tensor(
+            paged_kv_indices_tensor = create_torch_tensor_from_1d_list(
+                self.paged_kv_indices, device="cpu", dtype=torch.int)
+            paged_kv_indptr_tensor = create_torch_tensor_from_1d_list(
+                self.paged_kv_indptr, device="cpu", dtype=torch.int)
+            paged_kv_last_page_len_tensor = create_torch_tensor_from_1d_list(
                 self.paged_kv_last_page_len, device="cpu", dtype=torch.int)
         else:
             paged_kv_indices_tensor = None
