@@ -42,6 +42,7 @@ _PP_SUPPORTED_MODELS = [
     "NemotronForCausalLM",
     "Qwen2ForCausalLM",
     "Qwen2MoeForCausalLM",
+    "QWenLMHeadModel",
 ]
 
 
