@@ -60,7 +60,6 @@ files = [
     "vllm/logging",
     "vllm/multimodal",
     "vllm/platforms",
-    "vllm/server",
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
