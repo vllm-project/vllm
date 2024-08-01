@@ -20,15 +20,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only MiniCPM-V-2 model compatible with HuggingFace weights."""
+"""Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
 from functools import partial
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.types
 from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
@@ -38,14 +39,17 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsVision
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
+from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.models.minicpm import MiniCPMModel
+from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_image_processor,
@@ -55,12 +59,12 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from .idefics2_vision_model import Idefics2VisionTransformer
 
 _KEYS_TO_MODIFY_MAPPING = {
-    "language_model.lm_head": "lm_head",
-    "language_model.model": "language_model",
+    "llm.lm_head": "lm_head",
+    "llm.model": "llm",
 }
 
 
-def get_abs_pos(abs_pos, tgt_size):
+def get_abs_pos(abs_pos: torch.Tensor, tgt_size: torch.Tensor):
     # abs_pos: L, C
     # tgt_size: (H, W)
     # return: M, C
@@ -77,10 +81,12 @@ def get_abs_pos(abs_pos, tgt_size):
 
 
 # https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/pos_embed.py#L20
-def get_2d_sincos_pos_embed(embed_dim,
-                            grid_size,
-                            cls_token=False,
-                            version=2.0):
+def get_2d_sincos_pos_embed(
+        embed_dim: int,
+        grid_size: Union[int, Tuple[int, int]],
+        cls_token: bool = False,
+        version: Tuple[int, int] = (2, 0),
+):
     """
     grid_size: int of the grid height and width
     return:
@@ -97,7 +103,7 @@ def get_2d_sincos_pos_embed(embed_dim,
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
     grid = np.stack(grid, axis=0)
 
-    if version == 2.0:
+    if version == (2, 0):
         grid = grid.reshape([2, 1, grid_h_size, grid_w_size])
         pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid, version)
         if cls_token:
@@ -108,7 +114,11 @@ def get_2d_sincos_pos_embed(embed_dim,
     return pos_embed
 
 
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid, version=2.0):
+def get_2d_sincos_pos_embed_from_grid(
+        embed_dim: int,
+        grid: Union[int, Tuple[int, int]],
+        version: Tuple[int, int] = (2, 0),
+):
     assert embed_dim % 2 == 0
 
     # use half of dimensions to encode grid_h
@@ -117,14 +127,16 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim, grid, version=2.0):
     emb_w = get_1d_sincos_pos_embed_from_grid(
         embed_dim // 2, grid[1], version)  # (H*W, D/2) or (H, W, D/2)
 
-    if version == 2.0:
+    if version == (2, 0):
         emb = np.concatenate([emb_h, emb_w], axis=1)  # (H*W, D)
     else:
         emb = np.concatenate([emb_h, emb_w], axis=-1)  # (H, W, D)
     return emb
 
 
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos, version=2.0):
+def get_1d_sincos_pos_embed_from_grid(embed_dim: int,
+                                      pos: int,
+                                      version: Tuple[int, int] = (2, 0)):
     """
     embed_dim: output dimension for each position
     pos: a list of positions to be encoded: size (M,) / (H, W)
@@ -135,7 +147,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos, version=2.0):
     omega /= embed_dim / 2.0
     omega = 1.0 / 10000**omega  # (D/2,)
 
-    if version == 2.0:
+    if version == (2, 0):
         pos = pos.reshape(-1)  # (M,)
         out = np.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
         emb_sin = np.sin(out)  # (M, D/2)
@@ -161,20 +173,20 @@ class Resampler(nn.Module):
 
     def __init__(
             self,
-            num_queries,
-            grid_size,
-            embed_dim,
-            num_heads,
-            kv_dim=None,
-            norm_layer=default_norm_layer,
-            adaptive=False,
-            max_size=(70, 70),
-            version=2.0,
+            num_queries: int,
+            grid_size: int,
+            embed_dim: int,
+            num_heads: int,
+            kv_dim: Optional[int] = None,
+            norm_layer: nn.Module = default_norm_layer,
+            adaptive: bool = False,
+            max_size: Tuple[int, int] = (70, 70),
+            version: Tuple[int, int] = (2, 0),
     ):
         super().__init__()
 
         self.version = version
-        if self.version == 2.0:
+        if self.version == (2, 0):
             self.num_queries = grid_size**2
         else:
             self.num_queries = num_queries
@@ -187,7 +199,6 @@ class Resampler(nn.Module):
         trunc_normal_(self.query, std=0.02)
 
         if kv_dim is not None and kv_dim != embed_dim:
-
             self.kv_proj = ReplicatedLinear(kv_dim, embed_dim, bias=False)
         else:
             # Maintain the same return value with ReplicatedLinear.forward
@@ -204,7 +215,7 @@ class Resampler(nn.Module):
         self.proj = nn.Parameter(
             (embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
 
-        if self.version == 2.0:
+        if self.version == (2, 0):
             self.pos_embed = nn.Parameter(
                 torch.from_numpy(
                     get_2d_sincos_pos_embed(
@@ -215,14 +226,17 @@ class Resampler(nn.Module):
 
         self.apply(self._init_weights)
 
-    def _set_2d_pos_cache(self, max_size, device="cpu"):
+    def _set_2d_pos_cache(self,
+                          max_size: Tuple[int, int],
+                          device: torch.types.Device = "cpu"):
         pos_embed = (torch.from_numpy(
             get_2d_sincos_pos_embed(self.embed_dim,
                                     max_size,
                                     version=self.version)).float().to(device))
         self.register_buffer("pos_embed", pos_embed, persistent=False)
 
-    def _adjust_pos_cache(self, tgt_sizes, device):
+    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor,
+                          device: torch.types.Device):
         max_h = torch.max(tgt_sizes[:, 0])
         max_w = torch.max(tgt_sizes[:, 1])
         if max_h > self.max_size[0] or max_w > self.max_size[1]:
@@ -232,7 +246,7 @@ class Resampler(nn.Module):
             ]
             self._set_2d_pos_cache(self.max_size, device)
 
-    def _init_weights(self, m):
+    def _init_weights(self, m: nn.Module):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -241,7 +255,9 @@ class Resampler(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_2_5(self, x, tgt_sizes=None):
+    def forward_2_5(self,
+                    x: torch.Tensor,
+                    tgt_sizes: Optional[torch.Tensor] = None):
         assert x.shape[0] == tgt_sizes.shape[0]
         bs = x.shape[0]
 
@@ -288,7 +304,12 @@ class Resampler(nn.Module):
         x = x @ self.proj
         return x
 
-    def forward_2(self, x, tgt_sizes=None, attn_mask=None):
+    def forward_2(
+        self,
+        x: torch.Tensor,
+        tgt_sizes: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ):
         if self.adaptive:
             pos_embed = (torch.Tensor(
                 get_2d_sincos_pos_embed(self.embed_dim,
@@ -314,8 +335,13 @@ class Resampler(nn.Module):
         x = x @ self.proj
         return x
 
-    def forward(self, x, tgt_sizes=None, attn_mask=None):
-        if self.version == 2.0:
+    def forward(
+        self,
+        x: torch.Tensor,
+        tgt_sizes: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ):
+        if self.version == (2, 0):
             return self.forward_2(x, tgt_sizes=tgt_sizes, attn_mask=attn_mask)
         else:
             return self.forward_2_5(x, tgt_sizes=tgt_sizes)
@@ -334,7 +360,7 @@ def dummy_seq_data_for_minicpmv(seq_len: int):
     return SequenceData(token_ids)
 
 
-def dummy_image_for_minicpmv(hf_config):
+def dummy_image_for_minicpmv(hf_config: PretrainedConfig):
     width = height = hf_config.image_size
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image}
@@ -342,13 +368,8 @@ def dummy_image_for_minicpmv(hf_config):
 
 def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(PretrainedConfig)
-
-    # image_feature_size = get_max_minicpmv_image_tokens(ctx)
-
     seq_data = dummy_seq_data_for_minicpmv(seq_len)
-
     mm_data = dummy_image_for_minicpmv(hf_config)
-
     return seq_data, mm_data
 
 
@@ -388,6 +409,10 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsVision):
+    """
+    The abstract class of MiniCPMV can only be inherited, but cannot be 
+    instantiated.
+    """
 
     def __init__(
         self,
@@ -400,27 +425,45 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.version = float(self.config.version)
+        if not hasattr(self.config, "version"):
+            if self.config.hidden_size == 2304 and self.config.query_num == 64:
+                self.version = (2, 0)
+            else:
+                self.version = (2, 5)
+        else:
+            self.version = str(self.config.version).split(".")
+            self.version = tuple([int(x) for x in self.version])
         self.llm = self.init_llm(config, cache_config, quant_config)
         self.vpm = self.init_vision_module()
         param_dtype = torch.get_default_dtype()
         self.vpm.to(dtype=param_dtype)
-        self.vision_dim = (self.vpm.embed_dim if self.version == 2.0 else
+        self.vision_dim = (self.vpm.embed_dim if self.version == (2, 0) else
                            self.vpm.embeddings.embed_dim)
-        self.embed_dim = self.llm.config.hidden_size
+        self.embed_dim = self.config.hidden_size
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
         self.resampler.to(device="cuda", dtype=param_dtype)
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-    def get_image_bounds(self, input_ids) -> torch.Tensor:
+    def get_image_bounds(self, input_ids: torch.Tensor):
         tokenizer = cached_get_tokenizer(self.config._name_or_path,
                                          trust_remote_code=True)
-        im_start_token_id = tokenizer.im_start_id
-        im_end_token_id = tokenizer.im_end_id
-        image_start_tokens = torch.where(input_ids == im_start_token_id)[0]
+        if not hasattr(tokenizer, "slice_start_id"):
+            start_cond = input_ids == tokenizer.im_start_id
+            end_cond = input_ids == tokenizer.im_end_id
+        else:
+            start_cond = (input_ids == tokenizer.im_start_id) | (
+                input_ids == tokenizer.slice_start_id)
+            end_cond = (input_ids == tokenizer.im_end_id) | (
+                input_ids == tokenizer.slice_end_id)
+
+        image_start_tokens = torch.where(start_cond)[0]
         image_start_tokens += 1
-        image_end_tokens = torch.where(input_ids == im_end_token_id)[0]
-        valid_image_nums = min(len(image_start_tokens), len(image_end_tokens))
+        image_end_tokens = torch.where(end_cond)[0]
+        valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
         if valid_image_nums == 0:
             return []
         image_bound = torch.hstack([
@@ -430,7 +473,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
 
         return image_bound
 
-    def get_embedding(self, data) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_embedding(
+        self, data: Dict[str, Union[List[torch.Tensor], torch.Tensor]]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         input_ids = data["input_ids"]
 
         vision_hidden_states = self.get_vision_hidden_states(data)
@@ -439,11 +484,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         else:
             image_bounds = []
 
-        if hasattr(self.llm.config, "scale_emb"):
-            vlm_embedding = (self.llm.model.embed_tokens(input_ids) *
-                             self.llm.config.scale_emb)
+        if hasattr(self.config, "scale_emb"):
+            vlm_embedding = (self.llm.embed_tokens(input_ids) *
+                             self.config.scale_emb)
         else:
-            vlm_embedding = self.llm.model.embed_tokens(input_ids)
+            vlm_embedding = self.llm.embed_tokens(input_ids)
         vision_hidden_states = [
             i.type(vlm_embedding.dtype) if isinstance(i, torch.Tensor) else i
             for i in vision_hidden_states
@@ -462,7 +507,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             )
         return vlm_embedding, vision_hidden_states
 
-    def process_multimodal_inputs(self, inputs) -> Dict:
+    def process_multimodal_inputs(self, inputs: Dict[str,
+                                                     Union[List[torch.Tensor],
+                                                           torch.Tensor]]):
         pixel_values = []
         tgt_sizes = []
         for b in range(len(inputs["pixel_values"])):
@@ -488,7 +535,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             "input_ids": input_ids,
             "tgt_sizes": kwargs.pop("tgt_sizes", None),
         }
-
         inputs = self.process_multimodal_inputs(inputs)
 
         vlm_embeddings, vision_hidden_states = self.get_embedding(inputs)
@@ -499,20 +545,22 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            input_embeds=vlm_embeddings,
+            inputs_embeds=vlm_embeddings,
         )
         return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        return self.llm.compute_logits(hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
 
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.llm.sample(logits, sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -526,9 +574,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            #     for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
-            #         if key_to_modify in name:
-            #             name = name.replace(key_to_modify, new_key)
+            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -538,8 +586,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                 continue
             use_default_weight_loading = False
             if "resampler" in name:
-                # We only do sharding for language model and
-                # not vision model for now.
                 use_default_weight_loading = True
             else:
                 for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -571,13 +617,17 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         raise NotImplementedError
 
-    def get_vision_embedding(self,
-                             pixel_values,
-                             patch_attn_mask=None,
-                             tgt_sizes=None) -> torch.Tensor:
+    def get_vision_embedding(
+        self,
+        pixel_values: List[List[torch.Tensor]],
+        patch_attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
-    def get_vision_hidden_states(self, data) -> torch.Tensor:
+    def get_vision_hidden_states(
+        self, data: Dict[str, Union[List[torch.Tensor],
+                                    torch.Tensor]]) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -591,7 +641,7 @@ class MiniCPMV2(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        assert self.version == 2.0
+        assert self.version == (2, 0)
 
     def init_llm(
         self,
@@ -599,9 +649,9 @@ class MiniCPMV2(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        return MiniCPMForCausalLM(config,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config)
+        return MiniCPMModel(config,
+                            cache_config=cache_config,
+                            quant_config=quant_config)
 
     def init_vision_module(self) -> nn.Module:
         # TODO :refactor this vision model
@@ -641,10 +691,12 @@ class MiniCPMV2(MiniCPMVBaseModel):
 
         return resampler
 
-    def get_vision_embedding(self,
-                             pixel_values,
-                             patch_attn_mask=None,
-                             tgt_sizes=None) -> torch.Tensor:
+    def get_vision_embedding(
+        self,
+        pixel_values: List[List[torch.Tensor]],
+        patch_attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         res = []
         dtype = self.vpm.pos_embed.data.dtype
         for pixel_value in pixel_values:
@@ -662,7 +714,9 @@ class MiniCPMV2(MiniCPMVBaseModel):
             res.append(self.resampler(vision_embedding, tgt_size))
         return torch.vstack(res)
 
-    def get_vision_hidden_states(self, data) -> torch.Tensor:
+    def get_vision_hidden_states(
+        self, data: Dict[str, Union[List[torch.Tensor],
+                                    torch.Tensor]]) -> torch.Tensor:
         if "vision_hidden_states" not in data:
             pixel_values = data["pixel_values"]
             vision_hidden_states = []
@@ -688,7 +742,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        assert self.version == 2.5
+        assert self.version == (2, 5)
 
     def init_llm(
         self,
@@ -696,9 +750,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        return LlamaForCausalLM(config,
-                                cache_config=cache_config,
-                                quant_config=quant_config)
+        return LlamaModel(config,
+                          cache_config=cache_config,
+                          quant_config=quant_config)
 
     def init_vision_module(self) -> nn.Module:
         model = Idefics2VisionTransformer(self.config.vision_config)
@@ -730,7 +784,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         vision_embedding = self.resampler(vision_embedding, tgt_sizes)
         return vision_embedding
 
-    def get_vision_hidden_states(self, data) -> torch.Tensor:
+    def get_vision_hidden_states(
+        self, data: Dict[str, Union[List[torch.Tensor],
+                                    torch.Tensor]]) -> torch.Tensor:
         if "vision_hidden_states" not in data:
             pixel_values = data["pixel_values"]
             tgt_sizes = data["tgt_sizes"]
@@ -769,11 +825,125 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         return vision_hidden_states
 
 
+#NOTE: Currently, information about this model is unavailable. We are
+# temporarily using `MiniCPMVQwen2` as it's name. The name may need
+# to be modified in the future.
+class MiniCPMVQwen2(MiniCPMVBaseModel):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        multimodal_config: MultiModalConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__()
+
+    def init_llm(
+        self,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> nn.Module:
+        return Qwen2Model(config,
+                          cache_config=cache_config,
+                          quant_config=quant_config)
+
+    def init_vision_module(self) -> nn.Module:
+        from vllm.model_executor.models.na_vit import SiglipVisionTransformer
+
+        if self.config._attn_implementation == "flash_attention_2":
+            self.config.vision_config._attn_implementation = "flash_attention_2"
+        else:
+            # not support sdpa
+            self.config.vision_config._attn_implementation = "eager"
+        model = SiglipVisionTransformer(self.config.vision_config)
+        if self.config.drop_vision_last_layer:
+            model.encoder.layers = model.encoder.layers[:-1]
+        return model
+
+    def init_resampler(self, embed_dim: int, vision_dim: int):
+        with set_default_torch_dtype(torch.float16):
+            resampler = Resampler(
+                num_queries=self.config.query_num,
+                grid_size=None,
+                embed_dim=embed_dim,
+                num_heads=embed_dim // 128,
+                kv_dim=vision_dim,
+                adaptive=True,
+                version=self.version,
+            )
+
+        return resampler
+
+    def get_vision_embedding(
+        self,
+        pixel_values: List[List[torch.Tensor]],
+        patch_attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: Optional[torch.Tensor] = None,
+    ):
+        vision_embedding = self.vpm(
+            pixel_values,
+            patch_attention_mask=patch_attn_mask,
+            tgt_sizes=tgt_sizes,
+        ).last_hidden_state
+        return vision_embedding
+
+    def get_vision_hidden_states(
+        self, data: Dict[str, Union[List[torch.Tensor],
+                                    torch.Tensor]]) -> torch.Tensor:
+        if "vision_hidden_states" not in data:
+            pixel_values = data["pixel_values"]
+            tgt_sizes = data["tgt_sizes"]
+            vision_hidden_states = []
+
+            device = self.vpm.embeddings.position_embedding.weight.device
+            dtype = self.vpm.embeddings.position_embedding.weight.dtype
+            all_pixel_values = [
+                i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
+            ]
+            if all_pixel_values:
+                tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
+                max_patches = torch.max(tgt_sizes[:, 0] * tgt_sizes[:, 1])
+                all_pixel_values = torch.nn.utils.rnn.pad_sequence(
+                    all_pixel_values, batch_first=True, padding_value=0.0)
+                B, L, _ = all_pixel_values.shape
+                all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
+                    B, 3, -1, L)
+                patch_attn_mask = torch.zeros((B, 1, max_patches),
+                                              dtype=torch.bool,
+                                              device=device)
+                for i in range(B):
+                    patch_attn_mask[i, 0, :tgt_sizes[i][0] *
+                                    tgt_sizes[i][1]] = True
+                vision_embedding = self.vpm(
+                    all_pixel_values.type(dtype),
+                    patch_attention_mask=patch_attn_mask,
+                    tgt_sizes=tgt_sizes,
+                ).last_hidden_state
+
+                vision_hidden_states = self.resampler(vision_embedding,
+                                                      tgt_sizes)
+
+            else:  # no image
+                dummy_feature = []
+                vision_hidden_states = dummy_feature
+        else:
+            vision_hidden_states = data["vision_hidden_states"]
+
+        return vision_hidden_states
+
+
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_minicpmv)
 class MiniCPMV(MiniCPMVBaseModel):
+    """
+    Different versions of MiniCPMV use different visual encoders and LLMs,
+    which is not conducive to the current integration logic of LoRA and 
+    bitsandbytes in vLLM. Therefore, it is necessary to separate them.
+    """
 
     def __new__(
         cls,
@@ -782,14 +952,20 @@ class MiniCPMV(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        version = config.version
-        assert version in [
-            "2.0",
-            "2.5",
-        ], "MiniCPMV2 only supports versions 2.0 and 2.5."
-        if version == "2.0":
-            return MiniCPMV2(config, multimodal_config, cache_config,
-                             quant_config)
+        if not hasattr(config, "version"):
+            if config.hidden_size == 2304 and config.query_num == 64:
+                version = (2, 0)
+            else:
+                version = (2, 5)
         else:
-            return MiniCPMV2_5(config, multimodal_config, cache_config,
-                               quant_config)
+            version = str(config.version).split(".")
+            version = tuple([int(x) for x in version])
+        # Dispatch class based on version
+        if version == (2, 0):
+            instance_class = MiniCPMV2
+        elif version == (2, 5):
+            instance_class = MiniCPMV2_5
+        else:
+            instance_class = MiniCPMVQwen2
+        return instance_class(config, multimodal_config, cache_config,
+                              quant_config)

@@ -1,4 +1,7 @@
 # coding=utf-8
+
+# adapted from https://github.com/huggingface/transformers/blob/v4.43.2/src/transformers/models/idefics2/modeling_idefics2.py
+# Copyright 2024 The vLLM team.
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -113,7 +116,6 @@ class Idefics2VisionEmbeddings(nn.Module):
 class Idefics2VisionAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    # Copied from transformers.models.clip.modeling_clip.CLIPAttention.__init__
     def __init__(
         self,
         config: Idefics2Config,
@@ -237,10 +239,7 @@ class Idefics2EncoderLayer(nn.Module):
             attention_mask (`torch.FloatTensor`):
                 Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` where
                 padding elements are indicated by very large negative values.
-            output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all
-                attention layers. See `attentions` under
-                returned tensors for more detail.
+
         """
         residual = hidden_states
 
@@ -259,8 +258,6 @@ class Idefics2EncoderLayer(nn.Module):
         return hidden_states
 
 
-# Copied from transformers.models.siglip.modeling_siglip.SiglipEncoder
-# with Siglip->Idefics2
 class Idefics2Encoder(nn.Module):
     """
     Transformer encoder consisting of `config.num_hidden_layers` self attention
@@ -282,38 +279,24 @@ class Idefics2Encoder(nn.Module):
     # Ignore copy
     def forward(
         self,
-        inputs_embeds,
+        inputs_embeds: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size,
-                sequence_length, hidden_size)`):
+            inputs_embeds (torch.Tensor):
                 Optionally, instead of passing `input_ids` you can choose to
                 directly pass an embedded representation.
                 This is useful if you want more control over how to convert
                 `input_ids` indices into associated vectorsthan the model's
                 internal embedding lookup matrix.
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`
+            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)` 
                 , *optional*):
                 Mask to avoid performing attention on padding token indices.
                 Mask values selected in `[0, 1]`:
 
                 - 1 for tokens that are **not masked**,
                 - 0 for tokens that are **masked**.
-
-                [What are attention masks?](../glossary#attention-mask)
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention
-                layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See
-                `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a p
-                lain tuple.
         """  # noqa: E501
 
         hidden_states = inputs_embeds
