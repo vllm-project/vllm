@@ -1,0 +1,21 @@
+{% if messages[0]['role'] == 'system' %}
+{% set loop_messages = messages[1:] %}
+{% set system_message = '[gMASK]sop<|' + messages[0]['role'] + '|>' + '\n ' + messages[0]['content'] %}
+{% else %}
+{% set loop_messages = messages %}
+{% set system_message = '' %}
+{% endif %}
+{% for message in loop_messages %}
+{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}
+{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
+{% endif %}
+{% if loop.index0==0 and system_message=='' %}
+{{'[gMASK]sop<|' + message['role'] + '|>' + '\n ' + message['content']  + '<|assistant|>'  }}
+{% elif system_message!='' and loop.index0==0 %}
+{{system_message +  '<|' + message['role'] + '|>' + '\n ' + message['content'] + '<|assistant|>'}}
+{% elif message['role'] == 'user'%}
+{{' ' + message['content'] + '<|assistant|>'}}
+{% else %}
+{{message['content']+'<|user|>'}}
+{% endif %}
+{% endfor %}
