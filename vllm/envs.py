@@ -28,7 +28,9 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
+    VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -43,7 +45,6 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
-    VLLM_INSTALL_PUNICA_KERNELS: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
@@ -91,10 +92,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
-
-    # If set, vllm will install Punica kernels
-    "VLLM_INSTALL_PUNICA_KERNELS":
-    lambda: bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0"))),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -241,10 +238,19 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
-    # CPU key-value cache space
+    # Pipeline stage partition strategy
+    "VLLM_PP_LAYER_PARTITION":
+    lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+
+    # (CPU backend only) CPU key-value cache space.
     # default is 4GB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
+
+    # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
+    # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
+    "VLLM_CPU_OMP_THREADS_BIND":
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
 
     # OpenVINO key-value cache space
     # default is 4GB

@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
@@ -118,6 +119,7 @@ def convert_bin_to_safetensor_file(
 # TODO(woosuk): Move this to other place.
 def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
+
     quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
@@ -489,6 +491,11 @@ def initialize_dummy_weights(
     """
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
+            if current_platform.is_tpu():
+                # XLA device does not support torch.Generator()
+                param.uniform_(low, high)
+                continue
+
             generator = torch.Generator(device=param.data.device)
             generator.manual_seed(seed)
             if torch.finfo(param.data.dtype).bits < 16:

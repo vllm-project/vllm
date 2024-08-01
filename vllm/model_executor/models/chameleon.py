@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from torch import nn
+from transformers import ChameleonConfig, ChameleonVQVAEConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -30,8 +31,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
-from vllm.transformers_utils.configs import (ChameleonConfig,
-                                             ChameleonVQVAEConfig)
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsVision
@@ -126,7 +125,8 @@ def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
 
     # Appending sep token for chat mode to follow default processor
     # behavior
-    new_prompt += tokenizer.sep_token
+    if new_prompt is not None:
+        new_prompt += tokenizer.sep_token
     new_token_ids += [CHAMELEON_SEP_TOKEN_ID]
 
     # NOTE: Create a defensive copy of the original inputs
@@ -998,6 +998,13 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsVision):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+
+            # With tie_word_embeddings, we can skip lm_head.weight
+            # The weight might appear unnecessarily in the files if the model is
+            # processed with quantization, LoRA, fine-tuning, etc.
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
+                continue
+
             use_default_weight_loading = False
             if "vqmodel" in name:
                 if self.model.vqmodel is not None:

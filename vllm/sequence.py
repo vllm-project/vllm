@@ -3,6 +3,7 @@ import copy
 import enum
 import math
 from abc import ABC, abstractmethod
+from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
@@ -120,10 +121,10 @@ class SequenceData:
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
-        self._prompt_token_ids: List[int] = list(prompt_token_ids)
+        self._prompt_token_ids = array('l', prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
-        self._output_token_ids: List[int] = (
-            list(output_token_ids) if output_token_ids is not None else [])
+        self._output_token_ids = array(
+            'l', output_token_ids if output_token_ids is not None else [])
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -133,8 +134,8 @@ class SequenceData:
         self._update_cached_all_tokens()
 
     def _update_cached_all_tokens(self):
-        self._cached_all_token_ids: List[int] = (self._prompt_token_ids +
-                                                 self._output_token_ids)
+        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
+                                                     self._output_token_ids)
 
     @property
     def prompt_token_ids(self) -> Tuple[int, ...]:
@@ -142,9 +143,13 @@ class SequenceData:
 
     @prompt_token_ids.setter
     def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        self._prompt_token_ids = list(new_prompt_token_ids)
+        self._prompt_token_ids = array('l', new_prompt_token_ids)
         self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
         self._update_cached_all_tokens()
+
+    @property
+    def prompt_token_ids_array(self) -> array:
+        return self._prompt_token_ids
 
     @property
     def output_token_ids(self) -> Tuple[int, ...]:
@@ -152,8 +157,12 @@ class SequenceData:
 
     @output_token_ids.setter
     def output_token_ids(self, new_output_token_ids) -> None:
-        self._output_token_ids = list(new_output_token_ids)
+        self._output_token_ids = array('l', new_output_token_ids)
         self._update_cached_all_tokens()
+
+    @property
+    def output_token_ids_array(self) -> array:
+        return self._output_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -405,14 +414,6 @@ class Sequence:
                 f"num_blocks={self.n_blocks}, ")
 
 
-@dataclass
-class SequenceGroupState:
-    """Mutable state tied to a specific sequence group"""
-
-    # torch.Generator used in seeded sampling
-    generator: Optional = None  # type: ignore
-
-
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -457,7 +458,6 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.spec_decode_params = spec_decode_params
         self.prompt_logprobs: Optional[PromptLogprobs] = None
-        self.state = SequenceGroupState()
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.prompt_adapter_request = prompt_adapter_request
@@ -646,7 +646,6 @@ class SequenceGroupMetadata:
             for speculative decoding.
         computed_block_nums: The block numbers that are already computed,
             used in prefix caching.
-        state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None 
@@ -673,7 +672,6 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         spec_decode_params: Optional[SpecDecodeParams] = None,
         computed_block_nums: Optional[List[int]] = None,
-        state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional["MultiModalDataDict"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
@@ -690,7 +688,6 @@ class SequenceGroupMetadata:
         self.prompt_adapter_request = prompt_adapter_request
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
-        self.state = SequenceGroupState() if state is None else state
         self.encoder_seq_data = encoder_seq_data
         self.cross_block_table = cross_block_table
         self._token_chunk_size = token_chunk_size

@@ -17,7 +17,7 @@ from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
-                    Union)
+                    Union, overload)
 
 import numpy as np
 import numpy.typing as npt
@@ -53,6 +53,7 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 P = ParamSpec('P')
 K = TypeVar("K")
 T = TypeVar("T")
+U = TypeVar("U")
 
 
 class _Sentinel:
@@ -94,8 +95,10 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> Optional[T]:
-        return self.get(key)
+    def __getitem__(self, key: Hashable) -> T:
+        value = self.cache[key]  # Raise KeyError if not exists
+        self.cache.move_to_end(key)
+        return value
 
     def __setitem__(self, key: Hashable, value: T) -> None:
         self.put(key, value)
@@ -109,8 +112,9 @@ class LRUCache(Generic[T]):
     def get(self,
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
+        value: Optional[T]
         if key in self.cache:
-            value: Optional[T] = self.cache[key]
+            value = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -404,27 +408,6 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def init_kmp_env():
-    if not is_cpu():
-        return
-
-    ld_prealod_str = os.getenv("LD_PRELOAD", "")
-    if "libiomp5.so" not in ld_prealod_str:
-        return
-
-    # The time(milliseconds) that a thread should wait after completing the
-    # execution of a parallel region, before sleeping.
-    os.environ['KMP_BLOCKTIME'] = "1"
-    # dump settings on start up
-    os.environ['KMP_SETTINGS'] = "1"
-    # Prevents the CPU to run into low performance state
-    os.environ['KMP_TPAUSE'] = "0"
-    # Provides fine granularity parallelism
-    os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
-    os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
-    os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
-
-
 def chunk_list(lst: List[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
     for i in range(0, len(lst), chunk_size):
@@ -491,7 +474,6 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -507,7 +489,13 @@ def create_kv_caches_with_random_flash(
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
                                       device=device)
-        key_value_cache.uniform_(-scale, scale)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -524,6 +512,12 @@ def create_kv_caches_with_random(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -600,8 +594,8 @@ class CudaMemoryProfiler:
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)
-            mem = torch.xpu.max_memory_allocated(self.device)
+            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):
@@ -717,6 +711,54 @@ def merge_dicts(dict1: Dict[K, List[T]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
+                 Tuple["JSONTree[T]", ...], T]
+"""A nested JSON structure where the leaves need not be JSON-serializable."""
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Dict[str, JSONTree[T]],
+) -> Dict[str, JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: List[JSONTree[T]],
+) -> List[JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Tuple[JSONTree[T], ...],
+) -> Tuple[JSONTree[U], ...]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: JSONTree[T],
+) -> JSONTree[U]:
+    ...
+
+
+def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
+    if isinstance(value, dict):
+        return {k: json_map_leaves(func, v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [json_map_leaves(func, v) for v in value]
+    elif isinstance(value, tuple):
+        return tuple(json_map_leaves(func, v) for v in value)
+    else:
+        return func(value)
 
 
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
