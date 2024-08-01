@@ -333,9 +333,27 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
+        if isinstance(execute_model_req.previous_hidden_states,
+                        torch.Tensor):
+            kwargs = {
+                "previous_hidden_states":
+                execute_model_req.previous_hidden_states
+            }
+        elif isinstance(execute_model_req.previous_hidden_states,
+                        HiddenStates):
+            kwargs = {
+                "previous_hidden_states":
+                execute_model_req.previous_hidden_states.hidden_states
+            }
+        else:
+            kwargs = {}
+
         return self.model_runner.execute_model(
-            model_input, self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None)
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            **kwargs,
+        )
 
 
 class WorkerWrapperBase:
