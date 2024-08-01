@@ -9,9 +9,9 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.quantization.awq import (AWQConfig,
-                                                         AWQLinearMethod)
+from vllm.model_executor.layers.fused_moe import (fused_experts_awq, fused_moe,
+                                                  fused_topk)
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
@@ -177,10 +177,19 @@ def test_fused_moe_awq(
 
     score = torch.randn((m, e), device='cuda', dtype=torch.half)
 
-    awq_method = AWQLinearMethod(AWQConfig(4, groupsize, False))
+    quant_config = AWQConfig(4, groupsize, False)
     torch_output = torch_moe_awq(a, qw1, scale1, zero1, qw2, scale2, zero2,
                                  score, topk)
-    # TODO @dsikka: what is this supposed to be applying?
-    # LinearMethod used for a fused test?
-    cuda_output = awq_method.apply_moe_weights(w1, w2, a, score, topk, False)
+
+    topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+    cuda_output = fused_experts_awq(hidden_states=a,
+                                    w1=w1["qweight"],
+                                    w2=w2["qweight"],
+                                    w1_scales=w1["scales"],
+                                    w2_scales=w2["scales"],
+                                    w1_qzeros=w1["qzeros"],
+                                    w2_qzeros=w2["qzeros"],
+                                    topk_weights=topk_weights,
+                                    topk_ids=topk_ids,
+                                    pack_factor=quant_config.pack_factor)
     assert torch.allclose(cuda_output, torch_output, atol=1e-2, rtol=0)
