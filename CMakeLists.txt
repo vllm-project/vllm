@@ -199,15 +199,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           COMPILE_FLAGS
           "-gencode arch=compute_90a,code=sm_90a")
   endif()
-
-
-  # Include CUTLASS headers as system headers to avoid warnings
-  target_include_directories(my_executable SYSTEM PRIVATE
-      ${CUTLASS_INCLUDE_DIR}
-      ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  )
-)
-
 endif()
 
 define_gpu_extension_target(
@@ -220,6 +211,12 @@ define_gpu_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
+# Include CUTLASS headers as system headers to avoid warnings
+target_include_directories(_C SYSTEM PRIVATE
+  ${CUTLASS_INCLUDE_DIR}
+  ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+)
 
 #
 # _moe_C extension

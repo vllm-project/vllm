@@ -1131,7 +1131,7 @@ __global__ void Marlin(
     // This code does not handle group_blocks == 0,
     // which signifies act_order.
     // has_zp implies AWQ, which doesn't have act_order,
-    static_assert(!has_azp || !group_blocks);
+    static_assert(!has_zp || group_blocks != 0);
 
     // The constexpr check on group_blocks prevents divide-by-zero warnings
     if constexpr (has_zp && group_blocks != 0) {
