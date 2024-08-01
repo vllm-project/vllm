@@ -350,8 +350,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_tokens.extend(tokens)
             encoder_input_positions.extend(list(range(context_len, seq_len)))
 
-            is_profile_run = _is_single_block_table_empty(
-                seq_group_metadata.block_tables)
+            is_profile_run = (seq_group_metadata.block_tables is None)
             if is_profile_run:
                 # During memory profiling, the block tables are not
                 # initialized yet. In this case, we just use a dummy
@@ -430,12 +429,3 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         return (attn_metadata, encoder_input_tokens_tensor,
                 encoder_input_positions_tensor)
-
-
-def _is_single_block_table_empty(block_table: Optional[List[int]]):
-    """
-    Check if a single block table has not been constructed
-    """
-    if block_table is None:
-        return True
-    return False
