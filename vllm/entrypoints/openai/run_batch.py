@@ -10,9 +10,12 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
+                                              ChatCompletionRequest,
                                               ChatCompletionResponse,
-                                              ErrorResponse)
+                                              EmbeddingRequest,
+                                              EmbeddingResponse, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
@@ -82,8 +85,8 @@ async def write_file(path_or_url: str, data: str) -> None:
             f.write(data)
 
 
-async def run_request(chat_serving: OpenAIServingChat,
-                      request: BatchRequestInput) -> BatchRequestOutput:
+async def run_request_chat(chat_serving: OpenAIServingChat,
+                           request: BatchRequestInput) -> BatchRequestOutput:
     chat_request = request.body
     chat_response = await chat_serving.create_chat_completion(chat_request)
 
@@ -110,6 +113,37 @@ async def run_request(chat_serving: OpenAIServingChat,
     return batch_output
 
 
+async def run_request_embedding(
+        embedding_serving: OpenAIServingEmbedding,
+        request: BatchRequestInput) -> BatchRequestOutput:
+    embedding_request = request.body
+    embedding_response = await embedding_serving.create_embedding(
+        embedding_request)
+
+    if isinstance(embedding_response, EmbeddingResponse):
+        batch_output = BatchRequestOutput(
+            id=f"vllm-{random_uuid()}",
+            custom_id=request.custom_id,
+            response=BatchResponseData(
+                body=embedding_response,
+                request_id=f"vllm-batch-{random_uuid()}"),
+            error=None,
+        )
+    elif isinstance(embedding_response, ErrorResponse):
+        batch_output = BatchRequestOutput(
+            id=f"vllm-{random_uuid()}",
+            custom_id=request.custom_id,
+            response=BatchResponseData(
+                status_code=embedding_response.code,
+                request_id=f"vllm-batch-{random_uuid()}"),
+            error=embedding_response,
+        )
+    else:
+        raise ValueError("Request must not be sent in stream mode")
+
+    return batch_output
+
+
 async def main(args):
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
@@ -128,22 +162,56 @@ async def main(args):
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
-    openai_serving_chat = OpenAIServingChat(
-        engine,
-        model_config,
-        served_model_names,
-        args.response_role,
-        lora_modules=None,
-        prompt_adapters=None,
-        request_logger=request_logger,
-        chat_template=None,
-    )
+    # Read all the lines from the input file.
+    file_lines = [
+        line.strip()
+        for line in (await read_file(args.input_file)).strip().split("\n")
+        if line.strip()
+    ]
+
+    # Function that runs a single request.
+    run_request = None
+
+    # Determine the type of request (chat completion or embedding) based on the
+    # first request. Note that run_batch only supports one type of request for
+    # the entire input file.
+    first_request = BatchRequestInput.model_validate_json(file_lines[0])
+    if isinstance(first_request.body, ChatCompletionRequest):
+        openai_serving_chat = OpenAIServingChat(
+            engine,
+            model_config,
+            served_model_names,
+            args.response_role,
+            lora_modules=None,
+            prompt_adapters=None,
+            request_logger=request_logger,
+            chat_template=None,
+        )
+        run_request = lambda request: run_request_chat(openai_serving_chat,
+                                                       request)
+    elif isinstance(first_request.body, EmbeddingRequest):
+        openai_serving_embedding = OpenAIServingEmbedding(
+            engine,
+            model_config,
+            served_model_names,
+            request_logger=request_logger,
+        )
+        run_request = lambda request: run_request_embedding(
+            openai_serving_embedding, request)
+    else:
+        raise ValueError("Only /v1/chat/completions and /v1/embeddings are"
+                         "supported in the batch endpoint.")
+
+    assert run_request is not None
 
     # Submit all requests in the file to the engine "concurrently".
     response_futures: List[Awaitable[BatchRequestOutput]] = []
-    for request_json in (await read_file(args.input_file)).strip().split("\n"):
+    for request_json in file_lines:
+        request_json = request_json.strip()
+        if not request_json:
+            continue
         request = BatchRequestInput.model_validate_json(request_json)
-        response_futures.append(run_request(openai_serving_chat, request))
+        response_futures.append(run_request(request))
 
     responses = await asyncio.gather(*response_futures)
 
