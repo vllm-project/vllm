@@ -87,9 +87,8 @@ api_key_auth_scheme = HTTPBearer(scheme_name="ApiKeyAuth", auto_error=False)
 
 
 def validate_api_key(
-    auth_credentials: Annotated[
-        Optional[HTTPAuthorizationCredentials], Depends(api_key_auth_scheme)
-    ]
+    auth_credentials: Annotated[Optional[HTTPAuthorizationCredentials],
+                                Depends(api_key_auth_scheme)]
 ) -> None:
     if api_key is not None:
         if auth_credentials is None or auth_credentials.credentials != api_key:
@@ -188,7 +187,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 def build_app(args):
     global api_key
     api_key = envs.VLLM_API_KEY or args.api_key
-  
+
     app = fastapi.FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.include_router(protected_router)
