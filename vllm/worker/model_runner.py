@@ -77,6 +77,10 @@ _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
+# Bump up cache limits for CUDA graphs (for now)
+torch._dynamo.config.cache_size_limit = 128
+torch._dynamo.config.accumulated_cache_size_limit = 128
+
 
 @dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
@@ -790,7 +794,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
             self.model = torch.compile(self.model,
-                                       fullgraph=True,
+                                       fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                                        backend="eager")
 
     def save_sharded_state(
@@ -1370,6 +1374,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
             **seqlen_agnostic_kwargs)
+
+        import time
+        time.sleep(1)
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:

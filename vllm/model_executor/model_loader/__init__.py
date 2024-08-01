@@ -1,6 +1,6 @@
 from typing import Optional
 
-import torch
+from torch import nn
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
@@ -10,27 +10,25 @@ from vllm.model_executor.model_loader.loader import (BaseModelLoader,
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name, get_model_architecture)
 
-# Bump up cache limits for CUDA graphs (for now)
-torch._dynamo.config.cache_size_limit = 128
-torch._dynamo.config.accumulated_cache_size_limit = 128
-
+import torch
+import time
 
 def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               device_config: DeviceConfig, parallel_config: ParallelConfig,
               scheduler_config: SchedulerConfig,
               lora_config: Optional[LoRAConfig],
               multimodal_config: Optional[MultiModalConfig],
-              cache_config: CacheConfig) -> torch.nn.Module:
+              cache_config: CacheConfig) -> nn.Module:
     loader = get_model_loader(load_config)
-    m = loader.load_model(model_config=model_config,
-                          device_config=device_config,
-                          lora_config=lora_config,
-                          multimodal_config=multimodal_config,
-                          parallel_config=parallel_config,
-                          scheduler_config=scheduler_config,
-                          cache_config=cache_config)
-
-    return torch.compile(m, backend='eager', fullgraph=True)
+    m =loader.load_model(model_config=model_config,
+                             device_config=device_config,
+                             lora_config=lora_config,
+                             multimodal_config=multimodal_config,
+                             parallel_config=parallel_config,
+                             scheduler_config=scheduler_config,
+                             cache_config=cache_config)
+    return m
+    #return torch.compile(m, backend='eager', fullgraph=True)
 
 
 __all__ = [

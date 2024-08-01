@@ -19,7 +19,10 @@ with contextlib.suppress(ImportError):
     import vllm._moe_C
 
 
+# Note: don't use this in code that will be compiled or else
+# it will cause serious (and silent) problems.
 def is_custom_op_supported(op_name: str) -> bool:
+    # TODO: try torch._C._dispatch_has_kernel_for_dispatch_key(name, device) ?
     op, overloads = torch._C._jit_get_operation(op_name)
     return op is not None
 
