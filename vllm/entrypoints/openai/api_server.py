@@ -170,10 +170,15 @@ def build_app(args):
     API_KEY = envs.VLLM_API_KEY or args.api_key
     token_auth_scheme = HTTPBearer(scheme_name="ApiKeyAuth")
 
-    def validate_api_key(auth_credentials: Annotated[HTTPAuthorizationCredentials, Depends(token_auth_scheme)]) -> None:
+    def validate_api_key(
+        auth_credentials: Annotated[
+            HTTPAuthorizationCredentials, Depends(token_auth_scheme)
+        ]
+    ) -> None:
         if API_KEY is not None and auth_credentials.credentials != API_KEY:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail={"error": "Unauthorized"}
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Unauthorized"},
             )
 
     if API_KEY is not None:
