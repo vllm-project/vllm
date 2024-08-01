@@ -124,6 +124,15 @@ class LLM:
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
+        '''
+        LLM constructor.
+
+        Note: if enforce_eager is unset (enforce_eager is None)
+        it defaults to False for decoder-only models and True
+        for encoder/decoder models, since encoder/decoder models
+        do not currently support CUDAGraph.
+        '''
+
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
         removed_vision_keys = ("image_token_id", "image_feature_size",
