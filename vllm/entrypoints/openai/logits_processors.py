@@ -39,12 +39,14 @@ def _get_allowed_token_ids_logits_processor(
                          "out-of-vocab token id")
     return AllowedTokenIdsLogitsProcessor(allowed_token_ids)
 
+
 def logit_bias_logits_processor(logit_bias: Dict[str,
                                                  float], token_ids: List[int],
                                 logits: torch.Tensor) -> torch.Tensor:
     for token_id, bias in logit_bias.items():
         logits[token_id] += bias
     return logits
+
 
 def get_logits_processors(
         logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
@@ -70,9 +72,8 @@ def get_logits_processors(
                 raise ValueError("token_id in logit_bias contains "
                                  "out-of-vocab token id")
 
-
-        logits_processors.append(partial(logit_bias_logits_processor, 
-                                         clamped_logit_bias))
+        logits_processors.append(
+            partial(logit_bias_logits_processor, clamped_logit_bias))
 
     if allowed_token_ids is not None:
         logits_processors.append(
