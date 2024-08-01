@@ -5,7 +5,7 @@ import re
 import signal
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Optional, Set
+from typing import Optional, Set
 
 import fastapi
 import uvicorn
@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
+from typing_extensions import Annotated
 
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -90,8 +91,8 @@ def validate_api_key(
     auth_credentials: Annotated[Optional[HTTPAuthorizationCredentials],
                                 Depends(api_key_auth_scheme)]
 ) -> None:
-    if api_key is not None and (auth_credentials is None or 
-                                auth_credentials.credentials != api_key):
+    if api_key is not None and (auth_credentials is None
+                                or auth_credentials.credentials != api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "Unauthorized"},
