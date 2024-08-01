@@ -663,7 +663,9 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
+            # by default, tools are not used.
             tools_called = False
+
             # if the reqeust uses tools and specified a tool choice
             if request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
@@ -695,6 +697,11 @@ class OpenAIServingChat(OpenAIServing):
                 # FOR NOW make it a chat message; we will have to detect the type to make it later.
                     message = ChatMessage(role=role, content=output.text)
 
+            # undetermined case that is still important to handle
+            else:
+                logger.error('Error in chat_completion_full_generator - cannot determine if tools shouuld '
+                             'be extracted. Returning a standard chat completion.')
+                message = ChatMessage(role=role, content=output.text)
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
