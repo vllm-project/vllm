@@ -228,7 +228,8 @@ class OpenAIServingChat(OpenAIServing):
         content = message.get("content")
         tool_call_id = message.get('tool_call_id')
         tool_calls = message.get('tool_calls')
-        name = message.get('tool_calls')
+        # "name" is optional now per OAI spec, so clients using models that need it, should make sure to pass it!
+        name = message.get('name', '')
 
         # invariant
         if content is None and tool_calls is None:
