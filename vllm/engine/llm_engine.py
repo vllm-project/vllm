@@ -853,6 +853,29 @@ class LLMEngine:
             request_outputs.append(request_output)
         return request_outputs
 
+    def _advance_to_next_step(
+        self,
+        output: List[SamplerOutput],
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+        """Given model output from a single run, append the tokens to the
+        sequences. This is normally done outside of the worker, but it is
+        required if the worker is to perform async forward passes to next step.
+        """
+        for seq_group_metadata, sequence_group_outputs in zip(
+                seq_group_metadata_list, output):
+            seq_group_metadata.is_prompt = False
+
+            for seq_output in sequence_group_outputs.samples:
+                # NOTE: Beam search is not supported, so we can assume that
+                # parent_seq_id == seq_id.
+                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
+
+                token_id = seq_output.output_token
+                token_logprob = seq_output.logprobs[token_id]
+
+                seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
+                seq.append_token_id(token_id, token_logprob.logprob)
+
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
@@ -908,6 +931,12 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
+        request_outputs = None
+        if (self.previous_output) and (len(self.previous_output) > 0):
+            request_outputs = self._process_model_outputs(
+                self.previous_output, self.previous_scheduler_outputs.scheduled_seq_groups,
+                self.previous_scheduler_outputs.ignored_seq_groups, self.previous_seq_group_metadata_list)
+
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
 
@@ -927,15 +956,19 @@ class LLMEngine:
         else:
             output = []
 
-        request_outputs = self._process_model_outputs(
-            output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+        self.previous_output = output
+        self.previous_scheduler_outputs = scheduler_outputs
+        self.previous_seq_group_metadata_list = seq_group_metadata_list
+
+        # HACK: only supports single step
+        if len(output) > 0:
+            self._advance_to_next_step(output[0], seq_group_metadata_list)
 
         # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+        # self.do_log_stats(scheduler_outputs, output)
 
         # Tracing
-        self.do_tracing(scheduler_outputs)
+        # self.do_tracing(scheduler_outputs)
 
         if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are

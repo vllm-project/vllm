@@ -224,29 +224,6 @@ class RequestTracker:
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
-    def _advance_to_next_step(
-        self,
-        output: List[SamplerOutput],
-        seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
-        """Given model output from a single run, append the tokens to the
-        sequences. This is normally done outside of the worker, but it is
-        required if the worker is to perform async forward passes to next step.
-        """
-        for seq_group_metadata, sequence_group_outputs in zip(
-                seq_group_metadata_list, output):
-            seq_group_metadata.is_prompt = False
-
-            for seq_output in sequence_group_outputs.samples:
-                # NOTE: Beam search is not supported, so we can assume that
-                # parent_seq_id == seq_id.
-                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
-
-                token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
-
-                seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
-                seq.append_token_id(token_id, token_logprob.logprob)
-
     async def step_async(
         self, virtual_engine: int
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
