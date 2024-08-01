@@ -434,9 +434,7 @@ class Hermes2ProToolParser(ToolParser):
                     ) for function_call in raw_function_calls
                 ]
 
-                # TODO extract including the scratch pad into content
-                content_match = Hermes2ProToolParser.scratch_pad_regex.search(model_output)
-                content = content_match.group(1) if content_match else None
+                content = model_output[:model_output.find(Hermes2ProToolParser.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
