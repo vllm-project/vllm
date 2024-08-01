@@ -3,6 +3,7 @@
 #include "cutlass/cutlass.h"
 
 #include "scaled_mm_c2x.cuh"
+#include "scaled_mm_c2x_sm75_dispatch.cuh"
 #include "scaled_mm_c2x_sm80_dispatch.cuh"
 #include "scaled_mm_c2x_sm89_fp8_dispatch.cuh"
 #include "scaled_mm_c2x_sm89_int8_dispatch.cuh"
@@ -20,21 +21,13 @@ void cutlass_scaled_mm_sm75_epilogue(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
 
-  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
-  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
-  using InstructionShape = typename cutlass::gemm::GemmShape<8, 8, 16>;
-
   if (out.dtype() == torch::kBFloat16) {
-    return vllm::cutlass_gemm_caller<
-        vllm::cutlass_2x_gemm<cutlass::arch::Sm75, vllm::enable_sm75_to_sm80,
-                              int8_t, cutlass::bfloat16_t, Epilogue, TileShape,
-                              WarpShape, InstructionShape, 2>>(
+    return vllm::cutlass_gemm_sm75_dispatch<int8_t, cutlass::bfloat16_t,
+                                            Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return vllm::cutlass_gemm_caller<vllm::cutlass_2x_gemm<
-        cutlass::arch::Sm75, vllm::enable_sm75_to_sm80, int8_t, cutlass::half_t,
-        Epilogue, TileShape, WarpShape, InstructionShape, 2>>(
+    return vllm::cutlass_gemm_sm75_dispatch<int8_t, cutlass::half_t, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   }
 }
