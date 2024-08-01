@@ -1,11 +1,9 @@
-import socket
 from http import HTTPStatus
 
 import openai
 import pytest
 import requests
 
-from vllm import envs
 from vllm.version import __version__ as VLLM_VERSION
 
 from ...utils import RemoteOpenAIServer
