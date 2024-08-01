@@ -18,7 +18,6 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
     float const* scale_ub, float const var_epsilon,
     float const min_scaling_factor, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr) {
-  // Compute RMS
   float rms = 0.0f;
   float token_scale = 0.0f;
 
