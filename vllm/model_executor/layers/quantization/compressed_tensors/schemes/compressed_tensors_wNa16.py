@@ -132,10 +132,15 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # No zero-point
         layer.weight_zp = marlin_make_empty_g_idx(device)
+        # Update for kernel
+        layer.weight_packed = torch.nn.Parameter(
+            layer.weight_packed.t().contiguous(), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(
+            layer.weight_scale.squeeze().t().contiguous(), requires_grad=False)
 
         # Repack weights from compressed-tensors format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
-            layer.weight_packed.t().contiguous(),
+            layer.weight_packed,
             perm=layer.g_idx_sort_indices,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
@@ -144,7 +149,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # Permute scales from compressed-tensors format to marlin format.
         marlin_scales = marlin_permute_scales(
-            layer.weight_scale.squeeze().t().contiguous(),
+            layer.weight_scale,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
             group_size=layer.group_size)

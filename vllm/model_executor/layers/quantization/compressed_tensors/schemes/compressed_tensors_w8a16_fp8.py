@@ -41,11 +41,17 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                                                     layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise,
                                                     requires_grad=False)
+        else:
+            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                    requires_grad=False)
 
         # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(),
                                           requires_grad=False)
 
+        if self.is_static_input_scheme:
+            layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
+                                                   requires_grad=False)
         prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,

@@ -109,7 +109,7 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
         assert qkv_proj.weight_packed.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is torch.float16
-        assert qkv_proj.weight_packed.packed_factor == pack_factor
+        assert qkv_proj.scheme.pack_factor == pack_factor
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output

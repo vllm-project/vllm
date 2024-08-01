@@ -41,7 +41,9 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             ws_channelwise = convert_to_channelwise(layer.weight_scale,
                                                     self.logical_widths)
             layer.weight_scale = Parameter(ws_channelwise, requires_grad=False)
-
+        else:
+            layer.weight_scale = Parameter(layer.weight_scale.data,
+                                           requires_grad=False)
         # INPUT SCALE
         if self.is_static_input_scheme:
             layer.input_scale = Parameter(layer.input_scale.max(),

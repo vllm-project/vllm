@@ -46,6 +46,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
+            layer.weight_scale = Parameter(layer.weight_scale.data,
+                                           requires_grad=False)
 
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
