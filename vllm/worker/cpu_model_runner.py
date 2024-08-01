@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
-                    Type, Union)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from torch import nn
@@ -12,7 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
@@ -41,7 +40,8 @@ class CPUModelInput(ModelRunnerInputBase):
     input_positions: Optional[torch.Tensor] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
+    multi_modal_kwargs: Optional[BatchedTensorInputs] = None
+    virtual_engine: Optional[int] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -135,7 +135,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               Mapping[str, BatchedTensors]]:
+               BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -204,8 +204,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             seq_lens=seq_lens,
-            seq_lens_tensor=None,
-            max_decode_seq_len=None,
+            seq_lens_tensor=torch.tensor([]),
+            max_decode_seq_len=0,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
@@ -213,8 +213,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             slot_mapping=slot_mapping,
         )
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
@@ -336,7 +335,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             # just use seq_lens instead.
             seq_lens,
             self.device,
-            pin_memory=False)
+            pin_memory=False,
+            generators=self.get_generators(finished_requests_ids))
         return CPUModelInput(
             input_tokens=input_tokens,
             input_positions=input_positions,
@@ -345,7 +345,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             multi_modal_kwargs=multi_modal_kwargs,
         )
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def execute_model(
         self,
         model_input: CPUModelInput,
@@ -359,11 +359,16 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": model_input.input_tokens,
-            "positions": model_input.input_positions,
-            "kv_caches": kv_caches,
-            "attn_metadata": model_input.attn_metadata,
-            **(model_input.multi_modal_kwargs or {}),
+            "input_ids":
+            model_input.input_tokens,
+            "positions":
+            model_input.input_positions,
+            "kv_caches":
+            kv_caches,
+            "attn_metadata":
+            model_input.attn_metadata,
+            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                         device=self.device),
         }
 
         hidden_states = model_executable(**execute_model_kwargs)
