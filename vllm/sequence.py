@@ -560,9 +560,7 @@ class SequenceGroup:
         return self.encoder_seq
 
     def get_unfinished_seqs(self) -> List[Sequence]:
-        return [
-            seq for seq in self.seqs if not seq.is_finished()
-        ]
+        return [seq for seq in self.seqs if not seq.is_finished()]
 
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs if seq.is_finished()]
