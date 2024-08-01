@@ -107,11 +107,27 @@ if not is_cpu():
         test_case_prompts = example_encoder_decoder_prompts[
             decoder_prompt_type]
 
+        # Configuration settings for HF baseline
+        hf_kwargs = {
+            "top_k": None,
+            "num_beams": 1,
+            "repetition_penalty": 1.0,
+            "top_p": 1.0,
+            "length_penalty": 1.0,
+            "early_stopping": False,
+            "no_repeat_ngram_size": None,
+            "min_length": 0
+        }
+
         with hf_runner(model, dtype=dtype,
                        is_encoder_decoder_model=True) as hf_model:
             hf_outputs = (
                 hf_model.generate_encoder_decoder_greedy_logprobs_limit(
-                    test_case_prompts, max_tokens, num_logprobs))
+                    test_case_prompts,
+                    max_tokens,
+                    num_logprobs,
+                    **hf_kwargs,
+                ))
 
         with vllm_runner(model, dtype=dtype) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(

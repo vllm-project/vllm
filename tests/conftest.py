@@ -470,28 +470,14 @@ class HfRunner:
                     self.tokenizer(decoder_prompt,
                                    return_tensors="pt").input_ids))
 
-            from transformers.generation.configuration_utils import (
-                GenerationConfig)
-            generation_config = GenerationConfig.from_model_config(
-                self.model.config)
-            generation_config.do_sample = False
-            generation_config.top_k = None
-            generation_config.num_beams = 1
-            generation_config.repetition_penalty = 1.0
-            generation_config.top_p = 1.0
-            generation_config.length_penalty = 1.0
-            generation_config.early_stopping = False
-            generation_config.no_repeat_ngram_size = None
-            generation_config.min_length = 0
-
             output = self.model.generate(
                 encoder_input_ids,
                 decoder_input_ids=decoder_input_ids,
                 use_cache=True,
+                do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
-                generation_config=generation_config,
                 **kwargs,
             )
 
