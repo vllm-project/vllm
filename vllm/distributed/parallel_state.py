@@ -600,7 +600,8 @@ class GroupCoordinator:
                 continue
 
             # send-allgather: send only a slice, then do allgather.
-            if tensor.numel() % all_gather_size == 0:
+            if (all_gather_group is not None and
+                tensor.numel() % all_gather_size == 0):
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
             if tensor.is_cpu:
@@ -652,7 +653,8 @@ class GroupCoordinator:
                     continue
 
                 # send-allgather: send only a slice, then do allgather.
-                if tensor.numel() % all_gather_size == 0:
+                if (all_gather_group is not None and
+                    tensor.numel() % all_gather_size == 0):
                     orig_shape = tensor.shape
                     tensor = (
                         tensor.reshape(all_gather_size, -1)[all_gather_rank])
