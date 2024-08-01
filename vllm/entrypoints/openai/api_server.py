@@ -45,6 +45,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
+api_key = None
 engine: AsyncLLMEngine
 engine_args: AsyncEngineArgs
 openai_serving_chat: OpenAIServingChat
@@ -73,10 +74,6 @@ async def lifespan(app: fastapi.FastAPI):
     yield
 
 
-router = APIRouter()
-auth_enabled_router = APIRouter()
-
-
 def mount_metrics(app: fastapi.FastAPI):
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app())
@@ -85,11 +82,33 @@ def mount_metrics(app: fastapi.FastAPI):
     app.routes.append(metrics_route)
 
 
+# Disable auto_error to accommodate instances with no API key
+api_key_auth_scheme = HTTPBearer(scheme_name="ApiKeyAuth", auto_error=False)
+
+
+def validate_api_key(
+    auth_credentials: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(api_key_auth_scheme)
+    ]
+) -> None:
+    if api_key is not None:
+        if auth_credentials is None or auth_credentials.credentials != api_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Unauthorized"},
+            )
+
+
+router = APIRouter()
+protected_router = APIRouter(dependencies=[Depends(validate_api_key)])
+
+
 @router.get("/health")
 async def health() -> Response:
     """Health check."""
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
+
 
 @router.get("/version")
 async def show_version():
@@ -119,13 +138,13 @@ async def detokenize(request: DetokenizeRequest):
         return JSONResponse(content=generator.model_dump())
 
 
-@auth_enabled_router.get("/v1/models")
+@protected_router.get("/v1/models")
 async def show_available_models():
     models = await openai_serving_completion.show_available_models()
     return JSONResponse(content=models.model_dump())
 
 
-@auth_enabled_router.post("/v1/chat/completions")
+@protected_router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
@@ -141,7 +160,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return JSONResponse(content=generator.model_dump())
 
 
-@auth_enabled_router.post("/v1/completions")
+@protected_router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
@@ -155,7 +174,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-@auth_enabled_router.post("/v1/embeddings")
+@protected_router.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     generator = await openai_serving_embedding.create_embedding(
         request, raw_request)
@@ -167,26 +186,12 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 
 def build_app(args):
-    API_KEY = envs.VLLM_API_KEY or args.api_key
-    token_auth_scheme = HTTPBearer(scheme_name="ApiKeyAuth")
-
-    def validate_api_key(
-        auth_credentials: Annotated[
-            HTTPAuthorizationCredentials, Depends(token_auth_scheme)
-        ]
-    ) -> None:
-        if API_KEY is not None and auth_credentials.credentials != API_KEY:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"error": "Unauthorized"},
-            )
-
-    if API_KEY is not None:
-        auth_enabled_router.dependencies.append(Depends(validate_api_key))
-
+    global api_key
+    api_key = envs.VLLM_API_KEY or args.api_key
+  
     app = fastapi.FastAPI(lifespan=lifespan)
     app.include_router(router)
-    app.include_router(auth_enabled_router)
+    app.include_router(protected_router)
     app.root_path = args.root_path
 
     mount_metrics(app)
