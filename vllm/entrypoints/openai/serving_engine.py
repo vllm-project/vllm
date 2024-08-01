@@ -155,7 +155,7 @@ class OpenAIServing:
     async def _guided_decode_logits_processor(
             self, request: Union[ChatCompletionRequest, CompletionRequest],
             tokenizer: AnyTokenizer) -> Optional[LogitsProcessor]:
-        decoding_config = await self.engine.get_decoding_config()
+        decoding_config = await self.vllm_backend.get_decoding_config()
         guided_decoding_backend = request.guided_decoding_backend \
             or decoding_config.guided_decoding_backend
         return await get_guided_decoding_logits_processor(
