@@ -26,7 +26,8 @@ from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
-
+from lark import Lark
+from outlines import grammars
 
 class BaseLogitsProcessor:
 
@@ -44,6 +45,23 @@ class BaseLogitsProcessor:
             last_seq_id = hash(tuple(input_ids[:-1]))
             self._fsm_state[seq_id] = self._guide.get_next_state(
                 state=self._fsm_state[last_seq_id], token_id=last_token)
+        else:
+            # Note: this is a hack. 
+            # Lark pickling does not work properly (silent failure),
+            # which breaks the RPC (which uses python pickleing).
+            # We need to find a better solution.
+            # On the first time this is called, we simply re-create
+            # the Lark object.
+            if isinstance(self._guide, CFGGuide):
+                self._guide.parser = Lark(
+                    self._guide.cfg_string,
+                    parser="lalr",
+                    lexer="contextual",
+                    propagate_positions=False,
+                    maybe_placeholders=False,
+                    regex=True,
+                    import_paths=[grammars.GRAMMAR_PATH],
+                )
 
         instruction = self._guide.get_next_instruction(
             state=self._fsm_state[seq_id])
