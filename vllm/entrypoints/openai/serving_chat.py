@@ -89,7 +89,8 @@ class OpenAIServingChat(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             model_config = self.model_config
-            tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.async_engine_client.get_tokenizer(
+                lora_request)
 
             conversation: List[ConversationMessage] = []
             mm_futures: List[Awaitable[MultiModalDataDict]] = []
@@ -161,7 +162,8 @@ class OpenAIServingChat(OpenAIServing):
             if mm_data is not None:
                 engine_inputs["multi_modal_data"] = mm_data
 
-            is_tracing_enabled = await self.async_engine_client.is_tracing_enabled()
+            is_tracing_enabled = (
+                await self.async_engine_client.is_tracing_enabled())
             trace_headers = None
             if is_tracing_enabled and raw_request:
                 trace_headers = extract_trace_headers(raw_request.headers)

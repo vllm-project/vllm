@@ -91,7 +91,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.async_engine_client.get_tokenizer(
+                lora_request)
 
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
@@ -119,8 +120,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = await self.async_engine_client.is_tracing_enabled(
-                )
+                is_tracing_enabled = (
+                    await self.async_engine_client.is_tracing_enabled())
                 trace_headers = None
                 if is_tracing_enabled:
                     trace_headers = extract_trace_headers(raw_request.headers)
@@ -231,7 +232,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 # Abort the request if the client disconnects.
                 if await raw_request.is_disconnected():
-                    await self.async_engine_client.abort(f"{request_id}-{prompt_idx}")
+                    await self.async_engine_client.abort(
+                        f"{request_id}-{prompt_idx}")
                     raise StopAsyncIteration()
 
                 for output in res.outputs:

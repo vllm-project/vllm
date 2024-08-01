@@ -60,7 +60,7 @@ def get_span_exporter(endpoint):
             OTLPSpanExporter)
     elif protocol == "http/protobuf":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter)
+            OTLPSpanExporter)  # type: ignore
     else:
         raise ValueError(
             f"Unsupported OTLP protocol '{protocol}' is configured")

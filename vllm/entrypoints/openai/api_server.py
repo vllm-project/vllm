@@ -60,12 +60,14 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
+
 def model_is_embedding(model_name: str) -> bool:
     return ModelConfig(model=model_name,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
                        trust_remote_code=False,
-                       seed=0, dtype="float16").embedding_mode
+                       seed=0,
+                       dtype="float16").embedding_mode
 
 
 @asynccontextmanager
@@ -94,11 +96,10 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
     # Backend itself still global for the silly lil' health handler
     global async_engine_client
 
-
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model) or 
-        args.disable_frontend_multiprocessing):
+    if (model_is_embedding(args.model)
+            or args.disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
         yield async_engine_client
@@ -106,7 +107,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        # Start the RPC Server in separate process (holds the AsyncLLMEngine).
+        # Start RPCServer in separate process (holds the AsyncLLMEngine).
         port = get_open_port(envs.VLLM_RPC_PORT)
         rpc_server_process = Process(target=run_rpc_server,
                                      args=(engine_args,
@@ -114,7 +115,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
                                            port))
         rpc_server_process.start()
 
-        # Build the RPC Client, which conforms to the AsyncEngineClient protocol.
+        # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         async_engine_client = AsyncEngineRPCClient(port)
         await async_engine_client.setup()
 
