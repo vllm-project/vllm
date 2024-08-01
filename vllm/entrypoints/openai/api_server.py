@@ -49,12 +49,12 @@ from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
+async_engine_client: AsyncEngineClient
 engine_args: AsyncEngineArgs
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
-async_engine_client: AsyncEngineClient
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
