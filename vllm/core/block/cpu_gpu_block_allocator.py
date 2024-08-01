@@ -322,13 +322,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_common_computed_block_ids(
             computed_seq_block_ids)
     
-    def get_kv_tensor_from_block_id(block_id: int, device: Device) -> torch.Tensor:
-        if isinstance(device, Device.GPU) and torch.distributed.is_initialized():
+    def get_kv_cache_from_block_id(block_id: int) -> torch.Tensor:
+        if torch.distributed.is_initialized():
             dev = torch.device(f"cuda:{torch.distributed.get_rank()}") 
-        elif isinstance(device, Device.GPU):
-            dev = torch.device("cuda:0")
         else:
-            dev = "cpu"
+            dev = torch.device("cuda:0")
         return torch.tensor([block_id], device=dev, dtype=torch.int64).view(-1, 1)
     
     @property

@@ -317,20 +317,16 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return self.block_allocator.get_common_computed_block_ids(
             computed_seq_block_ids)  # type: ignore
     
-    def get_kv_cache_from_seq(self, seq_group: SequenceGroup,
-                               kv_from_block: Dict[int, torch.Tensor]) -> None:
+    def get_kv_cache_from_seq(self, seq_group: SequenceGroup) -> torch.Tensor:
         abs_block_ids = self.get_block_table(
             seq_group.get_seqs(status=SequenceStatus.RUNNING)[0])
         rel_block_id = self.block_allocator.get_physical_block_id(
             Device.GPU, abs_block_ids[0])
-        self.block_allocator._obtain_single_block_tensor
-        # block_table.block_allocator._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
-        kv_from_block[rel_block_id] = -1
+        kv_cache = self.block_allocator.get_kv_tensor_from_block_id(rel_block_id)
+        return kv_cache
 
     def get_kv_cache_from_block(self, seq_group: SequenceGroup) -> torch.Tensor:
-
-
-    def put_kv_cache_into_block(self, seq_group: SequenceGroup, kv_cache: torch.Tensor) -> None:
+        return self.get_kv_cache_from_seq(seq_group)
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         if parent_seq.seq_id not in self.block_tables:
