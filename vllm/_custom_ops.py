@@ -259,7 +259,7 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
                           b: torch.Tensor,
                           scale_a: torch.Tensor,
                           scale_b: torch.Tensor,
-                          out_dtype: Type[torch.dtype],
+                          out_dtype: torch.dtype,
                           azp_adj: torch.Tensor,
                           azp: Optional[torch.Tensor] = None,
                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
