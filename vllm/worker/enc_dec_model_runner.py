@@ -6,7 +6,9 @@ import torch.distributed
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
-from vllm.attention.selector import _Backend, global_force_attn_backend
+from vllm.attention.selector import (_Backend, 
+                                     global_force_attn_backend, 
+                                     _get_global_forced_attn_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -16,7 +18,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad, STR_NOT_IMPL_ENC_DEC_BACKEND
 from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata)
@@ -90,7 +92,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         the base-class constructor.
         '''
 
-        self._force_supported_attention_backend()
+        self._maybe_force_supported_attention_backend()
 
         super().__init__(
             model_config,
@@ -107,15 +109,26 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # Crash for unsupported encoder/scenarios
         assert_enc_dec_mr_supported_scenario(self)
 
-    def _force_supported_attention_backend(self):
+    def _maybe_force_supported_attention_backend(self):
         '''
         Force vLLM to use the XFormers attention backend,
         which is currently the only supported option.
         '''
-        logger.info("EncoderDecoderModelRunner requires "
-                    "XFormers backend; overriding backend "
-                    "auto-selection and forcing XFormers.")
-        global_force_attn_backend(_Backend.XFORMERS)
+        maybe_already_forced_backend = _get_global_forced_attn_backend()
+        if maybe_already_forced_backend is None:
+            # The user has not already specified an attention backend
+            # override
+            logger.info("EncoderDecoderModelRunner requires "
+                        "XFormers backend; overriding backend "
+                        "auto-selection and forcing XFormers.")
+            global_force_attn_backend(_Backend.XFORMERS)
+        elif maybe_already_forced_backend != _Backend.XFORMERS:
+            # The user has specified an attention backend override
+            # which is invalid for encoder/decoder models
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_BACKEND)
+        
+        # Else, the user has already overridden the attention backend
+        # to a value which is compatible with encoder/decoder models
 
     @torch.inference_mode()
     def execute_model(
