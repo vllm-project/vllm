@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.rpc import (VLLM_RPC_HEALTHY_STR,
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
-logger = init_logger('vllm.entrypoints.openai.rpc.server')
+logger = init_logger(__name__)
 
 
 class AsyncEngineRPCServer:
