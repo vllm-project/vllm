@@ -24,7 +24,7 @@ import time
 import contextlib
 import pickle
 import logging
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -215,9 +215,8 @@ class GroupCoordinator:
 
                 
         # use a threadpool to buffer send request in disaggregated prefill
-        self.send_buffer = None
-        # use a list to cache send items.
-        self.send_queue = queue.Queue()
+        self.input_hash_to_kv_sending_requests = {}
+        self.kv_sending_thread = ThreadPoolExecutor(max_workers=1)
 
     @property
     def first_rank(self):
@@ -705,14 +704,19 @@ class GroupCoordinator:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
 
+
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
+         
+        print('Sending %.3f MB to %d' % (tensor.element_size() * tensor.numel() / 1024 / 1024, self.ranks[dst]), end=' ', flush=True)
 
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
             pynccl_comm.send(tensor, dst)
         else:
             torch.distributed.send(tensor, self.ranks[dst], self.device_group)
+
+        print(' End sending ', end=' ', flush=True)
 
     def recv(self,
              size: torch.Size,
@@ -722,6 +726,8 @@ class GroupCoordinator:
         """NOTE: `src` is the local rank of the destination rank."""
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
+        
+        print('Start receiving from %d',self.ranks[src])
 
         tensor = torch.empty(size, dtype=dtype, device=self.device)
         pynccl_comm = self.pynccl_comm
@@ -729,46 +735,74 @@ class GroupCoordinator:
             pynccl_comm.recv(tensor, src)
         else:
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
+
+        print('End receiving')
         return tensor
     
     
-    def push(self,
-             tensor: torch.Tensor,
-             dst: Optional[int] = None,
-             enable_verification: bool = False) -> None:
+    def kv_cache_send(self,
+                    input_hash: int,
+                    tensor: torch.Tensor,
+                    dst: Optional[int] = None,
+                    enable_verification: bool = False) -> None:
         """Push the KV cache send request into the send buffer"""
         """NOTE: `dst` is the local rank of the destination rank."""
 
-        if self.send_buffer is None:
-            self.send_buffer = ThreadPoolExecutor(max_workers=1)
+        print('Pushing %.3f MB' % (tensor.element_size() * tensor.numel() / 1024 / 1024), end=' ', flush=True)
 
+        
         if enable_verification:
             # Send tensor, together with metadatas
             # We will use this metadata to perform some sanity check
             # But this transfer is VERY slow. 
             # So this is a good option for debugging but not for produciton
-            self.send_buffer.submit(
+            self.input_hash_to_kv_sending_requests[input_hash].append([
                 self.send_tensor_dict,
                 # tensor needs to be cloned, if not the mean doesn't match
                 {"tensor": tensor.clone(), "mean": tensor.mean()},
                 dst
-            )
+            ])
         else:
             # only send tensor, use NCCL if available
             # very fast but error-prone
-            self.send_buffer.submit(
+            self.input_hash_to_kv_sending_requests[input_hash].append([
                 self.send,
-                # tensor needs to be cloned, if not the mean doesn't match
+                # tensor needs to be cloned, if not the tensor may be freed
                 tensor.clone(),
                 dst
-            )
+            ])
+
+            
+    def sending_kv_from_input_hash(self):
+
+        # receive the input hash that the decode instance requires
+        input_hash_tensor = self.recv(torch.Size([1]), torch.long)
+        input_hash = input_hash_tensor.item()
+        
+        # execute corresponding send jobs in request queue
+        for request in input_hash_to_kv_sending_requests[input_hash]:
+            request[0](*request[1:])
+        # free GPU memory occupied by sending
+        del input_hash_to_kv_sending_requests[input_hash]
+
+
+    def kv_cache_send_ready(self):
+        
+        self.kv_sending_thread.submit([self.sending_kv_from_input_hash])
+
+            
+    def kv_cache_recv_start(self, input_hash: int):
+        
+        input_hash_tensor = torch.tensor([input_hash]).long().to(self.device)
+        # notify the kv cache sender with the input hash id
+        torch.distributed.send(input_hash_tensor)
     
     
-    def fetch(self,
-             size: torch.Size,
-             dtype: torch.dtype,
-             src: Optional[int] = None,
-             enable_verification: bool = False) -> torch.Tensor:
+    def kv_cache_recv(self,
+                    size: torch.Size,
+                    dtype: torch.dtype,
+                    src: Optional[int] = None,
+                    enable_verification: bool = False) -> torch.Tensor:
         """Receives a tensor from the src rank (blocking)."""
         """This API should be used together with `push`"""
         """NOTE: `src` is the local rank of the destination rank."""
@@ -895,16 +929,6 @@ def graph_capture():
 
 
 logger = init_logger(__name__)
-class ConditionalLoggingHandler(logging.Handler):
-    def emit(self, record):
-        dist = torch.distributed
-        try:
-            if not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() % 4 == 0):
-                msg = self.format(record)
-                print(msg)  # You can replace this with any other logging mechanism you prefer
-        except Exception:
-            pass
-logger.addHandler(ConditionalLoggingHandler())
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
@@ -973,12 +997,15 @@ def init_distributed_environment(
             else:
                 # offset global rank by tp * pp (which is world_size)
                 maybe_disagg_rank = rank + world_size
+
+        logger.debug(f"Before: world size {maybe_disagg_world_size}, rank {maybe_disagg_rank}")
             
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
             world_size=maybe_disagg_world_size,
             rank=maybe_disagg_rank)
+        logger.debug("torch.distributed initialized")
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -1109,11 +1136,6 @@ def initialize_model_parallel(
     logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
     
     if envs.VLLM_DISAGG_PREFILL_ROLE is not None:
-        # dirty fix: temporarily lift up NCCL buffer size to 1GB
-        import os
-        os.environ["NCCL_BUFFSIZE"] = "1073741824"
-        import time
-        time.sleep(20)
         global _DISAGG
         logger.debug("Disaggregated prefill enabled, create _DISAGG group")
         group_ranks = []
@@ -1122,11 +1144,18 @@ def initialize_model_parallel(
             # decode global rank: i + world_size
             group_ranks.append([i, i + world_size])
         logger.debug("Distributed group is %s", str(group_ranks))
-        _DISAGG = init_model_parallel_group(
-            group_ranks,
-            get_world_group().local_rank,
-            backend,
-            use_custom_allreduce=False)
+        _DISAGG = init_model_parallel_group(group_ranks,
+                                            get_world_group().local_rank,
+                                            backend,
+                                            use_custom_allreduce=False)
+        # follow by a warmup, to warmup nccl
+        # necessary, as NCCL may not be warmed up when tp and pp are both 1.
+        temp_tensor = torch.tensor([1.]).to(_DISAGG.device)
+        if envs.VLLM_DISAGG_PREFILL_ROLE == "prefill":
+            _DISAGG.send(temp_tensor)
+        else:
+            recv_tensor = _DISAGG.recv(temp_tensor.shape, temp_tensor.dtype)
+            assert torch.allclose(temp_tensor, recv_tensor)
         logger.debug("_DISAGG initialized for rank %d", torch.distributed.get_rank())
 
 
