@@ -106,6 +106,7 @@ class ToolParser:
     derived classes.
     """
 
+
     def __init__(
             self,
             tokenizer: Optional[PreTrainedTokenizer | PreTrainedTokenizerFast | PreTrainedTokenizerFast | AutoTokenizer]=None
@@ -169,6 +170,8 @@ class MistralToolParser(ToolParser):
     # if not present, the entire response will be parsed as text content.
     bot_token: str = '[TOOL_CALLS]'  # string literal
     bot_token_id: int = 5  # token ID thereof from the models' tokenizer
+    tool_call_regex = re.compile(r'\[{.*?}\]', re.DOTALL)
+
 
     @staticmethod
     def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
@@ -177,6 +180,8 @@ class MistralToolParser(ToolParser):
         quotes for JSON parsing, make sure your tool call arguments don't ever include quotes!
         """
 
+        logger.info('Trying to extract mistral tool calls from the following:')
+        logger.info(model_output)
         # Get the tool call token from the tokenizer
         if MistralToolParser.bot_token not in model_output:
             return ExtractedToolCallInformation(
@@ -186,10 +191,14 @@ class MistralToolParser(ToolParser):
             )
         else:
             try:
-                # extract the token so we hopefully have a JSON string
-                raw_tool_call = (model_output
-                                 .replace(MistralToolParser.bot_token, '')  # remove BOT token
-                                 .replace("'", '"'))  # ... hack to parse broken mistral JSON
+
+                # this will throw an exception if we can't find the tool call properly
+                raw_tool_call = MistralToolParser.tool_call_regex.findall(
+                    model_output
+                    .replace(MistralToolParser.bot_token, '') # remove BOT token
+                    .replace("'", '"')  # replace string quotes
+                )[0]
+
                 # load the JSON, and then use it to build the Function and Tool Call
                 function_call_arr = json.loads(raw_tool_call)
                 tool_calls: List[ToolCall] = [
