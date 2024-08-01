@@ -9,11 +9,11 @@
 
 #include "../../reduction_utils.cuh"
 
-#ifdef USE_ROCM
+#ifndef USE_ROCM
+  using FP8_TYPE = c10::Float8_e4m3fn;
+#else
   #include "amd/hip_float8.h"
   using FP8_TYPE = c10::Float8_e4m3fnuz;
-#else
-  using FP8_TYPE = c10::Float8_e4m3fn;
 #endif
 
 namespace vllm {
