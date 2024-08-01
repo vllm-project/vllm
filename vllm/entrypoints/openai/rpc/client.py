@@ -1,4 +1,4 @@
-import pickle
+import cloudpickle
 from contextlib import contextmanager
 from typing import Any, AsyncIterator, Mapping, Optional
 
@@ -70,10 +70,10 @@ class RPCClient:
         with self.socket() as socket:
 
             # Ping RPCServer with a request.
-            await socket.send(pickle.dumps(request))
+            await socket.send(cloudpickle.dumps(request))
 
             # Await the data from the Server.
-            data = pickle.loads(await socket.recv())
+            data = cloudpickle.loads(await socket.recv())
 
         if not isinstance(data, expected_type):
             # LoRAConfig can be None.
@@ -89,10 +89,10 @@ class RPCClient:
         """Send one-way RPC request to trigger an action."""
         with self.socket() as socket:
             # Ping RPC Server with request.
-            await socket.send(pickle.dumps(request, pickle.HIGHEST_PROTOCOL))
+            await socket.send(cloudpickle.dumps(request))
 
             # Await acknowledgement from RPCServer.
-            response = pickle.loads(await socket.recv())
+            response = cloudpickle.loads(await socket.recv())
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
             raise ValueError(error_message)
@@ -188,21 +188,20 @@ class RPCClient:
 
             # Send RPCGenerateRequest to the RPCServer.
             await socket.send_multipart([
-                pickle.dumps(
+                cloudpickle.dumps(
                     RPCGenerateRequest(
                         inputs=inputs,
                         sampling_params=sampling_params,
                         request_id=request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request),
-                    pickle.HIGHEST_PROTOCOL)
+                        prompt_adapter_request=prompt_adapter_request))
             ])
 
             # Stream back the results from the RPC Server.
             while True:
                 message = await socket.recv()
-                request_output = pickle.loads(message)
+                request_output = cloudpickle.loads(message)
 
                 if isinstance(request_output, Exception):
                     raise request_output
@@ -219,12 +218,12 @@ class RPCClient:
         with self.socket() as socket:
 
             # Ping RPCServer with CHECK_HEALTH request.
-            await socket.send(pickle.dumps(RPCUtilityRequest.CHECK_HEALTH))
+            await socket.send(cloudpickle.dumps(RPCUtilityRequest.CHECK_HEALTH))
 
             # Await the reply from the server.
             # TODO: do we need an internal timeout here?
             # Or do we expect the external probe to timeout and let this chill?
-            health_message = pickle.loads(await socket.recv())
+            health_message = cloudpickle.loads(await socket.recv())
 
         if isinstance(health_message, Exception):
             raise health_message

@@ -1,5 +1,5 @@
 import asyncio
-import pickle
+import cloudpickle
 import signal
 from typing import Any, Coroutine
 
@@ -43,7 +43,7 @@ class RPCServer:
 
         await self.socket.send_multipart(
             [identity,
-             pickle.dumps(model_config, pickle.HIGHEST_PROTOCOL)])
+             cloudpickle.dumps(model_config)])
 
     async def get_decoding_config(self, identity):
         """Send the DecodingConfig"""
@@ -51,14 +51,14 @@ class RPCServer:
 
         await self.socket.send_multipart(
             [identity,
-             pickle.dumps(decoding_config, pickle.HIGHEST_PROTOCOL)])
+             cloudpickle.dumps(decoding_config)])
 
     async def get_lora_config(self, identity):
         lora_config = await self.engine.get_lora_config()
 
         await self.socket.send_multipart(
             [identity,
-             pickle.dumps(lora_config, pickle.HIGHEST_PROTOCOL)])
+             cloudpickle.dumps(lora_config)])
 
     async def get_scheduler_config(self, identity):
         """Send the SchedulerConfig"""
@@ -66,7 +66,7 @@ class RPCServer:
 
         await self.socket.send_multipart(
             [identity,
-             pickle.dumps(parallel_config, pickle.HIGHEST_PROTOCOL)])
+             cloudpickle.dumps(parallel_config)])
 
     async def get_parallel_config(self, identity):
         """Send the ParallelConfig"""
@@ -74,7 +74,7 @@ class RPCServer:
 
         await self.socket.send_multipart(
             [identity,
-             pickle.dumps(parallel_config, pickle.HIGHEST_PROTOCOL)])
+             cloudpickle.dumps(parallel_config)])
 
     async def do_log_stats(self, identity):
         """Log stats and confirm success."""
@@ -82,14 +82,14 @@ class RPCServer:
 
         await self.socket.send_multipart([
             identity,
-            pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
+            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
         ])
 
     async def is_server_ready(self, identity):
         """Notify the client that we are ready."""
         await self.socket.send_multipart([
             identity,
-            pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
+            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
         ])
 
     async def abort(self, identity, request: RPCAbortRequest):
@@ -100,7 +100,7 @@ class RPCServer:
         # Send confirmation to the client.
         await self.socket.send_multipart([
             identity,
-            pickle.dumps(VLLM_RPC_SUCCESS_STR, pickle.HIGHEST_PROTOCOL),
+            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
         ])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
@@ -116,30 +116,30 @@ class RPCServer:
             async for request_output in results_generator:
                 await self.socket.send_multipart([
                     identity,
-                    pickle.dumps(request_output, pickle.HIGHEST_PROTOCOL)
+                    cloudpickle.dumps(request_output)
                 ])
 
         except Exception as e:
             ### Notify client of all failures
             await self.socket.send_multipart(
-                [identity, pickle.dumps(e, pickle.HIGHEST_PROTOCOL)])
+                [identity, cloudpickle.dumps(e)])
 
     async def check_health(self, identity):
         try:
             await self.engine.check_health()
             await self.socket.send_multipart([
                 identity,
-                pickle.dumps(VLLM_RPC_HEALTHY_STR, pickle.HIGHEST_PROTOCOL)
+                cloudpickle.dumps(VLLM_RPC_HEALTHY_STR)
             ])
         except Exception as e:
             await self.socket.send_multipart(
-                [identity, pickle.dumps(e, pickle.HIGHEST_PROTOCOL)])
+                [identity, cloudpickle.dumps(e)])
 
     def _make_handler_coro(self, identity,
                            message) -> Coroutine[Any, Any, Never]:
         """Route the zmq message to the handler coroutine."""
 
-        request = pickle.loads(message)
+        request = cloudpickle.loads(message)
 
         if isinstance(request, RPCGenerateRequest):
             return self.generate(identity, request)
