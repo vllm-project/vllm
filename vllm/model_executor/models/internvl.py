@@ -416,20 +416,23 @@ class InternVLChatModel(nn.Module, SupportsVision):
         return self.language_model.sample(logits, sampling_metadata)
 
     def _filter_weights(self, weights: Iterable[Tuple[str, torch.Tensor]],
-                        pattern: str):
+                        prefix: str):
         for name, loaded_weight in weights:
-            if pattern in name:
-                name = name.replace(pattern, "")
+            name = name.split(".")
+            if prefix == name.pop(0):
+                name = ".".join(name)
                 yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # load vision encoder
+        # prepare weight iterators for components
         vit_weights, mlp_weights, llm_weights = itertools.tee(weights, 3)
-        vit_weights = self._filter_weights(vit_weights, "vision_model.")
+
+        # load vision encoder
+        vit_weights = self._filter_weights(vit_weights, "vision_model")
         self.vision_model.load_weights(vit_weights)
 
         # load mlp projector
-        mlp_weights = self._filter_weights(mlp_weights, "mlp1.")
+        mlp_weights = self._filter_weights(mlp_weights, "mlp1")
         mlp_params_dict = dict(self.mlp1.named_parameters())
         for name, loaded_weight in mlp_weights:
             param = mlp_params_dict[name]
@@ -438,5 +441,5 @@ class InternVLChatModel(nn.Module, SupportsVision):
             weight_loader(param, loaded_weight)
 
         # load llm backbone
-        llm_weights = self._filter_weights(llm_weights, "language_model.")
+        llm_weights = self._filter_weights(llm_weights, "language_model")
         self.language_model.load_weights(llm_weights)
