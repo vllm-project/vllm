@@ -40,7 +40,7 @@ class Detokenizer:
         assert prms is not None
 
         # We can pick any sequence for the prompt.
-        seq = next(iter(seq_group.seqs_dict.values()))
+        seq = seq_group.get_seqs()[0]
         # Only prompt, without the generated token.
         all_token_ids = seq.get_token_ids()
         prompt_token_ids = all_token_ids[:-1]
