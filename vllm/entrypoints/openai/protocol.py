@@ -720,3 +720,31 @@ class DetokenizeRequest(OpenAIBaseModel):
 
 class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
+
+class ResponseLiveness(OpenAIBaseModel):
+    """Return object for liveness probe"""
+
+    alive: str = Field(None, title="Alive message")
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                "liveness": {
+                    "alive": "ok"
+                }
+            ]
+        }
+    }
+
+class ResponseReadiness(OpenAIBaseModel):
+    """Return object for readiness probe"""
+
+    ready: str = Field(None, title="Ready message")
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                "readiness": {
+                    "ready": "ok"
+                }
+            ]
+        }
+    }

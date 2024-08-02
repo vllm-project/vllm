@@ -30,7 +30,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest, ErrorResponse,
                                               TokenizeRequest,
-                                              TokenizeResponse)
+                                              TokenizeResponse, 
+                                              ResponseLiveness,
+                                              ResponseReadyness)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -88,6 +90,33 @@ async def health() -> Response:
     """Health check."""
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
+
+@router.get(
+    "/liveness",
+    response_model=ResponseLiveness,
+    name="liveness",
+    tags=["technical"],
+)
+async def get_liveness() -> ResponseLiveness:
+    """Liveness probe for k8s"""
+    liveness_msg = ResponseLiveness(alive="ok")
+    return liveness_msg
+
+
+@router.get(
+    "/readiness",
+    response_model=ResponseReadiness,
+    name="readiness",
+    tags=["technical"],
+)
+async def get_readiness() -> ResponseReadiness:
+    """Readiness probe for k8s"""
+    model_weights = await openai_serving_chat.engine.engine.model_executor.driver_worker.model_runner.model_memory_usage
+
+    if model_weights:
+        return ResponseReadiness(ready="ok")
+    else:
+        return ResponseReadiness(ready="ko")
 
 
 @router.post("/tokenize")
