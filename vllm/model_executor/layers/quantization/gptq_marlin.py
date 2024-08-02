@@ -53,7 +53,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                     bits = dym.get("bits", bits)
                     self.group_size = dym.get("group_size", self.group_size)
                     self.desc_act = dym.get("bits", self.desc_act)
-                    self.is_sym = dym.get("is_sym", self.is_sym)
+                    self.is_sym = dym.get("sym", self.is_sym)
                     break
         if bits != self.weight_bits:
             self.weight_bits = bits
