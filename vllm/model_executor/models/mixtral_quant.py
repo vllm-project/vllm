@@ -369,15 +369,8 @@ class MixtralForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
 
-        # print(config)
-        # print(cache_config)
-        # print(quant_config)
-
-        # FP8 hasn't been tested. Works only with enforce-eager
-        self.use_fused_moe = True
-        #(config.torch_dtype != torch.float8_e4m3fn and
-        #config.torch_dtype != torch.float16)
-        # print("use fused?", config.torch_dtype)
+        # TODO check runs with dtype=float16
+        self.use_fused_moe = (config.torch_dtype != torch.float8_e4m3fn)
 
         self.config = config
         self.quant_config = quant_config

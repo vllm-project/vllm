@@ -384,6 +384,8 @@ def fused_topk(
                                         topk,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
+    from pprint import pprint
+    pprint(vars(ops))
     ops.topk_softmax(
         topk_weights,
         topk_ids,
@@ -628,19 +630,6 @@ def fused_moe(
                          a2_scale=a2_scale)
 
 
-def get_expert_offsets(sorted_token_ids: torch.Tensor, topk_ids: torch.Tensor,
-                       num_experts: int, block_size_m: int):
-    expert_offsets = [0] * (num_experts + 1)
-    occurrences = torch.bincount(topk_ids.flatten()).to(dtype=torch.int)
-    erange = min(num_experts, len(occurrences))
-    for i in range(erange):
-        ex_blocks = (occurrences[i].item() + block_size_m - 1) // block_size_m
-        expert_offsets[i + 1] = ex_blocks * block_size_m + expert_offsets[i]
-    for i in range(len(occurrences), num_experts):
-        expert_offsets[i + 1] = sorted_token_ids.size()[0]
-    return torch.as_tensor(expert_offsets)
-
-
 def single_marlin_moe(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
@@ -712,13 +701,10 @@ def single_marlin_moe(
                             device="cuda",
                             requires_grad=False)
 
-    expert_offsets = get_expert_offsets(sorted_token_ids, topk_ids, E,
-                                        block_size_m)
-
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        g_idx, rand_perm, expert_offsets, workspace, M, N, K, True, E, topk,
-        block_size_m, True, False)
+        g_idx, rand_perm, workspace, M, N, K, True, E, topk, block_size_m,
+        True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -804,25 +790,21 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                             device="cuda",
                             requires_grad=False)
 
-    expert_offsets = get_expert_offsets(sorted_token_ids, topk_ids, E,
-                                        block_size_m)
-    # expert_offsets = torch.empty((0))
-
     intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
     intermediate_cache1 = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w1, sorted_token_ids, topk_weights, topk_ids, w1_scale,
-        g_idx1, rand_perm1, expert_offsets, workspace, M, 2 * N, K, True, E,
-        topk, block_size_m, True, False)
+        g_idx1, rand_perm1, workspace, M, 2 * N, K, True, E, topk,
+        block_size_m, True, False)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
 
     intermediate_cache3 = torch.ops._moe_C.marlin_gemm_moe(
         intermediate_cache2, w2, sorted_token_ids, topk_weights, topk_ids,
-        w2_scale, g_idx2, rand_perm2, expert_offsets, workspace, M, K, N, True,
-        E, topk, block_size_m, False, True)
+        w2_scale, g_idx2, rand_perm2, workspace, M, K, N, True, E, topk,
+        block_size_m, False, True)
 
     # intermediate_cache3 = torch.zeros((M, topk, K),
     #                                   device=hidden_states.device,
