@@ -36,10 +36,12 @@ def test_oot_registration_for_api_server():
     ctx = torch.multiprocessing.get_context()
     server = ctx.Process(target=server_function, args=(port, ))
     server.start()
+    MAX_SERVER_START_WAIT_S = 60
     client = OpenAI(
         base_url=f"http://localhost:{port}/v1",
         api_key="token-abc123",
     )
+    now = time.time()
     while True:
         try:
             completion = client.chat.completions.create(
@@ -57,6 +59,8 @@ def test_oot_registration_for_api_server():
         except OpenAIError as e:
             if "Connection error" in str(e):
                 time.sleep(3)
+                if time.time() - now > MAX_SERVER_START_WAIT_S:
+                    raise RuntimeError("Server did not start in time") from e
             else:
                 raise e
     server.kill()
