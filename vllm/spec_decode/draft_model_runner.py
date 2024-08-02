@@ -10,7 +10,6 @@ except ModuleNotFoundError:
     # vllm_flash_attn is not installed, use the identical ROCm FA metadata
     from vllm.attention.backends.rocm_flash_attn import (
         ROCmFlashAttentionMetadata as FlashAttentionMetadata)
-
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
