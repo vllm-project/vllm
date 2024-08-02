@@ -45,12 +45,10 @@ class GPTQMarlinConfig(QuantizationConfig):
                                      is_sym=self.is_sym)
 
     def update_bits_and_pack_factor(self, prefix: str):
-        print("lll", prefix)
         bits = self.weight_bits
         # check for variable/dynamic bits
         if len(self.dynamic_bits) > 0 and prefix:
             for pattern, dym_bits in self.dynamic_bits.items():
-                print("re.match(pattern, prefix)",re.match(pattern, prefix), prefix)
                 if re.match(pattern, prefix):
                     bits = dym_bits
                     break
