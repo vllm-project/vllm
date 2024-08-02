@@ -232,6 +232,7 @@ class LLMEngine:
         )
         self.log_stats = log_stats
 
+        # Initialize tokenizer/detokenizer
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
@@ -240,12 +241,17 @@ class LLMEngine:
             self.detokenizer = None
 
         self.seq_counter = Counter()
+        # Get generation config
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
+        # Input processor
         self.input_processor = INPUT_REGISTRY.create_input_processor(
             self.model_config)
 
+        # engine has a executor class
+        # program for a specific interface rather than an implementation
+        # XPUExecutor, this is an interface, to encap
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -259,6 +265,7 @@ class LLMEngine:
             prompt_adapter_config=prompt_adapter_config,
         )
 
+        # Initialize kv cache
         if not self.model_config.embedding_mode:
             self._initialize_kv_caches()
 
@@ -906,9 +913,11 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
+        # First step: schedule the sequences that need to be executed
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
 
+        # Second step: execute model
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
                 0].get_and_reset_finished_requests_ids()
@@ -925,6 +934,7 @@ class LLMEngine:
         else:
             output = []
 
+        # Last step: execute end
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)

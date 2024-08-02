@@ -281,6 +281,8 @@ class Scheduler:
         if self.scheduler_config.embedding_mode:
             version = "embedding"
 
+        # Get class
+        # This is just a factory method
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
