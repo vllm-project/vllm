@@ -38,6 +38,8 @@ if TYPE_CHECKING:
     VLLM_INSTALL_PUNICA_KERNELS: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
+    VLLM_SYNC_SERVER_ACCUM_REQUESTS: int = 1
+    VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -219,6 +221,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
+
+    # Try to accumulate this many requests before proceeding
+    "VLLM_SYNC_SERVER_ACCUM_REQUESTS":
+    lambda: int(os.getenv("VLLM_SYNC_SERVER_ACCUM_REQUESTS", "1")),
+
+    # Poll for new requests every this many steps
+    "VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS":
+    lambda: int(os.getenv("VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS", "1")),
 }
 
 # end-env-vars-definition
