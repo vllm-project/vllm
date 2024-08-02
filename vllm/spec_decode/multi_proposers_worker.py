@@ -34,7 +34,6 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                 f"other value than 1 when using MultiProposersWorker. "
                 f"Got {draft_tp} instead.")
 
-
     def init_device(self) -> None:
         for worker in self._workers.values():
             worker.init_device()
@@ -82,8 +81,6 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         chosen_proposer = self._get_proposer_for_this_step(
             execute_model_req,
             schedule_policy="proposal_latency")
-        
-        # print("chosen_proposer:", chosen_proposer)
 
         return self._workers[chosen_proposer].get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
@@ -190,14 +187,14 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                     if proposer == '[ngram]':
                         chosen_proposer = proposer
                         break
-
                     if proposer not in valid_proposers:
                         continue
                     else:
                         chosen_proposer = proposer
 
         elif schedule_policy == "proposal_quality":
-            # TODO: Use SpecDecodeWorkerMetrics to select the best proposer
+            # TODO: Use SpecDecodeWorkerMetrics to select the proposer with
+            # best draft_acceptance_rate.
             raise NotImplementedError(
                 f"schedule_policy: '{schedule_policy}' has not been "
                 f"implemented yet.")
@@ -284,3 +281,4 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                 return self.is_multi_step_worker_instance(obj._worker)
         else:
             return False
+
