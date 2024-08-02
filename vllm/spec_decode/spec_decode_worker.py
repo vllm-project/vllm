@@ -125,7 +125,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
         draft_model_config: ModelConfig = draft_worker_kwargs['model_config']
-        if draft_model_config == '[ngram]':
+        if draft_model_config.model == '[ngram]':
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
