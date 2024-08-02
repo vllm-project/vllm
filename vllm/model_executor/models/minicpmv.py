@@ -662,11 +662,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         raise NotImplementedError
 
     def get_vision_embedding(
-            self,
-            pixel_values: List[torch.Tensor],
-            patch_attn_mask: Optional[torch.Tensor] = None,
-            tgt_sizes: Optional[torch.Tensor] = None,
-            version: Tuple[int, int] = (2, 0),
+        self,
+        pixel_values: List[torch.Tensor],
+        patch_attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -738,11 +737,10 @@ class MiniCPMV2(MiniCPMVBaseModel):
         return resampler
 
     def get_vision_embedding(
-            self,
-            pixel_values: List[torch.Tensor],
-            patch_attn_mask: Optional[torch.Tensor] = None,
-            tgt_sizes: Optional[torch.Tensor] = None,
-            version: Tuple[int, int] = (2, 0),
+        self,
+        pixel_values: List[torch.Tensor],
+        patch_attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         res = []
         dtype = self.vpm.pos_embed.data.dtype
@@ -822,11 +820,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         return resampler
 
     def get_vision_embedding(
-            self,
-            pixel_values: List[torch.Tensor],
-            patch_attn_mask: Optional[torch.Tensor] = None,
-            tgt_sizes: Optional[torch.Tensor] = None,
-            version: Tuple[int, int] = (2, 0),
+        self,
+        pixel_values: List[torch.Tensor],
+        patch_attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         vision_embedding = self.vpm(pixel_values,
                                     patch_attention_mask=patch_attn_mask)
@@ -927,11 +924,10 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
         return resampler
 
     def get_vision_embedding(
-            self,
-            pixel_values: List[torch.Tensor],
-            patch_attn_mask: Optional[torch.Tensor] = None,
-            tgt_sizes: Optional[torch.Tensor] = None,
-            version: Tuple[int, int] = (2, 0),
+        self,
+        pixel_values: List[torch.Tensor],
+        patch_attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         vision_embedding = self.vpm(
             pixel_values,
