@@ -149,5 +149,6 @@ class AttentionImpl(ABC, Generic[T]):
         tmp_out: torch.Tensor,
         exp_sum: torch.Tensor,
         max_logits: torch.Tensor,
+        attn_metadata: T,
     ) -> torch.Tensor:
         pass
