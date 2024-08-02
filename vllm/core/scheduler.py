@@ -220,10 +220,10 @@ class SchedulerSwappedInOutputs:
     """
     # Selected sequences that are going to be swapped in and is in a
     # decoding phase.
-    decode_seq_groups: List[SequenceGroup]
+    decode_seq_groups: List[ScheduledSequenceGroup]
     # Selected sequences that are going to be swapped in and in a prefill
     # phase. I.e., it means the prefill has been chunked.
-    prefill_seq_groups: List[SequenceGroup]
+    prefill_seq_groups: List[ScheduledSequenceGroup]
     # The blocks to swap in.
     blocks_to_swap_in: List[Tuple[int, int]]
     # The blocks to copy.
@@ -253,7 +253,7 @@ class SchedulerPrefillOutputs:
     to be recomputed from scratch.
     """
     # Selected sequences for prefill.
-    seq_groups: List[SequenceGroup]
+    seq_groups: List[ScheduledSequenceGroup]
     # Ignored sequence groups.
     ignored_seq_groups: List[SequenceGroup]
     num_lookahead_slots: int
@@ -288,7 +288,8 @@ def scheduler_running_outputs_builder():
 
 
 def scheduled_seq_group_builder():
-    return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
+    return ScheduledSequenceGroup(SequenceGroup("", [], -1), token_chunk_size=0)
+    # return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
 
 
 class Scheduler:
@@ -737,7 +738,7 @@ class Scheduler:
             SchedulerPrefillOutputs.
         """
         ignored_seq_groups: List[SequenceGroup] = []
-        seq_groups: List[SequenceGroup] = []
+        seq_groups: List[ScheduledSequenceGroup] = []
 
         waiting_queue = self.waiting
 
@@ -1057,7 +1058,9 @@ class Scheduler:
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
-                encoder_seq_data = seq_group.get_encoder_seq().data
+                encoder_seq = seq_group.get_encoder_seq()
+                assert encoder_seq is not None
+                encoder_seq_data = encoder_seq.data
                 # Block table for cross-attention
                 # Also managed at SequenceGroup level
                 cross_block_table = self.block_manager.get_cross_block_table(
