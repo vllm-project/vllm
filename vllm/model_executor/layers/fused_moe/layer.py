@@ -28,8 +28,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @abstractmethod
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor) -> torch.Tensor:
+              topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+              **kwargs) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -59,21 +59,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor) -> torch.Tensor:
+              topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+              **kwargs) -> torch.Tensor:
 
         return self.forward(x=x,
                             layer=layer,
                             topk_weights=topk_weights,
-                            topk_ids=topk_ids)
+                            topk_ids=topk_ids,
+                            **kwargs)
 
-    def forward_cuda(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward_cuda(self, layer: torch.nn.Module, x: torch.Tensor,
+                     topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                     **kwargs) -> torch.Tensor:
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
@@ -85,17 +82,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         raise NotImplementedError(
             "The CPU backend currently does not support MoE.")
 
-    def forward_tpu(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward_tpu(self, layer: torch.nn.Module, x: torch.Tensor,
+                    topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                    use_grouped_topk: bool) -> torch.Tensor:
 
-        #assert not use_grouped_topk
-        #assert num_expert_group is None
-        #assert topk_group is None
+        assert not use_grouped_topk
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
@@ -294,7 +285,8 @@ class FusedMoE(torch.nn.Module):
             layer=self,
             x=hidden_states,
             topk_weights=topk_weights,
-            topk_ids=topk_ids)
+            topk_ids=topk_ids,
+            use_grouped_topk=self.use_grouped_topk)
 
         # Optionally reduce.
         if self.reduce_results and self.tp_size > 1:

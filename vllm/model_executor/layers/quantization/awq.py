@@ -280,8 +280,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             })
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor) -> torch.Tensor:
+              topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+              **kwargs) -> torch.Tensor:
 
         return fused_experts_awq(hidden_states=x,
                                  w1=layer.w13_qweight,

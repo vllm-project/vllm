@@ -408,8 +408,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor) -> torch.Tensor:
+              topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+              **kwargs) -> torch.Tensor:
 
         return fused_experts(x,
                              layer.w13_weight,
