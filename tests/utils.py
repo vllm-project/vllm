@@ -346,10 +346,10 @@ def _patched_skip(reason: str = "",
                   allow_module_level: bool = False,
                   msg: Optional[str] = None):
     warning = (
-        "Warning: cannot use pytest.skip inside fork_new_process_for_each_test."
-        " It is automatically disabled. Original skip reason is:\n")
+        "Error: cannot use pytest.skip inside fork_new_process_for_each_test."
+        " Please directly return. Original skip reason is:\n")
     reason = warning + reason
-    print(reason)
+    raise RuntimeError(reason)
 
 
 def fork_new_process_for_each_test(f):
