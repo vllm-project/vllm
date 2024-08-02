@@ -22,7 +22,6 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
-
 from vllm.model_executor.layers.quantization.tpu_int8 import Int8TpuConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {

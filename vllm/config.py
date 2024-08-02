@@ -283,7 +283,8 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if is_tpu() and self.quantization not in tpu_supported_quantization:
+            if is_tpu(
+            ) and self.quantization not in tpu_supported_quantization:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in TPU Backend.")
