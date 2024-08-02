@@ -678,7 +678,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
 
 class MiniCPMV2(MiniCPMVBaseModel):
 
-    def _init__(
+    def __init__(
         self,
         config: PretrainedConfig,
         multimodal_config: MultiModalConfig,
