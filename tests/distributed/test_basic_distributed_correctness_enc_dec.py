@@ -18,7 +18,6 @@ import os
 import pytest
 
 from tests.models.utils import DecoderPromptType
-
 from vllm.utils import cuda_device_count_stateless
 
 from ..models.utils import check_logprobs_close
@@ -52,12 +51,13 @@ def test_models(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model, 
-                     dtype=dtype,
-                     tensor_parallel_size=2,
-                     distributed_executor_backend=distributed_executor_backend, 
-                     enforce_eager=True,
-                     ) as vllm_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tensor_parallel_size=2,
+            distributed_executor_backend=distributed_executor_backend,
+            enforce_eager=True,
+    ) as vllm_model:
         vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
             test_prompts, max_tokens, num_logprobs)
 
@@ -74,14 +74,13 @@ def test_models(
     }
 
     with hf_runner(model, dtype=dtype,
-                    is_encoder_decoder_model=True) as hf_model:
-        hf_outputs = (
-            hf_model.generate_encoder_decoder_greedy_logprobs_limit(
-                test_prompts,
-                max_tokens,
-                num_logprobs,
-                **hf_kwargs,
-            ))
+                   is_encoder_decoder_model=True) as hf_model:
+        hf_outputs = (hf_model.generate_encoder_decoder_greedy_logprobs_limit(
+            test_prompts,
+            max_tokens,
+            num_logprobs,
+            **hf_kwargs,
+        ))
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
