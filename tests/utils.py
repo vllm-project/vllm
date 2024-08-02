@@ -357,8 +357,14 @@ def fork_new_process_for_each_test(f):
             else:
                 os._exit(0)
         else:
+            pgid = os.getpgid(pid)
             _pid, _exitcode = os.waitpid(pid, 0)
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            # ignore SIGTERM signal itself
+            old_singla_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            # kill all child processes
+            os.killpg(pgid, signal.SIGTERM)
+            # restore the signal handler
+            signal.signal(signal.SIGTERM, old_singla_handler)
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 
