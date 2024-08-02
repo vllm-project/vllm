@@ -26,10 +26,9 @@ DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024]
 DEFAULT_TP_SIZES = [1]
 
 
-def machete_pack_weights(w_q: torch.tensor,
-                          wtype: ScalarType) -> torch.tensor:
+def machete_pack_weights(w_q: torch.tensor, wtype: ScalarType) -> torch.tensor:
     w_q = pack_rows(w_q, wtype.size_bits, *w_q.shape)
-    w_q = w_q.t().contiguous().t() # make col major
+    w_q = w_q.t().contiguous().t()  # make col major
     return ops.machete_prepack_B(w_q, wtype)
 
 
@@ -99,7 +98,7 @@ def bench(atype: torch.dtype,
     sub_label += f", L={len(weights)}"
 
     weights_machete = [(w_ref, machete_pack_weights(w_q, wtype), w_s, w_zp)
-                        for w_ref, w_q, w_s, w_zp in weights]
+                       for w_ref, w_q, w_s, w_zp in weights]
 
     timers = []
     # pytorch impl
@@ -167,11 +166,11 @@ def bench(atype: torch.dtype,
 
             def run(a, _, w_q, w_s, schedule=schedule):
                 ops.machete_gemm(a,
-                                  w_q,
-                                  wtype,
-                                  w_s,
-                                  b_group_size=group_size,
-                                  schedule=schedule)
+                                 w_q,
+                                 wtype,
+                                 w_s,
+                                 b_group_size=group_size,
+                                 schedule=schedule)
 
             res = bench_fn(label, sub_label, "machete_best",
                            lambda: loop_over_weights(a, weights_machete, run))
@@ -192,14 +191,19 @@ def print_timers(timers: Iterable[TMeasurement]):
     compare.print()
 
 
-def run(dtype: torch.dtype,
-        sweep_schedules: bool,
+def run(dtype: torch.dtype, sweep_schedules: bool,
         MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
 
     results = []
     for m, k, n in MKNs:
-        timers = bench(dtype, scalar_types.uint4b8, 128, m, k, n,
-                       f"{dtype}-gemm", f"MKN=({m}x{k}x{n})",
+        timers = bench(dtype,
+                       scalar_types.uint4b8,
+                       128,
+                       m,
+                       k,
+                       n,
+                       f"{dtype}-gemm",
+                       f"MKN=({m}x{k}x{n})",
                        sweep_schedules=sweep_schedules)
         print_timers(timers)
         results.extend(timers)

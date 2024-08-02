@@ -55,9 +55,9 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
 
 
 def machete_quantize_and_pack(w: torch.Tensor,
-                               wtype: ScalarType,
-                               group_size: int,
-                               zero_points: bool = False):
+                              wtype: ScalarType,
+                              group_size: int,
+                              zero_points: bool = False):
     assert wtype.is_integer(), "TODO: support floating point weights"
 
     w_ref, w_q, w_s, w_zp = quantize_weights(
@@ -69,7 +69,7 @@ def machete_quantize_and_pack(w: torch.Tensor,
         ref_zero_points_after_scales=True)
 
     w_q = pack_rows(w_q, wtype.size_bits, *w_q.shape)
-    w_q = w_q.t().contiguous().t() # convert to col major
+    w_q = w_q.t().contiguous().t()  # convert to col major
     w_q_machete = ops.machete_prepack_B(w_q, wtype)
 
     return w_ref, w_q_machete, w_s, w_zp
@@ -84,8 +84,8 @@ def machete_quantize_and_pack(w: torch.Tensor,
 @pytest.mark.parametrize("wtype_zeropoints", WTYPE_ZEROPOINTS)
 @pytest.mark.parametrize("group_size", [128, None])
 def test_machete_all_schedules(shape, atype: torch.dtype,
-                                wtype_zeropoints: Tuple[ScalarType, bool],
-                                group_size: Optional[int]):
+                               wtype_zeropoints: Tuple[ScalarType, bool],
+                               group_size: Optional[int]):
     size_m, size_k, size_n = shape
     wtype, zero_points = wtype_zeropoints
 
@@ -130,8 +130,8 @@ def test_machete_all_schedules(shape, atype: torch.dtype,
 @pytest.mark.parametrize("wtype_zeropoints", WTYPE_ZEROPOINTS)
 @pytest.mark.parametrize("group_size", [128, None])
 def test_machete_heuristic(shape, atype: torch.dtype,
-                            wtype_zeropoints: Tuple[ScalarType, bool],
-                            group_size: Optional[int]):
+                           wtype_zeropoints: Tuple[ScalarType, bool],
+                           group_size: Optional[int]):
     size_m, size_k, size_n = shape
     wtype, zero_points = wtype_zeropoints
 
