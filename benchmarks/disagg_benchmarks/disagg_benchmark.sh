@@ -43,16 +43,20 @@ wait_for_server() {
 
 benchmark() {
 
+  export VLLM_LOGGING_LEVEL=DEBUG
+  export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+  export VLLM_PORT=12345
+
   # compare chunked prefill with disaggregated prefill
 
   results_folder="./results"
-  model="neuralmagic/Meta-Llama-3-70B-Instruct-FP8"
+  model="meta-llama/Meta-Llama-3.1-70B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=50
+  num_prompts=100
   qps=$1
-  prefix_len=64
-  input_len=2048
+  prefix_len=50
+  input_len="100"
   output_len=$2
 
 
@@ -138,31 +142,47 @@ benchmark() {
   # kill_gpu_processes
 
 
-
-  # chunked prefill with tp=4
-  export VLLM_PORT=12345
-  VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
-      -m vllm.entrypoints.openai.api_server \
-      --model $model \
-      --port 8100 \
-      -tp 4 \
-      --disable-log-stats \
-      --disable-log-requests \
-      --enable-chunked-prefill &
-  VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+# large model
+VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
-    --port 8200 \
+    --port 8100 \
     -tp 4 \
-    --disable-log-stats \
-    --disable-log-requests \
-    --enable-chunked-prefill &
+    --max-model-len 10000 \
+    --gpu-memory-utilization 0.8 &
+VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+  -m vllm.entrypoints.openai.api_server \
+  --model $model \
+  --port 8200 \
+  -tp 4 \
+  --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 &
+
+# # Small Model
+# # prefilling instance
+# VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0 python3 \
+#     -m vllm.entrypoints.openai.api_server \
+#     --model $model \
+#     --port 8100 \
+#     -tp 1 \
+#     --gpu-memory-utilization 0.8 \
+#     --max-model-len 10000 &
+
+# # decoding instance
+# VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=1 python3 \
+#     -m vllm.entrypoints.openai.api_server \
+#     --model $model \
+#     --port 8200 \
+#     -tp 1 \
+#     --gpu-memory-utilization 0.8 \
+#     --max-model-len 10000 &
+
   wait_for_server 8100
   wait_for_server 8200
 
   # launch a proxy server that listen from port 8000
   python3 disagg_prefill_proxy_server.py &
-  sleep 5
+  sleep 1
 
   python3 ../benchmark_serving.py \
           --backend vllm \
@@ -210,14 +230,14 @@ main() {
   rm -rf results
   mkdir results
 
-  default_qps=4
+  default_qps=10
   default_output_len=150
 
   # for target_qps in 2 4 8 16
   # do
   #   benchmark $target_qps $default_output_len
   # done
-  benchmark 1 150
+  benchmark $default_qps $default_output_len
 
   # for target_output_len in 5 10 20 40 80
   # do
