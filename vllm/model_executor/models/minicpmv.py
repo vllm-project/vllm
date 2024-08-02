@@ -178,31 +178,18 @@ class BaseResampler(nn.Module):
     """
 
     def __init__(
-            self,
-            num_queries: Optional[int],
-            grid_size: Optional[int],
-            embed_dim: int,
-            num_heads: int,
-            kv_dim: Optional[int] = None,
-            norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-            adaptive: bool = False,
-            max_size: Tuple[int, int] = (70, 70),
-            version: Tuple[int, int] = (2, 0),
-    ):
+        self,
+        num_queries: int,
+        embed_dim: int,
+        num_heads: int,
+        kv_dim: Optional[int] = None,
+        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+    ) -> None:
         super().__init__()
-
-        self.version = version
-        if self.version == (2, 0):
-            assert grid_size is not None
-            num_queries = grid_size**2
-        else:
-            assert num_queries is not None
-            self.max_size = max_size
 
         self.num_queries = num_queries
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.adaptive = adaptive
 
         self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
         trunc_normal_(self.query, std=0.02)
@@ -223,28 +210,6 @@ class BaseResampler(nn.Module):
         self.proj = nn.Parameter(
             (embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
 
-    def _set_2d_pos_cache(self,
-                          max_size: Tuple[int, int],
-                          device: torch.types.Device = "cpu") -> None:
-        pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
-                                                max_size,
-                                                version=self.version)
-        pos_embed = torch.from_numpy(pos_embed_arr).float().to(device)
-        self.register_buffer("pos_embed", pos_embed, persistent=False)
-
-    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor,
-                          device: torch.types.Device) -> None:
-        max_h = tgt_sizes[:, 0].max().item()
-        max_w = tgt_sizes[:, 1].max().item()
-        assert isinstance(max_h, int) and isinstance(max_w, int)
-
-        if max_h > self.max_size[0] or max_w > self.max_size[1]:
-            self.max_size = (
-                max(max_h, self.max_size[0]),
-                max(max_w, self.max_size[1]),
-            )
-            self._set_2d_pos_cache(self.max_size, device)
-
     def _init_weights(self, m: nn.Module) -> None:
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=0.02)
@@ -261,24 +226,20 @@ class BaseResampler(nn.Module):
 class Resampler2(BaseResampler):
 
     def __init__(
-            self,
-            num_queries: Optional[int],
-            grid_size: Optional[int],
-            embed_dim: int,
-            num_heads: int,
-            kv_dim: Optional[int] = None,
-            norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-            adaptive: bool = False,
-            max_size: Tuple[int, int] = (70, 70),
-            version: Tuple[int, int] = (2, 0),
-    ):
-        super().__init__(num_queries, grid_size, embed_dim, num_heads, kv_dim,
-                         norm_layer, adaptive, max_size, version)
-        assert self.version == (2, 0)
-        assert grid_size is not None
-        pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
-                                                grid_size,
-                                                version=self.version)
+        self,
+        grid_size: int,
+        embed_dim: int,
+        num_heads: int,
+        kv_dim: Optional[int] = None,
+        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+        adaptive: bool = False,
+    ) -> None:
+        super().__init__(grid_size**2, embed_dim, num_heads, kv_dim, norm_layer)
+        
+        self.adaptive = adaptive
+
+        pos_embed_arr = get_2d_sincos_pos_embed(embed_dim, grid_size,
+                                                version=(2, 0))
         self.pos_embed = nn.Parameter(
             torch.from_numpy(pos_embed_arr).float()).requires_grad_(False)
 
@@ -291,7 +252,8 @@ class Resampler2(BaseResampler):
         attn_mask: Optional[torch.Tensor] = None,
     ):
         if self.adaptive:
-            pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim, tgt_sizes)
+            pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim, tgt_sizes,
+                                                    version=(2, 0))
             pos_embed = torch.from_numpy(pos_embed_arr).to(device=x.device,
                                                            dtype=x.dtype)
         else:
@@ -318,23 +280,42 @@ class Resampler2(BaseResampler):
 class Resampler2_5(BaseResampler):
 
     def __init__(
-            self,
-            num_queries: Optional[int],
-            grid_size: Optional[int],
-            embed_dim: int,
-            num_heads: int,
-            kv_dim: Optional[int] = None,
-            norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-            adaptive: bool = False,
-            max_size: Tuple[int, int] = (70, 70),
-            version: Tuple[int, int] = (2, 0),
-    ):
-        super().__init__(num_queries, grid_size, embed_dim, num_heads, kv_dim,
-                         norm_layer, adaptive, max_size, version)
+        self,
+        num_queries: int,
+        embed_dim: int,
+        num_heads: int,
+        kv_dim: Optional[int] = None,
+        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+        max_size: Tuple[int, int] = (70, 70),
+    ) -> None:
+        super().__init__(num_queries, embed_dim, num_heads, kv_dim, norm_layer)
 
+        self.max_size = max_size
         self._set_2d_pos_cache(self.max_size)
 
         self.apply(self._init_weights)
+
+    def _set_2d_pos_cache(self,
+                          max_size: Tuple[int, int],
+                          device: torch.types.Device = "cpu") -> None:
+        pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
+                                                max_size,
+                                                version=(2, 5))
+        pos_embed = torch.from_numpy(pos_embed_arr).float().to(device)
+        self.register_buffer("pos_embed", pos_embed, persistent=False)
+
+    def _adjust_pos_cache(self, tgt_sizes: torch.Tensor,
+                          device: torch.types.Device) -> None:
+        max_h = tgt_sizes[:, 0].max().item()
+        max_w = tgt_sizes[:, 1].max().item()
+        assert isinstance(max_h, int) and isinstance(max_w, int)
+
+        if max_h > self.max_size[0] or max_w > self.max_size[1]:
+            self.max_size = (
+                max(max_h, self.max_size[0]),
+                max(max_w, self.max_size[1]),
+            )
+            self._set_2d_pos_cache(self.max_size, device)
 
     def forward(self, x: torch.Tensor,
                 tgt_sizes: torch.Tensor) -> torch.Tensor:
@@ -725,13 +706,11 @@ class MiniCPMV2(MiniCPMVBaseModel):
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
             resampler = Resampler2(
-                num_queries=None,
                 embed_dim=embed_dim,
                 num_heads=embed_dim // 128,
                 grid_size=int(math.sqrt(self.config.query_num)),
                 kv_dim=vision_dim,
                 adaptive=True,
-                version=self.version,
             )
 
         return resampler
@@ -812,10 +791,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
                 num_queries=self.config.query_num,
                 embed_dim=embed_dim,
                 num_heads=embed_dim // 128,
-                grid_size=None,
                 kv_dim=vision_dim,
-                adaptive=True,
-                version=self.version,
             )
         return resampler
 
@@ -843,7 +819,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
             ]
             if all_pixel_values:
                 tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
-                max_patches = torch.max(tgt_sizes[:, 0] * tgt_sizes[:, 1])
+
+                max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+                assert isinstance(max_patches, int)
+
                 all_pixel_values = torch.nn.utils.rnn.pad_sequence(
                     all_pixel_values, batch_first=True, padding_value=0.0)
                 B, L, _ = all_pixel_values.shape
@@ -915,10 +894,7 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
                 num_queries=self.config.query_num,
                 embed_dim=embed_dim,
                 num_heads=embed_dim // 128,
-                grid_size=None,
                 kv_dim=vision_dim,
-                adaptive=True,
-                version=self.version,
             )
 
         return resampler
@@ -949,12 +925,16 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
             ]
             if all_pixel_values:
                 tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
-                max_patches = torch.max(tgt_sizes[:, 0] * tgt_sizes[:, 1])
+
+                max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+                assert isinstance(max_patches, int)
+
                 all_pixel_values = torch.nn.utils.rnn.pad_sequence(
                     all_pixel_values, batch_first=True, padding_value=0.0)
                 B, L, _ = all_pixel_values.shape
                 all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
                     B, 3, -1, L)
+
                 patch_attn_mask = torch.zeros((B, 1, max_patches),
                                               dtype=torch.bool,
                                               device=device)
