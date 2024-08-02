@@ -615,9 +615,7 @@ def reshape_q(q: torch.tensor, pattern: List[int],
     size = q.size()
     size_all = list(size)
     size_all[1] = len(pattern)
-    result = torch.empty(size_all,
-                         dtype=q.dtype,
-                         device=q.device)
+    result = torch.empty(size_all, dtype=q.dtype, device=q.device)
     for tp_rank in range(tp_size):
         for index in range(len(pattern)):
             result[tp_rank][index] = q[tp_rank][pattern[index]]
@@ -626,8 +624,7 @@ def reshape_q(q: torch.tensor, pattern: List[int],
 
 def filter_tensor(
         output: torch.tensor, out_exp_sums: torch.tensor,
-        out_max_logits: torch.tensor,
-        pattern: List[int], length: int,
+        out_max_logits: torch.tensor, pattern: List[int], length: int,
         tp_size: int) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
     size_output = list(output.size())
     size_exp_sums = list(out_exp_sums.size())
@@ -650,7 +647,8 @@ def filter_tensor(
             if old_idx != idx:
                 result[tp_rank][index] = output[tp_rank][idx]
                 result_exp_sums[tp_rank][index] = out_exp_sums[tp_rank][idx]
-                result_max_logits[tp_rank][index] = out_max_logits[tp_rank][idx]
+                result_max_logits[tp_rank][index] = out_max_logits[tp_rank][
+                    idx]
                 index += 1
                 old_idx = idx
     return result, result_exp_sums, result_max_logits

@@ -155,9 +155,17 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.cpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self.tpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
-            num_gpu_blocks, self.block_size, num_kv_heads, head_size,)
+            num_gpu_blocks,
+            self.block_size,
+            num_kv_heads,
+            head_size,
+        )
         cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
-            num_cpu_blocks, self.block_size, num_kv_heads, head_size,)
+            num_cpu_blocks,
+            self.block_size,
+            num_kv_heads,
+            head_size,
+        )
         for _ in range(num_layers):
             tpu_k_cache = torch.zeros(tpu_cache_shape,
                                       dtype=dtype,

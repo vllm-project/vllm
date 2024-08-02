@@ -40,7 +40,8 @@ class FlashAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         if tp_size is not None and tp_size > 1:
-            return (tp_size, 2, num_blocks, block_size, num_kv_heads, head_size)
+            return (tp_size, 2, num_blocks, block_size, num_kv_heads,
+                    head_size)
         else:
             return (2, num_blocks, block_size, num_kv_heads, head_size)
 

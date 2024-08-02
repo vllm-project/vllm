@@ -348,8 +348,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 q_dist = remote_metadata.q_remote_distirbution[sp_rank]
                 query_remote = reshape_q(query, q_dist)
                 output = torch.empty_like(query_remote)
-                query = query_remote.view(
-                    tp_size, -1, self.num_heads, self.head_size)
+                query = query_remote.view(tp_size, -1, self.num_heads,
+                                          self.head_size)
                 num_rem_dec = remote_metadata.num_remote_decode_tokens[sp_rank]
                 decode_query = query[:]
                 assert decode_query.shape[1] == num_rem_dec
@@ -387,10 +387,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:], exp_sums[:], max_log[:] = result
 
                 # Reshape the output tensor.
-                tmp = output.view(
-                    tp_size, -1, self.num_heads * self.head_size)
-                return filter_tensor(tmp, exp_sums, max_log,
-                                     q_dist, num_old, tp_size)
+                tmp = output.view(tp_size, -1, self.num_heads * self.head_size)
+                return filter_tensor(tmp, exp_sums, max_log, q_dist, num_old,
+                                     tp_size)
         output = torch.empty_like(query)
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)

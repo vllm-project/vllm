@@ -352,10 +352,11 @@ class GroupCoordinator:
         else:
             output_tensor = None
         return output_tensor
+
     def gather_extension(self,
-               input_: torch.Tensor,
-               dst: int = 0,
-               dim: int = -1) -> torch.Tensor:
+                         input_: torch.Tensor,
+                         dst: int = 0,
+                         dim: int = -1) -> torch.Tensor:
         """
         NOTE: We assume that the input tensor is on the same device across
         all the ranks.

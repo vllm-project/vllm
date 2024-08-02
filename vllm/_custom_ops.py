@@ -181,7 +181,6 @@ def sequence_block_reducer(
     exp_sum: torch.Tensor,
     max_logits: torch.Tensor,
     tmp_out: torch.Tensor,
-
 ) -> None:
     torch.ops._C.sequence_block_reducer(out, exp_sum, max_logits, tmp_out)
 

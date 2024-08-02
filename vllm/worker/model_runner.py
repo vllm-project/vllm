@@ -63,7 +63,7 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
 _NUM_WARMUP_ITERS = 2
-_ALAILABLE_GRAPH=False
+_ALAILABLE_GRAPH = False
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
@@ -740,12 +740,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
         # vLLM uses cuda graph only for decoding requests.
-        
+
         use_captured_graph = (
             decode_only and not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_decode_seq_len <= self.max_seq_len_to_capture)
-        use_captured_graph=use_captured_graph and _ALAILABLE_GRAPH
+        use_captured_graph = use_captured_graph and _ALAILABLE_GRAPH
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size

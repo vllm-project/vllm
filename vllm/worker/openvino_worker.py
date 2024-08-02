@@ -81,7 +81,11 @@ class OpenVINOCacheEngine:
     ) -> List[Tuple[ov.Tensor, ov.Tensor]]:
         """Allocates KV cache."""
         k_block_shape = v_block_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size,)[1:]
+            num_blocks,
+            self.block_size,
+            self.num_kv_heads,
+            self.head_size,
+        )[1:]
         kv_cache: List[Tuple[ov.Tensor, ov.Tensor]] = []
         for _ in range(self.num_layers):
             key_blocks = ov.Tensor(self.cache_config.cache_dtype,

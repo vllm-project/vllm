@@ -63,8 +63,8 @@ class PagedAttention:
             key_cache = key_cache.view(tp_size, num_blocks, num_kv_heads,
                                        head_size // x, -1, x)
             value_cache = kv_cache_group[1]
-            value_cache = value_cache.view(
-                tp_size, num_blocks, num_kv_heads, head_size, -1)
+            value_cache = value_cache.view(tp_size, num_blocks, num_kv_heads,
+                                           head_size, -1)
             return key_cache, value_cache
         else:
             x = 16 // kv_cache.element_size()
@@ -74,8 +74,8 @@ class PagedAttention:
             key_cache = key_cache.view(num_blocks, num_kv_heads,
                                        head_size // x, -1, x)
             value_cache = kv_cache[1]
-            value_cache = value_cache.view(
-                num_blocks, num_kv_heads, head_size, -1)
+            value_cache = value_cache.view(num_blocks, num_kv_heads, head_size,
+                                           -1)
             return key_cache, value_cache
 
     @staticmethod
@@ -108,10 +108,8 @@ class PagedAttention:
         num_heads = tmp_out.size(1)
         head_size = tmp_out.size(3)
         size = (num_seqs, num_heads, head_size)
-        output = torch.empty(size, dtype=tmp_out.dtype,
-                             device=tmp_out.device)
-        ops.sequence_block_reducer(output, exp_sum,
-                                   max_logits, tmp_out)
+        output = torch.empty(size, dtype=tmp_out.dtype, device=tmp_out.device)
+        ops.sequence_block_reducer(output, exp_sum, max_logits, tmp_out)
         return output
 
     @staticmethod
@@ -343,14 +341,13 @@ class PagedAttention:
             # Run PagedAttention V3.
             assert _PARTITION_SIZE % block_size == 0
             tmp_output = torch.empty(
-                size=(tp_size, num_seqs, num_heads,
-                      max_num_partitions, head_size),
+                size=(tp_size, num_seqs, num_heads, max_num_partitions,
+                      head_size),
                 dtype=output.dtype,
                 device=output.device,
             )
             exp_sums = torch.empty(
-                size=(tp_size, num_seqs, num_heads,
-                      max_num_partitions),
+                size=(tp_size, num_seqs, num_heads, max_num_partitions),
                 dtype=torch.float32,
                 device=output.device,
             )

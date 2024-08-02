@@ -128,10 +128,9 @@ class OnlyAttention(nn.Module):
                               quant_config=quant_config)
 
         self.sp_rank = get_sequence_parallel_rank()
-        self.broastcastlayer = broastcastlayer(
-            self.tp_size, self.hidden_size, cache_config.cache_dtype)
-        self.gatherlayer = gatherlayer(self.tp_size,
-                                       self.total_num_heads)
+        self.broastcastlayer = broastcastlayer(self.tp_size, self.hidden_size,
+                                               cache_config.cache_dtype)
+        self.gatherlayer = gatherlayer(self.tp_size, self.total_num_heads)
 
     #     def __init__(
     #     self,

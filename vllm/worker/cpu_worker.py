@@ -72,7 +72,11 @@ class CPUCacheEngine:
     ) -> List[torch.Tensor]:
         """Allocates KV cache on CPU."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_heads, self.head_size,)
+            num_blocks,
+            self.block_size,
+            self.num_heads,
+            self.head_size,
+        )
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
             kv_cache.append(
