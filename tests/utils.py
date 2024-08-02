@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import openai
+import pytest
 import ray
 import requests
 from transformers import AutoTokenizer
@@ -340,6 +341,12 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         time.sleep(5)
 
 
+def _error_on_skip(msg: str):
+    raise RuntimeError(
+        "cannot use pytest.skip inside fork_new_process_for_each_test."
+        " Please directly return from the test function.")
+
+
 def fork_new_process_for_each_test(f):
 
     @functools.wraps(f)
@@ -347,6 +354,9 @@ def fork_new_process_for_each_test(f):
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
         os.setpgrp()
+
+        old_skip = pytest.skip
+        pytest.skip = _error_on_skip
         pid = os.fork()
         if pid == 0:
             try:
@@ -366,6 +376,7 @@ def fork_new_process_for_each_test(f):
             os.killpg(pgid, signal.SIGTERM)
             # restore the signal handler
             signal.signal(signal.SIGTERM, old_singla_handler)
+            pytest.skip = old_skip
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 
