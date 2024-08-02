@@ -113,6 +113,5 @@ define_gpu_extension_target(
     WITH_SOABI
 )
 
-add_custom_target(default)
 message(STATUS "Enabling C extension.")
 add_dependencies(default _C)

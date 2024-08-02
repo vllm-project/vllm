@@ -9,9 +9,13 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
-W4A16SPARSE24_SUPPORTED_BITS = [4]
+W4A16SPARSE24_SUPPORTED_TYPES_MAP = {
+    4: scalar_types.uint4b8,
+}
+W4A16SPARSE24_SUPPORTED_BITS = list(W4A16SPARSE24_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
@@ -22,8 +26,14 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                  group_size: Optional[int] = None):
         self.strategy = strategy
         self.group_size = group_size
-        self.num_bits = num_bits
         self.tile_size = 16
+
+        if num_bits not in W4A16SPARSE24_SUPPORTED_TYPES_MAP:
+            raise ValueError(
+                f"Unsupported num_bits = {num_bits}. "
+                f"Supported num_bits = {W4A16SPARSE24_SUPPORTED_BITS}")
+
+        self.quant_type = W4A16SPARSE24_SUPPORTED_TYPES_MAP[num_bits]
 
         if self.strategy == "group" and self.group_size is None:
             raise ValueError(
@@ -43,7 +53,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
 
-        pack_factor = 32 // self.num_bits
+        pack_factor = 32 // self.quant_type.size_bits
         output_size_per_partition = sum(output_partition_sizes)
 
         qweight = Parameter(
@@ -138,7 +148,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         size_n = scales.shape[1]
 
         output_2d = ops.gptq_marlin_24_gemm(x_2d, qweight, meta, scales,
-                                            workspace, self.num_bits, size_m,
+                                            workspace, self.quant_type, size_m,
                                             size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))

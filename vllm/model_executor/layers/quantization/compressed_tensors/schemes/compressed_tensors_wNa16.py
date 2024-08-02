@@ -8,12 +8,17 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, replace_tensor, verify_gptq_marlin_supported,
+    marlin_permute_scales, replace_tensor, verify_marlin_supported,
     verify_marlin_supports_shape)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA16"]
-WNA16_SUPPORTED_BITS = [4, 8]
+WNA16_SUPPORTED_TYPES_MAP = {
+    4: scalar_types.uint4b8,
+    8: scalar_types.uint8b128,
+}
+WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
@@ -22,8 +27,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                  strategy: str,
                  num_bits: int,
                  group_size: Optional[int] = None):
-        self.num_bits = num_bits
-        self.pack_factor = 32 // self.num_bits
+
+        self.pack_factor = 32 // num_bits
         self.strategy = strategy
 
         self.group_size: int
@@ -37,10 +42,16 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         else:
             self.group_size = group_size
 
+        if num_bits not in WNA16_SUPPORTED_TYPES_MAP:
+            raise ValueError(
+                f"Unsupported num_bits = {num_bits}. "
+                f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}")
+
+        self.quant_type = WNA16_SUPPORTED_TYPES_MAP[num_bits]
+
         # Verify supported on platform.
-        verify_gptq_marlin_supported(num_bits=self.num_bits,
-                                     group_size=self.group_size,
-                                     is_sym=True)
+        verify_marlin_supported(quant_type=self.quant_type,
+                                group_size=self.group_size)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -150,7 +161,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             perm=layer.g_idx_sort_indices,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            num_bits=self.num_bits)
+            num_bits=self.quant_type.size_bits)
         replace_tensor(layer, "weight_packed", marlin_qweight)
 
         # Permute scales from compressed-tensors format to marlin format.
@@ -172,7 +183,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
-            num_bits=self.num_bits,
+            wtype=self.quant_type,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
             is_k_full=True,
