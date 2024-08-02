@@ -96,6 +96,7 @@ echo 'vLLM yapf: Done'
 
 # Run mypy
 echo 'vLLM mypy:'
+mypy
 mypy tests --follow-imports skip
 mypy vllm/attention --follow-imports skip
 mypy vllm/core --follow-imports skip
@@ -108,7 +109,6 @@ mypy vllm/model_executor  --follow-imports skip
 mypy vllm/prompt_adapter --follow-imports skip
 mypy vllm/spec_decode --follow-imports skip
 mypy vllm/worker --follow-imports skip
-mypy
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:
