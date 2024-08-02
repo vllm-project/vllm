@@ -71,6 +71,9 @@ class MiniCPMVInputs(TypedDict):
     tgt_sizes: List[torch.Tensor]
 
 
+DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
+
+
 def get_abs_pos(abs_pos: torch.Tensor, tgt_size: torch.Tensor):
     # abs_pos: L, C
     # tgt_size: (H, W)
@@ -166,15 +169,13 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim: int,
     return emb
 
 
-class Resampler(nn.Module):
+class BaseResampler(nn.Module):
     """
     A 2D perceiver-resampler network with one cross attention layers by
         (grid_size**2) learnable queries and 2d sincos pos_emb
     Outputs:
         A tensor with the shape of (grid_size**2, embed_dim)
     """
-
-    default_norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
     def __init__(
             self,
@@ -183,7 +184,7 @@ class Resampler(nn.Module):
             embed_dim: int,
             num_heads: int,
             kv_dim: Optional[int] = None,
-            norm_layer: Callable[[int], nn.LayerNorm] = default_norm_layer,
+            norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
             adaptive: bool = False,
             max_size: Tuple[int, int] = (70, 70),
             version: Tuple[int, int] = (2, 0),
@@ -218,26 +219,13 @@ class Resampler(nn.Module):
         self.attn = nn.MultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
-
         self.ln_post = norm_layer(embed_dim)
         self.proj = nn.Parameter(
             (embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
 
-        if self.version == (2, 0):
-            assert grid_size is not None
-            pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
-                                                    grid_size,
-                                                    version=self.version)
-            self.pos_embed = nn.Parameter(
-                torch.from_numpy(pos_embed_arr).float()).requires_grad_(False)
-        else:
-            self._set_2d_pos_cache(self.max_size)
-
-        self.apply(self._init_weights)
-
     def _set_2d_pos_cache(self,
                           max_size: Tuple[int, int],
-                          device: torch.types.Device = "cpu"):
+                          device: torch.types.Device = "cpu") -> None:
         pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
                                                 max_size,
                                                 version=self.version)
@@ -245,7 +233,7 @@ class Resampler(nn.Module):
         self.register_buffer("pos_embed", pos_embed, persistent=False)
 
     def _adjust_pos_cache(self, tgt_sizes: torch.Tensor,
-                          device: torch.types.Device):
+                          device: torch.types.Device) -> None:
         max_h = tgt_sizes[:, 0].max().item()
         max_w = tgt_sizes[:, 1].max().item()
         assert isinstance(max_h, int) and isinstance(max_w, int)
@@ -257,7 +245,7 @@ class Resampler(nn.Module):
             )
             self._set_2d_pos_cache(self.max_size, device)
 
-    def _init_weights(self, m: nn.Module):
+    def _init_weights(self, m: nn.Module) -> None:
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -266,56 +254,37 @@ class Resampler(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_2_5(self, x: torch.Tensor, tgt_sizes: torch.Tensor):
-        assert x.shape[0] == tgt_sizes.shape[0]
-        bs = x.shape[0]
+    def _repeat(self, query, N: int):
+        return query.unsqueeze(1).repeat(1, N, 1)
 
-        device = x.device
-        dtype = x.dtype
 
-        patch_len = tgt_sizes[:, 0] * tgt_sizes[:, 1]
+class Resampler2(BaseResampler):
 
-        self._adjust_pos_cache(tgt_sizes, device=device)
+    def __init__(
+            self,
+            num_queries: Optional[int],
+            grid_size: Optional[int],
+            embed_dim: int,
+            num_heads: int,
+            kv_dim: Optional[int] = None,
+            norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+            adaptive: bool = False,
+            max_size: Tuple[int, int] = (70, 70),
+            version: Tuple[int, int] = (2, 0),
+    ):
+        super().__init__(num_queries, grid_size, embed_dim, num_heads, kv_dim,
+                         norm_layer, adaptive, max_size, version)
+        assert self.version == (2, 0)
+        assert grid_size is not None
+        pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
+                                                grid_size,
+                                                version=self.version)
+        self.pos_embed = nn.Parameter(
+            torch.from_numpy(pos_embed_arr).float()).requires_grad_(False)
 
-        max_patch_len = patch_len.max().item()
-        assert isinstance(max_patch_len, int)
+        self.apply(self._init_weights)
 
-        key_padding_mask = torch.zeros((bs, max_patch_len),
-                                       dtype=torch.bool,
-                                       device=device)
-
-        pos_embed = []
-        for i in range(bs):
-            tgt_h, tgt_w = tgt_sizes[i].tolist()
-            pos_embed.append(self.pos_embed[:tgt_h, :tgt_w, :].reshape(
-                (tgt_h * tgt_w, -1)).to(dtype))  # patches * D
-            key_padding_mask[i, patch_len[i]:] = True
-
-        pos_embed = torch.nn.utils.rnn.pad_sequence(pos_embed,
-                                                    batch_first=True,
-                                                    padding_value=0.0).permute(
-                                                        1, 0,
-                                                        2)  # BLD => L * B * D
-
-        x, _ = self.kv_proj(x)  # B * L * D
-        x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
-
-        q = self.ln_q(self.query)  # Q * D
-
-        out = self.attn(
-            self._repeat(q, bs),  # Q * B * D
-            x + pos_embed,  # L * B * D +  L * B * D
-            x,
-            key_padding_mask=key_padding_mask,
-        )[0]
-        #  out: Q * B * D
-        x = out.permute(1, 0, 2)  # B * Q * D
-
-        x = self.ln_post(x)
-        x = x @ self.proj
-        return x
-
-    def forward_2(
+    def forward(
         self,
         x: torch.Tensor,
         tgt_sizes: torch.Tensor,
@@ -345,19 +314,75 @@ class Resampler(nn.Module):
         x = x @ self.proj
         return x
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        tgt_sizes: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-    ):
-        if self.version == (2, 0):
-            return self.forward_2(x, tgt_sizes=tgt_sizes, attn_mask=attn_mask)
-        else:
-            return self.forward_2_5(x, tgt_sizes=tgt_sizes)
 
-    def _repeat(self, query, N: int):
-        return query.unsqueeze(1).repeat(1, N, 1)
+class Resampler2_5(BaseResampler):
+
+    def __init__(
+            self,
+            num_queries: Optional[int],
+            grid_size: Optional[int],
+            embed_dim: int,
+            num_heads: int,
+            kv_dim: Optional[int] = None,
+            norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+            adaptive: bool = False,
+            max_size: Tuple[int, int] = (70, 70),
+            version: Tuple[int, int] = (2, 0),
+    ):
+        super().__init__(num_queries, grid_size, embed_dim, num_heads, kv_dim,
+                         norm_layer, adaptive, max_size, version)
+
+        self._set_2d_pos_cache(self.max_size)
+
+        self.apply(self._init_weights)
+
+    def forward(self, x: torch.Tensor,
+                tgt_sizes: torch.Tensor) -> torch.Tensor:
+        assert x.shape[0] == tgt_sizes.shape[0]
+        bs = x.shape[0]
+
+        device = x.device
+        dtype = x.dtype
+
+        patch_len = tgt_sizes[:, 0] * tgt_sizes[:, 1]
+
+        self._adjust_pos_cache(tgt_sizes, device=device)
+
+        max_patch_len = patch_len.max().item()
+        assert isinstance(max_patch_len, int)
+
+        key_padding_mask = torch.zeros((bs, max_patch_len),
+                                       dtype=torch.bool,
+                                       device=device)
+
+        pos_embed = []
+        for i in range(bs):
+            tgt_h, tgt_w = tgt_sizes[i].tolist()
+            pos_embed.append(self.pos_embed[:tgt_h, :tgt_w, :].reshape(
+                (tgt_h * tgt_w, -1)).to(dtype))  # patches * D
+            key_padding_mask[i, patch_len[i]:] = True
+        pos_embed = torch.nn.utils.rnn.pad_sequence(pos_embed,
+                                                    batch_first=True,
+                                                    padding_value=0.0).permute(
+                                                        1, 0,
+                                                        2)  # BLD => L * B * D
+        x, _ = self.kv_proj(x)  # B * L * D
+        x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
+
+        q = self.ln_q(self.query)  # Q * D
+
+        out = self.attn(
+            self._repeat(q, bs),  # Q * B * D
+            x + pos_embed,  # L * B * D +  L * B * D
+            x,
+            key_padding_mask=key_padding_mask,
+        )[0]
+        #  out: Q * B * D
+        x = out.permute(1, 0, 2)  # B * Q * D
+
+        x = self.ln_post(x)
+        x = x @ self.proj
+        return x
 
 
 def get_max_minicpmv_image_tokens(ctx: InputContext):
@@ -556,7 +581,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             tgt_sizes=kwargs.pop("tgt_sizes", None),  # type: ignore
         )
 
-        vlm_embeddings, vision_hidden_states = self.get_embedding(inputs)
+        vlm_embeddings, _ = self.get_embedding(inputs)
 
         output = self.llm(
             input_ids=None,
@@ -604,7 +629,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                 # the checkpoint. Skip them.
                 continue
             use_default_weight_loading = False
-            if "resampler" in name:
+            if self.is_default_weight_loading(name):
                 use_default_weight_loading = True
             else:
                 for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -648,6 +673,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
     def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
         raise NotImplementedError
 
+    def is_default_weight_loading(self, name: str) -> bool:
+        raise NotImplementedError
+
 
 class MiniCPMV2(MiniCPMVBaseModel):
 
@@ -658,7 +686,7 @@ class MiniCPMV2(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        super().__init__()
+        super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 0)
 
     def init_llm(
@@ -697,11 +725,11 @@ class MiniCPMV2(MiniCPMVBaseModel):
 
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
-            resampler = Resampler(
-                grid_size=int(math.sqrt(self.config.query_num)),
+            resampler = Resampler2(
                 num_queries=None,
                 embed_dim=embed_dim,
                 num_heads=embed_dim // 128,
+                grid_size=int(math.sqrt(self.config.query_num)),
                 kv_dim=vision_dim,
                 adaptive=True,
                 version=self.version,
@@ -748,6 +776,9 @@ class MiniCPMV2(MiniCPMVBaseModel):
 
         return vision_hidden_states
 
+    def is_default_weight_loading(self, name: str) -> bool:
+        return "resampler" in name or "vpm" in name
+
 
 class MiniCPMV2_5(MiniCPMVBaseModel):
 
@@ -758,7 +789,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        super().__init__()
+        super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 5)
 
     def init_llm(
@@ -779,11 +810,11 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
 
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
-            resampler = Resampler(
+            resampler = Resampler2_5(
                 num_queries=self.config.query_num,
-                grid_size=None,
                 embed_dim=embed_dim,
                 num_heads=embed_dim // 128,
+                grid_size=None,
                 kv_dim=vision_dim,
                 adaptive=True,
                 version=self.version,
@@ -840,6 +871,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
 
         return vision_hidden_states
 
+    def is_default_weight_loading(self, name: str) -> bool:
+        return "resampler" in name
+
 
 # NOTE: Currently, information about this model is unavailable. We are
 # temporarily using `MiniCPMVQwen2` as it's name. The name may need
@@ -853,7 +887,7 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        super().__init__()
+        super().__init__(config, multimodal_config, cache_config, quant_config)
 
     def init_llm(
         self,
@@ -880,11 +914,11 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
 
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
-            resampler = Resampler(
+            resampler = Resampler2_5(
                 num_queries=self.config.query_num,
-                grid_size=None,
                 embed_dim=embed_dim,
                 num_heads=embed_dim // 128,
+                grid_size=None,
                 kv_dim=vision_dim,
                 adaptive=True,
                 version=self.version,
@@ -947,6 +981,9 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
             vision_hidden_states = data["vision_hidden_states"]
 
         return vision_hidden_states
+
+    def is_default_weight_loading(self, name: str) -> bool:
+        return "resampler" in name or "vpm" in name
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
