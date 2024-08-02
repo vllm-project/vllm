@@ -202,6 +202,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             # shard the scales in TP>1 case.
             scales_and_zp_input_dim = 0
             scales_and_zp_size = input_size_per_partition // group_size
+
         # Quantized weights
         qweight = Parameter(
             torch.empty(
