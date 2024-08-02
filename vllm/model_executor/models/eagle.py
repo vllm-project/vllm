@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -28,6 +31,27 @@ class EAGLE(nn.Module):
                             config.model.hidden_size,
                             bias=False)
 
+        self.orig_vocab_size = config.vocab_size
+        self.truncated_vocab_size = config.truncated_vocab_size
+        self.unpadded_vocab_size = self.truncated_vocab_size
+
+        self.lm_head = ParallelLMHead(
+            self.unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=self.truncated_vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+        )
+
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                self.truncated_vocab_size,
+                                                logit_scale)
+
+        # Token map is a idx to token mapping to reduce the vocab size for
+        # the draft model. Using smaller vocab size for draft, containing
+        # only most frequent tokens reduces the speculation overhead. This
+        # doesn't affect the acceptance rate much and thus gives more speed
+        # -up.
         self.token_map = None
 
     @property
@@ -61,7 +85,19 @@ class EAGLE(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        return self.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+
+        if self.token_map is not None:
+            _logits = logits
+            logits = -torch.inf * torch.ones(
+                size=(*_logits.shape[:-1], self.orig_vocab_size),
+                device=_logits.device,
+                dtype=_logits.dtype)
+
+            logits[..., self.token_map] = _logits
+
+        return logits
 
     def sample(
         self,
@@ -72,15 +108,33 @@ class EAGLE(nn.Module):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        model_weights = []
+        model_weights = {}
         for name, loaded_weight in weights:
-            if name.startswith("fc."):
+            if name == "token_map":
+                if self.config.truncated_vocab_size < self.config.vocab_size:
+                    self.token_map = nn.Parameter(loaded_weight,
+                                                  requires_grad=False)
+            elif name.startswith("fc."):
                 weight_loader = getattr(self.fc.weight, "weight_loader",
                                         default_weight_loader)
                 weight_loader(self.fc.weight, loaded_weight)
+            elif name.startswith("model.lm_head.") or name.startswith(
+                    "model.model."):
+                model_weights[name.split("model.", 1)[-1]] = loaded_weight
             elif name.startswith("lm_head.") or name.startswith("model."):
-                model_weights.append((name, loaded_weight))
+                model_weights[name] = loaded_weight
             else:
-                model_weights.append((f"model.{name}", loaded_weight))
+                model_weights[f"model.{name}"] = loaded_weight
 
-        self.model.load_weights(model_weights)
+        lm_head_weight = model_weights.pop("lm_head.weight")
+
+        if self.token_map is not None and\
+            lm_head_weight.shape[0] > self.token_map.shape[0]:
+
+            lm_head_weight = lm_head_weight[self.token_map]
+
+        weight_loader = getattr(self.lm_head.weight, "weight_loader",
+                                default_weight_loader)
+        weight_loader(self.lm_head.weight, lm_head_weight)
+
+        self.model.load_weights(model_weights.items())

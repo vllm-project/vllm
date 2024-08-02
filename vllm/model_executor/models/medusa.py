@@ -57,6 +57,11 @@ class Medusa(nn.Module):
                                                 self.truncated_vocab_size,
                                                 logit_scale)
 
+        # Token map is a idx to token mapping to reduce the vocab size for
+        # the draft model. Using smaller vocab size for draft, containing
+        # only most frequent tokens reduces the speculation overhead. This
+        # doesn't affect the acceptance rate much and thus gives more speed
+        # -up.
         self.token_map = None
 
     def forward(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:

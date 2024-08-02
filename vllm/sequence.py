@@ -947,18 +947,18 @@ class HiddenStates:
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
             hidden_states: torch.Tensor,
-            bonus_token_previous_hidden_states: Optional[torch.Tensor] = None):
+            last_non_bonus_token_hidden_states: Optional[torch.Tensor] = None):
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
         self.hidden_states: torch.Tensor = hidden_states
         self.last_non_bonus_token_hidden_states: Optional[
-            torch.Tensor] = bonus_token_previous_hidden_states
+            torch.Tensor] = last_non_bonus_token_hidden_states
 
     def update(
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
             hidden_states: torch.Tensor,
-            bonus_token_previous_hidden_states: Optional[torch.Tensor] = None):
+            last_non_bonus_token_hidden_states: Optional[torch.Tensor] = None):
         """Update hidden states from target model invocation."""
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
@@ -966,8 +966,8 @@ class HiddenStates:
         # Adding dummy hidden_states to this to maintain same shape
         self.last_non_bonus_token_hidden_states = torch.cat([
             self.hidden_states,
-            hidden_states if bonus_token_previous_hidden_states is None else
-            bonus_token_previous_hidden_states
+            hidden_states if last_non_bonus_token_hidden_states is None else
+            last_non_bonus_token_hidden_states
         ])
 
     def prune(self,
