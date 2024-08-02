@@ -176,10 +176,10 @@ class SchedulerRunningOutputs:
     enough memory, it can be preempted (for recompute) or swapped out.
     """
     # Selected sequences that are running and in a decoding phase.
-    decode_seq_groups: List[SequenceGroup]
+    decode_seq_groups: List[ScheduledSequenceGroup]
     # Selected sequences that are running and in a prefill phase.
     # I.e., it means the prefill has been chunked.
-    prefill_seq_groups: List[SequenceGroup]
+    prefill_seq_groups: List[ScheduledSequenceGroup]
     # The preempted sequences.
     preempted: List[SequenceGroup]
     # Sequences that are swapped out.
@@ -212,10 +212,10 @@ class SchedulerSwappedInOutputs:
     """
     # Selected sequences that are going to be swapped in and is in a
     # decoding phase.
-    decode_seq_groups: List[SequenceGroup]
+    decode_seq_groups: List[ScheduledSequenceGroup]
     # Selected sequences that are going to be swapped in and in a prefill
     # phase. I.e., it means the prefill has been chunked.
-    prefill_seq_groups: List[SequenceGroup]
+    prefill_seq_groups: List[ScheduledSequenceGroup]
     # The blocks to swap in.
     blocks_to_swap_in: List[Tuple[int, int]]
     # The blocks to copy.
@@ -245,7 +245,7 @@ class SchedulerPrefillOutputs:
     to be recomputed from scratch.
     """
     # Selected sequences for prefill.
-    seq_groups: List[SequenceGroup]
+    seq_groups: List[ScheduledSequenceGroup]
     # Ignored sequence groups.
     ignored_seq_groups: List[SequenceGroup]
     num_lookahead_slots: int
@@ -668,7 +668,7 @@ class Scheduler:
             SchedulerSwappedInOutputs.
         """
         ignored_seq_groups: List[SequenceGroup] = []
-        seq_groups: List[SequenceGroup] = []
+        seq_groups: List[ScheduledSequenceGroup] = []
 
         waiting_queue = self.waiting
 
@@ -990,6 +990,7 @@ class Scheduler:
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             is_prompt = seq_group.is_prefill()
+            assert seq_group.sampling_params is not None
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=is_prompt,

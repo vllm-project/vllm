@@ -261,7 +261,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # request ID
         self.cross_block_tables: Dict[str, BlockTable] = {}
 
-    def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
+    def _get_seq_num_required_blocks(self, seq: Optional[Sequence]) -> int:
         return 0 if seq is None else seq.n_blocks
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
@@ -293,28 +293,29 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return AllocStatus.LATER
 
     def _allocate_sequence(self, \
-                           seq: Sequence, \
+                           seq: Optional[Sequence], \
                            ref_count: int, \
                            is_encoder_decoder: bool = True) -> BlockTable:
         # Allocate new physical token blocks that will store the prompt tokens.
-        num_prompt_blocks = seq.n_blocks
+        num_prompt_blocks = self._get_seq_num_required_blocks(seq)
 
         block_table: BlockTable = []
-        for logical_idx in range(num_prompt_blocks):
-            if (self.block_sliding_window is not None
-                    and logical_idx >= self.block_sliding_window):
-                block = block_table[logical_idx % self.block_sliding_window]
-                # Set the reference counts of the token blocks.
-                block.ref_count = ref_count
-            elif not is_encoder_decoder and self.enable_caching:
-                block = self.gpu_allocator.allocate(
-                    seq.hash_of_block(logical_idx),
-                    seq.num_hashed_tokens_of_block(logical_idx))
-            else:
-                block = self.gpu_allocator.allocate()
-                # Set the reference counts of the token blocks.
-                block.ref_count = ref_count
-            block_table.append(block)
+        if seq is not None:
+          for logical_idx in range(num_prompt_blocks):
+              if (self.block_sliding_window is not None
+                      and logical_idx >= self.block_sliding_window):
+                  block = block_table[logical_idx % self.block_sliding_window]
+                  # Set the reference counts of the token blocks.
+                  block.ref_count = ref_count
+              elif not is_encoder_decoder and self.enable_caching:
+                  block = self.gpu_allocator.allocate(
+                      seq.hash_of_block(logical_idx),
+                      seq.num_hashed_tokens_of_block(logical_idx))
+              else:
+                  block = self.gpu_allocator.allocate()
+                  # Set the reference counts of the token blocks.
+                  block.ref_count = ref_count
+              block_table.append(block)
 
         return block_table
 
