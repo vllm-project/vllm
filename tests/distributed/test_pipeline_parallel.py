@@ -32,8 +32,8 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
                     DIST_BACKEND):
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
-        pytest.skip("Skipping multi-node pipeline parallel test for "
-                    "multiprocessing distributed backend")
+        # skip multi-node tests for mp backend
+        return
 
     pp_args = [
         # use half precision for speed and memory savings in CI environment
