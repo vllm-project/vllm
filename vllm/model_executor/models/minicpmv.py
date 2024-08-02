@@ -744,7 +744,6 @@ class MiniCPMV2(MiniCPMVBaseModel):
     def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
         if "vision_hidden_states" not in data:
             pixel_values = data["pixel_values"]
-            vision_hidden_states = []
             if pixel_values is not None and len(pixel_values) > 0:
                 vision_hidden_states = self.get_vision_embedding(pixel_values)
             else:
@@ -843,8 +842,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
                     all_pixel_values.type(dtype), patch_attn_mask, tgt_sizes)
 
             else:
-                dummy_feature = []
-                vision_hidden_states = dummy_feature
+                vision_hidden_states = torch.tensor([]).to(
+                    data["input_ids"].device)
         else:
             vision_hidden_states = data["vision_hidden_states"]
 
@@ -954,8 +953,8 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
                                                       tgt_sizes)
 
             else:  # no image
-                dummy_feature = []
-                vision_hidden_states = dummy_feature
+                vision_hidden_states = torch.tensor([]).to(
+                    data["input_ids"].device)
         else:
             vision_hidden_states = data["vision_hidden_states"]
 
