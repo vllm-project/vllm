@@ -7,7 +7,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import openai
 import ray
@@ -57,6 +57,7 @@ class RemoteOpenAIServer:
         model: str,
         cli_args: List[str],
         *,
+        env_dict: Optional[Dict[str, str]] = None,
         auto_port: bool = True,
     ) -> None:
         if auto_port:
@@ -77,6 +78,8 @@ class RemoteOpenAIServer:
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
         self.proc = subprocess.Popen(["vllm", "serve"] + [model] + cli_args,
                                      env=env,
                                      stdout=sys.stdout,
@@ -89,6 +92,11 @@ class RemoteOpenAIServer:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.proc.terminate()
+        try:
+            self.proc.wait(3)
+        except subprocess.TimeoutExpired:
+            # force kill if needed
+            self.proc.kill()
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
@@ -127,10 +135,21 @@ class RemoteOpenAIServer:
         )
 
 
-def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
+def compare_two_settings(model: str,
+                         arg1: List[str],
+                         arg2: List[str],
+                         env1: Optional[Dict[str, str]] = None,
+                         env2: Optional[Dict[str, str]] = None):
     """
-    Launch API server with two different sets of arguments and compare the
-    results of the API calls. The arguments are after the model name.
+    Launch API server with two different sets of arguments/environments
+    and compare the results of the API calls.
+
+    Args:
+        model: The model to test.
+        arg1: The first set of arguments to pass to the API server.
+        arg2: The second set of arguments to pass to the API server.
+        env1: The first set of environment variables to pass to the API server.
+        env2: The second set of environment variables to pass to the API server.
     """
 
     tokenizer = AutoTokenizer.from_pretrained(model)
@@ -138,8 +157,8 @@ def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]
     results = []
-    for args in (arg1, arg2):
-        with RemoteOpenAIServer(model, args) as server:
+    for args, env in ((arg1, env1), (arg2, env2)):
+        with RemoteOpenAIServer(model, args, env_dict=env) as server:
             client = server.get_client()
 
             # test models list
