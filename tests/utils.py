@@ -1,3 +1,4 @@
+import functools
 import os
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import openai
+import psutil
 import ray
 import requests
 from transformers import AutoTokenizer
@@ -338,10 +340,6 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         time.sleep(5)
 
 
-import functools
-import psutil
-
-
 def fork_new_process_for_each_test(f):
 
     @functools.wraps(f)
@@ -363,6 +361,7 @@ def fork_new_process_for_each_test(f):
             # kill all child processes
             for child in process.children(recursive=True):
                 child.kill()
-            assert _exitcode == 0, f"function {f} failed when called with args {args} and kwargs {kwargs}"
+            assert _exitcode == 0, (f"function {f} failed when called with"
+                                    f" args {args} and kwargs {kwargs}")
 
     return wrapper
