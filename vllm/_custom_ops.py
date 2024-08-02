@@ -351,11 +351,11 @@ def machete_gemm(
     schedule: Optional[str] = None,
 ) -> torch.Tensor:
     return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
-                                      b_group_size, c, alpha, beta, schedule)
+                                     b_group_size, c, alpha, beta, schedule)
 
 
 def machete_prepack_B(b_q_weight: torch.Tensor,
-                       b_type: ScalarType) -> torch.Tensor:
+                      b_type: ScalarType) -> torch.Tensor:
     return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
 
 

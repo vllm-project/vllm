@@ -4,18 +4,16 @@ import os
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import List, Tuple, Union, Optional
+from typing import List, Optional, Tuple, Union
 
 import jinja2
-from vllm_cutlass_library_extension import (DataType, VLLMDataTypeNames,
-                                            VLLMDataTypeTag, 
-                                            EpilogueScheduleTag,
+from vllm_cutlass_library_extension import (DataType, EpilogueScheduleTag,
                                             EpilogueScheduleType,
-                                            VLLMKernelScheduleTag,
-                                            KernelScheduleType,
                                             MixedInputKernelScheduleType,
-                                            VLLMTileSchedulerTag,
                                             TileSchedulerType, VLLMDataType,
+                                            VLLMDataTypeNames, VLLMDataTypeTag,
+                                            VLLMKernelScheduleTag,
+                                            VLLMTileSchedulerTag,
                                             VLLMTileSchedulerType)
 
 #
@@ -229,7 +227,8 @@ def generate_type_signature(kernel_type_config: TypeConfig):
     element_d = VLLMDataTypeNames[kernel_type_config.element_d]
     accumulator = VLLMDataTypeNames[kernel_type_config.accumulator]
     element_scale = VLLMDataTypeNames[kernel_type_config.element_b_scale]
-    element_zeropoint = VLLMDataTypeNames[kernel_type_config.element_b_zeropoint]
+    element_zeropoint = VLLMDataTypeNames[
+        kernel_type_config.element_b_zeropoint]
 
     return (f"{element_a}{element_b}{element_d}"
             f"{accumulator}{element_scale}{element_zeropoint}")
@@ -338,41 +337,42 @@ def generate():
             ((128, 128), (1, 1, 1)),
             # ((128, 256), (1, 1, 1)),
         ) for kernel_schedule in (TmaMI, ) for epilogue_schedule in (TmaCoop, )
-        for tile_scheduler in (
-            VLLMTileSchedulerType.StreamK,
-        )]
-    
-    # For now we use the same heuristic for all types
-    default_heuristic = [
-        ("M > 64", ScheduleConfig(
-            tile_shape_mn=(128, 128),
-            cluster_shape_mnk=(1, 1, 1),
-            kernel_schedule=TmaMI,
-            epilogue_schedule=TmaCoop,
-            tile_scheduler=VLLMTileSchedulerType.StreamK,
-        )),
-        ("M > 32", ScheduleConfig(
-            tile_shape_mn=(128, 64),
-            cluster_shape_mnk=(1, 1, 1),
-            kernel_schedule=TmaMI,
-            epilogue_schedule=TmaCoop,
-            tile_scheduler=VLLMTileSchedulerType.StreamK,
-        )),
-        ("M > 16", ScheduleConfig(
-            tile_shape_mn=(128, 32),
-            cluster_shape_mnk=(1, 1, 1),
-            kernel_schedule=TmaMI,
-            epilogue_schedule=TmaCoop,
-            tile_scheduler=VLLMTileSchedulerType.StreamK,
-        )),
-        (None, ScheduleConfig(
-            tile_shape_mn=(128, 16),
-            cluster_shape_mnk=(1, 1, 1),
-            kernel_schedule=TmaMI,
-            epilogue_schedule=TmaCoop,
-            tile_scheduler=VLLMTileSchedulerType.StreamK))
+        for tile_scheduler in (VLLMTileSchedulerType.StreamK, )
     ]
 
+    # For now we use the same heuristic for all types
+    default_heuristic = [
+        ("M > 64",
+         ScheduleConfig(
+             tile_shape_mn=(128, 128),
+             cluster_shape_mnk=(1, 1, 1),
+             kernel_schedule=TmaMI,
+             epilogue_schedule=TmaCoop,
+             tile_scheduler=VLLMTileSchedulerType.StreamK,
+         )),
+        ("M > 32",
+         ScheduleConfig(
+             tile_shape_mn=(128, 64),
+             cluster_shape_mnk=(1, 1, 1),
+             kernel_schedule=TmaMI,
+             epilogue_schedule=TmaCoop,
+             tile_scheduler=VLLMTileSchedulerType.StreamK,
+         )),
+        ("M > 16",
+         ScheduleConfig(
+             tile_shape_mn=(128, 32),
+             cluster_shape_mnk=(1, 1, 1),
+             kernel_schedule=TmaMI,
+             epilogue_schedule=TmaCoop,
+             tile_scheduler=VLLMTileSchedulerType.StreamK,
+         )),
+        (None,
+         ScheduleConfig(tile_shape_mn=(128, 16),
+                        cluster_shape_mnk=(1, 1, 1),
+                        kernel_schedule=TmaMI,
+                        epilogue_schedule=TmaCoop,
+                        tile_scheduler=VLLMTileSchedulerType.StreamK))
+    ]
 
     impl_configs = []
 
