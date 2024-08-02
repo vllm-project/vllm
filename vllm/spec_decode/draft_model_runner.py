@@ -333,7 +333,6 @@ class TP1DraftModelRunner(ModelRunner):
                         self.flashinfer_decode_wrapper
                 model_input.attn_metadata.begin_forward()
 
-
         # Detect exec mode
         assert model_input.attn_metadata is not None
         use_cuda_graph = False
