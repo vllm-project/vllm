@@ -596,12 +596,11 @@ torch::Tensor aqlm_dequant(
   return {};
 }
 
-torch::Tensor aqlm_gemm_meta(const torch::Tensor& input,
-                             const torch::Tensor& codes,
-                             const torch::Tensor& codebooks,
-                             const torch::Tensor& scales,
-                             const torch::Tensor& codebook_partition_sizes,
-                             const std::optional<torch::Tensor>& bias) {
+torch::Tensor aqlm_gemm_meta(
+    const torch::Tensor& input, const torch::Tensor& codes,
+    const torch::Tensor& codebooks, const torch::Tensor& scales,
+    const std::vector<int64_t>& codebook_partition_sizes,
+    const std::optional<torch::Tensor>& bias) {
   auto out_features = codes.size(0) * codebooks.size(2);
   auto flat_input = input.reshape({-1, input.size(-1)});
   auto flat_output = torch::empty(
@@ -614,9 +613,9 @@ torch::Tensor aqlm_gemm_meta(const torch::Tensor& input,
   return flat_output.reshape(output_sizes);
 }
 
-torch::Tensor aqlm_dequant_meta(const torch::Tensor& codes,
-                                const torch::Tensor& codebooks,
-                                const torch::Tensor& codebook_partition_sizes) {
+torch::Tensor aqlm_dequant_meta(
+    const torch::Tensor& codes, const torch::Tensor& codebooks,
+    const std::vector<int64_t>& codebook_partition_sizes) {
   auto in_features = codes.size(1) * 8;
   auto out_features = codes.size(0);
   return torch::empty({out_features, in_features},
