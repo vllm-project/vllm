@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import PromptStrictInputs
+from vllm.inputs import PromptInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
@@ -46,6 +46,7 @@ def main(args: argparse.Namespace):
         load_format=args.load_format,
         distributed_executor_backend=args.distributed_executor_backend,
         otlp_traces_endpoint=args.otlp_traces_endpoint,
+        enable_prefix_caching=args.enable_prefix_caching,
     )
 
     sampling_params = SamplingParams(
@@ -60,7 +61,7 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_inputs: List[PromptStrictInputs] = [{
+    dummy_inputs: List[PromptInputs] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
@@ -220,6 +221,9 @@ if __name__ == '__main__':
         action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
+    parser.add_argument("--enable-prefix-caching",
+                        action='store_true',
+                        help="Enable automatic prefix caching")
     parser.add_argument('--use-v2-block-manager', action='store_true')
     parser.add_argument(
         "--ray-workers-use-nsight",

@@ -4,7 +4,8 @@ FP8
 ==================
 
 vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x. 
-Currently, only Hopper and Ada Lovelace GPUs are supported. 
+Currently, only Hopper and Ada Lovelace GPUs are officially supported for W8A8. 
+Ampere GPUs are supported for W8A16 (weight-only FP8) utilizing Marlin kernels.
 Quantization of models with FP8 allows for a 2x reduction in model memory requirements and up to a 1.6x improvement in throughput with minimal impact on accuracy.
 
 Please visit the HF collection of `quantized FP8 checkpoints of popular LLMs ready to use with vLLM <https://huggingface.co/collections/neuralmagic/fp8-llms-for-vllm-666742ed2b78b7ac8df13127>`_.

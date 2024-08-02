@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from shutil import which
 from typing import Dict, List
 
@@ -25,6 +26,34 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
+
+
+def embed_commit_hash():
+    try:
+        if "BUILDKITE_COMMIT" in os.environ:
+            # ci build
+            commit_id = os.environ["BUILDKITE_COMMIT"]
+        else:
+            commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                encoding="utf-8").strip()
+
+        commit_contents = f'__commit__ = "{commit_id}"\n'
+
+        version_file = os.path.join(ROOT_DIR, "vllm", "commit_id.py")
+        with open(version_file, "w", encoding="utf-8") as f:
+            f.write(commit_contents)
+
+    except subprocess.CalledProcessError as e:
+        warnings.warn(f"Failed to get commit hash:\n{e}",
+                      RuntimeWarning,
+                      stacklevel=2)
+    except Exception as e:
+        warnings.warn(f"Failed to embed commit hash:\n{e}",
+                      RuntimeWarning,
+                      stacklevel=2)
+
+
+embed_commit_hash()
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -152,9 +181,6 @@ class cmake_build_ext(build_ext):
         # match.
         cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
 
-        if _install_punica():
-            cmake_args += ['-DVLLM_INSTALL_PUNICA_KERNELS=ON']
-
         #
         # Setup parallelism and build tool
         #
@@ -243,10 +269,6 @@ def _is_xpu() -> bool:
 
 def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
-
-
-def _install_punica() -> bool:
-    return envs.VLLM_INSTALL_PUNICA_KERNELS
 
 
 def get_hipcc_rocm_version():
@@ -417,9 +439,6 @@ if _is_cuda() or _is_hip():
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
-    if _install_punica():
-        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
-
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
@@ -459,4 +478,9 @@ setup(
     },
     cmdclass={"build_ext": cmake_build_ext} if _build_custom_ops() else {},
     package_data=package_data,
+    entry_points={
+        "console_scripts": [
+            "vllm=vllm.scripts:main",
+        ],
+    },
 )

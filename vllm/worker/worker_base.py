@@ -2,15 +2,17 @@ import dataclasses
 import importlib
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
+from vllm.platforms import current_platform
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SamplerOutput)
+from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
@@ -52,7 +54,7 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
-    @torch.inference_mode()
+    @current_platform.inference_mode()
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.
 
@@ -124,6 +126,7 @@ class WorkerInput:
     blocks_to_swap_in: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
+    virtual_engine: int = 0
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -139,6 +142,7 @@ class WorkerInput:
             blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
+            virtual_engine=tensor_dict["virtual_engine"],
         )
 
     def as_broadcastable_tensor_dict(
@@ -151,6 +155,7 @@ class WorkerInput:
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
+            "virtual_engine": self.virtual_engine,
         }
 
         return tensor_dict
@@ -181,11 +186,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     @property
     @abstractmethod
-    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         """
-        Get the kv cache to pass to the worker's model runner. Used by the
-        default `execute_model`. If the worker's model runner does not follow
-        the ModelRunnerBase interface, then inherit from WorkerBase instead.
+        Gets the list of kv caches to pass to the worker's model runner. Each
+        element in the list is a kv cache corresponding to a particular virtual
+        engine (PP stream). Used by the default `execute_model`. If the worker's
+        model runner does not follow the ModelRunnerBase interface, then inherit
+        from WorkerBase instead.
         """
         raise NotImplementedError
 
@@ -227,7 +234,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 execute_model_req=execute_model_req)
             model_input: ModelRunnerInputBase = (
                 self.model_runner.prepare_model_input(
-                    execute_model_req.seq_group_metadata_list))
+                    execute_model_req.seq_group_metadata_list,
+                    execute_model_req.virtual_engine,
+                    execute_model_req.finished_requests_ids))
             num_steps = execute_model_req.num_steps
 
             if self.do_metadata_broadcast:
@@ -255,8 +264,52 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        return self.model_runner.execute_model(model_input, self.kv_cache,
-                                               num_steps)
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=get_tp_group()))
+
+        output = self.model_runner.execute_model(
+            model_input, self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None, intermediate_tensors,
+            num_steps)
+
+        if not get_pp_group().is_last_rank:
+            # output is IntermediateTensors
+            get_pp_group().send_tensor_dict(output.tensors,
+                                            all_gather_group=get_tp_group())
+            return [None]
+
+        # output is List[SamplerOutput]
+        return output
+
+    def _execute_model_spmd(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
+        """
+        Execute model in Single Program Multiple Data (SPMD) fashion.
+        All workers take the same request, prepare the input and
+        execute the model.
+        """
+        assert execute_model_req is not None, (
+            "_execute_model_spmd() requires each worker to take in an "
+            "ExecuteModelRequest")
+        worker_input: WorkerInput = self.prepare_worker_input(
+            execute_model_req=execute_model_req)
+        model_input: ModelRunnerInputBase = (
+            self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list))
+
+        self.execute_worker(worker_input)
+
+        # If there is no input, we don't need to execute the model.
+        if worker_input.num_seq_groups == 0:
+            return []
+
+        return self.model_runner.execute_model(
+            model_input, self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None)
 
 
 class WorkerWrapperBase:
@@ -265,15 +318,24 @@ class WorkerWrapperBase:
     We first instantiate the WorkerWrapper, which remembers the worker module
     and class name. Then, when we call `update_environment_variables`, and the
     real initialization happens in `init_worker`.
+
+    If worker_class_fn is specified, it will be executed to get the worker
+    class.
+    Otherwise, the worker class will be obtained by dynamically importing it
+    using worker_module_name and worker_class_name.
     """
 
-    def __init__(self,
-                 worker_module_name: str,
-                 worker_class_name: str,
-                 trust_remote_code: bool = False) -> None:
+    def __init__(
+        self,
+        worker_module_name: str,
+        worker_class_name: str,
+        trust_remote_code: bool = False,
+        worker_class_fn: Optional[Callable[[],
+                                           Type[WorkerBase]]] = None) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
-        self.worker = None
+        self.worker_class_fn = worker_class_fn
+        self.worker: Optional[WorkerBase] = None
         if trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -286,14 +348,6 @@ class WorkerWrapperBase:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`
             del os.environ[key]
-            if is_hip():
-                hip_env_var = "HIP_VISIBLE_DEVICES"
-                if hip_env_var in os.environ:
-                    logger.warning(
-                        "Ignoring pre-set environment variable `%s=%s` as "
-                        "%s has also been set, which takes precedence.",
-                        hip_env_var, os.environ[hip_env_var], key)
-                os.environ.pop(hip_env_var, None)
         update_environment_variables(envs)
 
     def init_worker(self, *args, **kwargs):
@@ -306,9 +360,14 @@ class WorkerWrapperBase:
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
-        mod = importlib.import_module(self.worker_module_name)
-        worker_class = getattr(mod, self.worker_class_name)
+        if self.worker_class_fn:
+            worker_class = self.worker_class_fn()
+        else:
+            mod = importlib.import_module(self.worker_module_name)
+            worker_class = getattr(mod, self.worker_class_name)
+
         self.worker = worker_class(*args, **kwargs)
+        assert self.worker is not None
 
     def execute_method(self, method, *args, **kwargs):
         try:

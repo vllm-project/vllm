@@ -36,7 +36,7 @@
     ```
     export OTEL_SERVICE_NAME="vllm-server"
     export OTEL_EXPORTER_OTLP_TRACES_INSECURE=true
-    python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m" --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+    vllm serve facebook/opt-125m --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
     ```
 
 1. In a new shell, send requests with trace context from a dummy client
@@ -62,7 +62,7 @@ By default, `grpc` is used. To set `http/protobuf` as the protocol, configure th
 ```
 export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://$JAEGER_IP:4318/v1/traces
-python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m" --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+vllm serve facebook/opt-125m --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 ```
 
 ## Instrumentation of FastAPI
@@ -74,7 +74,7 @@ OpenTelemetry allows automatic instrumentation of FastAPI.
 
 1. Run vLLM with `opentelemetry-instrument`
     ```
-    opentelemetry-instrument python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m" 
+    opentelemetry-instrument vllm serve facebook/opt-125m
     ```
 
 1. Send a request to vLLM and find its trace in Jaeger. It should contain spans from FastAPI.

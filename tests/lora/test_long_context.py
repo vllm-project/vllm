@@ -29,7 +29,7 @@ def _create_lora_request(lora_id, long_context_infos):
     context_len = long_context_infos[lora_id]["context_length"]
     scaling_factor = context_len_to_scaling_factor[context_len]
     return LoRARequest(context_len, lora_id,
-                       long_context_infos[lora_id]["lora"],
+                       long_context_infos[lora_id]["lora"], None,
                        4096 * scaling_factor)
 
 
@@ -92,11 +92,10 @@ def batched_generate(
     for input in inputs:
         prompt, sampling_param, lora_req = input
         # Add requests to the engine and run the engine
-        llm._validate_and_add_requests(
-            prompt,
-            sampling_param,
-            lora_request=lora_req,
-        )
+        llm._validate_and_add_requests(prompt,
+                                       sampling_param,
+                                       lora_request=lora_req,
+                                       prompt_adapter_request=None)
 
     outputs = llm._run_engine(use_tqdm=True)
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]

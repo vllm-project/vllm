@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -16,9 +17,10 @@ from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
-                    Union)
+                    Union, overload)
 
 import numpy as np
+import numpy.typing as npt
 import psutil
 import torch
 import torch.types
@@ -39,9 +41,19 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
 }
 
+TORCH_DTYPE_TO_NUMPY_DTYPE = {
+    torch.float16: np.float16,
+    torch.float32: np.float32,
+    torch.float64: np.float64,
+    torch.uint8: np.uint8,
+    torch.int32: np.int32,
+    torch.int64: np.int64,
+}
+
 P = ParamSpec('P')
 K = TypeVar("K")
 T = TypeVar("T")
+U = TypeVar("U")
 
 
 class _Sentinel:
@@ -83,8 +95,10 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> Optional[T]:
-        return self.get(key)
+    def __getitem__(self, key: Hashable) -> T:
+        value = self.cache[key]  # Raise KeyError if not exists
+        self.cache.move_to_end(key)
+        return value
 
     def __setitem__(self, key: Hashable, value: T) -> None:
         self.put(key, value)
@@ -98,8 +112,9 @@ class LRUCache(Generic[T]):
     def get(self,
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
+        value: Optional[T]
         if key in self.cache:
-            value: Optional[T] = self.cache[key]
+            value = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -385,10 +400,6 @@ def get_open_port() -> int:
 
 
 def update_environment_variables(envs: Dict[str, str]):
-    if is_hip() and "CUDA_VISIBLE_DEVICES" in envs:
-        # Propagate changes to CUDA_VISIBLE_DEVICES to
-        # ROCm's HIP_VISIBLE_DEVICES as well
-        envs["HIP_VISIBLE_DEVICES"] = envs["CUDA_VISIBLE_DEVICES"]
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -397,9 +408,10 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
+def chunk_list(lst: List[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
-    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
 
 
 def cdiv(a: int, b: int) -> int:
@@ -462,7 +474,6 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -478,7 +489,13 @@ def create_kv_caches_with_random_flash(
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
                                       device=device)
-        key_value_cache.uniform_(-scale, scale)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -495,6 +512,12 @@ def create_kv_caches_with_random(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -571,8 +594,8 @@ class CudaMemoryProfiler:
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)
-            mem = torch.xpu.max_memory_allocated(self.device)
+            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):
@@ -598,23 +621,54 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
-def make_tensor_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
-    dtype: torch.dtype,
-    device: Optional[Union[str, torch.device]],
-) -> torch.Tensor:
-    """Make a padded tensor of a 2D inputs.
+def make_ndarray_with_pad(
+    x: List[List[T]],
+    pad: T,
+    dtype: npt.DTypeLike,
+    *,
+    max_len: Optional[int] = None,
+) -> npt.NDArray:
+    """
+    Make a padded array from 2D inputs.
 
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
     """
-    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
+    if max_len is None:
+        # Unlike for most functions, map is faster than a genexpr over `len`
+        max_len = max(map(len, x), default=0)
+
+    padded_x = np.full((len(x), max_len), pad, dtype=dtype)
     for ind, blocktb in enumerate(x):
         assert len(blocktb) <= max_len
         padded_x[ind, :len(blocktb)] = blocktb
-    return torch.tensor(padded_x, dtype=dtype, device=device)
+
+    return padded_x
+
+
+def make_tensor_with_pad(
+    x: List[List[T]],
+    pad: T,
+    dtype: torch.dtype,
+    *,
+    max_len: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    pin_memory: bool = False,
+) -> torch.Tensor:
+    """
+    Make a padded tensor from 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
+    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
+
+    tensor = torch.from_numpy(padded_x).to(device)
+    if pin_memory:
+        tensor = tensor.pin_memory()
+
+    return tensor
 
 
 def async_tensor_h2d(
@@ -657,6 +711,59 @@ def merge_dicts(dict1: Dict[K, List[T]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
+                 Tuple["JSONTree[T]", ...], T]
+"""A nested JSON structure where the leaves need not be JSON-serializable."""
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Dict[str, JSONTree[T]],
+) -> Dict[str, JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: List[JSONTree[T]],
+) -> List[JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Tuple[JSONTree[T], ...],
+) -> Tuple[JSONTree[U], ...]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: JSONTree[T],
+) -> JSONTree[U]:
+    ...
+
+
+def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
+    if isinstance(value, dict):
+        return {k: json_map_leaves(func, v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [json_map_leaves(func, v) for v in value]
+    elif isinstance(value, tuple):
+        return tuple(json_map_leaves(func, v) for v in value)
+    else:
+        return func(value)
+
+
+def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
+    """Flatten a list of lists to a single list."""
+    return [item for sublist in lists for item in sublist]
 
 
 def init_cached_hf_modules() -> None:
@@ -816,6 +923,27 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
+def error_on_invalid_device_count_status():
+    cache_entries = 0
+    with contextlib.suppress(Exception):
+        # future pytorch will fix the issue, device_count will not be cached
+        # at that time, `.cache_info().currsize` will error out
+        cache_entries = torch.cuda.device_count.cache_info().currsize
+    if cache_entries != 0:
+        # the function is already called, and the result is cached
+        remembered = torch.cuda.device_count()
+        current = cuda_device_count_stateless()
+        if remembered > current:
+            raise RuntimeError(
+                "The number of CUDA devices has changed since the first "
+                "call to torch.cuda.device_count(). This is not allowed "
+                "and may result in undefined behavior. Please check out "
+                "https://github.com/vllm-project/vllm/issues/6056 to "
+                "find the first call to torch.cuda.device_count() "
+                "and defer it until the engine is up. Or you can set "
+                "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
+
+
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
@@ -866,13 +994,6 @@ def is_full_nvlink(device_ids: List[int]) -> bool:
     return True
 
 
-@lru_cache(maxsize=8)
-@with_nvml_context
-def get_device_capability_stateless(device_id: int = 0) -> Tuple[int, int]:
-    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-    return pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-
-
 #From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f):
 
@@ -907,3 +1028,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
+
+
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
+                              **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)

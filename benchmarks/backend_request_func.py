@@ -225,8 +225,8 @@ async def async_request_openai_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "v1/completions"
-    ), "OpenAI Completions API URL must end with 'v1/completions'."
+        "completions"
+    ), "OpenAI Completions API URL must end with 'completions'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -304,8 +304,8 @@ async def async_request_openai_chat_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "v1/chat/completions"
-    ), "OpenAI Chat Completions API URL must end with 'v1/chat/completions'."
+        "chat/completions"
+    ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -390,17 +390,17 @@ def remove_prefix(text: str, prefix: str) -> str:
     return text
 
 
-def get_model(pretrained_model_name_or_path: str):
+def get_model(pretrained_model_name_or_path: str) -> str:
     if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
         from modelscope import snapshot_download
-    else:
-        from huggingface_hub import snapshot_download
 
-    model_path = snapshot_download(
-        model_id=pretrained_model_name_or_path,
-        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-        ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
-    return model_path
+        model_path = snapshot_download(
+            model_id=pretrained_model_name_or_path,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+
+        return model_path
+    return pretrained_model_name_or_path
 
 
 def get_tokenizer(

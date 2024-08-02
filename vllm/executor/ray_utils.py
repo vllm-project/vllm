@@ -1,9 +1,9 @@
-import pickle
 from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_ip, is_hip, is_xpu
+from vllm.sequence import ExecuteModelRequest
+from vllm.utils import get_ip, is_hip, is_tpu, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -31,23 +31,37 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def execute_model_compiled_dag_remote(self, ignored):
-            """Used only when compiled DAG is enabled."""
+        def execute_model_spmd(self, execute_model_req: ExecuteModelRequest):
+            """Used only when SPMD worker and compiled DAG are both
+            enabled."""
+            # TODO(swang): This is needed right now because Ray aDAG executes
+            # on a background thread, so we need to reset torch's current
+            # device.
             import torch
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            output = self.worker.execute_model()
-            output = pickle.dumps(output)
-            return output
+            return self.worker._execute_model_spmd(execute_model_req)
+
+    ray_import_err = None
 
 except ImportError as e:
-    logger.warning(
-        "Failed to import Ray with %r. For multi-node inference, "
-        "please install Ray with `pip install ray`.", e)
     ray = None  # type: ignore
+    ray_import_err = e
     RayWorkerWrapper = None  # type: ignore
+
+
+def ray_is_available() -> bool:
+    """Returns True if Ray is available."""
+    return ray is not None
+
+
+def assert_ray_available():
+    """Raise an exception if Ray is not available."""
+    if ray is None:
+        raise ValueError("Failed to import Ray, please install Ray with "
+                         "`pip install ray`.") from ray_import_err
 
 
 def initialize_ray_cluster(
@@ -65,10 +79,7 @@ def initialize_ray_cluster(
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
     """
-    if ray is None:
-        raise ImportError(
-            "Ray is not installed. Please install Ray to use multi-node "
-            "serving.")
+    assert_ray_available()
 
     # Connect to a ray cluster.
     if is_hip() or is_xpu():
@@ -82,32 +93,38 @@ def initialize_ray_cluster(
         # Placement group is already set.
         return
 
+    device_str = "GPU" if not is_tpu() else "TPU"
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
         # Verify that we can use the placement group.
-        gpu_bundles = 0
+        device_bundles = 0
         for bundle in bundles:
-            bundle_gpus = bundle.get("GPU", 0)
-            if bundle_gpus > 1:
+            bundle_devices = bundle.get(device_str, 0)
+            if bundle_devices > 1:
                 raise ValueError(
-                    "Placement group bundle cannot have more than 1 GPU.")
-            if bundle_gpus:
-                gpu_bundles += 1
-        if parallel_config.world_size > gpu_bundles:
+                    "Placement group bundle cannot have more than 1 "
+                    f"{device_str}.")
+            if bundle_devices:
+                device_bundles += 1
+        if parallel_config.world_size > device_bundles:
             raise ValueError(
-                "The number of required GPUs exceeds the total number of "
-                "available GPUs in the placement group.")
+                f"The number of required {device_str}s exceeds the total "
+                f"number of available {device_str}s in the placement group."
+                f"Required number of devices: {parallel_config.world_size}. "
+                f"Total number of devices: {device_bundles}.")
     else:
-        num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
-        if parallel_config.world_size > num_gpus_in_cluster:
+        num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+        if parallel_config.world_size > num_devices_in_cluster:
             raise ValueError(
-                "The number of required GPUs exceeds the total number of "
-                "available GPUs in the cluster.")
+                f"The number of required {device_str}s exceeds the total "
+                f"number of available {device_str}s in the placement group.")
         # Create a new placement group
-        placement_group_specs = ([{"GPU": 1}] * parallel_config.world_size)
+        placement_group_specs = ([{
+            device_str: 1
+        }] * parallel_config.world_size)
         current_placement_group = ray.util.placement_group(
             placement_group_specs)
         # Wait until PG is ready - this will block until all

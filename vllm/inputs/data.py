@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalData
+    from vllm.multimodal import MultiModalDataDict
 
 
 class ParsedText(TypedDict):
@@ -72,7 +72,7 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -85,32 +85,14 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: List[int]
     """A list of token IDs to pass to the model."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
 
-class TextTokensPrompt(TypedDict):
-    """It is assumed that :attr:`prompt` is consistent with
-    :attr:`prompt_token_ids`. This is currently used in
-    :class:`AsyncLLMEngine` for logging both the text and token IDs."""
-
-    prompt: str
-    """The prompt text."""
-
-    prompt_token_ids: List[int]
-    """The token IDs of the prompt."""
-
-    multi_modal_data: NotRequired["MultiModalData"]
-    """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
-    """
-
-
-PromptStrictInputs = Union[str, TextPrompt, TokensPrompt]
+PromptInputs = Union[str, TextPrompt, TokensPrompt]
 """
 The inputs to the LLM, which can take one of the following forms:
 
@@ -118,17 +100,12 @@ The inputs to the LLM, which can take one of the following forms:
 - A tokenized prompt (:class:`TokensPrompt`)
 """
 
-PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
-"""Same as :const:`PromptStrictInputs` but additionally accepts
-:class:`TextTokensPrompt`."""
-
 
 class LLMInputs(TypedDict):
     """
     The inputs in :class:`~vllm.LLMEngine` before they are
     passed to the model executor.
     """
-
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
@@ -137,7 +114,7 @@ class LLMInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    multi_modal_data: NotRequired[Optional["MultiModalData"]]
+    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
