@@ -727,8 +727,7 @@ class LivenessResponse(OpenAIBaseModel):
     alive: str = Field(None, title="Alive message")
     model_config = {
         "json_schema_extra": {
-            "examples": [
-                "liveness": {
+            "examples": [{
                     "alive": "ok"
                 }
             ]
@@ -741,8 +740,7 @@ class ReadinessResponse(OpenAIBaseModel):
     ready: str = Field(None, title="Ready message")
     model_config = {
         "json_schema_extra": {
-            "examples": [
-                "readiness": {
+            "examples": [{
                     "ready": "ok"
                 }
             ]
