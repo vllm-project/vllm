@@ -336,7 +336,8 @@ function (define_gpu_extension_target GPU_MOD_NAME)
 
   if (GPU_ARCHITECTURES)
     set_target_properties(${GPU_MOD_NAME} PROPERTIES
-      ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
+      ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}"
+      LINK_FLAGS_RELEASE "-s")
   endif()
 
   set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
