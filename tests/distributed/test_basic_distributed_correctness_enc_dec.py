@@ -43,6 +43,22 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    '''
+    Test vLLM BART inference on more than one GPU, comparing
+    outputs against HF as a baseline.
+
+    Arguments:
+
+    * hf_runner: HuggingFace (HF) test model runner
+    * vllm_runner: vLLM test model runner
+    * example_encoder_decoder_prompts: test fixture which provides a 
+                                        dictionary of dummy prompts
+    * model: the HF ID of the specific BART variant under test
+    * dtype: the tensor datatype to employ
+    * max_tokens
+    * num_logprobs
+    '''
+
     distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
 
     test_prompts = example_encoder_decoder_prompts[DecoderPromptType.CUSTOM]
