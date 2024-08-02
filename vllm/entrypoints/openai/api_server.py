@@ -111,8 +111,8 @@ async def get_liveness() -> LivenessResponse:
 )
 async def get_readiness() -> ReadinessResponse:
     """Readiness probe for k8s"""
-    driver_worker = openai_serving_chat.engine.engine.model_executor.driver_worker
-    model_weights = driver_worker.model_runner.model_memory_usage
+    d_worker = openai_serving_chat.engine.engine.model_executor.driver_worker
+    model_weights = d_worker.model_runner.model_memory_usage
 
     if model_weights > 0:
         return ReadinessResponse(ready="ok")
