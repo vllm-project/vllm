@@ -3,7 +3,7 @@ import os
 from typing import List, Optional
 
 try:
-    from ray.exceptions import ActorDiedError
+    from ray.exceptions import ActorDiedError  # type: ignore
 except ImportError:
     # For older versions of Ray
     from ray.exceptions import RayActorError as ActorDiedError  # type: ignore
