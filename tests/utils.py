@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import openai
-import psutil
 import ray
 import requests
+import signal
 from transformers import AutoTokenizer
 
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -344,9 +344,10 @@ def fork_new_process_for_each_test(f):
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
-        import os
         pid = os.fork()
         if pid == 0:
+            # Make the child process the leader of its own process group
+            os.setpgrp()
             try:
                 f(*args, **kwargs)
             except Exception:
@@ -357,10 +358,7 @@ def fork_new_process_for_each_test(f):
                 os._exit(0)
         else:
             _pid, _exitcode = os.waitpid(pid, 0)
-            process = psutil.Process(pid)
-            # kill all child processes
-            for child in process.children(recursive=True):
-                child.kill()
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 
