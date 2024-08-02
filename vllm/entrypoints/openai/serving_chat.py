@@ -25,8 +25,6 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
 from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
@@ -134,27 +132,22 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"chat-{random_uuid()}"
         try:
-            sampling_params = request.to_sampling_params(tokenizer)
-            decoding_config = await self.engine.get_decoding_config()
-            guided_decoding_backend = request.guided_decoding_backend \
-                or decoding_config.guided_decoding_backend
             guided_decode_logits_processor = (
-                await
-                get_guided_decoding_logits_processor(guided_decoding_backend,
-                                                     request, tokenizer))
-            if guided_decode_logits_processor:
-                if sampling_params.logits_processors is None:
-                    sampling_params.logits_processors = []
-                sampling_params.logits_processors.append(
-                    guided_decode_logits_processor)
+                await self._guided_decode_logits_processor(request, tokenizer))
 
             prompt_inputs = self._tokenize_prompt_input(
                 request,
                 tokenizer,
                 prompt,
-                truncate_prompt_tokens=sampling_params.truncate_prompt_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
+
+            sampling_params = request.to_sampling_params(
+                tokenizer,
+                guided_decode_logits_processor,
+                default_max_tokens=self.max_model_len -
+                len(prompt_inputs["prompt_token_ids"]))
 
             self._log_inputs(request_id,
                              prompt_inputs,

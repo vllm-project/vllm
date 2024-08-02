@@ -25,6 +25,12 @@
 
 #include <iostream>
 
+#include "common/base.h"
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  #include "common/mem.h"
+#endif
+
 template <typename T>
 inline std::string str(T x) {
   return std::to_string(x);
@@ -32,23 +38,9 @@ inline std::string str(T x) {
 
 namespace marlin_dense {
 
-constexpr int ceildiv(int a, int b) { return (a + b - 1) / b; }
-
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 
-// Instances of `Vec` are used to organize groups of >>registers<<, as needed
-// for instance as inputs to tensor core operations. Consequently, all
-// corresponding index accesses must be compile-time constants, which is why we
-// extensively use `#pragma unroll` throughout the kernel code to guarantee
-// this.
-template <typename T, int n>
-struct Vec {
-  T elems[n];
-  __device__ T& operator[](int i) { return elems[i]; }
-};
-
 using I4 = Vec<int, 4>;
-
 // Matrix fragments for tensor core instructions; their precise layout is
 // documented here:
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
@@ -56,43 +48,6 @@ using FragA = Vec<half2, 4>;
 using FragB = Vec<half2, 2>;
 using FragC = Vec<float, 4>;
 using FragS = Vec<half2, 1>;  // quantization scales
-
-// Predicated asynchronous global->shared copy; used for inputs A where we apply
-// predication to handle batchsizes that are not multiples of 16.
-__device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr,
-                                      bool pred = true) {
-  const int BYTES = 16;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   .reg .pred p;\n"
-      "   setp.ne.b32 p, %0, 0;\n"
-      "   @p cp.async.cg.shared.global [%1], [%2], %3;\n"
-      "}\n" ::"r"((int)pred),
-      "r"(smem), "l"(glob_ptr), "n"(BYTES));
-}
-
-// Asynchronous global->shared copy
-__device__ inline void cp_async4(void* smem_ptr, const void* glob_ptr) {
-  const int BYTES = 16;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   cp.async.cg.shared.global [%0], [%1], %2;\n"
-      "}\n" ::"r"(smem),
-      "l"(glob_ptr), "n"(BYTES));
-}
-
-// Async copy fence.
-__device__ inline void cp_async_fence() {
-  asm volatile("cp.async.commit_group;\n" ::);
-}
-
-// Wait until at most `n` async copy stages are still pending.
-template <int n>
-__device__ inline void cp_async_wait() {
-  asm volatile("cp.async.wait_group %0;\n" ::"n"(n));
-}
 
 // m16n8k16 tensor core mma instruction with fp16 inputs and fp32
 // output/accumulation.
@@ -162,39 +117,6 @@ __device__ inline void scale(FragB& frag_b, FragS& frag_s, int i) {
   half2 s = __half2half2(reinterpret_cast<__half*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
   frag_b[1] = __hmul2(frag_b[1], s);
-}
-
-// Wait until barrier reaches `count`, then lock for current threadblock.
-__device__ inline void barrier_acquire(int* lock, int count) {
-  if (threadIdx.x == 0) {
-    int state = -1;
-    do
-      // Guarantee that subsequent writes by this threadblock will be visible
-      // globally.
-      asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
-                   : "=r"(state)
-                   : "l"(lock));
-    while (state != count);
-  }
-  __syncthreads();
-}
-
-// Release barrier and increment visitation count.
-__device__ inline void barrier_release(int* lock, bool reset = false) {
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    if (reset) {
-      lock[0] = 0;
-      return;
-    }
-    int val = 1;
-    // Make sure that all writes since acquiring this barrier are visible
-    // globally, while releasing the barrier.
-    asm volatile("fence.acq_rel.gpu;\n");
-    asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
-                 :
-                 : "l"(lock), "r"(val));
-  }
 }
 
 template <const int threads,          // number of threads in a threadblock
