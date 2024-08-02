@@ -39,7 +39,10 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         type=nullable_str,
                         default=None,
                         help="host name")
-    parser.add_argument("--port", type=int, default=8000, help="port number")
+    parser.add_argument("--port",
+                        type=int,
+                        default=8000,
+                        help="port number")
     parser.add_argument(
         "--uvicorn-log-level",
         type=str,
@@ -144,7 +147,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--enable-auto-tool-choice",
         action="store_true",
         help=
-        'Enable auto tool choice for models that support it. Requires --tool-call-parser'
+        'Enable auto tool choice for supported models. Use --tool-call-parser'
+        'to specify which parser to use'
     )
 
     parser.add_argument(
@@ -152,9 +156,10 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         type=str,
         choices=['mistral', 'hermes'],
         help=
-        'Select the tool call parser depending on the model that you\'re using. '
-        'This is used to parse the model-generated tool call into OpenAI API format. '
-        'Required for --enable-auto-tool-choice. Options: "mistral", "hermes"')
+        'Select the tool call parser depending on the model that you\'re using.'
+        ' This is used to parse the model-generated tool call into OpenAI API '
+        'format. Required for --enable-auto-tool-choice. Options: "mistral", '
+        '"hermes"')
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

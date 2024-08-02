@@ -674,11 +674,11 @@ class DeltaFunctionCall(FunctionCall):
 
 # a tool call delta where everything is optional
 class DeltaToolCall(ToolCall):
-    index: int  # this is always required, the index of the tool call in the tool_calls array.
+    index: int  # this is always required, the index of the tool call in the arr
     function: Optional[DeltaFunctionCall] = None
 
 
-# the initial delta that gets sent once a new tool call is started; differs in that it includes an auto-set id and type
+# the initial delta that gets sent once a new tool call is started;
 class InitialDeltaToolCall(DeltaToolCall):
     id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
     type: Literal["function"] = "function"
@@ -692,7 +692,7 @@ class ExtractedToolCallInformation(BaseModel):
     # extracted tool calls
     tool_calls: List[ToolCall]
 
-    # content - per OpenAI spec, content AND tool calls can be returned ALTHOUGH THIS IS VERY RARE
+    # content - per OpenAI spec, content AND tool calls can be returned rarely
     # But some models will do this intentionally
     content: Optional[str] = None
 

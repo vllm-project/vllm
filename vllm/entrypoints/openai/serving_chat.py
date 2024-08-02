@@ -34,7 +34,8 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.utils import random_uuid
 
-from vllm.entrypoints.openai.tool_parsers import ToolParser, MistralToolParser, Hermes2ProToolParser
+from vllm.entrypoints.openai.tool_parsers import (
+    ToolParser, MistralToolParser, Hermes2ProToolParser)
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 

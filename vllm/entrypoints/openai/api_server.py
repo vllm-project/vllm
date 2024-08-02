@@ -139,7 +139,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
     # TODO implement for streaming later
     if request.stream:
 
-        if openai_serving_chat.enable_auto_tools and openai_serving_chat.tool_parser:
+        if (openai_serving_chat.enable_auto_tools and
+                openai_serving_chat.tool_parser):
             print('handling streaming response')
 
             return StreamingResponse(content=generator,
