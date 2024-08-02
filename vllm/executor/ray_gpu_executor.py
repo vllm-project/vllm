@@ -10,10 +10,9 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (_run_task_with_lock,
-                        error_on_invalid_device_count_status,
-                        get_distributed_init_method, get_ip, get_open_port,
-                        get_vllm_instance_id, make_async)
+from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
+                        get_ip, get_open_port, get_vllm_instance_id,
+                        make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -215,8 +214,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
             driver_ip = "127.0.0.1"
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
-
-        error_on_invalid_device_count_status()
 
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [
