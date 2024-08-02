@@ -384,8 +384,7 @@ def fused_topk(
                                         topk,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
-    from pprint import pprint
-    pprint(vars(ops))
+
     ops.topk_softmax(
         topk_weights,
         topk_ids,
@@ -692,8 +691,7 @@ def single_marlin_moe(
 
     block_size_m = config['BLOCK_SIZE_M']
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, block_size_m, E)
+    sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
 
     max_workspace_size = (N // 64) * 16
     workspace = torch.zeros(max_workspace_size,
@@ -781,8 +779,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 
     block_size_m = config['BLOCK_SIZE_M']
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, block_size_m, E)
+    sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
 
     max_workspace_size = ((M + 255) // 256) * (max(2 * N, K) // 64) * 16
     workspace = torch.zeros(max_workspace_size,
@@ -806,8 +803,5 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         w2_scale, g_idx2, rand_perm2, workspace, M, K, N, True, E, topk,
         block_size_m, False, True)
 
-    # intermediate_cache3 = torch.zeros((M, topk, K),
-    #                                   device=hidden_states.device,
-    #                                   dtype=hidden_states.dtype)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
