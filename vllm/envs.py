@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_SYNC_SERVER_ACCUM_REQUESTS: int = 1
     VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
+    VLLM_MOE_PADDING: bool = True
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -229,6 +230,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Poll for new requests every this many steps
     "VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS":
     lambda: int(os.getenv("VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS", "1")),
+
+    # Pad the weight for moe kernel or not
+    "VLLM_MOE_PADDING":
+    lambda: bool(int(os.getenv("VLLM_MOE_PADDING", "1"))),
 }
 
 # end-env-vars-definition
