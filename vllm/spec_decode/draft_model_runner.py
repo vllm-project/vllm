@@ -325,8 +325,8 @@ class TP1DraftModelRunner(ModelRunner):
                     self.flashinfer_prefill_wrapper
                 if model_input.attn_metadata.use_cuda_graph:
                     batch_size = model_input.input_tokens.shape[0]
-                    model_input.attn_metadata.decode_wrapper = self.graph_runners[
-                        model_input.
+                    model_input.attn_metadata.decode_wrapper = \
+                        self.graph_runners[model_input.
                         virtual_engine][batch_size].flashinfer_decode_wrapper
                 else:
                     model_input.attn_metadata.decode_wrapper = \
