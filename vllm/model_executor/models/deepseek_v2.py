@@ -115,7 +115,7 @@ class DeepseekV2MoE(nn.Module):
                                 hidden_size=config.hidden_size,
                                 intermediate_size=config.moe_intermediate_size,
                                 reduce_results=False,
-                                renormalize=True,
+                                renormalize=False,
                                 quant_config=quant_config,
                                 use_grouped_topk=True,
                                 num_expert_group=config.n_group,
