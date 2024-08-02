@@ -1162,12 +1162,12 @@ __global__ void Marlin(
 
         int k_blocks = cur_k / 16;
         int cur_group_id = 0;
-        // Guard divide by zero warnings
-        if constexpr (group_blocks != 0) {
-          cur_group_id = k_blocks / group_blocks;
-        } else {
-          __builtin_unreachable();
-        }
+
+        // Suppress bogus and persistent divide-by-zero warning
+  #pragma nv_diagnostic push
+  #pragma nv_diag_suppress divide_by_zero
+        cur_group_id = k_blocks / group_blocks;
+  #pragma nv_diagnostic pop
 
         int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
