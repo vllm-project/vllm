@@ -54,6 +54,8 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_SYNC_SERVER_ACCUM_REQUESTS: int = 1
+    VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
 
 
 def get_default_cache_root():
@@ -356,6 +358,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+
+    # Try to accumulate this many requests before proceeding
+    "VLLM_SYNC_SERVER_ACCUM_REQUESTS":
+    lambda: int(os.getenv("VLLM_SYNC_SERVER_ACCUM_REQUESTS", "1")),
+
+    # Poll for new requests every this many steps
+    "VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS":
+    lambda: int(os.getenv("VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS", "1")),
 }
 
 # end-env-vars-definition

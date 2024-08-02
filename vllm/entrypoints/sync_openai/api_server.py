@@ -8,6 +8,7 @@ from typing import Dict
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import Mount
 from prometheus_client import make_asgi_app
@@ -178,7 +179,8 @@ async def completions(request: CompletionRequest, raw_request: Request):
         created_time = int(time.time())
         return StreamingResponse(content=completion_generator(
             request.model, result_queue, choices, created_time, ids),
-                                 media_type="text/event-stream")
+                                 media_type="text/event-stream",
+                                 headers={"Access-Control-Allow-Origin": "*"})
     while True:
         request_id, token, stats = await result_queue.get()
         choice_idx = choices[request_id]
@@ -207,4 +209,13 @@ if __name__ == "__main__":
     args = parse_args()
     engine_args = EngineArgs.from_cli_args(args)
     runner.set_engine_args(engine_args)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=args.allowed_origins,
+        allow_credentials=args.allow_credentials,
+        allow_methods=args.allowed_methods,
+        allow_headers=args.allowed_headers,
+    )
+
     uvicorn.run(app, port=args.port, host=args.host)

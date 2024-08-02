@@ -2,9 +2,12 @@ import multiprocessing as mp
 from queue import Empty
 from typing import Union
 
+from vllm import envs
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.executor.multiproc_gpu_executor import MultiprocessingGPUExecutor
+from vllm.executor.ray_gpu_executor import RayGPUExecutor
 from vllm.inputs import PromptInputs, TextTokensPrompt
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
@@ -49,7 +52,9 @@ class FastSyncLLM:
             if not self.llm_engine.has_unfinished_requests():
                 logger.info("No unfinished requests. Waiting...")
                 (request_id, prompt, sampling_params) = self.input_queue.get()
-                if self.need_restart:
+                if self.need_restart and isinstance(
+                        self.llm_engine.model_executor,
+                        MultiprocessingGPUExecutor):
                     logger.info("Restarting worker loops")
                     for worker in self.llm_engine.model_executor.workers:
                         worker.execute_method("start_worker_execution_loop")
@@ -66,13 +71,24 @@ class FastSyncLLM:
     def run_engine(self):
         self.llm_engine = LLMEngine.from_engine_args(
             self.engine_args, usage_context=UsageContext.LLM_CLASS)
+        assert not isinstance(
+            self.llm_engine.model_executor,
+            RayGPUExecutor), "Ray is not supported in sync openai mode"
 
         self.result_queue.put(("Ready", None, None))
         request_stats = {}
         log_interval = 100
+        poll_interval = envs.VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS
         try:
             while True:
-                self._poll_requests()
+                poll_interval -= 1
+                if (self.input_queue.qsize() >=
+                        envs.VLLM_SYNC_SERVER_ACCUM_REQUESTS
+                        or poll_interval <= 0
+                        or not self.llm_engine.has_unfinished_requests()):
+                    self._poll_requests()
+                    poll_interval = \
+                        envs.VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS
                 step_outputs = self.llm_engine.step()
                 log_interval -= 1
                 if log_interval == 0:
