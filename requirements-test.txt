@@ -1,3 +1,6 @@
+# Needed for Ray accelerated DAG tests
+-r requirements-adag.txt
+
 # testing
 pytest
 tensorizer>=2.9.0

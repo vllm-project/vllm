@@ -15,22 +15,31 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
 @pytest.mark.parametrize(
-    "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME, DIST_BACKEND",
-    [
-        (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray"),
-        (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-        (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-        (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray"),
-        (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-        (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "mp"),
-        (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-        (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-        (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "mp"),
-        (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-    ])
-@fork_new_process_for_each_test
+    ("TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, "
+     "MODEL_NAME, DIST_BACKEND, USE_RAY_ADAG, USE_RAY_ADAG_NCCL"), [
+         (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray", False, False),
+         (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray", False, False),
+         (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray", False, False),
+         (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray", False, False),
+         (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray", False, False),
+         (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray", True, False),
+         (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray", True, False),
+         (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray", True, False),
+         (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray", True, False),
+         (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray", True, False),
+         (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray", True, True),
+         (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray", True, True),
+         (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray", True, True),
+         (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray", True, True),
+         (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray", True, True),
+         (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "mp", False, False),
+         (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp", False, False),
+         (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp", False, False),
+         (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "mp", False, False),
+         (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp", False, False),
+     ])
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
-                    DIST_BACKEND):
+                    DIST_BACKEND, USE_RAY_ADAG, USE_RAY_ADAG_NCCL):
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
@@ -67,8 +76,18 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
     if EAGER_MODE:
         pp_args.append("--enforce-eager")
         tp_args.append("--enforce-eager")
+    pp_env = None
+    if USE_RAY_ADAG:
+        assert DIST_BACKEND == "ray", (
+            "Ray ADAG is only supported with Ray distributed backend")
+        pp_env = {
+            "VLLM_USE_RAY_COMPILED_DAG": "1",
+            "VLLM_USE_RAY_SPMD_WORKER": "1",
+            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
+            str(int(USE_RAY_ADAG_NCCL)),
+        }
 
-    compare_two_settings(MODEL_NAME, pp_args, tp_args)
+    compare_two_settings(MODEL_NAME, pp_args, tp_args, pp_env)
 
 
 @pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [
