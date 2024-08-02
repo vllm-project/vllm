@@ -344,10 +344,11 @@ def fork_new_process_for_each_test(f):
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
+        # Make the process the leader of its own process group
+        # to avoid sending SIGTERM to the parent process
+        os.setpgrp()
         pid = os.fork()
         if pid == 0:
-            # Make the child process the leader of its own process group
-            os.setpgrp()
             try:
                 f(*args, **kwargs)
             except Exception:
