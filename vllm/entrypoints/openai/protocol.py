@@ -720,3 +720,7 @@ class DetokenizeRequest(OpenAIBaseModel):
 
 class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
+
+
+class AbortRequestRequest(OpenAIBaseModel):
+    request_id: str

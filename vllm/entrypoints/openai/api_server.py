@@ -30,7 +30,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest, ErrorResponse,
                                               TokenizeRequest,
-                                              TokenizeResponse)
+                                              TokenizeResponse,
+                                              AbortRequestRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -163,6 +164,11 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
                             status_code=generator.code)
     else:
         return JSONResponse(content=generator.model_dump())
+
+
+@router.post("/v1/abort_request")
+async def abort_requests(request: AbortRequestRequest):
+    engine.engine.abort_request(request.request_id)
 
 
 def build_app(args):
