@@ -1554,8 +1554,8 @@ def _get_and_verify_max_len(
                     "%s Make sure the value is correct and within the "
                     "model context size.", msg)
             else:
-                raise ValueError(f"{msg} To allow overriding this maximum, set the env var "
-                                 "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
+                raise ValueError(f"{msg} To allow overriding this maximum, set "
+                                 "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
     return int(max_model_len)
 
 
