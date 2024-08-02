@@ -93,30 +93,30 @@ async def health() -> Response:
 
 @router.get(
     "/liveness",
-    response_model=ResponseLiveness,
+    response_model=LivenessResponse,
     name="liveness",
     tags=["technical"],
 )
-async def get_liveness() -> ResponseLiveness:
+async def get_liveness() -> LivenessResponse:
     """Liveness probe for k8s"""
-    liveness_msg = ResponseLiveness(alive="ok")
+    liveness_msg = LivenessResponse(alive="ok")
     return liveness_msg
 
 
 @router.get(
     "/readiness",
-    response_model=ResponseReadiness,
+    response_model=ReadinessResponse,
     name="readiness",
     tags=["technical"],
 )
-async def get_readiness() -> ResponseReadiness:
+async def get_readiness() -> ReadinessResponse:
     """Readiness probe for k8s"""
-    model_weights = await openai_serving_chat.engine.engine.model_executor.driver_worker.model_runner.model_memory_usage
+    model_weights = openai_serving_chat.engine.engine.model_executor.driver_worker.model_runner.model_memory_usage
 
-    if model_weights:
-        return ResponseReadiness(ready="ok")
+    if model_weights > 0:
+        return ReadinessResponse(ready="ok")
     else:
-        return ResponseReadiness(ready="ko")
+        return ReadinessResponse(ready="ko")
 
 
 @router.post("/tokenize")
