@@ -44,15 +44,14 @@ class GPTQMarlinConfig(QuantizationConfig):
                                      is_sym=self.is_sym)
 
     def get_weight_bits(self, prefix: str):
-        real_bits = self._weight_bits
+        bits = self._weight_bits
+        # check for variable/dynamic bits
         if len(self.dynamic_bits) > 0 and prefix:
-            remove_prefix = r'^.*?(?=\d)'
-            match_name = re.sub(remove_prefix, '', prefix)
-            for pattern, dm_bits in self.dynamic_bits.items():
-                if re.match(pattern, match_name):
-                    real_bits = dm_bits
+            for pattern, dym_bits in self.dynamic_bits.items():
+                if re.match(pattern, prefix):
+                    bits = dym_bits
                     break
-        return real_bits
+        return bits
 
     def get_pack_factor(self, prefix: str):
         return 32 // self.get_weight_bits(prefix)  # packed into int32
