@@ -89,6 +89,7 @@ def test_eviction(num_blocks: int, ):
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("cached_position", [0, 1])
 @pytest.mark.parametrize("use_v2_block_manager", [False, True])
 def test_mixed_requests(
     hf_runner,
@@ -98,19 +99,21 @@ def test_mixed_requests(
     backend: str,
     dtype: str,
     max_tokens: int,
+    cached_position: int,
     use_v2_block_manager: bool,
     monkeypatch,
 ) -> None:
     """
     Test the case when some sequences have the prefix cache hit
-    and the others don't.
+    and the others don't. The cached position determines where 
+    the sequence is at among the batch of prefills.
     """
     override_backend_env_variable(monkeypatch, backend)
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    cached_prompt = example_prompts[0]
+    cached_prompt = example_prompts[cached_position]
     with vllm_runner(
             model,
             dtype=dtype,
