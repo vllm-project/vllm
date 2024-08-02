@@ -721,7 +721,7 @@ class DetokenizeRequest(OpenAIBaseModel):
 class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
 
-class ResponseLiveness(OpenAIBaseModel):
+class LivenessResponse(OpenAIBaseModel):
     """Return object for liveness probe"""
 
     alive: str = Field(None, title="Alive message")
@@ -735,7 +735,7 @@ class ResponseLiveness(OpenAIBaseModel):
         }
     }
 
-class ResponseReadiness(OpenAIBaseModel):
+class ReadinessResponse(OpenAIBaseModel):
     """Return object for readiness probe"""
 
     ready: str = Field(None, title="Ready message")
