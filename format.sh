@@ -96,6 +96,7 @@ echo 'vLLM yapf: Done'
 
 # Run mypy
 echo 'vLLM mypy:'
+mypy --follow-imports skip  # Note that this is less strict than CI
 mypy tests --follow-imports skip
 mypy vllm/attention --follow-imports skip
 mypy vllm/core --follow-imports skip
@@ -108,7 +109,7 @@ mypy vllm/model_executor  --follow-imports skip
 mypy vllm/prompt_adapter --follow-imports skip
 mypy vllm/spec_decode --follow-imports skip
 mypy vllm/worker --follow-imports skip
-mypy
+echo 'vLLM mypy: Done'
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:
@@ -127,7 +128,7 @@ spell_check_all(){
   codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
 }
 
-# Spelling  check of files that differ from main branch.
+# Spelling check of files that differ from main branch.
 spell_check_changed() {
     # The `if` guard ensures that the list of filenames is not empty, which
     # could cause ruff to receive 0 positional arguments, making it hang
