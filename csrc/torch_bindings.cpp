@@ -116,7 +116,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantized GEMM for AQLM.
   ops.def(
       "aqlm_gemm(Tensor input, Tensor codes, Tensor codebooks, "
-      "Tensor scales, Tensor codebook_partition_sizes, Tensor? bias) "
+      "Tensor scales, int[] codebook_partition_sizes, Tensor? bias) "
       "-> Tensor");
   ops.impl("aqlm_gemm", torch::kCUDA, &aqlm_gemm);
   ops.impl("aqlm_gemm", torch::kMeta, &aqlm_gemm_meta);
@@ -124,7 +124,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Decompression method for AQLM.
   ops.def(
       "aqlm_dequant(Tensor codes, Tensor codebooks, "
-      "Tensor codebook_partition_sizes) -> Tensor");
+      "int[] codebook_partition_sizes) -> Tensor");
   ops.impl("aqlm_dequant", torch::kCUDA, &aqlm_dequant);
   ops.impl("aqlm_dequant", torch::kMeta, &aqlm_dequant_meta);
 
