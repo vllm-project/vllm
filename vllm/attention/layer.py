@@ -101,10 +101,9 @@ class Attention(nn.Module):
         tmp_out: torch.Tensor,
         exp_sum: torch.Tensor,
         max_logits: torch.Tensor,
-        query: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        return self.impl.reducer(tmp_out, exp_sum, max_logits, query,
+        return self.impl.reducer(tmp_out, exp_sum, max_logits,
                                  attn_metadata)
 
     def extra_repr(self) -> str:
