@@ -92,8 +92,10 @@ class RequestMetrics:
         first_token_time: The time when the first token was generated.
         time_in_queue: The time the request spent in the queue.
         finished_time: The time when the request was finished.
-        scheduler_time: The time spent in the scheduler when this request was being considered by the scheduler.
-        model_forward_time: The time spent in the model forward pass when this request was in the batch.
+        scheduler_time: The time spent in the scheduler when this request was
+                        being considered by the scheduler.
+        model_forward_time: The time spent in the model forward pass when this
+                            request was in the batch.
     """
     arrival_time: float
     last_token_time: float
@@ -868,8 +870,8 @@ class SamplerOutput:
     # Total time spent in the forward pass for this across all workers
     model_forward_time: Optional[float] = None
 
-    # Total time spent in the model execute function. This will include model forward,
-    #  block/sync across workers, cpu-gpu sync time and sampling time.
+    # Total time spent in the model execute function. This will include model
+    # forward, block/sync across workers, cpu-gpu sync time and sampling time.
     model_execute_time: Optional[float] = None
 
     def __getitem__(self, idx: int):

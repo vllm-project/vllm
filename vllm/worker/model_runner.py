@@ -1369,7 +1369,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                          device=self.device),
             **seqlen_agnostic_kwargs)
         model_forward_end.record()
-        
+
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
@@ -1385,12 +1385,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        if self.observability_config.collect_model_forward_time:
+        if (self.observability_config.collect_model_forward_time
+                and output is not None):
             model_forward_end.synchronize()
-            model_forward_time = model_forward_start.elapsed_time(model_forward_end)    
-            # If there are multiple workers, we are still tracking the latency from the start time
-            # of the driver worker to the end time of the driver worker. The model forward time wil
-            # then end up covering the communication time as well.
+            model_forward_time = model_forward_start.elapsed_time(
+                model_forward_end)
+            # If there are multiple workers, we are still tracking the latency
+            # from the start time of the driver worker to the end time of the
+            # driver worker. The model forward time will then end up covering
+            # the communication time as well.
             output.model_forward_time = model_forward_time
 
         if self.return_hidden_states:

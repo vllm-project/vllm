@@ -663,7 +663,7 @@ class EngineArgs:
             help='Target URL to which OpenTelemetry traces will be sent.')
         parser.add_argument(
             '--collect-model-forward-time',
-             type=bool,
+            type=bool,
             default=EngineArgs.collect_model_forward_time,
             help="If set to True and otlp-traces-endpoint is set, "
             "collects model forward time in traces. This involves "

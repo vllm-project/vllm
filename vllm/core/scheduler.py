@@ -816,8 +816,8 @@ class Scheduler:
                 remaining_swapped, swapped_in = self._schedule_swapped(
                     self.swapped, budget, curr_loras, fcfs_policy)
 
-        assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens
+                <= self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -904,8 +904,8 @@ class Scheduler:
         remaining_waiting, prefills = self._schedule_prefills(
             self.waiting, budget, curr_loras, enable_chunking=True)
 
-        assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens
+                <= self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -1014,8 +1014,8 @@ class Scheduler:
                 # NOTE: We use get_len instead of get_prompt_len because when
                 # a sequence is preempted, prefill includes previous generated
                 # output tokens.
-                if (token_chunk_size + seqs[0].data.get_num_computed_tokens() <
-                        seqs[0].data.get_len()):
+                if (token_chunk_size + seqs[0].data.get_num_computed_tokens()
+                        < seqs[0].data.get_len()):
                     do_sample = False
 
             # It assumes the scheduled_seq_groups is ordered by
@@ -1049,16 +1049,17 @@ class Scheduler:
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
-    
+
         scheduler_time = time.time() - scheduler_start_time
-        # Add this to scheduler time to all the sequences that are currently running.
-        # This will help estimate if the scheduler is a significant component in the e2e latency.
+        # Add this to scheduler time to all the sequences that are currently
+        # running. This will help estimate if the scheduler is a significant
+        # component in the e2e latency.
         for seq_group in self.running:
             if seq_group.metrics.scheduler_time is not None:
                 seq_group.metrics.scheduler_time += scheduler_time
             else:
                 seq_group.metrics.scheduler_time = scheduler_time
-    
+
         return seq_group_metadata_list, scheduler_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
@@ -1205,10 +1206,9 @@ class Scheduler:
         if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(
                 [e.metrics.arrival_time for e in self.waiting])
-            passed_delay = (
-                (now - earliest_arrival_time) >
-                (self.scheduler_config.delay_factor * self.last_prompt_latency)
-                or not self.running)
+            passed_delay = ((now - earliest_arrival_time)
+                            > (self.scheduler_config.delay_factor *
+                               self.last_prompt_latency) or not self.running)
         else:
             passed_delay = True
         return passed_delay

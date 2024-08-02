@@ -1,8 +1,8 @@
 import dataclasses
 import importlib
 import os
-from abc import ABC, abstractmethod
 import time
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -278,7 +278,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         end_time = time.time()
         if output is not None:
             for o in output:
-                o.model_execute_time =  end_time - start_time
+                o.model_execute_time = end_time - start_time
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
             get_pp_group().send_tensor_dict(output.tensors)
