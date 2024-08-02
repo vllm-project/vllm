@@ -27,7 +27,7 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
-from vllm.distributed import get_pp_group, get_disagg_group
+from vllm.distributed import get_tp_group, get_pp_group, get_disagg_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -1387,6 +1387,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 _input_tokens_list = model_input.input_tokens.tolist()
                 seq_lens = model_input.seq_lens
                 query_lens = model_input.query_lens
+                seq_lens = get_tp_group().broadcast_object(seq_lens)
+                query_lens = get_tp_group().broadcast_object(query_lens)
                 slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
                 
                 # failed = False
@@ -1413,37 +1415,38 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 # query_lens contains new KV caches that are added to vLLM.
                 # so we will send them to decode instance
                 # FIXME(Kuntai): This assume that all requests are prefill. 
-                if query_lens is not None:
-                    for idx, qlen in enumerate(query_lens):
+                for idx, qlen in enumerate(query_lens):
 
 
-                        start_pos = sum(query_lens[:idx])
-                        end_pos = start_pos + qlen
-                        input_hash = hash(tuple(_input_tokens_list[start_pos:end_pos]))
+                    start_pos = sum(query_lens[:idx])
+                    end_pos = start_pos + qlen
+                    input_hash = hash(tuple(_input_tokens_list[start_pos:end_pos]))
+                    
+                    for i in range(model_executable.model.start_layer,
+                            model_executable.model.end_layer):
+                        kv_cache = kv_caches[i - model_executable.model.start_layer]
                         
-                        for i in range(model_executable.model.start_layer,
-                                model_executable.model.end_layer):
-                            kv_cache = kv_caches[i - model_executable.model.start_layer]
-                            
-                            _, _, num_heads, head_size = kv_cache[0].shape
-                            
-                            key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
-                            value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
+                        _, _, num_heads, head_size = kv_cache[0].shape
+                        
+                        key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
+                        value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
 
-                            current_slot_mapping = slot_mapping[start_pos:end_pos]
-
-                            get_disagg_group().kv_cache_send(
-                                input_hash,
-                                key_cache[current_slot_mapping])
-                            get_disagg_group().kv_cache_send(
-                                input_hash,
-                                value_cache[current_slot_mapping])
-
+                        current_slot_mapping = slot_mapping[start_pos:end_pos]
 
                         get_disagg_group().kv_cache_send(
-                            input_hash, 
-                            hidden_or_intermediate_states[start_pos:end_pos])
-                        get_disagg_group().kv_cache_send_finish()
+                            input_hash,
+                            key_cache[current_slot_mapping])
+                        get_disagg_group().kv_cache_send(
+                            input_hash,
+                            value_cache[current_slot_mapping])
+
+
+                    get_disagg_group().kv_cache_send(
+                        input_hash, 
+                        hidden_or_intermediate_states[start_pos:end_pos])
+                    get_disagg_group().kv_cache_send_finish()
+
+                logger.error("\033[92mKV send DONE for rank %d\033[0m", torch.distributed.get_rank())
                 
         else:
             
@@ -1452,8 +1455,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             # FIXME(Kuntai): This impl assumes that all requests are prefill. 
 
             _input_tokens_list = model_input.input_tokens.tolist()
-            query_lens = model_input.query_lens
             seq_lens = model_input.seq_lens
+            query_lens = model_input.query_lens
+            seq_lens = get_tp_group().broadcast_object(seq_lens)
+            query_lens = get_tp_group().broadcast_object(query_lens)
             slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
             
             hidden_or_intermediate_states_for_one_req = []
@@ -1463,59 +1468,60 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                          str(query_lens),
                          str(seq_lens),
                          torch.distributed.get_rank())
-            if query_lens is not None:
-                for idx, qlen in enumerate(query_lens):
+            for idx, qlen in enumerate(query_lens):
 
-                    start_pos = sum(query_lens[:idx])
-                    end_pos = start_pos + qlen
-                    input_hash = hash(tuple(_input_tokens_list[start_pos:end_pos]))
-                    num_tokens = qlen
+                start_pos = sum(query_lens[:idx])
+                end_pos = start_pos + qlen
+                input_hash = hash(tuple(_input_tokens_list[start_pos:end_pos]))
+                num_tokens = qlen
+                
+                # notify the prefill instance to start sending KVs associated with input_hash 
+                get_disagg_group().kv_cache_recv_start(input_hash)
+
+                # receive KV cache from disaggregated prefill instance
+                for i in range(model_executable.model.start_layer,
+                            model_executable.model.end_layer):
                     
-                    # notify the prefill instance to start sending KVs associated with input_hash 
-                    get_disagg_group().kv_cache_recv_start(input_hash)
-
-                    # receive KV cache from disaggregated prefill instance
-                    for i in range(model_executable.model.start_layer,
-                                model_executable.model.end_layer):
-                        
-                        # get kv cache
-                        kv_cache = kv_caches[i - model_executable.model.start_layer]
-                        # get corresponding layer
-                        layer = model_executable.model.layers[i]
-                        
-                        # get kv cache shape (after sliced by tp)
-                        _, _, num_heads, head_size = kv_cache[0].shape
-                        key = get_disagg_group().kv_cache_recv(
-                            torch.Size([num_tokens, num_heads, head_size]),
-                            kv_cache[0].dtype
-                        )
-                        value = get_disagg_group().kv_cache_recv(
-                            torch.Size([num_tokens, num_heads, head_size]),
-                            kv_cache[0].dtype
-                        )
-                        
-                        key_cache, value_cache = kv_cache[0], kv_cache[1]
-                        ops.reshape_and_cache_flash(
-                            key,
-                            value,
-                            key_cache,
-                            value_cache,
-                            slot_mapping[start_pos:end_pos],
-                            layer.self_attn.attn.kv_cache_dtype,
-                            layer.self_attn.attn._k_scale,
-                            layer.self_attn.attn._v_scale,
-                        )
-
-
-                    hidden_or_intermediate_states_for_one_req.append(
-                        get_disagg_group().kv_cache_recv(
-                            torch.Size([num_tokens, model_executable.config.hidden_size]),
-                            kv_cache[0].dtype
-                        )
+                    # get kv cache
+                    kv_cache = kv_caches[i - model_executable.model.start_layer]
+                    # get corresponding layer
+                    layer = model_executable.model.layers[i]
+                    
+                    # get kv cache shape (after sliced by tp)
+                    _, _, num_heads, head_size = kv_cache[0].shape
+                    key = get_disagg_group().kv_cache_recv(
+                        torch.Size([num_tokens, num_heads, head_size]),
+                        kv_cache[0].dtype
+                    )
+                    value = get_disagg_group().kv_cache_recv(
+                        torch.Size([num_tokens, num_heads, head_size]),
+                        kv_cache[0].dtype
+                    )
+                    
+                    key_cache, value_cache = kv_cache[0], kv_cache[1]
+                    ops.reshape_and_cache_flash(
+                        key,
+                        value,
+                        key_cache,
+                        value_cache,
+                        slot_mapping[start_pos:end_pos],
+                        layer.self_attn.attn.kv_cache_dtype,
+                        layer.self_attn.attn._k_scale,
+                        layer.self_attn.attn._v_scale,
                     )
 
-                # concatenate hidden states from different requests
-                hidden_or_intermediate_states = torch.cat(hidden_or_intermediate_states_for_one_req, dim=0)
+
+                hidden_or_intermediate_states_for_one_req.append(
+                    get_disagg_group().kv_cache_recv(
+                        torch.Size([num_tokens, model_executable.config.hidden_size]),
+                        kv_cache[0].dtype
+                    )
+                )
+
+            # concatenate hidden states from different requests
+            hidden_or_intermediate_states = torch.cat(hidden_or_intermediate_states_for_one_req, dim=0)
+
+            logger.error("\033[92mKV receive DONE for rank %d\033[0m", torch.distributed.get_rank())
 
                 
 
