@@ -19,27 +19,30 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(model=args.model,
-              speculative_model=args.speculative_model,
-              num_speculative_tokens=args.num_speculative_tokens,
-              tokenizer=args.tokenizer,
-              quantization=args.quantization,
-              quantized_weights_path=args.quantized_weights_path,
-              tensor_parallel_size=args.tensor_parallel_size,
-              trust_remote_code=args.trust_remote_code,
-              dtype=args.dtype,
-              enforce_eager=args.enforce_eager,
-              kv_cache_dtype=args.kv_cache_dtype,
-              quantization_param_path=args.quantization_param_path,
-              device=args.device,
-              ray_workers_use_nsight=args.ray_workers_use_nsight,
-              worker_use_ray=args.worker_use_ray,
-              use_v2_block_manager=args.use_v2_block_manager,
-              enable_chunked_prefill=args.enable_chunked_prefill,
-              download_dir=args.download_dir,
-              block_size=args.block_size,
-              disable_custom_all_reduce=args.disable_custom_all_reduce,
-              gpu_memory_utilization=args.gpu_memory_utilization)
+    llm = LLM(
+        model=args.model,
+        speculative_model=args.speculative_model,
+        num_speculative_tokens=args.num_speculative_tokens,
+        tokenizer=args.tokenizer,
+        quantization=args.quantization,
+        quantized_weights_path=args.quantized_weights_path,
+        tensor_parallel_size=args.tensor_parallel_size,
+        trust_remote_code=args.trust_remote_code,
+        dtype=args.dtype,
+        enforce_eager=args.enforce_eager,
+        kv_cache_dtype=args.kv_cache_dtype,
+        quantization_param_path=args.quantization_param_path,
+        device=args.device,
+        ray_workers_use_nsight=args.ray_workers_use_nsight,
+        worker_use_ray=args.worker_use_ray,
+        use_v2_block_manager=args.use_v2_block_manager,
+        enable_chunked_prefill=args.enable_chunked_prefill,
+        download_dir=args.download_dir,
+        block_size=args.block_size,
+        disable_custom_all_reduce=args.disable_custom_all_reduce,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        distributed_executor_backend=args.distributed_executor_backend,
+    )
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -237,5 +240,13 @@ if __name__ == '__main__':
                         help='the fraction of GPU memory to be used for '
                         'the model executor, which can range from 0 to 1.'
                         'If unspecified, will use the default value of 0.9.')
+    parser.add_argument(
+        '--distributed-executor-backend',
+        choices=['ray', 'mp', 'torchrun'],
+        default=None,
+        help='Backend to use for distributed serving. When more than 1 GPU '
+        'is used, on CUDA this will be automatically set to "ray" if '
+        'installed or "mp" (multiprocessing) otherwise. On ROCm, this is '
+        'instead set to torchrun by default.')
     args = parser.parse_args()
     main(args)

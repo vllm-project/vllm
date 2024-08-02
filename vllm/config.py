@@ -599,7 +599,7 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size > 1:
             if is_hip():
                 logger.info("Using torchrun for multi-GPU on "
-                            "ROCM platform. Use --worker-use-ray or "
+                            "ROCm platform. Use --worker-use-ray or "
                             "--distributed-executor-backend={ray, mp} to "
                             "override")
                 if not os.environ.get("RANK"):
