@@ -147,7 +147,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
         else:
             return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
+                                     media_type="text/event-stream")
 
     # handle non-streaming requests
     else:
@@ -271,8 +271,7 @@ async def build_server(
         chat_template=args.chat_template,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        tool_parser=args.tool_call_parser
-    )
+        tool_parser=args.tool_call_parser)
     openai_serving_completion = OpenAIServingCompletion(
         engine,
         model_config,

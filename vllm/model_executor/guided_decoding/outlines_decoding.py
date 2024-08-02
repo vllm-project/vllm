@@ -8,11 +8,12 @@ from typing import Tuple, Union
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest,
-                                              ChatCompletionNamedToolChoiceParam)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest, CompletionRequest,
+    ChatCompletionNamedToolChoiceParam)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
+
 
 class GuidedDecodingMode(Enum):
     JSON = "json"

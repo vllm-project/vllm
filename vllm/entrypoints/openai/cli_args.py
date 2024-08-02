@@ -138,20 +138,23 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--enable-api-tools",
                         action="store_true",
                         help="Enable OpenAI-like tools API "
-                             "(only function calls are currently supported)")
+                        "(only function calls are currently supported)")
 
-    parser.add_argument("--enable-auto-tool-choice",
-                        action="store_true",
-                        help='Enable auto tool choice for models that support it. Requires --tool-call-parser'
-                        )
+    parser.add_argument(
+        "--enable-auto-tool-choice",
+        action="store_true",
+        help=
+        'Enable auto tool choice for models that support it. Requires --tool-call-parser'
+    )
 
-    parser.add_argument("--tool-call-parser",
-                        type=str,
-                        choices=['mistral', 'hermes'],
-                        help='Select the tool call parser depending on the model that you\'re using. '
-                             'This is used to parse the model-generated tool call into OpenAI API format. '
-                             'Required for --enable-auto-tool-choice. Options: "mistral", "hermes"'
-                        )
+    parser.add_argument(
+        "--tool-call-parser",
+        type=str,
+        choices=['mistral', 'hermes'],
+        help=
+        'Select the tool call parser depending on the model that you\'re using. '
+        'This is used to parse the model-generated tool call into OpenAI API format. '
+        'Required for --enable-auto-tool-choice. Options: "mistral", "hermes"')
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

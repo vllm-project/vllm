@@ -33,7 +33,7 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
 
 
 ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
-CustomChatCompletionContentPartParam]
+                                       CustomChatCompletionContentPartParam]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -53,11 +53,11 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 
 
 ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
-CustomChatCompletionMessageParam]
+                                   CustomChatCompletionMessageParam]
 
 
 @final  # So that it should be compatible with Dict[str, str]
-class ConversationMessage(TypedDict):
+class ConversationMessage(TypedDict, total=False):
     role: str
     content: Optional[str]
     tool_call_id: Optional[str]
@@ -126,10 +126,10 @@ def _get_full_image_text_prompt(image_token_str: str, text_prompt: str) -> str:
 
 
 def _parse_chat_message_content_parts(
-        role: str,
-        parts: Iterable[ChatCompletionContentPartParam],
-        model_config: ModelConfig,
-        tokenizer: PreTrainedTokenizer,
+    role: str,
+    parts: Iterable[ChatCompletionContentPartParam],
+    model_config: ModelConfig,
+    tokenizer: PreTrainedTokenizer,
 ) -> ChatMessageParseResult:
     texts: List[str] = []
     mm_futures: List[Awaitable[MultiModalDataDict]] = []
@@ -178,15 +178,17 @@ def _parse_chat_message_content_parts(
 
 
 def parse_chat_message_content(
-        message: ChatCompletionMessageParam,
-        model_config: ModelConfig,
-        tokenizer: PreTrainedTokenizer,
+    message: ChatCompletionMessageParam,
+    model_config: ModelConfig,
+    tokenizer: PreTrainedTokenizer,
 ) -> ChatMessageParseResult:
     role = message["role"]
     content = message.get("content")
     tool_call_id = message.get('content')
     tool_calls = message.get('tool_calls')
-    name = message.get('name', '')  # no longer used by OpenAI, was formerly. used for tool calls by some models still
+    name = message.get(
+        'name', ''
+    )  # no longer used by OpenAI, was formerly. used for tool calls by some models still
 
     # empty case
     if content is None and tool_calls is None:
@@ -194,13 +196,22 @@ def parse_chat_message_content(
 
     # special case - assistant message where tool calls are provided.
     if role == 'assistant' and tool_calls is not None and len(tool_calls):
-        messages = [ConversationMessage(role=role, content=content, tool_calls=list(tool_calls))]
+        messages = [
+            ConversationMessage(role=role,
+                                content=content,
+                                tool_calls=list(tool_calls))
+        ]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
     # special case - tool call result message
     elif role == 'tool':
-        messages = [ConversationMessage(role=role, name=name, content=content, tool_call_id=tool_call_id)]
-        return ChatMessageParseResult(messages=messages,mm_futures=[])
+        messages = [
+            ConversationMessage(role=role,
+                                name=name,
+                                content=content,
+                                tool_call_id=tool_call_id)
+        ]
+        return ChatMessageParseResult(messages=messages, mm_futures=[])
 
     # other cases - normal assistant response, user message or system message
     elif isinstance(content, str):
