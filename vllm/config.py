@@ -1020,8 +1020,6 @@ class SpeculativeConfig:
             draft_model_config.model = "[ngram]"
             draft_parallel_config = target_parallel_config
         else:
-            ngram_prompt_lookup_max = 0
-            ngram_prompt_lookup_min = 0
             draft_model_config = ModelConfig(
                 model=speculative_model,
                 tokenizer=target_model_config.tokenizer,
@@ -1149,7 +1147,7 @@ class SpeculativeConfig:
         elif speculative_draft_tensor_parallel_size != 1:
             # TODO(wooyeon): allow tp values larger than 1
             raise ValueError(
-                f"{speculative_draft_tensor_parallel_size=} cannot be"
+                f"{speculative_draft_tensor_parallel_size=} cannot be "
                 f"other value than 1")
 
         draft_parallel_config = ParallelConfig(
