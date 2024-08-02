@@ -23,6 +23,7 @@ except ImportError:
     BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
@@ -785,6 +786,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "Using FP8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
+
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend="eager")
 
     def save_sharded_state(
         self,
