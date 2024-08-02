@@ -609,7 +609,8 @@ def reshape_list(x: List[int], pattern: List[int]) -> List[int]:
     return result
 
 
-def reshape_q(q: torch.tensor, pattern: List[int], tp_size: int) -> torch.tensor:
+def reshape_q(q: torch.tensor, pattern: List[int],
+              tp_size: int) -> torch.tensor:
     # [tp_size,num_seqs,head_size]==>[tp_size,len2,head_size]
     size = q.size()
     size_all = list(size)
@@ -628,11 +629,11 @@ def filter_tensor(
         out_max_logits: torch.tensor,
         pattern: List[int], length: int,
         tp_size: int) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-    size_output=list(output.size())
-    size_exp_sums=list(out_exp_sums.size())
-    size_output[1]=length
-    size_exp_sums[1]=length
-    size_max_logits=size_exp_sums
+    size_output = list(output.size())
+    size_exp_sums = list(out_exp_sums.size())
+    size_output[1] = length
+    size_exp_sums[1] = length
+    size_max_logits = size_exp_sums
     result = torch.empty(size_output,
                          dtype=output.dtype,
                          device=output.device)

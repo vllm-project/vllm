@@ -60,8 +60,8 @@ class PagedAttention:
             num_blocks = kv_cache.shape[2]
             kv_cache_group = kv_cache.split(1, 1)
             key_cache = kv_cache_group[0]
-            key_cache = key_cache.view(tp_size, num_blocks, num_kv_heads, head_size // x,
-                                       -1, x)
+            key_cache = key_cache.view(tp_size, num_blocks, num_kv_heads,
+                                       head_size // x, -1, x)
             value_cache = kv_cache_group[1]
             value_cache = value_cache.view(
                 tp_size, num_blocks, num_kv_heads, head_size, -1)
@@ -71,8 +71,8 @@ class PagedAttention:
             num_blocks = kv_cache.shape[1]
 
             key_cache = kv_cache[0]
-            key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
-                                       -1, x)
+            key_cache = key_cache.view(num_blocks, num_kv_heads,
+                                       head_size // x, -1, x)
             value_cache = kv_cache[1]
             value_cache = value_cache.view(
                 num_blocks, num_kv_heads, head_size, -1)
@@ -104,11 +104,14 @@ class PagedAttention:
         exp_sum: torch.Tensor,
         max_logits: torch.Tensor,
     ) -> torch.Tensor:
-        num_seqs=tmp_out.size(0)
-        num_heads=tmp_out.size(1)
-        head_size=tmp_out.size(3)
-        output = torch.empty([num_seqs,num_heads,head_size],dtype=tmp_out.dtype,device=tmp_out.device)
-        ops.sequence_block_reducer(output, exp_sum, max_logits, tmp_out)
+        num_seqs = tmp_out.size(0)
+        num_heads = tmp_out.size(1)
+        head_size = tmp_out.size(3)
+        size = (num_seqs, num_heads, head_size)
+        output = torch.empty(size, dtype=tmp_out.dtype,
+                             device=tmp_out.device)
+        ops.sequence_block_reducer(output, exp_sum,
+                                   max_logits, tmp_out)
         return output
 
     @staticmethod
@@ -239,7 +242,8 @@ class PagedAttention:
         blocksparse_head_sliding_step: int = 0,
     ) -> Tuple[torch.tensor, torch.Tensor, torch.Tensor]:
         if not is_remote:
-            if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
+            use_sparse = blocksparse_vert_stride > 1
+            if blocksparse_vert_stride is not None and use_sparse:
                 # use blocksparse paged attention
                 block_size = value_cache.size(-1)
                 assert (blocksparse_block_size > 0 and
@@ -256,7 +260,8 @@ class PagedAttention:
             # sequences or heads is large, we use V1 since there is enough work
             # to parallelize.
             # TODO(woosuk): Tune this heuristic.
-            # For context len > 8192, use V2 kernel to avoid shared memory shortage.
+            # For context len > 8192, use V2 kernel to avoid shared memory
+            # shortage.
             output = torch.empty_like(query)
             out_exp_sums = torch.empty(
                 size=(num_seqs, num_heads),
@@ -310,9 +315,9 @@ class PagedAttention:
 
             return output, out_exp_sums, out_max_logits
         else:
-            #[tp_size, num_blocks, num_kv_heads, head_size, -1]
+            # [tp_size, num_blocks, num_kv_heads, head_size, -1]
             block_size = value_cache.shape[4]
-            tp_size,num_seqs, num_heads, head_size = query.shape
+            tp_size, num_seqs, num_heads, head_size = query.shape
             max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
                                   _PARTITION_SIZE)
             # NOTE(woosuk): We use a simple heuristic to decide whether to use
@@ -321,15 +326,16 @@ class PagedAttention:
             # sequences or heads is large, we use V1 since there is enough work
             # to parallelize.
             # TODO(woosuk): Tune this heuristic.
-            # For context len > 8192, use V2 kernel to avoid shared memory shortage.
+            # For context len > 8192, use V2 kernel to avoid shared memory
+            # shortage.
             output = torch.empty_like(query)
             out_exp_sums = torch.empty(
-                size=(tp_size,num_seqs, num_heads),
+                size=(tp_size, num_seqs, num_heads),
                 dtype=torch.float32,
                 device=output.device,
             )
             out_max_logits = torch.empty(
-                size=(tp_size,num_seqs, num_heads),
+                size=(tp_size, num_seqs, num_heads),
                 dtype=torch.float32,
                 device=output.device,
             )
@@ -337,12 +343,14 @@ class PagedAttention:
             # Run PagedAttention V3.
             assert _PARTITION_SIZE % block_size == 0
             tmp_output = torch.empty(
-                size=(tp_size,num_seqs, num_heads, max_num_partitions, head_size),
+                size=(tp_size, num_seqs, num_heads,
+                      max_num_partitions, head_size),
                 dtype=output.dtype,
                 device=output.device,
             )
             exp_sums = torch.empty(
-                size=(tp_size,num_seqs, num_heads, max_num_partitions),
+                size=(tp_size, num_seqs, num_heads,
+                      max_num_partitions),
                 dtype=torch.float32,
                 device=output.device,
             )

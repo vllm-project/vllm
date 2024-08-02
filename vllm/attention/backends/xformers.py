@@ -345,7 +345,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             tp_size = query.size(0)
             num_old = query.size(1)
             if remote_metadata := attn_metadata.remote_metadata:
-                q_dist = remote_metadata.q_remote_distirbution[sp_rank][:]
+                q_dist = remote_metadata.q_remote_distirbution[sp_rank]
                 query_remote = reshape_q(query, q_dist)
                 output = torch.empty_like(query_remote)
                 query = query_remote.view(
@@ -387,9 +387,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:], exp_sums[:], max_log[:] = result
 
                 # Reshape the output tensor.
-                temp = output.view(
+                tmp = output.view(
                     tp_size, -1, self.num_heads * self.head_size)
-                return filter_tensor(temp, exp_sums, max_log, q_dist, num_old, tp_size)
+                return filter_tensor(tmp, exp_sums, max_log,
+                                     q_dist, num_old, tp_size)
         output = torch.empty_like(query)
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)

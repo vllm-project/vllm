@@ -74,7 +74,8 @@ class CacheEngine:
         else:
             tp_size = None
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size, tp_size)
+            num_blocks, self.block_size,
+            self.num_kv_heads, self.head_size, tp_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
