@@ -52,16 +52,31 @@ class PagedAttention:
         kv_cache: torch.Tensor,
         num_kv_heads: int,
         head_size: int,
+        tensor_parallel: Optional[bool],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = 16 // kv_cache.element_size()
-        num_blocks = kv_cache.shape[1]
+        if tensor_parallel is not None and tensor_parallel:
+            x = 16 // kv_cache.element_size()
+            tp_size = kv_cache.shape[0]
+            num_blocks = kv_cache.shape[2]
+            kv_cache_group = kv_cache.split(1, 1)
+            key_cache = kv_cache_group[0]
+            key_cache = key_cache.view(tp_size, num_blocks, num_kv_heads, head_size // x,
+                                       -1, x)
+            value_cache = kv_cache_group[1]
+            value_cache = value_cache.view(
+                tp_size, num_blocks, num_kv_heads, head_size, -1)
+            return key_cache, value_cache
+        else:
+            x = 16 // kv_cache.element_size()
+            num_blocks = kv_cache.shape[1]
 
-        key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
-                                   -1, x)
-        value_cache = kv_cache[1]
-        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
-        return key_cache, value_cache
+            key_cache = kv_cache[0]
+            key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+                                       -1, x)
+            value_cache = kv_cache[1]
+            value_cache = value_cache.view(
+                num_blocks, num_kv_heads, head_size, -1)
+            return key_cache, value_cache
 
     @staticmethod
     def write_to_paged_cache(
@@ -88,13 +103,12 @@ class PagedAttention:
         tmp_out: torch.Tensor,
         exp_sum: torch.Tensor,
         max_logits: torch.Tensor,
-        query: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
     ) -> torch.Tensor:
-        output = torch.empty_like(query)
-        ops.sequence_block_reducer(output, exp_sum, max_logits, tmp_out, query,
-                                   seq_lens, max_seq_len)
+        num_seqs=tmp_out.size(0)
+        num_heads=tmp_out.size(1)
+        head_size=tmp_out.size(3)
+        output = torch.empty([num_seqs,num_heads,head_size],dtype=tmp_out.dtype,device=tmp_out.device)
+        ops.sequence_block_reducer(output, exp_sum, max_logits, tmp_out)
         return output
 
     @staticmethod
@@ -203,6 +217,7 @@ class PagedAttention:
 
     # modify
     # return output output_exp_sum output_max_sums
+    # is_remote: call the remote pagedattention kernel
     @staticmethod
     def forward_decode_v2(
         query: torch.Tensor,
@@ -216,82 +231,149 @@ class PagedAttention:
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
         kv_scale: float,
+        is_remote: bool = False,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> Tuple[torch.tensor, torch.Tensor, torch.Tensor]:
-        if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
-            # use blocksparse paged attention
-            block_size = value_cache.size(-1)
-            assert (blocksparse_block_size > 0 and
-                    blocksparse_block_size % block_size == 0), \
-                (f"{blocksparse_block_size=} needs to be a multiple of"
-                 f"{block_size=} used in block_tables.")
-        block_size = value_cache.shape[3]
-        num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
-                              _PARTITION_SIZE)
-        # NOTE(woosuk): We use a simple heuristic to decide whether to use
-        # PagedAttention V1 or V2. If the number of partitions is 1, we use
-        # V1 to avoid the overhead of reduction. Also, if the number of
-        # sequences or heads is large, we use V1 since there is enough work
-        # to parallelize.
-        # TODO(woosuk): Tune this heuristic.
-        # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        output = torch.empty_like(query)
-        out_exp_sums = torch.empty(
-            size=(num_seqs, num_heads),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        out_max_logits = torch.empty(
-            size=(num_seqs, num_heads),
-            dtype=torch.float32,
-            device=output.device,
-        )
+        if not is_remote:
+            if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
+                # use blocksparse paged attention
+                block_size = value_cache.size(-1)
+                assert (blocksparse_block_size > 0 and
+                        blocksparse_block_size % block_size == 0), \
+                    (f"{blocksparse_block_size=} needs to be a multiple of"
+                     f"{block_size=} used in block_tables.")
+            block_size = value_cache.shape[3]
+            num_seqs, num_heads, head_size = query.shape
+            max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
+                                  _PARTITION_SIZE)
+            # NOTE(woosuk): We use a simple heuristic to decide whether to use
+            # PagedAttention V1 or V2. If the number of partitions is 1, we use
+            # V1 to avoid the overhead of reduction. Also, if the number of
+            # sequences or heads is large, we use V1 since there is enough work
+            # to parallelize.
+            # TODO(woosuk): Tune this heuristic.
+            # For context len > 8192, use V2 kernel to avoid shared memory shortage.
+            output = torch.empty_like(query)
+            out_exp_sums = torch.empty(
+                size=(num_seqs, num_heads),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            out_max_logits = torch.empty(
+                size=(num_seqs, num_heads),
+                dtype=torch.float32,
+                device=output.device,
+            )
 
-        # Run PagedAttention V3.
-        assert _PARTITION_SIZE % block_size == 0
-        tmp_output = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions, head_size),
-            dtype=output.dtype,
-            device=output.device,
-        )
-        exp_sums = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        max_logits = torch.empty_like(exp_sums)
-        ops.paged_attention_v3(
-            output,
-            out_exp_sums,
-            out_max_logits,
-            exp_sums,
-            max_logits,
-            tmp_output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            block_tables,
-            seq_lens,
-            block_size,
-            max_seq_len,
-            alibi_slopes,
-            kv_cache_dtype,
-            kv_scale,
-            tp_rank,
-            blocksparse_local_blocks,
-            blocksparse_vert_stride,
-            blocksparse_block_size,
-            blocksparse_head_sliding_step,
-        )
+            # Run PagedAttention V3.
+            assert _PARTITION_SIZE % block_size == 0
+            tmp_output = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
+            exp_sums = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            max_logits = torch.empty_like(exp_sums)
+            ops.paged_attention_v3(
+                output,
+                out_exp_sums,
+                out_max_logits,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                seq_lens,
+                block_size,
+                max_seq_len,
+                alibi_slopes,
+                kv_cache_dtype,
+                kv_scale,
+                tp_rank,
+                blocksparse_local_blocks,
+                blocksparse_vert_stride,
+                blocksparse_block_size,
+                blocksparse_head_sliding_step,
+            )
 
-        return output, out_exp_sums, out_max_logits
+            return output, out_exp_sums, out_max_logits
+        else:
+            #[tp_size, num_blocks, num_kv_heads, head_size, -1]
+            block_size = value_cache.shape[4]
+            tp_size,num_seqs, num_heads, head_size = query.shape
+            max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
+                                  _PARTITION_SIZE)
+            # NOTE(woosuk): We use a simple heuristic to decide whether to use
+            # PagedAttention V1 or V2. If the number of partitions is 1, we use
+            # V1 to avoid the overhead of reduction. Also, if the number of
+            # sequences or heads is large, we use V1 since there is enough work
+            # to parallelize.
+            # TODO(woosuk): Tune this heuristic.
+            # For context len > 8192, use V2 kernel to avoid shared memory shortage.
+            output = torch.empty_like(query)
+            out_exp_sums = torch.empty(
+                size=(tp_size,num_seqs, num_heads),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            out_max_logits = torch.empty(
+                size=(tp_size,num_seqs, num_heads),
+                dtype=torch.float32,
+                device=output.device,
+            )
+
+            # Run PagedAttention V3.
+            assert _PARTITION_SIZE % block_size == 0
+            tmp_output = torch.empty(
+                size=(tp_size,num_seqs, num_heads, max_num_partitions, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
+            exp_sums = torch.empty(
+                size=(tp_size,num_seqs, num_heads, max_num_partitions),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            max_logits = torch.empty_like(exp_sums)
+            ops.paged_attention_remote(
+                output,
+                out_exp_sums,
+                out_max_logits,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                seq_lens,
+                block_size,
+                max_seq_len,
+                alibi_slopes,
+                kv_cache_dtype,
+                kv_scale,
+                tp_rank,
+                blocksparse_local_blocks,
+                blocksparse_vert_stride,
+                blocksparse_block_size,
+                blocksparse_head_sliding_step,
+            )
+
+            return output, out_exp_sums, out_max_logits
 
     @staticmethod
     def forward_prefix(

@@ -72,7 +72,7 @@ class CPUCacheEngine:
     ) -> List[torch.Tensor]:
         """Allocates KV cache on CPU."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_heads, self.head_size)
+            num_blocks, self.block_size, self.num_heads, self.head_size,)
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
             kv_cache.append(
@@ -134,6 +134,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         vision_language_config: Optional[VisionLanguageConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
+        is_sp_worker: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -147,6 +148,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
+        self.is_sp_worker = is_sp_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 

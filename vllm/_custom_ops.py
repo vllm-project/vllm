@@ -143,7 +143,7 @@ def paged_attention_v2(
         blocksparse_block_size, blocksparse_head_sliding_step)
 
 
-def paged_attention_v3(
+def paged_attention_remote(
     out: torch.Tensor,
     out_exp_sum: torch.Tensor,
     out_max_logits: torch.Tensor,
@@ -168,7 +168,7 @@ def paged_attention_v3(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    torch.ops._C.paged_attention_v3(
+    torch.ops._C.paged_attention_remote(
         out, out_exp_sum, out_max_logits, exp_sum, max_logits, tmp_out, query,
         key_cache, value_cache, num_kv_heads, scale, block_tables, seq_lens,
         block_size, max_seq_len, alibi_slopes, kv_cache_dtype, kv_scale,
@@ -181,12 +181,9 @@ def sequence_block_reducer(
     exp_sum: torch.Tensor,
     max_logits: torch.Tensor,
     tmp_out: torch.Tensor,
-    query: torch.Tensor,
-    seq_lens: torch.Tensor,
-    max_seq_len: int,
+
 ) -> None:
-    torch.ops._C.sequence_block_reducer(out, exp_sum, max_logits, tmp_out,
-                                        query, seq_lens, max_seq_len)
+    torch.ops._C.sequence_block_reducer(out, exp_sum, max_logits, tmp_out)
 
 
 # pos encoding ops

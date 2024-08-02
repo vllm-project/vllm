@@ -26,6 +26,7 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
+        in_sp_worker: bool = False,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
@@ -39,6 +40,7 @@ class CacheEngine:
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
+        self.in_sp_worker = in_sp_worker
 
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
@@ -67,8 +69,12 @@ class CacheEngine:
         device: str,
     ) -> List[torch.Tensor]:
         """Allocates KV cache on the specified device."""
+        if self.in_sp_worker:
+            tp_size = self.parallel_config.tensor_parallel_size
+        else:
+            tp_size = None
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+            num_blocks, self.block_size, self.num_kv_heads, self.head_size, tp_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):

@@ -35,6 +35,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        tp_size: Optional[int],
     ) -> Tuple[int, ...]:
         raise NotImplementedError
 

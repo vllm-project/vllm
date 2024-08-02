@@ -34,6 +34,7 @@ class IpexAttnBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        tp_size: Optional[int],
     ) -> Tuple[int, ...]:
         return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                  num_kv_heads, head_size)

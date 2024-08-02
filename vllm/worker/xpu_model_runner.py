@@ -83,6 +83,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         vision_language_config: Optional[VisionLanguageConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
+        is_sp_worker: bool = False,
         *args,
         **kwargs,
     ):
@@ -94,6 +95,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.cache_config = cache_config
         self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
+        self.is_sp_worker = is_sp_worker
 
         self.sliding_window = model_config.get_sliding_window()
         self.device_config = device_config

@@ -609,37 +609,49 @@ def reshape_list(x: List[int], pattern: List[int]) -> List[int]:
     return result
 
 
-def reshape_q(q: torch.tensor, pattern: List[int]) -> torch.tensor:
-    result = torch.empty([len(pattern), len(q[0])],
+def reshape_q(q: torch.tensor, pattern: List[int], tp_size: int) -> torch.tensor:
+    # [tp_size,num_seqs,head_size]==>[tp_size,len2,head_size]
+    size = q.size()
+    size_all = list(size)
+    size_all[1] = len(pattern)
+    result = torch.empty(size_all,
                          dtype=q.dtype,
                          device=q.device)
-    for i in range(len(pattern)):
-        result[i] = q[pattern[i]]
+    for tp_rank in range(tp_size):
+        for index in range(len(pattern)):
+            result[tp_rank][index] = q[tp_rank][pattern[index]]
     return result
 
 
 def filter_tensor(
         output: torch.tensor, out_exp_sums: torch.tensor,
-        out_max_logits: torch.tensor, pattern: List[int],
-        length: int) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-    result = torch.empty(length * output[0],
+        out_max_logits: torch.tensor,
+        pattern: List[int], length: int,
+        tp_size: int) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
+    size_output=list(output.size())
+    size_exp_sums=list(out_exp_sums.size())
+    size_output[1]=length
+    size_exp_sums[1]=length
+    size_max_logits=size_exp_sums
+    result = torch.empty(size_output,
                          dtype=output.dtype,
                          device=output.device)
-    result_exp_sums = torch.empty(length * out_exp_sums[0],
+    result_exp_sums = torch.empty(size_exp_sums,
                                   dtype=out_exp_sums.dtype,
                                   device=out_exp_sums.device)
-    result_max_logits = torch.empty(length * out_max_logits[0],
+    result_max_logits = torch.empty(size_max_logits,
                                     dtype=out_max_logits.dtype,
                                     device=out_max_logits.device)
-    index = 0
-    old_i = -1
-    for i in pattern:
-        if old_i != i:
-            result[index] = output[i]
-            result_exp_sums = out_exp_sums[i]
-            result_max_logits = out_max_logits[i]
-            index += 1
-            old_i = i
+    for tp_rank in range(tp_size):
+        index = 0
+        old_idx = -1
+        for idx in pattern:
+            if old_idx != idx:
+                result[tp_rank][index] = output[tp_rank][idx]
+                result_exp_sums[tp_rank][index] = out_exp_sums[tp_rank][idx]
+                result_max_logits[tp_rank][index] = out_max_logits[tp_rank][idx]
+                index += 1
+                old_idx = idx
     return result, result_exp_sums, result_max_logits
 
 
