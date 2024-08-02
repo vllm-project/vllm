@@ -317,7 +317,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
     # the user to specify a max sequence length greater than
-    # the model's max length.
+    # the max length derived from the model's config.json.
     # To enable this, set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1.
     "VLLM_ALLOW_LONG_MAX_MODEL_LEN":
     lambda:
