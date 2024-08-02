@@ -341,10 +341,12 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         time.sleep(5)
 
 
-def _error_on_skip(msg: str):
-    raise RuntimeError(
-        "cannot use pytest.skip inside fork_new_process_for_each_test."
-        " Please directly return from the test function.")
+def _patched_skip(msg: str):
+    warning = (
+        "Warning: cannot use pytest.skip inside fork_new_process_for_each_test."
+        " It is automatically disabled. Original message is:\n")
+    msg = warning + msg
+    print(msg)
 
 
 def fork_new_process_for_each_test(f):
@@ -356,7 +358,7 @@ def fork_new_process_for_each_test(f):
         os.setpgrp()
 
         old_skip = pytest.skip
-        pytest.skip = _error_on_skip
+        pytest.skip = _patched_skip
         pid = os.fork()
         if pid == 0:
             try:
