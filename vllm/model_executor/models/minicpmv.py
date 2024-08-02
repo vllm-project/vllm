@@ -759,7 +759,7 @@ class MiniCPMV2(MiniCPMVBaseModel):
 
 class MiniCPMV2_5(MiniCPMVBaseModel):
 
-    def _init__(
+    def __init__(
         self,
         config: PretrainedConfig,
         multimodal_config: MultiModalConfig,
