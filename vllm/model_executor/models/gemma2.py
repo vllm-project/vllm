@@ -23,6 +23,7 @@ from transformers import Gemma2Config
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -40,6 +41,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
+
+logger = init_logger(__name__)
 
 
 class Gemma2MLP(nn.Module):
@@ -87,7 +90,8 @@ class Gemma2Attention(nn.Module):
                  max_position_embeddings: int,
                  rope_theta: float,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 attn_logits_soft_cap: Optional[float] = None) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
@@ -147,7 +151,8 @@ class Gemma2Attention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              logits_soft_cap=attn_logits_soft_cap)
 
     def forward(
         self,
@@ -186,6 +191,7 @@ class Gemma2DecoderLayer(nn.Module):
             rope_theta=config.rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
+            attn_logits_soft_cap=config.attn_logit_softcapping,
         )
         self.hidden_size = config.hidden_size
         self.mlp = Gemma2MLP(
@@ -390,6 +396,6 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
 
         unloaded_params = params_dict.keys() - loaded_params
         if unloaded_params:
-            raise RuntimeError(
-                "Some weights are not initialized from checkpoints: "
-                f"{unloaded_params}")
+            logger.warning(
+                "Some weights are not initialized from checkpoints: %s",
+                unloaded_params)
