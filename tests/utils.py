@@ -336,3 +336,33 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
                              f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
 
         time.sleep(5)
+
+
+import functools
+import psutil
+
+
+def fork_new_process_for_each_test(f):
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        import os
+        pid = os.fork()
+        if pid == 0:
+            try:
+                f(*args, **kwargs)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+            else:
+                os._exit(0)
+        else:
+            _pid, _exitcode = os.waitpid(pid, 0)
+            process = psutil.Process(pid)
+            # kill all child processes
+            for child in process.children(recursive=True):
+                child.kill()
+            assert _exitcode == 0, f"function {f} failed when called with args {args} and kwargs {kwargs}"
+
+    return wrapper
