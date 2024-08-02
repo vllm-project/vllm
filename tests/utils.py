@@ -7,7 +7,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import openai
 import pytest
@@ -341,12 +341,15 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         time.sleep(5)
 
 
-def _patched_skip(msg: str):
+def _patched_skip(reason: str = "",
+                  *,
+                  allow_module_level: bool = False,
+                  msg: Optional[str] = None):
     warning = (
         "Warning: cannot use pytest.skip inside fork_new_process_for_each_test."
-        " It is automatically disabled. Original message is:\n")
-    msg = warning + msg
-    print(msg)
+        " It is automatically disabled. Original skip reason is:\n")
+    reason = warning + reason
+    print(reason)
 
 
 def fork_new_process_for_each_test(f):
