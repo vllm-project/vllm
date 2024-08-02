@@ -1,5 +1,6 @@
 import functools
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -11,7 +12,6 @@ from typing import Any, Dict, List
 import openai
 import ray
 import requests
-import signal
 from transformers import AutoTokenizer
 
 from vllm.distributed import (ensure_model_parallel_initialized,
