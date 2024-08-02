@@ -234,11 +234,13 @@ class Resampler2(BaseResampler):
         norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
         adaptive: bool = False,
     ) -> None:
-        super().__init__(grid_size**2, embed_dim, num_heads, kv_dim, norm_layer)
-        
+        super().__init__(grid_size**2, embed_dim, num_heads, kv_dim,
+                         norm_layer)
+
         self.adaptive = adaptive
 
-        pos_embed_arr = get_2d_sincos_pos_embed(embed_dim, grid_size,
+        pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
+                                                grid_size,
                                                 version=(2, 0))
         self.pos_embed = nn.Parameter(
             torch.from_numpy(pos_embed_arr).float()).requires_grad_(False)
@@ -252,7 +254,8 @@ class Resampler2(BaseResampler):
         attn_mask: Optional[torch.Tensor] = None,
     ):
         if self.adaptive:
-            pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim, tgt_sizes,
+            pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
+                                                    tgt_sizes,
                                                     version=(2, 0))
             pos_embed = torch.from_numpy(pos_embed_arr).to(device=x.device,
                                                            dtype=x.dtype)
@@ -280,13 +283,13 @@ class Resampler2(BaseResampler):
 class Resampler2_5(BaseResampler):
 
     def __init__(
-        self,
-        num_queries: int,
-        embed_dim: int,
-        num_heads: int,
-        kv_dim: Optional[int] = None,
-        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-        max_size: Tuple[int, int] = (70, 70),
+            self,
+            num_queries: int,
+            embed_dim: int,
+            num_heads: int,
+            kv_dim: Optional[int] = None,
+            norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+            max_size: Tuple[int, int] = (70, 70),
     ) -> None:
         super().__init__(num_queries, embed_dim, num_heads, kv_dim, norm_layer)
 
