@@ -1,8 +1,10 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
+import warnings
 from math import inf
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -18,6 +20,13 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceOutput)
+from vllm.utils import async_numpy_to_tensor
+
+HAS_FLASHINFER = True
+try:
+    from flashinfer.sampling import top_k_top_p_sampling_from_probs
+except ImportError:
+    HAS_FLASHINFER = False
 
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
@@ -121,7 +130,7 @@ class Sampler(nn.Module):
         # Use in-place division to avoid creating a new tensor.
         logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
-        if do_top_p_top_k:
+        if do_top_p_top_k and not HAS_FLASHINFER:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
 
@@ -475,32 +484,69 @@ def _multinomial(
     seq_groups: Optional[List[SequenceGroupToSample]] = None,
 ) -> torch.Tensor:
     if num_samples > 1:
-        # This is equivalent to torch.repeat_interleaved (which also
-        # forces a GPU<->CPU sync).
-        # This allows us to do sampling with replacement by creating
-        # num_samples copies of each row in the tensor, and then
-        # batch sampling the resulting tensor.
-        probs = probs[:, None, :].expand(probs.shape[0], num_samples,
-                                         probs.shape[1]).contiguous().view(
-                                             -1, probs.shape[1])
-    q = torch.empty_like(probs)
+        probs = probs.repeat_interleave(num_samples, dim=0)
     if seq_groups is None:
+        q = torch.empty_like(probs)
         q.exponential_()
     else:
+        q_ = np.empty(probs.shape)
         sample_idx = 0
         for seq_group in seq_groups:
             seq_ids = seq_group.seq_ids
-            next_sample_idx = sample_idx + len(seq_ids) * num_samples
-            q[sample_idx:next_sample_idx].exponential_(
-                generator=seq_group.generator)
-            sample_idx = next_sample_idx
+            stride = len(seq_ids) * num_samples
+            assert seq_group.generator is not None
+            q_[sample_idx:sample_idx + stride] = \
+                seq_group.generator.exponential(size=(stride, q_.shape[1]))
+            sample_idx += stride
+        q = async_numpy_to_tensor(q_, probs.device)
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
+
+
+def _top_k_top_p_multinomial(
+        probs: torch.Tensor, top_ks: torch.Tensor, top_ps: torch.Tensor,
+        num_samples: int, seq_groups: Optional[List[SequenceGroupToSample]]):
+    max_top_k_round = 32
+    if num_samples > 1:
+        probs = probs.repeat_interleave(num_samples, dim=0)
+        top_ks = top_ks.repeat_interleave(num_samples)
+        top_ps = top_ps.repeat_interleave(num_samples)
+    batch_size = probs.shape[0]
+    if seq_groups is None:
+        uniform_samples = torch.rand((max_top_k_round, batch_size),
+                                     device=probs.device)
+    else:
+        uniform_samples_cpu = np.empty((max_top_k_round, batch_size))
+        sample_idx = 0
+        for seq_group in seq_groups:
+            seq_ids = seq_group.seq_ids
+            stride = len(seq_ids) * num_samples
+            assert seq_group.generator is not None
+            uniform_samples_cpu[:, sample_idx:sample_idx + stride] = \
+                seq_group.generator.random((max_top_k_round, stride))
+            sample_idx += stride
+        uniform_samples = async_numpy_to_tensor(uniform_samples_cpu,
+                                                probs.device)
+    batch_next_token_ids, success = top_k_top_p_sampling_from_probs(
+        probs,
+        uniform_samples,
+        top_ks,
+        top_ps,
+    )
+    if not success.all():
+        warnings.warn("Sampling failed, fallback to greedy sampling.",
+                      stacklevel=2)
+        probs = probs.masked_fill(torch.isnan(probs), 0.0)
+        argmax_ids = torch.argmax(probs, dim=-1)
+        batch_next_token_ids = torch.where(success, batch_next_token_ids,
+                                           argmax_ids)
+    return batch_next_token_ids.view(-1, num_samples)
 
 
 def _sample_with_torch(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    sampling_tensors: SamplingTensors,
     include_gpu_probs_tensor: bool,
     modify_greedy_probs: bool,
 ) -> Tuple[SampleResultType, Optional[torch.Tensor]]:
@@ -563,13 +609,23 @@ def _sample_with_torch(
                     sampling_params = seq_group.sampling_params
                     max_best_of_in_batch = max(max_best_of_in_batch,
                                                sampling_params.best_of)
-            seeded_args = {} if sampling_type == SamplingType.RANDOM else {
-                "seq_groups": seq_groups,
-            }
+            if HAS_FLASHINFER:
+                multinomial_samples[sampling_type] = _top_k_top_p_multinomial(
+                    probs[long_sample_indices],
+                    sampling_tensors.top_ks[long_sample_indices],
+                    sampling_tensors.top_ps[long_sample_indices],
+                    max_best_of_in_batch,
+                    seq_groups
+                    if sampling_type == SamplingType.RANDOM_SEED else None,
+                )
+            else:
+                seeded_args = {} if sampling_type == SamplingType.RANDOM else {
+                    "seq_groups": seq_groups,
+                }
 
-            multinomial_samples[sampling_type] = _multinomial(
-                probs[long_sample_indices], max_best_of_in_batch,
-                **seeded_args)
+                multinomial_samples[sampling_type] = _multinomial(
+                    probs[long_sample_indices], max_best_of_in_batch,
+                    **seeded_args)
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
@@ -692,9 +748,12 @@ def _sample_with_triton_kernel(
 
 
 def _sample(
-    probs: torch.Tensor, logprobs: torch.Tensor,
-    sampling_metadata: SamplingMetadata, sampling_tensors: SamplingTensors,
-    include_gpu_probs_tensor: bool, modify_greedy_probs: bool
+    probs: torch.Tensor,
+    logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    sampling_tensors: SamplingTensors,
+    include_gpu_probs_tensor: bool,
+    modify_greedy_probs: bool,
 ) -> Tuple[SampleResultType, Optional[torch.Tensor]]:
     """
     Args:
@@ -712,6 +771,7 @@ def _sample(
         probs,
         logprobs,
         sampling_metadata,
+        sampling_tensors,
         include_gpu_probs_tensor=include_gpu_probs_tensor,
         modify_greedy_probs=modify_greedy_probs,
     )

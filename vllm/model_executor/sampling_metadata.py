@@ -3,6 +3,7 @@ from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -38,7 +39,7 @@ class SequenceGroupToSample:
     # prefill is enabled.
     query_len: Optional[int]
     # A random number generator for sampling.
-    generator: Optional[torch.Generator]
+    generator: Optional[np.random.Generator]
     # True if the sequence group is in prefill stage. False if it is in a
     # decode stage.
     is_prompt: bool
@@ -211,7 +212,7 @@ def _prepare_seq_groups(
         seq_ids = list(seq_group_metadata.seq_data.keys())
         sampling_params = seq_group_metadata.sampling_params
         is_prompt = seq_group_metadata.is_prompt
-        generator: Optional[torch.Generator] = None
+        generator: Optional[np.random.Generator] = None
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
@@ -221,8 +222,7 @@ def _prepare_seq_groups(
 
         if seq_group_metadata.is_prompt:
             if sampling_params.seed is not None:
-                generator = torch.Generator(device=device).manual_seed(
-                    sampling_params.seed)
+                generator = np.random.default_rng(seed=sampling_params.seed)
                 if generators is not None:
                     generators[seq_group_metadata.request_id] = generator
 

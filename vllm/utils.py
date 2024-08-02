@@ -647,8 +647,8 @@ def make_tensor_with_pad(
     pad: T,
     dtype: torch.dtype,
     *,
+    device: Union[str, torch.device],
     max_len: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
@@ -660,11 +660,17 @@ def make_tensor_with_pad(
     np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
     padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
 
-    tensor = torch.from_numpy(padded_x).to(device)
-    if pin_memory:
-        tensor = tensor.pin_memory()
+    return async_numpy_to_tensor(padded_x, device)
 
-    return tensor
+
+def async_numpy_to_tensor(x: npt.NDArray, device: Union[str, torch.device]):
+    """
+    Make a tensor from a numpy array. Use pinned memory if possible.
+    """
+    t = torch.from_numpy(x)
+    if is_pin_memory_available():
+        t = t.pin_memory()
+    return t.to(device, non_blocking=True)
 
 
 def async_tensor_h2d(

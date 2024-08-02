@@ -625,7 +625,9 @@ def test_sampler_top_k_top_p(seed: int, device: str):
         return ([[prob.topk(1, dim=-1).indices.tolist(), [0]]
                  for prob in probs], None)
 
-    with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
+    # top-k and top-p is only calculated when flashinfer kernel is not available
+    with patch("vllm.model_executor.layers.sampler._sample", mock_sample), \
+         patch("vllm.model_executor.layers.sampler.HAS_FLASHINFER", False):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
     assert sample_probs is not None
