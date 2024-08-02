@@ -113,7 +113,8 @@ def test_eagle_e2e_greedy_correctness_cuda_graph(baseline_llm_generator,
                                                  test_llm_generator,
                                                  batch_size: int,
                                                  output_len: int):
-    """Verify greedy equality with different batch size."""
+    """Verify greedy equality with cuda graph enabled and different 
+    batch sizes."""
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,

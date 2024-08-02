@@ -239,20 +239,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     execute_model_req.finished_requests_ids))
             num_steps = execute_model_req.num_steps
 
-            if isinstance(execute_model_req.previous_hidden_states,
-                          torch.Tensor):
-                kwargs = {
-                    "previous_hidden_states":
-                    execute_model_req.previous_hidden_states
-                }
-            elif isinstance(execute_model_req.previous_hidden_states,
-                            HiddenStates):
-                kwargs = {
-                    "previous_hidden_states":
-                    execute_model_req.previous_hidden_states.hidden_states
-                }
-            else:
-                kwargs = {}
+            kwargs = extract_previous_hidden_states(execute_model_req)
 
             if self.do_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_tensor_dict()
@@ -274,13 +261,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 self.model_runner.
                 make_model_input_from_broadcasted_tensor_dict(broadcast_data))
 
-            if "previous_hidden_states" in broadcast_data:
-                kwargs = {
-                    "previous_hidden_states":
-                    broadcast_data["previous_hidden_states"]
-                }
-            else:
-                kwargs = {}
+            kwargs = extract_previous_hidden_states(broadcast_data)
 
         self.execute_worker(worker_input)
 
@@ -335,19 +316,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        if isinstance(execute_model_req.previous_hidden_states, torch.Tensor):
-            kwargs = {
-                "previous_hidden_states":
-                execute_model_req.previous_hidden_states
-            }
-        elif isinstance(execute_model_req.previous_hidden_states,
-                        HiddenStates):
-            kwargs = {
-                "previous_hidden_states":
-                execute_model_req.previous_hidden_states.hidden_states
-            }
-        else:
-            kwargs = {}
+        kwargs = extract_previous_hidden_states(execute_model_req)
 
         return self.model_runner.execute_model(
             model_input=model_input,
@@ -428,3 +397,20 @@ class WorkerWrapperBase:
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
+
+
+def extract_previous_hidden_states(
+        data: Union[ExecuteModelRequest, dict]) -> dict:
+    output = {}
+
+    if isinstance(data, dict):
+        if "previous_hidden_states" in data:
+            output["previous_hidden_states"] = data["previous_hidden_states"]
+    else:
+        if isinstance(data.previous_hidden_states, torch.Tensor):
+            output["previous_hidden_states"] = data.previous_hidden_states
+        elif isinstance(data.previous_hidden_states, HiddenStates):
+            output["previous_hidden_states"] = data.previous_hidden_states\
+                .hidden_states
+
+    return output

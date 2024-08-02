@@ -963,12 +963,15 @@ class HiddenStates:
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
-        # Adding dummy hidden_states to this to maintain same shape
-        self.last_non_bonus_token_hidden_states = torch.cat([
-            self.hidden_states,
-            hidden_states if last_non_bonus_token_hidden_states is None else
-            last_non_bonus_token_hidden_states
-        ])
+
+        if self.last_non_bonus_token_hidden_states is not None:
+            # Adding dummy hidden_states to this to maintain same shape
+            self.last_non_bonus_token_hidden_states = torch.cat([
+                self.last_non_bonus_token_hidden_states,
+                torch.zeros_like(hidden_states)
+                if last_non_bonus_token_hidden_states is None else
+                last_non_bonus_token_hidden_states
+            ])
 
     def prune(self,
               seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:

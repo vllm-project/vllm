@@ -6,7 +6,8 @@ import pytest
 import torch
 
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import ExecuteModelRequest, Logprob, SamplerOutput
+from vllm.sequence import (ExecuteModelRequest, HiddenStates, Logprob,
+                           SamplerOutput, get_all_seq_ids)
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
@@ -690,3 +691,55 @@ def test_use_draft_model_runner_advance_step():
         worker.execute_model(execute_model_req=execute_model_req)
     call_args_list = worker.model_runner._gpu_advance_step.call_args_list
     assert len(call_args_list) == 1
+
+
+@torch.inference_mode()
+def test_expand_execute_model_request_sync_with_expand_hidden_states():
+    """
+    In this test we verify that the logic for expanding the 
+    seq_group_metadata_list remains in sync with the expansion logic of 
+    the HiddenStates in _expand_execute_model_request.
+    """
+    k = 5
+    batch_size = 16
+    # seq_groups_to_merge = {3: 2, 6: 5, 7: 5, 13: 12, 14: 12, 15: 12}
+    seq_with_bonus_token_in_last_step = [1, 3, 8, 10, 13, 15]
+
+    seq_group_metadata_list, _, _ = create_batch(batch_size, k)
+    # merged_seq_group_metadata = {}
+    # for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+    #     if i in seq_groups_to_merge:
+    #         dst = merged_seq_group_metadata.get(
+    #             seq_groups_to_merge[i],
+    #             seq_group_metadata_list[seq_groups_to_merge[i]])
+    #         src = seq_group_metadata
+    #         prompt_token_ids = next(iter(dst.seq_data.values()))\
+    #             .prompt_token_ids
+    #         for seq_id, seq in src.seq_data.items():
+    #             dst.seq_data[seq_id] = SequenceData(prompt_token_ids,
+    #                                                 seq.output_token_ids)
+    #             dst.block_tables[seq_id] = src.block_tables[seq_id]
+    #         merged_seq_group_metadata[seq_groups_to_merge[i]] = dst
+    #     else:
+    #         merged_seq_group_metadata[i] = seq_group_metadata
+    # seq_group_metadata_list = [merged_seq_group_metadata[k] for k in sorted(
+    #     merged_seq_group_metadata.keys())]
+
+    execute_model_request = ExecuteModelRequest(
+        seq_group_metadata_list,
+        previous_hidden_states=HiddenStates(
+            seq_group_metadata_list, torch.arange(batch_size),
+            torch.arange(batch_size, 2 * batch_size)))
+
+    expanded_execute_model_request, orig_seq_group_ids = MultiStepWorker.\
+        _expand_execute_model_request(execute_model_request,
+                                      seq_with_bonus_token_in_last_step)
+
+    all_seq_ids = torch.tensor(
+        get_all_seq_ids(
+            expanded_execute_model_request.seq_group_metadata_list))
+    ref_expanded_hidden_states = all_seq_ids + batch_size
+    ref_expanded_hidden_states[orig_seq_group_ids] -= batch_size
+
+    assert (ref_expanded_hidden_states == expanded_execute_model_request.
+            previous_hidden_states.hidden_states).all().item()
