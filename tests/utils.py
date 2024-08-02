@@ -7,10 +7,9 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import openai
-import pytest
 import ray
 import requests
 from transformers import AutoTokenizer
@@ -341,17 +340,6 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         time.sleep(5)
 
 
-def _patched_skip(reason: str = "",
-                  *,
-                  allow_module_level: bool = False,
-                  msg: Optional[str] = None):
-    warning = (
-        "Error: cannot use pytest.skip inside fork_new_process_for_each_test."
-        " Please directly return. Original skip reason is:\n")
-    reason = warning + reason
-    raise RuntimeError(reason)
-
-
 def fork_new_process_for_each_test(f):
 
     @functools.wraps(f)
@@ -359,13 +347,15 @@ def fork_new_process_for_each_test(f):
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
         os.setpgrp()
-
-        old_skip = pytest.skip
-        pytest.skip = _patched_skip
+        from _pytest.outcomes import Skipped
         pid = os.fork()
         if pid == 0:
             try:
                 f(*args, **kwargs)
+            except Skipped as e:
+                # convert Skipped to exit code 0
+                print(str(e))
+                os._exit(0)
             except Exception:
                 import traceback
                 traceback.print_exc()
@@ -381,7 +371,6 @@ def fork_new_process_for_each_test(f):
             os.killpg(pgid, signal.SIGTERM)
             # restore the signal handler
             signal.signal(signal.SIGTERM, old_singla_handler)
-            pytest.skip = old_skip
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 
