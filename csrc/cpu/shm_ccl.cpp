@@ -485,7 +485,7 @@ void shm_gather(torch::Tensor& data,
   });
 }
 
-void shm_allreduce(torch::Tensor& data, int64_t rank) {
+void shm_allreduce(torch::Tensor &data, int rank) {
   TORCH_CHECK(data.is_contiguous())
   VLLM_DISPATCH_FLOATING_TYPES(data.scalar_type(), "shm_allreduce_sum", [&] {
     CPU_KERNEL_GUARD_IN(shm_allreduce_sum)
@@ -495,8 +495,8 @@ void shm_allreduce(torch::Tensor& data, int64_t rank) {
   });
 }
 
-void init_shm_manager(const std::string& ip_port, const int64_t group_size,
-                      const int64_t rank, const int64_t rank_buffer_size) {
+void init_shm_manager(const std::string &ip_port, const int group_size,
+                      const int rank, const size_t rank_buffer_size)  {
   if (shm_manager_singleton == nullptr) {
     shm_manager_singleton = std::make_unique<SHMManager>(
         ip_port, group_size, rank, rank_buffer_size);
@@ -507,9 +507,9 @@ void init_shm_manager(const std::string& ip_port, const int64_t group_size,
   }
 }
 
-std::string join_shm_manager(const std::string& ip_port,
-                             const int64_t group_size, const int64_t rank,
-                             const int64_t rank_buffer_size) {
+
+std::string join_shm_manager(const std::string &ip_port, const int group_size,
+                             const int rank, const size_t rank_buffer_size) {
   TORCH_CHECK(shm_manager_singleton);
   shm_manager_singleton->join(ip_port, group_size, rank, rank_buffer_size);
   return shm_manager_singleton->get_shm_ctx()->to_string();
