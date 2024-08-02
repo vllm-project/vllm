@@ -631,9 +631,7 @@ def filter_tensor(
     size_output[1] = length
     size_exp_sums[1] = length
     size_max_logits = size_exp_sums
-    result = torch.empty(size_output,
-                         dtype=output.dtype,
-                         device=output.device)
+    result = torch.empty(size_output, dtype=output.dtype, device=output.device)
     result_exp_sums = torch.empty(size_exp_sums,
                                   dtype=out_exp_sums.dtype,
                                   device=out_exp_sums.device)

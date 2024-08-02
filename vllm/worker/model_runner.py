@@ -879,8 +879,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 query_start_loc=query_start_loc,
                 device=self.device,
                 data_type=kv_cache_dtype,
-                use_cuda_graph=use_captured_graph
-            )
+                use_cuda_graph=use_captured_graph)
 
         elif backend_name == "flash_attn" or backend_name == "xformers":
             attn_metadata = self.attn_backend.make_metadata(
@@ -1165,8 +1164,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         block_tables=block_tables,
                         paged_kv_indptr=paged_kv_indptr_tensor_host,
                         paged_kv_indices=paged_kv_indices_tensor_host,
-                        paged_kv_last_page_len=
-                        paged_kv_last_page_len_tensor_host,
+                        paged_kv_last_page_len=paged_kv_last_page_len_tensor_host,
                         num_qo_heads=num_qo_heads,
                         num_kv_heads=num_kv_heads,
                         head_dim=self.model_config.get_head_size(),
