@@ -1133,8 +1133,7 @@ __global__ void Marlin(
     // has_zp implies AWQ, which doesn't have act_order,
     static_assert(!has_zp || group_blocks != 0);
 
-    // The constexpr check on group_blocks prevents divide-by-zero warnings
-    if constexpr (has_zp && group_blocks != 0) {
+    if constexpr (has_zp) {
       int pipe = full_pipe % stages;
 
       if constexpr (group_blocks == -1) {
@@ -1160,7 +1159,13 @@ __global__ void Marlin(
         cur_k += k_iter_size * (k % b_sh_wr_iters);
 
         int k_blocks = cur_k / 16;
-        int cur_group_id = k_blocks / group_blocks;
+        int cur_group_id = 0;
+        // Guard divide by zero warnings
+        if constexpr (group_blocks != 0) {
+          cur_group_id = k_blocks / group_blocks;
+        } else {
+          __builtin_unreachable();
+        }
 
         int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
