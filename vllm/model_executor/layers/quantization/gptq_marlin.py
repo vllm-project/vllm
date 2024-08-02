@@ -169,9 +169,11 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         del output_size
+
         prefix = extra_weight_attrs.get("prefix", "")
+        # Depending on prefix and dynamic_bits, bits and pack_factor may be modified.
         self.quant_config.update_bits_and_pack_factor(prefix=prefix)
-        print("wwww", self.quant_config.weight_bits)
+
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
 
