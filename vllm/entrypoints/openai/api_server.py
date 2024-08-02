@@ -29,10 +29,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest, ErrorResponse,
-                                              TokenizeRequest,
-                                              TokenizeResponse, 
                                               LivenessResponse,
-                                              ReadinessResponse)
+                                              ReadinessResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
