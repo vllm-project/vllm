@@ -1,4 +1,5 @@
 import re
+from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -31,33 +32,32 @@ class GPTQMarlinConfig(QuantizationConfig):
             desc_act = False
 
         self.dynamic_bits = dynamic_bits
-        self._weight_bits = weight_bits
-        self._pack_factor = 32 // self._weight_bits  # packed into int32
+        self.weight_bits = weight_bits
+        self.pack_factor = 32 // self.weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
         self.is_sym = is_sym
         self.lm_head_quantized = lm_head_quantized
 
         # Verify supported on platform.
-        verify_gptq_marlin_supported(num_bits=self._weight_bits,
+        verify_gptq_marlin_supported(num_bits=self.weight_bits,
                                      group_size=self.group_size,
                                      is_sym=self.is_sym)
 
-    def get_weight_bits(self, prefix: str):
-        bits = self._weight_bits
+    def update_bits_and_pack_factor(self, prefix: str):
+        bits = self.weight_bits
         # check for variable/dynamic bits
         if len(self.dynamic_bits) > 0 and prefix:
             for pattern, dym_bits in self.dynamic_bits.items():
                 if re.match(pattern, prefix):
                     bits = dym_bits
                     break
-        return bits
-
-    def get_pack_factor(self, prefix: str):
-        return 32 // self.get_weight_bits(prefix)  # packed into int32
+        if bits != self.weight_bits:
+            self.weight_bits = bits
+            self.pack_factor = 32 // self.weight_bits  # packed into int32
 
     def __repr__(self) -> str:
-        return (f"GPTQMarlinConfig(weight_bits={self._weight_bits}, "
+        return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}, "
                 f"lm_head_quantized={self.lm_head_quantized}), "
@@ -154,7 +154,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
-        self.quant_config = quant_config
+        self.quant_config = deepcopy(quant_config)
 
     def create_weights(
         self,
@@ -167,7 +167,11 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         del output_size
-        self.prefix = extra_weight_attrs.get("prefix", "")
+
+        prefix = extra_weight_attrs.get("prefix", "")
+        # Depending on prefix and dynamic_bits, bits and pack_factor may be modified.
+        self.quant_config.update_bits_and_pack_factor(prefix=prefix)
+
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
 
@@ -196,10 +200,11 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             # shard the scales in TP>1 case.
             scales_and_zp_input_dim = 0
             scales_and_zp_size = input_size_per_partition // group_size
+
         # Quantized weights
         qweight = Parameter(
             torch.empty(
-                input_size_per_partition // self.quant_config.get_pack_factor(self.prefix),
+                input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
                 dtype=torch.int32,
             ),
@@ -212,7 +217,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 0,
-                "pack_factor": self.quant_config.get_pack_factor(self.prefix),
+                "pack_factor": self.quant_config.pack_factor,
             },
         )
 
@@ -255,7 +260,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         qzeros = Parameter(
             torch.empty(
                 scales_and_zp_size,
-                output_size_per_partition // self.quant_config.get_pack_factor(self.prefix),
+                output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
                 device="meta",
             ),
@@ -268,7 +273,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
-                "pack_factor": self.quant_config.get_pack_factor(self.prefix),
+                "pack_factor": self.quant_config.pack_factor,
             },
         )
 
@@ -310,7 +315,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             perm=layer.g_idx_sort_indices,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            num_bits=self.quant_config.get_weight_bits(self.prefix))
+            num_bits=self.quant_config.weight_bits)
         replace_tensor(layer, "qweight", marlin_qweight)
 
         # Permute scales from autogptq format to marlin format.
@@ -336,7 +341,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
-            num_bits=self.quant_config.get_weight_bits(self.prefix),
+            num_bits=self.quant_config.weight_bits,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
             is_k_full=layer.is_k_full,
