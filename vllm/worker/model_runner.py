@@ -1048,7 +1048,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ] * self.parallel_config.pipeline_parallel_size
 
         graph_batch_size = _get_graph_batch_size(
-            self.scheduler_config.max_num_seqs)
+            self.scheduler_config.max_num_seqs *
+            (1 + self.scheduler_config.num_lookahead_slots))
         batch_size_capture_list = [
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
