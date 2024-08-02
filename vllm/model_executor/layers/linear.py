@@ -706,9 +706,9 @@ class SequenceParallelLinearForGather:
         # gather(input_,dst,dim),dim is untest.
         # output need be the shape
         # [num_seqs, num_heads, num_sequece_block, head_size]
-        output = get_sp_group(self.tp_rank).gather(input_, 0, -1)
-        output2 = get_sp_group(self.tp_rank).gather(input_2, 0, -1)
-        output3 = get_sp_group(self.tp_rank).gather(input_3, 0, -1)
+        output = get_sp_group(self.tp_rank).gather_extension(input_, 0, -2)
+        output2 = get_sp_group(self.tp_rank).gather_extension(input_2, 0, -1)
+        output3 = get_sp_group(self.tp_rank).gather_extension(input_3, 0, -1)
 
         return output, output2, output3
 

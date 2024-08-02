@@ -25,6 +25,7 @@ class PallasAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        tp_size: Optional[int],
     ) -> Tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 

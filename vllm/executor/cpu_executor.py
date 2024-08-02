@@ -49,6 +49,7 @@ class CPUExecutor(ExecutorBase):
             vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
+            is_sp_worker=False,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()

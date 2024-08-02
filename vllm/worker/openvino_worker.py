@@ -81,7 +81,11 @@ class OpenVINOCacheEngine:
     ) -> List[Tuple[ov.Tensor, ov.Tensor]]:
         """Allocates KV cache."""
         k_block_shape = v_block_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)[1:]
+            num_blocks,
+            self.block_size,
+            self.num_kv_heads,
+            self.head_size,
+        )[1:]
         kv_cache: List[Tuple[ov.Tensor, ov.Tensor]] = []
         for _ in range(self.num_layers):
             key_blocks = ov.Tensor(self.cache_config.cache_dtype,
@@ -151,6 +155,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         vision_language_config: Optional[VisionLanguageConfig] = None,
         kv_cache_dtype: Optional[ov.Type] = ov.Type.undefined,
         is_driver_worker: bool = False,
+        is_sp_worker: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -164,6 +169,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
+        self.is_sp_worker = is_sp_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 

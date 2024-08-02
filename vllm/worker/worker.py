@@ -21,6 +21,8 @@ from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
+_ALAILABLE_GRAPH = False
+
 
 class Worker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
@@ -209,6 +211,8 @@ class Worker(LocalOrDistributedWorkerBase):
         num_cpu_blocks = max(num_cpu_blocks, 0)
         if self.is_sp_worker:
             num_cpu_blocks = -1 if num_cpu_blocks == 0 else -num_cpu_blocks
+            num_gpu_blocks = int(num_gpu_blocks //
+                                 self.parallel_config.tensor_parallel_size)
 
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
@@ -240,11 +244,11 @@ class Worker(LocalOrDistributedWorkerBase):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config,
-                                        self.device_config)
+                                        self.device_config, self.is_sp_worker)
         self.gpu_cache = self.cache_engine.gpu_cache
 
     def _warm_up_model(self) -> None:
-        if not self.model_config.enforce_eager:
+        if _ALAILABLE_GRAPH and not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

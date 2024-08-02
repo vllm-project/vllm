@@ -35,6 +35,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        tp_size: Optional[int],
     ) -> Tuple[int, ...]:
         raise NotImplementedError
 
@@ -148,7 +149,6 @@ class AttentionImpl(ABC, Generic[T]):
         tmp_out: torch.Tensor,
         exp_sum: torch.Tensor,
         max_logits: torch.Tensor,
-        query: torch.Tensor,
         attn_metadata: T,
     ) -> torch.Tensor:
         pass

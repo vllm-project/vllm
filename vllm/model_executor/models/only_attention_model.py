@@ -57,7 +57,11 @@ class broastcastlayer:
         self.dtype = dtype
 
     def forward(self, num_seqs: int) -> torch.Tensor:
-        output = torch.empty([self.tp_size, num_seqs, self.hidden_size])
+
+        output = torch.empty(
+            [self.tp_size, num_seqs, self.hidden_size // self.tp_size],
+            dtype=self.dtype,
+            device="cuda")
         for i in range(self.tp_size):
             with torch.cuda.stream(self.broastcast_streams[i]):
                 output[i] = self.broatcasters[i]()
@@ -81,9 +85,9 @@ class gatherlayer:
             with torch.cuda.stream(self.gather_streams[i]):
                 start = i * self.num_heads
                 end = (i + 1) * self.num_heads
-                self.gather[i](attn_to_reduce[:, start:end, :],
-                               exp_sum_to_reduce[:, start:end],
-                               max_logits_to_reduce[:, start:end])
+                self.gather[i](attn_to_reduce[start:end],
+                               exp_sum_to_reduce[start:end],
+                               max_logits_to_reduce[start:end])
 
 
 class OnlyAttention(nn.Module):
@@ -124,7 +128,8 @@ class OnlyAttention(nn.Module):
                               quant_config=quant_config)
 
         self.sp_rank = get_sequence_parallel_rank()
-        self.broastcastlayer = broastcastlayer(self.tp_size, self.hidden_size)
+        self.broastcastlayer = broastcastlayer(self.tp_size, self.hidden_size,
+                                               cache_config.cache_dtype)
         self.gatherlayer = gatherlayer(self.tp_size, self.total_num_heads)
 
     #     def __init__(

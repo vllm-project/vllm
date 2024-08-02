@@ -796,26 +796,11 @@ __global__ void sequence_block_reduce_kernel(
                                            // max_num_partitions]
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
-    const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_partitions) {
   const int num_heads = gridDim.x;
   const int head_idx = blockIdx.x;
   const int seq_idx = blockIdx.y;
-  const int seq_len = seq_lens[seq_idx];
-  const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
-  if (num_partitions == 1) {
-    // No need to reduce. Only copy tmp_out to out.
-    scalar_t* out_ptr =
-        out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
-    const scalar_t* tmp_out_ptr =
-        tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-        head_idx * max_num_partitions * HEAD_SIZE;
-    for (int i = threadIdx.x; i < HEAD_SIZE; i += blockDim.x) {
-      out_ptr[i] = tmp_out_ptr[i];
-    }
-    // Terminate the thread block.
-    return;
-  }
+  const int num_partitions = max_num_partitions;
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   const int warp_idx = threadIdx.x / WARP_SIZE;
@@ -895,31 +880,26 @@ __global__ void sequence_block_reduce_kernel(
 }  // namespace vllm
 //@###################modify
 // the launcher of sequence block reduce kernel
-#define LAUNCH_SEQUENCE_BLOCK_REDUCER(HEAD_SIZE)                            \
-  vllm::sequence_block_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,             \
-                                     PARTITION_SIZE>                        \
-      <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(             \
-          out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr, \
+#define LAUNCH_SEQUENCE_BLOCK_REDUCER(HEAD_SIZE)                \
+  vllm::sequence_block_reduce_kernel<T, HEAD_SIZE, NUM_THREADS, \
+                                     PARTITION_SIZE>            \
+      <<<reduce_grid, block, reduce_shared_mem_size, stream>>>( \
+          out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr,   \
           max_num_partitions);
 
 template <typename T, int NUM_THREADS = 128, int PARTITION_SIZE = 8192>
 void sequence_block_reducer_launcher(torch::Tensor& out,
                                      torch::Tensor& exp_sums,
                                      torch::Tensor& max_logits,
-                                     torch::Tensor& tmp_out,
-                                     torch::Tensor& query,
-                                     torch::Tensor& seq_lens, int max_seq_len) {
-  int num_seqs = query.size(0);
-  int num_heads = query.size(1);
-  int head_size = query.size(2);
-
+                                     torch::Tensor& tmp_out, int max_seq_len) {
+  int num_seqs = tmp_out.size(0);
+  int num_heads = tmp_out.size(1);
+  int head_size = tmp_out.size(3);
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
   T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
-  int* seq_lens_ptr = seq_lens.data_ptr<int>();
-
-  int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
+  int max_num_partitions = tmp_out.size(2);
 
   // For paged attention v2 reduce kernel.
   dim3 reduce_grid(num_heads, num_seqs);
@@ -961,17 +941,18 @@ void sequence_block_reducer_launcher(torch::Tensor& out,
 
 #define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T)                          \
   sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out, \
-                                     query, seq_lens, max_seq_len);
+                                     query, seq_lens);
 
+// [num_seqs, num_heads, head_size]
+// [num_seqs, num_heads, float]
+// [num_seqs, num_heads, float]
 void sequence_block_reducer(
     torch::Tensor& out,         // [num_seqs, num_heads, head_size]
     torch::Tensor& exp_sums,    // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
-        tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
-    torch::Tensor& query,     // [num_seqs, num_heads, head_size]
-    torch::Tensor& seq_lens,  // [num_seqs]
-    int64_t max_seq_len){CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(query.dtype())}
+        tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
+){CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(tmp_out.dtype())}
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
       ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,        \
@@ -1373,25 +1354,25 @@ void paged_attention_v3_launcher(
     // head sizes that we use in the model. However, we can easily extend this
     // to support any head size which is a multiple of 16.
     case 64:
-      LAUNCH_PAGED_ATTENTION_V2(64);
+      LAUNCH_PAGED_ATTENTION_V3(64);
       break;
     case 80:
-      LAUNCH_PAGED_ATTENTION_V2(80);
+      LAUNCH_PAGED_ATTENTION_V3(80);
       break;
     case 96:
-      LAUNCH_PAGED_ATTENTION_V2(96);
+      LAUNCH_PAGED_ATTENTION_V3(96);
       break;
     case 112:
-      LAUNCH_PAGED_ATTENTION_V2(112);
+      LAUNCH_PAGED_ATTENTION_V3(112);
       break;
     case 128:
-      LAUNCH_PAGED_ATTENTION_V2(128);
+      LAUNCH_PAGED_ATTENTION_V3(128);
       break;
     case 192:
-      LAUNCH_PAGED_ATTENTION_V2(192);
+      LAUNCH_PAGED_ATTENTION_V3(192);
       break;
     case 256:
-      LAUNCH_PAGED_ATTENTION_V2(256);
+      LAUNCH_PAGED_ATTENTION_V3(256);
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
@@ -1462,6 +1443,174 @@ void paged_attention_v3(
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                              CALL_V3_LAUNCHER_BLOCK_SIZE)
+}
+
+template <typename T, typename CACHE_T, int BLOCK_SIZE,
+          vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
+          int NUM_THREADS = 128, int PARTITION_SIZE = 512>
+void paged_attention_remote_launcher(
+    torch::Tensor& out, torch::Tensor& out_exp_sums,
+    torch::Tensor& out_max_logits, torch::Tensor& exp_sums,
+    torch::Tensor& max_logits, torch::Tensor& tmp_out, torch::Tensor& query,
+    torch::Tensor& key_cache, torch::Tensor& value_cache, int num_kv_heads,
+    float scale, torch::Tensor& block_tables, torch::Tensor& seq_lens,
+    int max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    float kv_scale, const int tp_rank, const int blocksparse_local_blocks,
+    const int blocksparse_vert_stride, const int blocksparse_block_size,
+    const int blocksparse_head_sliding_step) {
+  int tp_size = query.size(0);
+  int num_seqs = query.size(1);
+  int num_heads = query.size(2);
+  int head_size = query.size(3);
+  int max_num_blocks_per_seq = block_tables.size(1);
+  int q_tp_stride = query.stride(0);
+  int q_stride = query.stride(1);
+  int kv_tp_stride = key_cache.stride(0);
+  int kv_block_stride = key_cache.stride(1);
+  int kv_head_stride = key_cache.stride(2);
+  int out_tp_stride = out.stride(0);
+  int out_exp_sums_tp_stride = out_exp_sums.stride(0);
+  int out_max_logits_tp_stride = exp_sums_tp_stride;
+  int temp_out_tp_stride = temp_out.stride(0);
+  int exp_sums_tp_stride = exp_sums.stride(0);
+  int max_logits_tp_stride = exp_sums_tp_stride;
+
+  int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
+  assert(head_size % thread_group_size == 0);
+
+  // NOTE: alibi_slopes is optional.
+  const float* alibi_slopes_ptr =
+      alibi_slopes
+          ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
+          : nullptr;
+#pragma unroll
+  for (int tp_rank = 0; tp_rank < tp_size; tp_rank++) {
+    T* out_ptr = reinterpret_cast<T*>(out.data_ptr()) + tp_rank * out_tp_stride;
+    float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr()) +
+                          tp_rank * exp_sums_tp_stride;
+    float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr()) +
+                            tp_rank * max_logits_tp_stride;
+    float* out_exp_sums_ptr =
+        reinterpret_cast<float*>(out_exp_sums.data_ptr()) +
+        tp_rank * out_exp_sums_tp_stride;
+    float* out_max_logits_ptr =
+        reinterpret_cast<float*>(out_max_logits.data_ptr()) +
+        tp_rank * out_max_logits_tp_stride;
+    T* tmp_out_ptr =
+        reinterpret_cast<T*>(tmp_out.data_ptr()) + tp_rank * temp_out_tp_stride;
+    T* query_ptr =
+        reinterpret_cast<T*>(query.data_ptr()) + tp_rank * q_tp_stride;
+    CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr()) +
+                             tp_rank * kv_tp_stripe;
+    CACHE_T* value_cache_ptr =
+        reinterpret_cast<CACHE_T*>(value_cache.data_ptr()) +
+        tp_rank * kv_tp_stride;
+    int* block_tables_ptr = block_tables.data_ptr<int>();
+    int* seq_lens_ptr = seq_lens.data_ptr<int>();
+
+    constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+    int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
+    int logits_size = PARTITION_SIZE * sizeof(float);
+    int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
+
+    // For paged attention remote kernel.
+    dim3 grid(num_heads, num_seqs, max_num_partitions);
+    int shared_mem_size = std::max(logits_size, outputs_size);
+    // For paged attention v2 reduce kernel.
+    dim3 reduce_grid(num_heads, num_seqs);
+    int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
+
+    dim3 block(NUM_THREADS);
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    switch (head_size) {
+      // NOTE(woosuk): To reduce the compilation time, we only compile for the
+      // head sizes that we use in the model. However, we can easily extend this
+      // to support any head size which is a multiple of 16.
+      case 64:
+        LAUNCH_PAGED_ATTENTION_V3(64);
+        break;
+      case 80:
+        LAUNCH_PAGED_ATTENTION_V3(80);
+        break;
+      case 96:
+        LAUNCH_PAGED_ATTENTION_V3(96);
+        break;
+      case 112:
+        LAUNCH_PAGED_ATTENTION_V3(112);
+        break;
+      case 128:
+        LAUNCH_PAGED_ATTENTION_V3(128);
+        break;
+      case 192:
+        LAUNCH_PAGED_ATTENTION_V3(192);
+        break;
+      case 256:
+        LAUNCH_PAGED_ATTENTION_V3(256);
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported head size: ", head_size);
+        break;
+    }
+  }
+}
+
+#define CALL_REMOTE_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE,                 \
+                             IS_BLOCK_SPARSE)                                  \
+  paged_attention_remote_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,            \
+                                  IS_BLOCK_SPARSE>(                            \
+      out, out_exp_sums, out_max_logits, exp_sums, max_logits, tmp_out, query, \
+      key_cache, value_cache, num_kv_heads, scale, block_tables, seq_lens,     \
+      max_seq_len, alibi_slopes, kv_scale, tp_rank, blocksparse_local_blocks,  \
+      blocksparse_vert_stride, blocksparse_block_size,                         \
+      blocksparse_head_sliding_step);
+
+// NOTE(woosuk): To reduce the compilation time, we omitted block sizes
+// 1, 2, 4, 64, 128, 256.
+#define CALL_REMOTE_LAUNCHER_BLOCK_SIZE(T, CACHE_T, KV_DTYPE)     \
+  switch (block_size) {                                           \
+    case 8:                                                       \
+      CALL_REMOTE_LAUNCHER(T, CACHE_T, 8, KV_DTYPE, false);       \
+      break;                                                      \
+    case 16:                                                      \
+      CALL_REMOTE_LAUNCHER(T, CACHE_T, 16, KV_DTYPE, false);      \
+      break;                                                      \
+    case 32:                                                      \
+      CALL_REMOTE_LAUNCHER(T, CACHE_T, 32, KV_DTYPE, false);      \
+      break;                                                      \
+    default:                                                      \
+      TORCH_CHECK(false, "Unsupported block size: ", block_size); \
+      break;                                                      \
+  }
+
+void paged_attention_remote(
+    torch::Tensor& out,            // [tp_size, num_seqs, num_heads, head_size]
+    torch::Tensor& out_exm_sums,   // [tp_size, num_seqs, num_heads, float]
+    torch::Tensor& out_max_logit,  // [tp_size, num_seqs, num_heads, float]
+    torch::Tensor&
+        exp_sums,  // [tp_size, num_seqs, num_heads, max_num_partitions]
+    torch::Tensor&
+        max_logits,  // [tp_size, num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& tmp_out,    // [tp_size, num_seqs, num_heads,
+                               // max_num_partitions, head_size]
+    torch::Tensor& query,      // [tp_size, num_seqs, num_heads, head_size]
+    torch::Tensor& key_cache,  // [tp_size, num_blocks, num_heads, head_size/x,
+                               // block_size, x]
+    torch::Tensor&
+        value_cache,  // [tp_size, num_blocks, num_heads, head_size, block_size]
+    int64_t num_kv_heads,  // [num_heads]
+    double scale,
+    torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
+    torch::Tensor& seq_lens,      // [num_seqs]
+    int64_t block_size, int64_t max_seq_len,
+    const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) {
+  const bool is_block_sparse = (blocksparse_vert_stride > 1);
+  DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
+                             CALL_REMOTE_LAUNCHER_BLOCK_SIZE)
 }
 
 #undef WARP_SIZE

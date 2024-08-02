@@ -205,6 +205,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
                     lora_config=self.lora_config,
                     vision_language_config=self.vision_language_config,
                     is_driver_worker=rank == 0,
+                    is_sp_worker=False,
                 ))
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 

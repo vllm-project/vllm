@@ -36,6 +36,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool,
+        is_sp_worker: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -48,6 +49,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
+        self.is_sp_worker = is_sp_worker
 
         assert self.device_config.device_type == "tpu"
         if self.cache_config.cache_dtype == "auto":
@@ -153,9 +155,17 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.cpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self.tpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
-            num_gpu_blocks, self.block_size, num_kv_heads, head_size)
+            num_gpu_blocks,
+            self.block_size,
+            num_kv_heads,
+            head_size,
+        )
         cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
-            num_cpu_blocks, self.block_size, num_kv_heads, head_size)
+            num_cpu_blocks,
+            self.block_size,
+            num_kv_heads,
+            head_size,
+        )
         for _ in range(num_layers):
             tpu_k_cache = torch.zeros(tpu_cache_shape,
                                       dtype=dtype,

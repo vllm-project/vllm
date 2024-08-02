@@ -35,10 +35,15 @@ class FlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        tp_size: Optional[int],
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        if tp_size is not None and tp_size > 1:
+            return (tp_size, 2, num_blocks, block_size, num_kv_heads,
+                    head_size)
+        else:
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_blocks(kv_cache: torch.Tensor, start: int,

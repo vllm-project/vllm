@@ -47,6 +47,7 @@ class GPUExecutor(ExecutorBase):
             vision_language_config=self.vision_language_config,
             speculative_config=self.speculative_config,
             is_driver_worker=rank == 0,
+            is_sp_worker=False,
         )
 
     def _create_worker(self,

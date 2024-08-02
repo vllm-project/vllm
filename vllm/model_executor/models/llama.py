@@ -178,7 +178,7 @@ class LlamaAttention(nn.Module):
             # reduce sequence block result
 
             attn_output[-num:] = self.attn.reducer(attn, exp_sum, max_logits,
-                                                   q[-num:], attn_metadata)
+                                                   attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 

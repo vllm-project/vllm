@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import openvino as ov
 import torch
@@ -34,6 +34,7 @@ class OpenVINOAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        tp_size: Optional[int],
     ) -> Tuple[int, ...]:
         return (2, num_blocks, num_kv_heads, block_size, head_size)
 
