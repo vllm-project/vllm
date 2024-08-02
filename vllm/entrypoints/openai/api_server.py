@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import importlib
 import inspect
 import re
@@ -70,6 +71,8 @@ async def lifespan(app: fastapi.FastAPI):
         task.add_done_callback(_running_tasks.remove)
 
     yield
+
+    engine.shutdown_background_loop()
 
 
 router = APIRouter()
@@ -337,6 +340,9 @@ async def run_server(args, llm_engine=None, **uvicorn_kwargs) -> None:
                     "openai_serving_embedding", "openai_serving_tokenization",
                     "engine_args", "engine"):
             globals().pop(var, None)
+
+    # This is required for the LLMEngine destructor to run
+    gc.collect()
 
 
 if __name__ == "__main__":

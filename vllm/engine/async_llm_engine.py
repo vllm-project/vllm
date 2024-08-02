@@ -390,6 +390,12 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
+    def shutdown_background_loop(self) -> None:
+        if self._background_loop_unshielded is not None:
+            self._background_loop_unshielded.cancel()
+            self._background_loop_unshielded = None
+        self.background_loop = None
+
     @classmethod
     def _get_executor_cls(
             cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
