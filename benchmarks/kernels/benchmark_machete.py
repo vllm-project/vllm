@@ -94,7 +94,7 @@ def bench(atype: torch.dtype,
           label: str,
           sub_label: str,
           benchmark_marlinv1: bool = True,
-          benchmark_machete_best: bool = True) -> Iterable[TMeasurement]:
+          sweep_schedules: bool = True) -> Iterable[TMeasurement]:
     a, weights = make_bench_tensors(atype, wtype, group_size, m, n, k)
     sub_label += f", L={len(weights)}"
 
@@ -158,7 +158,7 @@ def bench(atype: torch.dtype,
                 a, weights_machete, lambda a, _, w_q, w_s: ops.machete_gemm(
                     a, w_q, wtype, b_scales=w_s, b_group_size=group_size))))
 
-    if benchmark_machete_best:
+    if sweep_schedules:
         print("Finding best schedule for machete")
         best = None
         best_schedule = None
@@ -193,12 +193,14 @@ def print_timers(timers: Iterable[TMeasurement]):
 
 
 def run(dtype: torch.dtype,
+        sweep_schedules: bool,
         MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
 
     results = []
     for m, k, n in MKNs:
         timers = bench(dtype, scalar_types.uint4b8, 128, m, k, n,
-                       f"{dtype}-gemm", f"MKN=({m}x{k}x{n})")
+                       f"{dtype}-gemm", f"MKN=({m}x{k}x{n})",
+                       sweep_schedules=sweep_schedules)
         print_timers(timers)
         results.extend(timers)
 
@@ -229,7 +231,7 @@ def run_square_bench(args):
     dim_sizes = list(
         range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
-    data = run(args.dtype, MKNs)
+    data = run(args.dtype, args.sweep_schedules, MKNs)
 
     make_output(data, MKNs, f"square_bench-{args.dtype}")
 
@@ -241,7 +243,7 @@ def run_range_bench(args):
     Ks = [args.k_constant] * n if args.k_constant is not None else dim_sizes
     Ns = [args.n_constant] * n if args.n_constant is not None else dim_sizes
     MKNs = list(zip(Ms, Ks, Ns))
-    data = run(args.dtype, MKNs)
+    data = run(args.dtype, args.sweep_schedules, MKNs)
 
     make_output(data, MKNs, f"range_bench-{args.dtype}")
 
@@ -269,7 +271,7 @@ def run_model_bench(args):
             for k, n in KNs:
                 MKNs.append((m, k, n))
 
-        data = run(args.dtype, MKNs)
+        data = run(args.dtype, args.sweep_schedules, MKNs)
         model_bench_data.append(data)
 
     # Print all results
@@ -321,6 +323,11 @@ Benchmark Machete GEMM.
         type=to_torch_dtype,
         required=True,
         help="Available options are ['bfloat16', 'float16']",
+    )
+    parser.add_argument(
+        "--sweep-schedules",
+        action="store_true",
+        help="Run a sweep over all supported schedules",
     )
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 

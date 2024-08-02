@@ -4,16 +4,17 @@ import os
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Union, Optional
 
 import jinja2
-from vllm_cutlass_library_extension import (DataType, DataTypeNames,
-                                            DataTypeTag, EpilogueScheduleTag,
+from vllm_cutlass_library_extension import (DataType, VLLMDataTypeNames,
+                                            VLLMDataTypeTag, 
+                                            EpilogueScheduleTag,
                                             EpilogueScheduleType,
-                                            KernelScheduleTag,
+                                            VLLMKernelScheduleTag,
                                             KernelScheduleType,
                                             MixedInputKernelScheduleType,
-                                            TileSchedulerTag,
+                                            VLLMTileSchedulerTag,
                                             TileSchedulerType, VLLMDataType,
                                             VLLMTileSchedulerType)
 
@@ -33,17 +34,26 @@ using KernelDispatcher_ = KernelDispatcher<
     {{DataTypeTag[type_config.element_b_scale]}}, // Scales
     {{DataTypeTag[type_config.element_b_zeropoint]}}>; // Zeropoints
 
-{% for _, schedule_name in schedules %}extern torch::Tensor 
-impl_{{type_name}}_sch_{{schedule_name}}(PytorchArguments args);
+{% for s in schedules %}extern torch::Tensor 
+impl_{{type_name}}_sch_{{ gen_sch_name(s) }}(PytorchArguments args);
 {% endfor %}
 template <>
 torch::Tensor KernelDispatcher_::dispatch(PytorchArguments args) {
+  [[maybe_unused]] auto M = args.A.size(0);
+  [[maybe_unused]] auto N = args.B.size(1);
+  [[maybe_unused]] auto K = args.A.size(1);
+    
   if (!args.schedule) {
-    return impl_{{ type_name }}_sch_{{ schedules[0][1] }}(args);
+    {%- for cond, s in heuristic %}
+    {%if cond is not none%}if ({{cond}})
+    {%- else %}else
+    {%- endif %}
+        return impl_{{ type_name }}_sch_{{ gen_sch_name(s) }}(args);{% endfor %}
   }
-  {% for _, schedule_name in schedules %}
-  if (*args.schedule == "{{ schedule_name }}") {
-    return impl_{{ type_name }}_sch_{{ schedule_name }}(args);
+
+  {% for s in schedules %}
+  if (*args.schedule == "{{ gen_sch_name(s) }}") {
+    return impl_{{ type_name }}_sch_{{ gen_sch_name(s) }}(args);
   }
   {% endfor %}
   TORCH_CHECK_NOT_IMPLEMENTED(false, "machete_gemm(..) is not implemented for "
@@ -53,8 +63,8 @@ torch::Tensor KernelDispatcher_::dispatch(PytorchArguments args) {
 template <>
 std::vector<std::string> KernelDispatcher_::supported_schedules() {
   return { 
-    {% for _, schedule_name in schedules -%}
-    "{{ schedule_name }}"{{ ",
+    {% for s in schedules -%}
+    "{{ gen_sch_name(s) }}"{{ ",
     " if not loop.last }}{%- endfor %}
   };
 }
@@ -77,16 +87,17 @@ using Kernel = KernelTemplate<
     cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput
 >::Speacialization<Config, with_C, with_scales, with_zeropoints>;
 
-{% for schedule, schedule_name in schedules %}
+{% for sch in schedules %}
+{% set schedule_name = gen_sch_name(sch) -%}
 struct sch_{{schedule_name}} {
   using TileShapeNM = Shape<{{
-      to_cute_constant(schedule.tile_shape_mn)|join(', ')}}>;
+      to_cute_constant(sch.tile_shape_mn)|join(', ')}}>;
   using ClusterShape = Shape<{{
-      to_cute_constant(schedule.cluster_shape_mnk)|join(', ')}}>;
+      to_cute_constant(sch.cluster_shape_mnk)|join(', ')}}>;
   // TODO: Reimplement
-  // using KernelSchedule   = {{KernelScheduleTag[schedule.kernel_schedule]}};
-  using EpilogueSchedule = {{EpilogueScheduleTag[schedule.epilogue_schedule]}};
-  using TileScheduler    = {{TileSchedulerTag[schedule.tile_scheduler]}};
+  // using KernelSchedule   = {{KernelScheduleTag[sch.kernel_schedule]}};
+  using EpilogueSchedule = {{EpilogueScheduleTag[sch.epilogue_schedule]}};
+  using TileScheduler    = {{TileSchedulerTag[sch.tile_scheduler]}};
   using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 };
 
@@ -149,15 +160,15 @@ TmaCoop = EpilogueScheduleType.TmaWarpSpecializedCooperative
 class ScheduleConfig:
     tile_shape_mn: Tuple[int, int]
     cluster_shape_mnk: Tuple[int, int, int]
-    kernel_schedule: KernelScheduleType
+    kernel_schedule: MixedInputKernelScheduleType
     epilogue_schedule: EpilogueScheduleType
-    tile_scheduler: TileSchedulerType
+    tile_scheduler: Union[TileSchedulerType, VLLMTileSchedulerType]
 
 
 @dataclass
 class TypeConfig:
     element_a: DataType
-    element_b: DataType
+    element_b: Union[DataType, VLLMDataType]
     element_b_scale: DataType
     element_b_zeropoint: DataType
     element_d: DataType
@@ -176,6 +187,7 @@ class ImplConfig:
     type_config: TypeConfig
     schedule_configs: List[ScheduleConfig]
     specializations: List[Specialization]
+    heuristic: List[Tuple[Optional[str], ScheduleConfig]]
 
 
 def generate_schedule_name(schedule_config: ScheduleConfig) -> str:
@@ -185,12 +197,12 @@ def generate_schedule_name(schedule_config: ScheduleConfig) -> str:
     cluster_shape = (f"{schedule_config.cluster_shape_mnk[0]}" +
                      f"x{schedule_config.cluster_shape_mnk[1]}" +
                      f"x{schedule_config.cluster_shape_mnk[2]}")
-    kernel_schedule = KernelScheduleTag[schedule_config.kernel_schedule].split(
-        "::")[-1]
+    kernel_schedule = VLLMKernelScheduleTag[schedule_config.kernel_schedule]\
+        .split("::")[-1]
     epilogue_schedule = EpilogueScheduleTag[
         schedule_config.epilogue_schedule].split("::")[-1]
-    tile_scheduler = TileSchedulerTag[schedule_config.tile_scheduler].split(
-        "::")[-1]
+    tile_scheduler = VLLMTileSchedulerTag[schedule_config.tile_scheduler]\
+        .split("::")[-1]
 
     return (f"{tile_shape}_{cluster_shape}_{kernel_schedule}" +
             f"_{epilogue_schedule}_{tile_scheduler}")
@@ -201,7 +213,7 @@ def generate_terse_schedule_name(schedule_config: ScheduleConfig) -> str:
     kernel_terse_names_replace = {
         "KernelTmaWarpSpecializedCooperativeMixedInput_": "TmaMI_",
         "TmaWarpSpecializedCooperative_": "TmaCoop_",
-        "VLLMStreamKScheduler": "NMstreamK",
+        "VLLMStreamKScheduler": "VLLMstreamK",
     }
 
     schedule_name = generate_schedule_name(schedule_config)
@@ -212,12 +224,12 @@ def generate_terse_schedule_name(schedule_config: ScheduleConfig) -> str:
 
 # unique type_name
 def generate_type_signature(kernel_type_config: TypeConfig):
-    element_a = DataTypeNames[kernel_type_config.element_a]
-    element_b = DataTypeNames[kernel_type_config.element_b]
-    element_d = DataTypeNames[kernel_type_config.element_d]
-    accumulator = DataTypeNames[kernel_type_config.accumulator]
-    element_scale = DataTypeNames[kernel_type_config.element_b_scale]
-    element_zeropoint = DataTypeNames[kernel_type_config.element_b_zeropoint]
+    element_a = VLLMDataTypeNames[kernel_type_config.element_a]
+    element_b = VLLMDataTypeNames[kernel_type_config.element_b]
+    element_d = VLLMDataTypeNames[kernel_type_config.element_d]
+    accumulator = VLLMDataTypeNames[kernel_type_config.accumulator]
+    element_scale = VLLMDataTypeNames[kernel_type_config.element_b_scale]
+    element_zeropoint = VLLMDataTypeNames[kernel_type_config.element_b_zeropoint]
 
     return (f"{element_a}{element_b}{element_d}"
             f"{accumulator}{element_scale}{element_zeropoint}")
@@ -225,8 +237,8 @@ def generate_type_signature(kernel_type_config: TypeConfig):
 
 # non-unique shorter type_name
 def generate_terse_type_signature(kernel_type_config: TypeConfig):
-    element_a = DataTypeNames[kernel_type_config.element_a]
-    element_b = DataTypeNames[kernel_type_config.element_b]
+    element_a = VLLMDataTypeNames[kernel_type_config.element_a]
+    element_b = VLLMDataTypeNames[kernel_type_config.element_b]
 
     return f"{element_a}{element_b}"
 
@@ -250,11 +262,12 @@ def to_cute_constant(value: List[int]):
 
 
 template_globals = {
-    "DataTypeTag": DataTypeTag,
-    "KernelScheduleTag": KernelScheduleTag,
+    "DataTypeTag": VLLMDataTypeTag,
+    "KernelScheduleTag": VLLMKernelScheduleTag,
     "EpilogueScheduleTag": EpilogueScheduleTag,
-    "TileSchedulerTag": TileSchedulerTag,
+    "TileSchedulerTag": VLLMTileSchedulerTag,
     "to_cute_constant": to_cute_constant,
+    "gen_sch_name": generate_terse_schedule_name,
 }
 
 
@@ -271,9 +284,6 @@ prepack_dispatch_template = create_template(PREPACK_TEMPLATE)
 
 def create_sources(impl_config: ImplConfig, num_impl_files=2):
     sources = []
-    # Render the template with the provided configurations
-    schedules_with_names = [(schedule, generate_terse_schedule_name(schedule))
-                            for schedule in impl_config.schedule_configs]
 
     type_name = generate_type_signature(impl_config.type_config)
     terse_type_name = generate_terse_type_signature(impl_config.type_config)
@@ -282,7 +292,8 @@ def create_sources(impl_config: ImplConfig, num_impl_files=2):
         f"machete_mm_{terse_type_name}",
         mm_dispatch_template.render(type_name=type_name,
                                     type_config=impl_config.type_config,
-                                    schedules=schedules_with_names),
+                                    schedules=impl_config.schedule_configs,
+                                    heuristic=impl_config.heuristic),
     ))
 
     sources.append((
@@ -296,7 +307,7 @@ def create_sources(impl_config: ImplConfig, num_impl_files=2):
     num_schedules = len(impl_config.schedule_configs)
     schedules_per_file = math.ceil(num_schedules / num_impl_files)
     for part, i in enumerate(range(0, num_schedules, schedules_per_file)):
-        file_schedules = schedules_with_names[i:i + schedules_per_file]
+        file_schedules = impl_config.schedule_configs[i:i + schedules_per_file]
 
         sources.append((
             f"machete_mm_{terse_type_name}_impl_part{part}",
@@ -313,7 +324,7 @@ def create_sources(impl_config: ImplConfig, num_impl_files=2):
 def generate():
     SCRIPT_DIR = os.path.dirname(__file__)
 
-    schedules = list((
+    schedules = [
         ScheduleConfig(
             tile_shape_mn=tile_shape_mn,
             cluster_shape_mnk=cluster_shape_mnk,
@@ -328,9 +339,40 @@ def generate():
             # ((128, 256), (1, 1, 1)),
         ) for kernel_schedule in (TmaMI, ) for epilogue_schedule in (TmaCoop, )
         for tile_scheduler in (
-            TileSchedulerType.Default,
             VLLMTileSchedulerType.StreamK,
-        )))
+        )]
+    
+    # For now we use the same heuristic for all types
+    default_heuristic = [
+        ("M > 64", ScheduleConfig(
+            tile_shape_mn=(128, 128),
+            cluster_shape_mnk=(1, 1, 1),
+            kernel_schedule=TmaMI,
+            epilogue_schedule=TmaCoop,
+            tile_scheduler=VLLMTileSchedulerType.StreamK,
+        )),
+        ("M > 32", ScheduleConfig(
+            tile_shape_mn=(128, 64),
+            cluster_shape_mnk=(1, 1, 1),
+            kernel_schedule=TmaMI,
+            epilogue_schedule=TmaCoop,
+            tile_scheduler=VLLMTileSchedulerType.StreamK,
+        )),
+        ("M > 16", ScheduleConfig(
+            tile_shape_mn=(128, 32),
+            cluster_shape_mnk=(1, 1, 1),
+            kernel_schedule=TmaMI,
+            epilogue_schedule=TmaCoop,
+            tile_scheduler=VLLMTileSchedulerType.StreamK,
+        )),
+        (None, ScheduleConfig(
+            tile_shape_mn=(128, 16),
+            cluster_shape_mnk=(1, 1, 1),
+            kernel_schedule=TmaMI,
+            epilogue_schedule=TmaCoop,
+            tile_scheduler=VLLMTileSchedulerType.StreamK))
+    ]
+
 
     impl_configs = []
 
@@ -350,9 +392,10 @@ def generate():
     ]
 
     impl_configs += [
-        ImplConfig(x[0], x[1], x[2])
+        ImplConfig(x[0], x[1], x[2], x[3])
         for x in zip(GPTQ_kernel_type_configs, itertools.repeat(schedules),
-                     itertools.repeat(GPTQ_kernel_specializations))
+                     itertools.repeat(GPTQ_kernel_specializations),
+                     itertools.repeat(default_heuristic))
     ]
 
     AWQ_kernel_type_configs = list(
@@ -371,9 +414,10 @@ def generate():
     ]
 
     impl_configs += [
-        ImplConfig(x[0], x[1], x[2])
+        ImplConfig(x[0], x[1], x[2], x[3])
         for x in zip(AWQ_kernel_type_configs, itertools.repeat(schedules),
-                     itertools.repeat(AWQ_kernel_specializations))
+                     itertools.repeat(AWQ_kernel_specializations),
+                     itertools.repeat(default_heuristic))
     ]
 
     output_dir = os.path.join(SCRIPT_DIR, "generated")

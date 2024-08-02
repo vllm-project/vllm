@@ -338,31 +338,6 @@ def machete_supported_schedules(b_type: ScalarType) -> List[str]:
     return torch.ops._C.machete_supported_schedules(b_type)
 
 
-def machete_gemm_schedule_heuristic(M: int, N: int, K: int,
-                                     b_type: ScalarType):
-    assert b_type.size_bits == 4 or b_type.size_bits == 8
-
-    tile_scheduler = "NMstreamK"
-
-    if M > 64:
-        tile_shape_mn = (128, 128)
-    elif M > 32:
-        tile_shape_mn = (128, 64)
-    elif M > 16:
-        tile_shape_mn = (128, 32)
-    else:
-        tile_shape_mn = (128, 16)
-
-    cluster_shape_mnk = (1, 1, 1)
-
-    tile_shape_mn_str = "x".join(map(str, tile_shape_mn))
-    cluster_shape_mnk_str = "x".join(map(str, cluster_shape_mnk))
-    schedule_name = (f"{tile_shape_mn_str}_{cluster_shape_mnk_str}"
-                     f"_TmaMI_TmaCoop_{tile_scheduler}")
-
-    return schedule_name
-
-
 def machete_gemm(
     a: torch.Tensor,
     b_q: torch.Tensor,
@@ -375,10 +350,6 @@ def machete_gemm(
     beta: Optional[float] = None,
     schedule: Optional[str] = None,
 ) -> torch.Tensor:
-    if schedule is None:
-        M, K, N = (a.shape[0], a.shape[1], b_q.shape[1])
-        schedule = machete_gemm_schedule_heuristic(M, N, K, b_type)
-
     return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
                                       b_group_size, c, alpha, beta, schedule)
 
