@@ -294,7 +294,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         return output
 
     def _execute_model_spmd(
-        self, execute_model_req: ExecuteModelRequest
+        self,
+        execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Optional[List[SamplerOutput]]:
         """
         Execute model in Single Program Multiple Data (SPMD) fashion.
@@ -322,6 +324,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input=model_input,
             kv_caches=self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
             **kwargs,
         )
 
