@@ -52,25 +52,6 @@ ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
                                    CustomChatCompletionMessageParam]
 
 
-class CustomChatCompletionMessageParam(TypedDict, total=False):
-    """Enables custom roles in the Chat Completion API."""
-    role: Required[str]
-    """The role of the message's author."""
-
-    content: Union[str, List[ChatCompletionContentPartParam]]
-    """The contents of the message."""
-
-    name: Optional[str]
-    """An optional name for the participant.
-
-    Provides the model information to differentiate between participants of the
-    same role.
-    """
-    tool_call_id: Optional[str]
-
-    tool_calls: Optional[List[dict]]
-
-
 class CustomChatCompletionContentPartParam(TypedDict, total=False):
     __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
 
@@ -697,15 +678,24 @@ class ToolCall(OpenAIBaseModel):
         }
 
 
-class DeltaFunctionCall(FunctionCall):
+class DeltaFunctionCall(BaseModel):
     name: Optional[str] = None
     arguments: Optional[str] = None
 
 
 # a tool call delta where everything is optional
-class DeltaToolCall(ToolCall):
-    index: int  # this is always required, the index of the tool call in the arr
+class DeltaToolCall(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    index: int
     function: Optional[DeltaFunctionCall] = None
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "type": self.type,
+            "function": self.function.to_dict() if self.function else None
+        }
 
 
 # the initial delta that gets sent once a new tool call is started;

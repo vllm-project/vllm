@@ -569,7 +569,7 @@ class OpenAIServingChat(OpenAIServing):
                         ChatCompletionNamedToolChoiceParam):
                 message = ChatMessage(role=role, content=output.text)
 
-            # if the reqeust uses tools and specified a tool choice
+            # if the request uses tools and specified a tool choice
             elif request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
 
