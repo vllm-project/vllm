@@ -38,7 +38,7 @@ from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available, is_tpu
+from vllm.utils import is_pin_memory_available
 
 
 @contextmanager
@@ -298,7 +298,7 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             weights_iterator = pt_weights_iterator(hf_weights_files)
 
-        if is_tpu():
+        if current_platform.is_tpu():
             # In PyTorch XLA, we should call `xm.mark_step` frequently so that
             # not too many ops are accumulated in the XLA program.
             import torch_xla.core.xla_model as xm
