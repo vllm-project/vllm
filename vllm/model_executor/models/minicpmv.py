@@ -482,9 +482,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-    def get_image_bounds(
-            self, input_ids: torch.Tensor
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def get_image_bounds(self, input_ids: torch.Tensor) -> torch.Tensor:
         tokenizer = cached_get_tokenizer(self.config._name_or_path,
                                          trust_remote_code=True)
         if not hasattr(tokenizer, "slice_start_id"):
@@ -500,14 +498,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         image_start_tokens += 1
         image_end_tokens = torch.where(end_cond)[0]
         valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
-        if valid_image_nums == 0:
-            return []
-        image_bound = torch.hstack([
+
+        return torch.hstack([
             image_start_tokens[:valid_image_nums].unsqueeze(-1),
             image_end_tokens[:valid_image_nums].unsqueeze(-1),
         ])
-
-        return image_bound
 
     def get_embedding(
         self,
