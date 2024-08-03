@@ -1,31 +1,55 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Dict, List, Literal, Optional, Union, Type
-import openai
+from typing import Any, Dict, List, Literal, Optional, Union, Type, final
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated, TypedDict, Required
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.utils import random_uuid
+from openai.types.chat import (
+    ChatCompletionContentPartParam,
+    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam,
+    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam
+)
 
 
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
+class CustomChatCompletionMessageParam(TypedDict, total=False):
+    """Enables custom roles in the Chat Completion API."""
+    role: Required[str]
+    """The role of the message's author."""
 
-    type: Required[str]
-    """The type of the content part."""
+    content: Union[str, List[ChatCompletionContentPartParam]]
+    """The contents of the message."""
+
+    name: str
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the
+    same role.
+    """
+
+    tool_call_id: Optional[str]
+
+    tool_calls: Optional[List[dict]]
+
+@final  # So that it should be compatible with Dict[str, str]
+class ConversationMessage(TypedDict, total=False):
+    role: str
+    content: Optional[str]
+    tool_call_id: Optional[str]
+    name: Optional[str]
+    tool_calls: Optional[List]
 
 
-ChatCompletionContentPartParam = Union[
-    openai.types.chat.ChatCompletionContentPartParam,
-    CustomChatCompletionContentPartParam]
+
+ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
+                                   CustomChatCompletionMessageParam]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -46,10 +70,15 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 
     tool_calls: Optional[List[dict]]
 
+class CustomChatCompletionContentPartParam(TypedDict, total=False):
+    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
 
-ChatCompletionMessageParam = Type[
-    Union[openai.types.chat.ChatCompletionMessageParam,
-          CustomChatCompletionMessageParam]]
+    type: Required[str]
+    """The type of the content part."""
+
+
+ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
+                                       CustomChatCompletionContentPartParam]
 
 
 class OpenAIBaseModel(BaseModel):

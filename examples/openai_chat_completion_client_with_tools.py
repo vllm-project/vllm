@@ -135,11 +135,10 @@ for call in completion_tool_calls:
         "name": call.function.name
     })
 
-print("Sending new chat with messages", messages)
+
 chat_completion_2 = client.chat.completions.create(messages=messages,
                                                    model=model,
                                                    tools=tools,
                                                    stream=False)
-
-print(chat_completion_2)
 print('\n\n')
+print(chat_completion_2)
