@@ -74,7 +74,7 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template = load_chat_template(chat_template)
 
         # set up tool use
-        self.enable_auto_tools: bool = enable_auto_tools
+        self.enable_auto_tools: bool = enable_auto_tools or False
         if self.enable_auto_tools:
             logger.info(
                 '"Auto" tool choice has been enabled please note that while the '
@@ -463,8 +463,9 @@ class OpenAIServingChat(OpenAIServing):
                             delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=output.finish_reason
-                            if not len(tool_parser.prev_tool_call_arr) else
-                            'tool_calls',
+                            if not (tool_parser
+                                    and len(tool_parser.prev_tool_call_arr))
+                            else 'tool_calls',
                             stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
