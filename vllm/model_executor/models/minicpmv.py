@@ -515,7 +515,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
 
             vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
             if hasattr(self.config, "scale_emb"):
-                vlm_embedding = vlm_embedding * self.config.scale_emb
+                vlm_embedding *= self.config.scale_emb
 
             image_indices = torch.stack([
                 torch.arange(r[0], r[1], dtype=torch.long)
@@ -532,18 +532,15 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
     def _get_image_bounds(self, input_ids: torch.Tensor) -> torch.Tensor:
         tokenizer = cached_get_tokenizer(self.config._name_or_path,
                                          trust_remote_code=True)
-        if not hasattr(tokenizer, "slice_start_id"):
-            start_cond = input_ids == tokenizer.im_start_id
-            end_cond = input_ids == tokenizer.im_end_id
-        else:
-            start_cond = (input_ids == tokenizer.im_start_id) | (
-                input_ids == tokenizer.slice_start_id)
-            end_cond = (input_ids == tokenizer.im_end_id) | (
-                input_ids == tokenizer.slice_end_id)
+        start_cond = input_ids == tokenizer.im_start_id
+        end_cond = input_ids == tokenizer.im_end_id
+        if hasattr(tokenizer, "slice_start_id"):
+            start_cond |= (input_ids == tokenizer.slice_start_id)
+            end_cond |= (input_ids == tokenizer.slice_end_id)
 
-        image_start_tokens = torch.where(start_cond)[0]
+        image_start_tokens, = torch.where(start_cond)
         image_start_tokens += 1
-        image_end_tokens = torch.where(end_cond)[0]
+        image_end_tokens, = torch.where(end_cond)
         valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
 
         if valid_image_nums == 0:
