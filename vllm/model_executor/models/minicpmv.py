@@ -521,7 +521,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if image_inputs is None or len(image_inputs["pixel_values"]) == 0:
+        if image_inputs is None:
             # No image
             vlm_embedding = torch.tensor([], device=input_ids.device)
             vision_hidden_states = torch.tensor([], device=input_ids.device)
@@ -559,17 +559,21 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                              f"Got type: {type(tgt_sizes)}")
 
         if len(pixel_values) != len(tgt_sizes):
-            raise ValueError("Inconsistent lengths, found: "
+            raise ValueError("Inconsistent batch lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
-
-        if len(pixel_values) == 0:
-            return None
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
         for b in range(len(pixel_values)):
             pixel_values_flat += pixel_values[b]
             tgt_sizes_flat += tgt_sizes[b]
+
+        if len(pixel_values_flat) != len(tgt_sizes_flat):
+            raise ValueError("Inconsistent flattened lengths, found: "
+                             f"{len(pixel_values)} vs. {len(tgt_sizes)}")
+
+        if len(pixel_values_flat) == 0:
+            return None
 
         return MiniCPMVImageInputs(
             pixel_values=pixel_values_flat,
