@@ -56,7 +56,12 @@ class MLPSpeculatorLayerNorm(nn.Module):
 
 
 class MLPSpeculator(nn.Module):
-
+    """
+    An implementation of the speculative models introduced in
+    "Accelerating Production LLMs with Combined Token/Embedding
+    Speculators"
+    https://arxiv.org/pdf/2404.19124
+    """
     def __init__(self, config: MLPSpeculatorConfig, **kwargs) -> None:
         super().__init__()
         self.n_predict = config.n_predict
