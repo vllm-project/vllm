@@ -392,10 +392,7 @@ def dummy_image_for_minicpmv(hf_config: PretrainedConfig):
 def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(PretrainedConfig)
 
-    # image_feature_size = get_max_minicpmv_image_tokens(ctx)
-
     seq_data = dummy_seq_data_for_minicpmv(seq_len)
-
     mm_data = dummy_image_for_minicpmv(hf_config)
 
     return seq_data, mm_data
