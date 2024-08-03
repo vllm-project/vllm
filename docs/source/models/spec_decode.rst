@@ -100,6 +100,11 @@ For more information see `this blog <https://pytorch.org/blog/hitchhikers-guide-
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
+Note that these speculative models currently need to be run without tensor parallelism, although 
+it is possible to run the main model using tensor parallelism (see example above). Since the 
+speculative models are relatively small, we still see significant speedups. However, this 
+limitation will be fixed in a future release.
+
 A variety of speculative models of this type are available on HF hub:
 
 * `llama-13b-accelerator <https://huggingface.co/ibm-fms/llama-13b-accelerator>`_
