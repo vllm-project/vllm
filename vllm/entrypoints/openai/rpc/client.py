@@ -159,7 +159,7 @@ class AsyncEngineRPCClient:
             expected_type=LoRAConfig,
             error_message="Could not get LoRAConfig from RPC Server")
 
-    async def _is_tracing_enabled_rpc(self) -> ParallelConfig:
+    async def _is_tracing_enabled_rpc(self) -> bool:
         """Get is_tracing_enabled flag from the RPCServer"""
 
         return await self._send_get_data_rpc_request(
