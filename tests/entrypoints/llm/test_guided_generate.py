@@ -111,6 +111,7 @@ def test_guided_grammar(sample_sql_statements, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
+        max_tokens=1000,
     )
     outputs = llm.generate(
         prompts=("Generate a sql state that select col_1 from "
@@ -127,7 +128,6 @@ def test_guided_grammar(sample_sql_statements, llm):
 
         generated_text = output.outputs[0].text
         assert generated_text is not None
-
         # use Lark to parse the output, and make sure it's a valid parse tree
         from lark import Lark
         parser = Lark(sample_sql_statements)
