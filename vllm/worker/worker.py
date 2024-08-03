@@ -19,7 +19,7 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata, SequenceGroupMetadataDecode)
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -303,14 +303,15 @@ class Worker(LocalOrDistributedWorkerBase):
                 assert isinstance(metadata_or_delta, SequenceGroupMetadata)
                 self._seq_group_metadata_cache[request_id] = metadata_or_delta
             else:
-                if isinstance(metadata_or_delta, SequenceGroupMetadataDecode):
+                if isinstance(metadata_or_delta, SequenceGroupMetadataDelta):
                     self._seq_group_metadata_cache[request_id].apply_delta(
                         metadata_or_delta)
                 else:
-                    # If metadata snapshot is sent again, it is either preempted,
-                    # or chunked prefill.
+                    # If metadata snapshot is sent again, it is either
+                    # preempted, or chunked prefill. Reset the cache.
                     assert isinstance(metadata_or_delta, SequenceGroupMetadata)
-                    self._seq_group_metadata_cache[request_id] = metadata_or_delta
+                    self._seq_group_metadata_cache[
+                        request_id] = metadata_or_delta
             new_seq_group_metadata_list.append(
                 self._seq_group_metadata_cache[request_id])
         return new_seq_group_metadata_list

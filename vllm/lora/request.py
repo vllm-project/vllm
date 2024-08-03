@@ -1,12 +1,14 @@
 import warnings
-from dataclasses import dataclass, field
 from typing import Optional
 
 from vllm.adapter_commons.request import AdapterRequest
 import msgspec
 
 
-class LoRARequest(msgspec.Struct, AdapterRequest):
+class LoRARequest(msgspec.Struct,
+                  AdapterRequest,
+                  omit_defaults=True,
+                  array_like=True):
     """
     Request for a LoRA adapter.
 

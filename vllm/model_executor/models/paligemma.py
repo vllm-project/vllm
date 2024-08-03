@@ -1,5 +1,5 @@
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
-
+from array import array
 import torch
 from PIL import Image
 from torch import nn
@@ -51,7 +51,7 @@ def dummy_seq_data_for_paligemma(
 
     token_ids = [image_token_id] * image_feature_size
     token_ids += [0] * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceData(array("I", token_ids))
 
 
 def dummy_image_for_paligemma(

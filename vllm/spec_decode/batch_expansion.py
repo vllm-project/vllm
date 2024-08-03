@@ -1,6 +1,6 @@
 from itertools import chain, count
 from typing import Iterator, List, Tuple
-
+from array import array
 import torch
 
 from vllm import SamplingParams
@@ -299,8 +299,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         new_seq_data_dict = {
             target_seq_id:
             SequenceData(
-                prompt_token_ids=prompt_token_ids,
-                _output_token_ids=new_output_token_ids,
+                array("I", prompt_token_ids),
+                _output_token_ids=array("I", new_output_token_ids),
             ),
         }
         # This is a hack. Technically, spec decoding should compute

@@ -3,12 +3,8 @@ import os
 from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
-import time
 import msgspec
-import pickle
 from array import array
-
-from regex import P
 
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
@@ -68,14 +64,14 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
-        self.forward_dag: Optional["ray.dag.CompiledDAG"] = None
-
         def enc_hook(obj: Any) -> Any:
             if isinstance(obj, array):
                 # convert the complex to a tuple of real, imag
                 return obj.tobytes()
 
-        self.encoder = msgspec.msgpack.Encoder(enc_hook=enc_hook)
+        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=enc_hook)
+        self.output_decoder = msgspec.msgpack.Decoder(
+            Optional[List[SamplerOutput]])
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
@@ -290,22 +286,26 @@ class RayGPUExecutor(DistributedGPUExecutor):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        s = time.time()
+        # s = time.time()
+        # import pickle
         # serialized_data = pickle.dumps(execute_model_req)
 
-        serialized_data = self.encoder.encode(execute_model_req)
+        serialized_data = self.input_encoder.encode(execute_model_req)
         # # Open a file in binary write mode
-        import sys
-        if sys.getsizeof(serialized_data) > 60000:
-            with open('example.bin', 'wb') as file:
-                # Write bytes to the file
-                file.write(serialized_data)
+        # import sys
+        # if sys.getsizeof(serialized_data) > 60000:
+        #     with open('example.bin', 'wb') as file:
+        #         # Write bytes to the file
+        #         file.write(serialized_data)
 
-        # print(f"SANG-TODO input serialization takes {(time.time() - s) * 1000} ms index: {self.i}")
+        # print("SANG-TODO input serialization takes "
+        #       f"{(time.time() - s) * 1000} ms index: {self.i}")
 
         outputs = ray.get(self.forward_dag.execute(serialized_data))
-        output = pickle.loads(outputs[0])
-        # print(f"SANG-TODO e2e takes {(time.time() - s) * 1000} ms index: {self.i}")
+        # output = pickle.loads(outputs[0])
+        output = self.output_decoder.decode(outputs[0])
+        # print(f"SANG-TODO e2e takes {(time.time() - s) * 1000} "
+        #       f"ms index: {self.i}")
         self.i += 1
         return output
 

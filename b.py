@@ -1,5 +1,6 @@
 import time
 from array import array
+from vllm.sequence import SequenceData
 
 
 def t():
@@ -47,29 +48,29 @@ class Timer:
 encoder = msgspec.msgpack.Encoder(enc_hook=enc_hook)
 decoder = msgspec.msgpack.Decoder(dec_hook=dec_hook)
 
-l = [i for i in range(256)]
-d = {"1": l}
+# l = [i for i in range(256)]
+# d = {"1": l}
+
+# with Timer("Serialization array"):
+#     # a = array('l')
+#     # a.fromlist(l)
+#     data = encoder.encode(a)
+# with Timer("Deserialization"):
+#     data = decoder.decode(data)
+
+l = [i for i in range(64 * 256)]
+a = array('I')
+a.fromlist(l)
+# a = SequenceData(a)
+
+# with Timer("Serialization sequence data"):
+#     # a = array('l')
+#     # a.fromlist(l)
+#     data = encoder.encode(a)
+# with Timer("Deserialization"):
+#     data = decoder.decode(data)
 
 with Timer("Serialization array"):
-    # a = array('l')
-    # a.fromlist(l)
     data = encoder.encode(a)
 with Timer("Deserialization"):
     data = decoder.decode(data)
-
-l = [i for i in range(256)]
-a = array('l')
-a.fromlist(l)
-
-with Timer("Serialization bigger array"):
-    # a = array('l')
-    # a.fromlist(l)
-    data = encoder.encode(a)
-with Timer("Deserialization"):
-    data = decoder.decode(data)
-
-# for _ in range(5):
-#     with Timer("Serialization list"):
-#         data = encoder.encode(l)
-#     with Timer("Deserialization"):
-#         data = decoder.decode(data)

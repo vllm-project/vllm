@@ -1,11 +1,9 @@
 """Sampling parameters for text generation."""
 import copy
 from enum import IntEnum
-from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Union, Set
 
 import torch
-from pydantic import Field
 from typing_extensions import Annotated
 import msgspec
 
@@ -33,7 +31,7 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
+class SamplingParams(msgspec.Struct, omit_defaults=True):
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
@@ -138,7 +136,9 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
     detokenize: bool = True
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    # logits_processors: Optional[List[LogitsProcessor]] = None
+    # Optional[List[LogitsProcessor]] type. We use Any here because
+    # Optional[List[LogitsProcessor]] type is not supported by msgspec.
+    # We will also remove this API soon.
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
@@ -146,7 +146,7 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
-    all_stop_token_ids: Optional[Set[int]] = None
+    _all_stop_token_ids: Set[int] = msgspec.field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.best_of = self.best_of or self.n
@@ -182,11 +182,12 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
                 self.min_p = 0.0
                 self._verify_greedy_sampling()
         # eos_token_id is added to this by the engine
-        self.all_stop_token_ids = set(self.stop_token_ids)
+        self._all_stop_token_ids = set(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        assert isinstance(self.best_of, int)
         if self.best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
                              f"got n={self.n} and best_of={self.best_of}.")
@@ -230,6 +231,7 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
@@ -263,6 +265,7 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
                 "default value of 1.0 when not using beam search.")
 
     def _verify_greedy_sampling(self) -> None:
+        assert isinstance(self.best_of, int)
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
@@ -276,7 +279,7 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
         if model_eos_token_id is not None:
             # Add the eos token id into the sampling_params to support
             # min_tokens processing.
-            self.all_stop_token_ids.add(model_eos_token_id)
+            self._all_stop_token_ids.add(model_eos_token_id)
 
         # Update eos_token_id for generation
         if (eos_ids := generation_config.get("eos_token_id")) is not None:
@@ -288,7 +291,7 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
                 # purposes.
                 eos_ids.discard(model_eos_token_id)
             if eos_ids:
-                self.all_stop_token_ids.update(eos_ids)
+                self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
@@ -302,6 +305,10 @@ class SamplingParams(msgspec.Struct, omit_defaults=True, array_like=False):
         if self.seed is not None:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
+
+    @property
+    def all_stop_token_ids(self) -> Set[int]:
+        return self._all_stop_token_ids
 
     def clone(self) -> "SamplingParams":
         """Deep copy excluding LogitsProcessor objects.

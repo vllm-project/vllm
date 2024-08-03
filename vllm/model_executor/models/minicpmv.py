@@ -25,7 +25,7 @@ import math
 import re
 from functools import partial
 from typing import Iterable, List, Optional, Tuple
-
+from array import array
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -319,7 +319,7 @@ def get_max_minicpmv_image_tokens(ctx: InputContext):
 
 def dummy_seq_data_for_minicpmv(seq_len: int):
     token_ids = [0] * seq_len
-    return SequenceData(token_ids)
+    return SequenceData(array("I", token_ids))
 
 
 def dummy_image_for_minicpmv(hf_config):

@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupMetadataDecode,
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
 
 logger = init_logger(__name__)
@@ -333,9 +333,6 @@ class Scheduler:
                                        if self.enable_artificial_preemption
                                        else 0)
         self.num_cumulative_preemption: int = 0
-        from collections import defaultdict
-        self._block_table_cache: Dict[int, Dict[int,
-                                                List[int]]] = defaultdict(dict)
 
     @property
     def lora_enabled(self) -> bool:
@@ -998,25 +995,11 @@ class Scheduler:
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
 
-            is_prompt = seq_group.is_prefill()
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                if is_prompt or not envs.VLLM_USE_RAY_SPMD_WORKER or True:
-                    block_table = self.block_manager.get_block_table(seq)
-                    block_tables[seq_id] = block_table
-                    self._block_table_cache[
-                        seq_group.request_id][seq_id] = block_table
-                else:
-                    block_table = self.block_manager.get_block_table(seq)
-                    if len(self._block_table_cache[seq_group.request_id]
-                           [seq_id]) < len(block_table):
-                        block_tables[seq_id] = [block_table[-1]]
-                        self._block_table_cache[
-                            seq_group.request_id][seq_id].append(
-                                block_table[-1])
-                    else:
-                        block_tables[seq_id] = []
+                block_table = self.block_manager.get_block_table(seq)
+                block_tables[seq_id] = block_table
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             common_computed_block_nums = (
@@ -1024,22 +1007,30 @@ class Scheduler:
                     seq_group.get_seqs(status=SequenceStatus.RUNNING)))
 
             do_sample = True
+            is_prompt = seq_group.is_prefill()
+            # We should send the metadata to workers when the first prefill
+            # is sent. Subsequent requests could be chunked prefill or decode.
+            is_first_prefill = False
             if is_prompt:
                 seqs = seq_group.get_seqs()
                 # Prefill has only 1 sequence.
                 assert len(seqs) == 1
+                num_computed_tokens = seqs[0].data.get_num_computed_tokens()
+                is_first_prefill = num_computed_tokens == 0
                 # In the next iteration, all prompt tokens are not computed.
                 # It means the prefill is chunked, and we don't need sampling.
                 # NOTE: We use get_len instead of get_prompt_len because when
                 # a sequence is preempted, prefill includes previous generated
                 # output tokens.
-                if (token_chunk_size + seqs[0].data.get_num_computed_tokens() <
+                if (token_chunk_size + num_computed_tokens <
                         seqs[0].data.get_len()):
                     do_sample = False
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            if is_prompt or not envs.VLLM_USE_RAY_SPMD_WORKER:
+            # When SPMD mode is enabled, we only send delta data except for
+            # the first request to reduce serialization cost.
+            if is_first_prefill or not envs.VLLM_USE_RAY_SPMD_WORKER:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1047,31 +1038,31 @@ class Scheduler:
                     sampling_params=seq_group.sampling_params,
                     block_tables=block_tables,
                     do_sample=do_sample,
-                    # pooling_params=seq_group.pooling_params,
+                    pooling_params=seq_group.pooling_params,
                     token_chunk_size=token_chunk_size,
-                    # lora_request=seq_group.lora_request,
+                    lora_request=seq_group.lora_request,
                     computed_block_nums=common_computed_block_nums,
-                    # state=seq_group.state,
-                    # # `multi_modal_data` will only be present for the 1st comm
-                    # # between engine and worker.
-                    # # the subsequent comms can still use delta, but
-                    # # `multi_modal_data` will be None.
-                    # multi_modal_data=seq_group.multi_modal_data
-                    # if scheduler_outputs.num_prefill_groups > 0 else None,
-                    # prompt_adapter_request=seq_group.prompt_adapter_request,
+                    # `multi_modal_data` will only be present for the 1st comm
+                    # between engine and worker.
+                    # the subsequent comms can still use delta, but
+                    # `multi_modal_data` will be None.
+                    multi_modal_data=seq_group.multi_modal_data
+                    if scheduler_outputs.num_prefill_groups > 0 else None,
+                    prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
             else:
                 # Delta is used only for spmd workers.
                 seq_data_delta = {}
                 for id, data in seq_data.items():
                     seq_data_delta[id] = data.get_delta()
-
-                seq_group_metadata = SequenceGroupMetadataDecode(
+                seq_group_metadata = SequenceGroupMetadataDelta(
                     seq_data_delta,
                     seq_group.request_id,
                     block_tables,
+                    is_prompt,
                     do_sample=do_sample,
                     token_chunk_size=token_chunk_size,
+                    computed_block_nums=common_computed_block_nums,
                 )
             seq_group_metadata_list.append(seq_group_metadata)
 

@@ -1,7 +1,7 @@
 from functools import cached_property
 from typing import (Any, Dict, Iterable, List, Literal, Optional, Tuple,
                     TypedDict)
-
+from array import array
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -70,7 +70,7 @@ def dummy_seq_data_for_chameleon(
 
     token_ids = [image_token_id] * image_feature_size
     token_ids += [0] * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceData(array("I", token_ids))
 
 
 def dummy_image_for_chameleon(

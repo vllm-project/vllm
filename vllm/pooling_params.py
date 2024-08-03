@@ -2,7 +2,7 @@ from typing import Any, Optional
 import msgspec
 
 
-class PoolingParams(msgspec.Struct, omit_defaults=True):
+class PoolingParams(msgspec.Struct, omit_defaults=True, array_like=True):
     """Pooling parameters for pooling.
 
     Attributes:

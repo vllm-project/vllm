@@ -1,7 +1,7 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
 from typing import Optional, Union
-
+from array import array
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -55,7 +55,7 @@ def dummy_seq_data_for_blip(
 
     token_ids = [image_token_id] * image_feature_size
     token_ids += [0] * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceData(array("I", token_ids))
 
 
 def dummy_image_for_blip(

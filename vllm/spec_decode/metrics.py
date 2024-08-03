@@ -1,6 +1,6 @@
 import time
-from dataclasses import dataclass
 from typing import Callable, Optional
+import msgspec
 
 import torch
 
@@ -9,8 +9,9 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.utils import is_pin_memory_available
 
 
-@dataclass
-class SpecDecodeWorkerMetrics:
+class SpecDecodeWorkerMetrics(msgspec.Struct,
+                              omit_defaults=True,
+                              array_like=True):
     """Dataclass holding metrics emitted from the spec decode worker.
     """
 

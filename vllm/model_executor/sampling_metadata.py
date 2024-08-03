@@ -440,9 +440,9 @@ class SamplingTensors:
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
                     prompt_tokens.extend(
-                        array('l') for _ in range(prefill_len))
+                        array('I') for _ in range(prefill_len))
                     output_tokens.extend(
-                        array('l') for _ in range(prefill_len))
+                        array('I') for _ in range(prefill_len))
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
