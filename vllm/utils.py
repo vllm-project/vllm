@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import contextlib
 import datetime
 import enum
 import gc
@@ -291,6 +290,10 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     return _async_wrapper
 
 
+class ProducerFinished:
+    pass
+
+
 def merge_async_iterators(
         *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
     """Merge multiple asynchronous iterators into a single iterator.
@@ -299,9 +302,10 @@ def merge_async_iterators(
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
     """
-    queue: asyncio.Queue[Union[Tuple[int, T], Exception]] = asyncio.Queue()
+    queue: asyncio.Queue[Union[Tuple[int, T], ProducerFinished,
+                               Exception]] = asyncio.Queue()
 
-    finished = [False] * len(iterators)
+    producers = len(iterators)
 
     async def producer(i: int, iterator: AsyncIterator[T]):
         try:
@@ -309,7 +313,8 @@ def merge_async_iterators(
                 await queue.put((i, item))
         except Exception as e:
             await queue.put(e)
-        finished[i] = True
+        # Signal to the consumer that we've finished
+        await queue.put(ProducerFinished())
 
     _tasks = [
         asyncio.create_task(producer(i, iterator))
@@ -317,9 +322,17 @@ def merge_async_iterators(
     ]
 
     async def consumer():
+        remaining = producers
         try:
-            while not all(finished) or not queue.empty():
+            while remaining or not queue.empty():
+                # we think there is a race condition here
                 item = await queue.get()
+
+                if isinstance(item, ProducerFinished):
+                    # Signal that a producer finished- not a real item
+                    remaining -= 1
+                    continue
+
                 if isinstance(item, Exception):
                     raise item
                 yield item
@@ -375,8 +388,10 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
-def get_open_port() -> int:
-    port = envs.VLLM_PORT
+def get_open_port(port: Optional[int] = None) -> int:
+    if port is None:
+        # Default behavior here is to return a port for multi-gpu communication
+        port = envs.VLLM_PORT
     if port is not None:
         while True:
             try:
@@ -921,27 +936,6 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
-def error_on_invalid_device_count_status():
-    cache_entries = 0
-    with contextlib.suppress(Exception):
-        # future pytorch will fix the issue, device_count will not be cached
-        # at that time, `.cache_info().currsize` will error out
-        cache_entries = torch.cuda.device_count.cache_info().currsize
-    if cache_entries != 0:
-        # the function is already called, and the result is cached
-        remembered = torch.cuda.device_count()
-        current = cuda_device_count_stateless()
-        if remembered > current:
-            raise RuntimeError(
-                "The number of CUDA devices has changed since the first "
-                "call to torch.cuda.device_count(). This is not allowed "
-                "and may result in undefined behavior. Please check out "
-                "https://github.com/vllm-project/vllm/issues/6056 to "
-                "find the first call to torch.cuda.device_count() "
-                "and defer it until the engine is up. Or you can set "
-                "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
 
 
 # NVML utils

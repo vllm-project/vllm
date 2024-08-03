@@ -9,7 +9,7 @@ from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          load_chat_template,
                                          parse_chat_message_content,
@@ -47,20 +47,22 @@ logger = init_logger(__name__)
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 model_config: ModelConfig,
-                 served_model_names: List[str],
-                 response_role: str,
-                 *,
-                 lora_modules: Optional[List[LoRAModulePath]],
-                 prompt_adapters: Optional[List[PromptAdapterPath]],
-                 request_logger: Optional[RequestLogger],
-                 chat_template: Optional[str],
-                 return_tokens_as_token_ids: bool = False,
-                 enable_auto_tools: Optional[bool] = False,
-                 tool_parser: Optional[str] = None):
-        super().__init__(engine=engine,
+    def __init__(
+            self,
+            async_engine_client: AsyncEngineClient,
+            model_config: ModelConfig,
+            served_model_names: List[str],
+            response_role: str,
+            *,
+            lora_modules: Optional[List[LoRAModulePath]],
+            prompt_adapters: Optional[List[PromptAdapterPath]],
+            request_logger: Optional[RequestLogger],
+            chat_template: Optional[str],
+            return_tokens_as_token_ids: bool = False,
+            enable_auto_tools: Optional[bool] = False,
+            tool_parser: Optional[str] = None
+    ):
+        super().__init__(async_engine_client=async_engine_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -76,28 +78,29 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_auto_tools: bool = enable_auto_tools
         if self.enable_auto_tools:
             logger.info(
-                '"Auto" tool choice has been enabled please note that while the parallel_tool_calls client '
-                'option is preset for compatibility reasons, it will be ignored.'
+                '"Auto" tool choice has been enabled please note that while the '
+                'parallel_tool_calls client option is preset for compatibility '
+                'reasons, it will be ignored.'
             )
 
-        if self.enable_auto_tools and not tool_parser:
-            raise TypeError(
-                'Error: --enable-auto-tool-choice requires --tool-choice-parser'
-            )
-
-        if tool_parser == 'mistral':
-            self.tool_parser: Type[ToolParser] = MistralToolParser
-        elif tool_parser == 'hermes':
-            self.tool_parser: Type[ToolParser] = Hermes2ProToolParser
+        if self.enable_auto_tools:
+            if tool_parser == 'mistral':
+                self.tool_parser: Optional[Type[ToolParser]] = MistralToolParser
+            elif tool_parser == 'hermes':
+                self.tool_parser: Optional[Type[ToolParser]] = Hermes2ProToolParser
+            else:
+                raise TypeError(
+                    'Error: --enable-auto-tool-choice requires --tool-parser'
+                )
         else:
-            raise ValueError(f'Invalid tool parser value {tool_parser}!')
+            self.tool_parser: Optional[Type[ToolParser]] = None
 
     async def create_chat_completion(
-        self,
-        request: ChatCompletionRequest,
-        raw_request: Optional[Request] = None
+            self,
+            request: ChatCompletionRequest,
+            raw_request: Optional[Request] = None
     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
-               ChatCompletionResponse]:
+    ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
@@ -117,13 +120,13 @@ class OpenAIServingChat(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             model_config = self.model_config
-            tokenizer = await self.engine.get_tokenizer(lora_request)
+            tokenizer = await self.async_engine_client.get_tokenizer(
+                lora_request)
 
             conversation: List[ConversationMessage] = []
             mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
             for msg in request.messages:
-
                 chat_parsed_result = parse_chat_message_content(
                     msg, model_config, tokenizer)
 
@@ -177,7 +180,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 guided_decode_logits_processor,
                 default_max_tokens=self.max_model_len -
-                len(prompt_inputs["prompt_token_ids"]))
+                                   len(prompt_inputs["prompt_token_ids"]))
 
             self._log_inputs(request_id,
                              prompt_inputs,
@@ -191,7 +194,8 @@ class OpenAIServingChat(OpenAIServing):
             if mm_data is not None:
                 engine_inputs["multi_modal_data"] = mm_data
 
-            is_tracing_enabled = await self.engine.is_tracing_enabled()
+            is_tracing_enabled = (
+                await self.async_engine_client.is_tracing_enabled())
             trace_headers = None
             if is_tracing_enabled and raw_request:
                 trace_headers = extract_trace_headers(raw_request.headers)
@@ -199,7 +203,7 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
 
-            result_generator = self.engine.generate(
+            result_generator = self.async_engine_client.generate(
                 engine_inputs,
                 sampling_params,
                 request_id,
@@ -235,12 +239,12 @@ class OpenAIServingChat(OpenAIServing):
             return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
-        self,
-        request: ChatCompletionRequest,
-        result_generator: AsyncIterator[RequestOutput],
-        request_id: str,
-        conversation: List[ConversationMessage],
-        tokenizer: PreTrainedTokenizer,
+            self,
+            request: ChatCompletionRequest,
+            result_generator: AsyncIterator[RequestOutput],
+            request_id: str,
+            conversation: List[ConversationMessage],
+            tokenizer: PreTrainedTokenizer,
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
         created_time = int(time.time())
@@ -296,7 +300,7 @@ class OpenAIServingChat(OpenAIServing):
                         last_msg_content = ""
                         if conversation and conversation[-1].get(
                                 "content") and conversation[-1].get(
-                                    "role") == role:
+                            "role") == role:
                             last_msg_content = conversation[-1]["content"]
 
                         if last_msg_content:
@@ -337,14 +341,15 @@ class OpenAIServingChat(OpenAIServing):
 
                     i = output.index
                     # prints the full completion so far including text and tokens
-                    #print(f'[{i}]:', output)
+                    # print(f'[{i}]:', output)
 
                     if finish_reason_sent[i]:
                         continue
 
                     delta_token_ids = output.token_ids[previous_num_tokens[i]:]
                     out_logprobs = output.logprobs[
-                        previous_num_tokens[i]:] if output.logprobs else None
+                                   previous_num_tokens[
+                                       i]:] if output.logprobs else None
 
                     if request.logprobs and request.top_logprobs is not None:
                         assert out_logprobs is not None, (
@@ -381,8 +386,8 @@ class OpenAIServingChat(OpenAIServing):
                             previous_text=previous_texts[i],
                             current_text=output.text,
                             delta_text=delta_text,
-                            previous_token_ids=output.
-                            token_ids[:-1 * len(delta_token_ids)],
+                            previous_token_ids=output.token_ids[
+                                               :-1 * len(delta_token_ids)],
                             current_token_ids=output.token_ids,
                             delta_token_ids=delta_token_ids)
                     else:
@@ -420,7 +425,7 @@ class OpenAIServingChat(OpenAIServing):
                                     prompt_tokens=prompt_tokens,
                                     completion_tokens=completion_tokens,
                                     total_tokens=prompt_tokens +
-                                    completion_tokens,
+                                                 completion_tokens,
                                 )
                                 chunk.usage = usage
                             else:
@@ -431,11 +436,12 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         # check to make sure we haven't missed something on the last function call
                         if (delta_message.tool_calls and
-                            (delta_message.tool_calls[0].function.arguments
-                             == '' or
-                             delta_message.tool_calls[0].function.arguments and
-                             (output.finish_reason == 'stop'
-                              or output.finish_reason == 'tool_calls'))):
+                                (delta_message.tool_calls[0].function.arguments
+                                 == '' or
+                                 delta_message.tool_calls[
+                                     0].function.arguments and
+                                 (output.finish_reason == 'stop'
+                                  or output.finish_reason == 'tool_calls'))):
                             expected_call = json.dumps(
                                 tool_parser.prev_tool_call_arr[
                                     len(tool_parser.prev_tool_call_arr) -
@@ -447,10 +453,10 @@ class OpenAIServingChat(OpenAIServing):
                             delta_message = DeltaMessage(tool_calls=[
                                 DeltaToolCall(
                                     index=len(tool_parser.prev_tool_call_arr) -
-                                    1,
+                                          1,
                                     function=DeltaFunctionCall(
                                         arguments=remaining_call).model_dump(
-                                            exclude_none=True))
+                                        exclude_none=True))
                             ])
                         # Send the finish response for each request.n only once
                         prompt_tokens = len(res.prompt_token_ids)
@@ -477,7 +483,7 @@ class OpenAIServingChat(OpenAIServing):
                                     prompt_tokens=prompt_tokens,
                                     completion_tokens=completion_tokens,
                                     total_tokens=prompt_tokens +
-                                    completion_tokens,
+                                                 completion_tokens,
                                 )
                                 chunk.usage = usage
                             else:
@@ -514,13 +520,13 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-        self,
-        request: ChatCompletionRequest,
-        raw_request: Optional[Request],
-        result_generator: AsyncIterator[RequestOutput],
-        request_id: str,
-        conversation: List[ConversationMessage],
-        tokenizer: PreTrainedTokenizer,
+            self,
+            request: ChatCompletionRequest,
+            raw_request: Optional[Request],
+            result_generator: AsyncIterator[RequestOutput],
+            request_id: str,
+            conversation: List[ConversationMessage],
+            tokenizer: PreTrainedTokenizer,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = self.served_model_names[0]
@@ -530,7 +536,7 @@ class OpenAIServingChat(OpenAIServing):
         async for res in result_generator:
             if raw_request is not None and await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
-                await self.engine.abort(request_id)
+                await self.async_engine_client.abort(request_id)
                 return self.create_error_response("Client disconnected")
             final_res = res
         assert final_res is not None
@@ -556,8 +562,14 @@ class OpenAIServingChat(OpenAIServing):
             # by default, tools are not used.
             tools_called = False
 
+            # if auto tools are not enabled, and a named tool choice using
+            #   outlines is not being used
+            if not self.enable_auto_tools and not isinstance(
+                    request.tool_choice, ChatCompletionNamedToolChoiceParam):
+                message = ChatMessage(role=role, content=output.text)
+
             # if the reqeust uses tools and specified a tool choice
-            if request.tool_choice and type(
+            elif request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
 
                 message = ChatMessage(
@@ -653,11 +665,11 @@ class OpenAIServingChat(OpenAIServing):
         ]
 
     def _create_chat_logprobs(
-        self,
-        token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
-        tokenizer: PreTrainedTokenizer,
-        num_output_top_logprobs: Optional[int] = None,
+            self,
+            token_ids: GenericSequence[int],
+            top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+            tokenizer: PreTrainedTokenizer,
+            num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
 
