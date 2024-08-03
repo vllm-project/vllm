@@ -61,6 +61,9 @@ class MLPSpeculator(nn.Module):
     "Accelerating Production LLMs with Combined Token/Embedding
     Speculators"
     https://arxiv.org/pdf/2404.19124
+
+    Trained speculators of this type are available on HF hub at:
+    https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
     """
     def __init__(self, config: MLPSpeculatorConfig, **kwargs) -> None:
         super().__init__()
