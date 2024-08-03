@@ -532,15 +532,28 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             )
         return vlm_embedding, vision_hidden_states
 
-    def process_multimodal_inputs(
+    def _parse_and_validate_multimodal_inputs(
         self,
-        pixel_values: Union[List[torch.Tensor], torch.Tensor],
         input_ids: torch.Tensor,
-        tgt_sizes: torch.Tensor,
+        **kwargs: object,
     ) -> MiniCPMVInputs:
+        pixel_values = kwargs.pop("pixel_values", [])
+        tgt_sizes = kwargs.pop("tgt_sizes", [])
+
+        if not isinstance(pixel_values, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
+
+        if not isinstance(tgt_sizes, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of target sizes. "
+                             f"Got type: {type(tgt_sizes)}")
+
         pixel_values_lst: List[torch.Tensor] = []
         tgt_sizes_lst: List[torch.Tensor] = []
         for b in range(len(pixel_values)):
+            assert isinstance(pixel_values[b], torch.Tensor)
+            assert isinstance(tgt_sizes[b], torch.Tensor)
+
             pixel_values_lst += pixel_values[b]
             tgt_sizes_lst += tgt_sizes[b]
 
@@ -559,11 +572,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        inputs = self.process_multimodal_inputs(
-            pixel_values=kwargs.pop("pixel_values", []),  # type: ignore
-            input_ids=input_ids,
-            tgt_sizes=kwargs.pop("tgt_sizes", None),  # type: ignore
-        )
+        inputs = self._parse_and_validate_multimodal_inputs(input_ids, **kwargs)
 
         vlm_embeddings, _ = self.get_embedding(inputs)
 
