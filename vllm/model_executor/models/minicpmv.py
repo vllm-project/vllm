@@ -517,15 +517,19 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             if hasattr(self.config, "scale_emb"):
                 vlm_embedding *= self.config.scale_emb
 
-            image_indices = torch.stack([
-                torch.arange(r[0], r[1], dtype=torch.long)
-                for r in image_inputs["image_bounds"]
-            ]).to(vlm_embedding.device, vlm_embedding.dtype)
-            vlm_embedding.scatter_(
-                0,
-                image_indices.view(-1, 1).repeat(1, vlm_embedding.shape[-1]),
-                vision_hidden_states.view(-1, vision_hidden_states.shape[-1]),
-            )
+            # See NOTE in _parse_and_validate_inputs
+            if len(image_inputs["image_bounds"]) > 0:
+                image_indices = torch.stack([
+                    torch.arange(r[0], r[1], dtype=torch.long)
+                    for r in image_inputs["image_bounds"]
+                ]).to(vlm_embedding.device, vlm_embedding.dtype)
+                vlm_embedding.scatter_(
+                    0,
+                    image_indices.view(-1, 1).repeat(1,
+                                                     vlm_embedding.shape[-1]),
+                    vision_hidden_states.view(-1,
+                                              vision_hidden_states.shape[-1]),
+                )
 
         return vlm_embedding, vision_hidden_states
 
@@ -579,13 +583,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             pixel_values_flat += pixel_values[b]
             tgt_sizes_flat += tgt_sizes[b]
 
-        lens = [
-            len(image_bounds_flat),
-            len(pixel_values_flat),
-            len(tgt_sizes_flat),
-        ]
-        if len(set(lens)) > 1:
-            raise ValueError(f"Inconsistent flattened lengths, found: {lens}")
+        # NOTE: Input IDs does not contain image tokens during memory profiling,
+        # so we allow it to be empty
+        if len(pixel_values_flat) != len(tgt_sizes_flat):
+            raise ValueError("Inconsistent flattened lengths, found: "
+                             f"{len(pixel_values_flat)} vs. "
+                             f"{len(tgt_sizes_flat)}")
 
         if len(pixel_values_flat) == 0:
             return None
