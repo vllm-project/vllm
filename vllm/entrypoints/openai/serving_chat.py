@@ -81,18 +81,15 @@ class OpenAIServingChat(OpenAIServing):
                 'parallel_tool_calls client option is preset for compatibility '
                 'reasons, it will be ignored.')
 
+        self.tool_parser: Optional[Type[ToolParser]] = None
         if self.enable_auto_tools:
             if tool_parser == 'mistral':
-                self.tool_parser: Optional[
-                    Type[ToolParser]] = MistralToolParser
+                self.tool_parser = MistralToolParser
             elif tool_parser == 'hermes':
-                self.tool_parser: Optional[
-                    Type[ToolParser]] = Hermes2ProToolParser
+                self.tool_parser = Hermes2ProToolParser
             else:
                 raise TypeError(
                     'Error: --enable-auto-tool-choice requires --tool-parser')
-        else:
-            self.tool_parser: Optional[Type[ToolParser]] = None
 
     async def create_chat_completion(
         self,
@@ -256,7 +253,7 @@ class OpenAIServingChat(OpenAIServing):
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
 
-        tool_parser: ToolParser = self.tool_parser(
+        tool_parser: Optional[ToolParser] = self.tool_parser(
             tokenizer) if self.tool_parser else None
 
         try:
@@ -374,8 +371,9 @@ class OpenAIServingChat(OpenAIServing):
                         ])
 
                     # handle streaming deltas for tools with tool_choice
-                    elif (request.tools and (request.tool_choice is None
-                                             or request.tool_choice == 'auto')
+                    elif (request.tools and tool_parser
+                          and (request.tool_choice is None
+                               or request.tool_choice == 'auto')
                           and self.enable_auto_tools):
 
                         delta_message = tool_parser.extract_tool_calls_streaming(
@@ -440,8 +438,8 @@ class OpenAIServingChat(OpenAIServing):
                              == '' or
                              delta_message.tool_calls[0].function.arguments and
                              (output.finish_reason == 'stop'
-                              or output.finish_reason == 'tool_calls'))):
-
+                              or output.finish_reason == 'tool_calls'))
+                                and tool_parser):
                             expected_call = json.dumps(
                                 tool_parser.prev_tool_call_arr[
                                     len(tool_parser.prev_tool_call_arr) -
