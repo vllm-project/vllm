@@ -143,15 +143,20 @@ class RequestTracker:
                                verbose: bool = False) -> None:
         """Process a request output from the engine."""
         request_id = request_output.request_id
+        finished = request_output.finished
 
+        if finished:
+            stream = self._request_streams.pop(request_id, None)
+        else:
+            stream = self._request_streams.get(request_id)
         # Guard against a KeyError which can occur if the request was aborted
         # while the output was generated
-        if (stream := self._request_streams.get(request_id)) is not None:
+        if stream is not None:
             stream.put(request_output)
-            if request_output.finished:
+            if finished:
                 stream.finish()
 
-        if verbose and request_output.finished:
+        if verbose and finished:
             logger.info("Finished request %s.", request_id)
 
     def process_exception(self,
@@ -200,7 +205,7 @@ class RequestTracker:
 
         self._finished_requests.put_nowait(request_id)
 
-        stream = self._request_streams.get(request_id, None)
+        stream = self._request_streams.pop(request_id, None)
         if stream is not None:
             stream.finish(cancelled=cancelled)
 
@@ -213,7 +218,6 @@ class RequestTracker:
         while not self._finished_requests.empty():
             request_id = self._finished_requests.get_nowait()
             finished_requests.add(request_id)
-            self._request_streams.pop(request_id, None)
 
         while not self._new_requests.empty():
             stream, new_request = self._new_requests.get_nowait()
