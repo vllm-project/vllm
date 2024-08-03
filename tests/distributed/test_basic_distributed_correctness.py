@@ -1,7 +1,5 @@
 """Compare the outputs of HF and distributed vLLM when using greedy sampling.
-vLLM will allocate all the available memory, so we need to run the tests one
-by one. The solution is to pass arguments (model name) by environment
-variables.
+
 Run:
 ```sh
 cd $VLLM_PATH/tests
