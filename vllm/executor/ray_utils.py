@@ -4,7 +4,7 @@ from array import array
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip, is_hip, is_tpu, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -12,6 +12,8 @@ logger = init_logger(__name__)
 
 try:
     import ray
+
+    ModelRequest = Tuple[ExecuteModelRequest, Optional[IntermediateTensors]]
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
@@ -32,7 +34,7 @@ try:
                     deserialized.frombytes(obj)
                     return deserialized
 
-            self.input_decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
+            self.input_decoder = msgspec.msgpack.Decoder(ModelRequest,
                                                          dec_hook=dec_hook)
             self.output_encoder = msgspec.msgpack.Encoder()
 
@@ -44,13 +46,23 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def execute_model_spmd(self, serialized_execute_model_req: bytes):
-            """Used only when SPMD worker and compiled DAG are both
-            enabled."""
+        def execute_model_spmd(
+            self,
+            serialized_model_request: bytes) -> bytes:
+            """Execute model in SPMD fashion: used only when SPMD worker and
+            compiled DAG are both enabled.
+
+            Args:
+                req_or_tuple: A tuple containing the request and intermediate
+                    tensors. Intermediate tensors are None unless if it is
+                    provided because it is > 0 pipeline stage. The value is
+                    serialized (to optimize the serialization performance).
+            """
             # s = time.time()
 
-            execute_model_req: ExecuteModelRequest = self.input_decoder.decode(
-                serialized_execute_model_req)
+            execute_model_req, intermediate_tensors: ModelRequest = (
+                    self.input_decoder.decode(serialized_model_request))
+
             # import pickle
             # execute_model_req: ExecuteModelRequest = (
             #     pickle.loads(execute_model_req))
@@ -64,7 +76,12 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            output = self.worker._execute_model_spmd(execute_model_req)
+            output = self.worker._execute_model_spmd(execute_model_req,
+                                                     intermediate_tensors)
+            # Pipeline model request and output to the next pipeline stage.
+            if isinstance(output, IntermediateTensors):
+                output = execute_model_req, output
+
             # output = pickle.dumps(output)
             output = self.output_encoder.encode(output)
             # print("SANG-TODO worker takes "

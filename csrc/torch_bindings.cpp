@@ -1,7 +1,7 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
-#include "registration.h"
+#include "core/registration.h"
 
 #include <torch/library.h>
 
@@ -148,6 +148,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def("fp8_marlin_gemm", &fp8_marlin_gemm);
   ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
+
+  // marlin_qqq_gemm for QQQ.
+  ops.def("marlin_qqq_gemm", &marlin_qqq_gemm);
+  ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.

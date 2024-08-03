@@ -3,12 +3,12 @@ import msgspec
 
 
 class PromptAdapterRequest(msgspec.Struct,
-                           AdapterRequest,
                            array_like=True,
                            omit_defaults=True):
     """
     Request for a Prompt adapter.
     """
+    __metaclass__ = AdapterRequest
 
     prompt_adapter_name: str
     prompt_adapter_id: int

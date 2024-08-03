@@ -1,4 +1,4 @@
-#include "registration.h"
+#include "core/registration.h"
 #include "moe_ops.h"
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {

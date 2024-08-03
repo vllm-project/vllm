@@ -41,6 +41,9 @@ _PP_SUPPORTED_MODELS = [
     "GPT2LMHeadModel",
     "MixtralForCausalLM",
     "NemotronForCausalLM",
+    "Qwen2ForCausalLM",
+    "Qwen2MoeForCausalLM",
+    "QWenLMHeadModel",
 ]
 
 
@@ -198,13 +201,17 @@ class ModelConfig:
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is None:
-            # compress-tensors uses a "compression_config" key
+            # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
         return quant_cfg
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
         rocm_supported_quantization = ["gptq", "squeezellm"]
+        optimized_quantization_methods = [
+            "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
+            "fbgemm_fp8", "compressed_tensors", "compressed-tensors"
+        ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -243,9 +250,7 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if (self.quantization
-                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin",
-                            "awq_marlin", "fbgemm_fp8", "compressed_tensors")):
+            if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -725,7 +730,7 @@ class ParallelConfig:
                         backend)
 
         self._verify_args()
-        self.rank = 0
+        self.rank: int = 0
 
     @property
     def use_ray(self) -> bool:
@@ -824,7 +829,6 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
-        self._use_delta = envs.VLLM_USE_DELTA_INPUT
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -852,6 +856,7 @@ class SchedulerConfig:
 
 
 class DeviceConfig:
+    device: Optional[torch.device]
 
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
