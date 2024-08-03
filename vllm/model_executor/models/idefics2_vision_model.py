@@ -21,7 +21,6 @@ from typing import Optional
 
 import torch
 from torch import nn
-from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2Config, Idefics2VisionConfig)
 from xformers import ops as xops
@@ -32,8 +31,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-
-_CONFIG_FOR_DOC = "Idefics2Config"
 
 
 class Idefics2VisionEmbeddings(nn.Module):
@@ -153,7 +150,6 @@ class Idefics2VisionAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         batch_size, q_len, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(
@@ -230,24 +226,17 @@ class Idefics2EncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             hidden_states (`torch.FloatTensor`):
                 Input to the layer of shape `(batch, seq_len, embed_dim)`.
-            attention_mask (`torch.FloatTensor`):
-                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` where
-                padding elements are indicated by very large negative values.
 
         """
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-        )
+        hidden_states = self.self_attn(hidden_states=hidden_states, )
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -276,11 +265,9 @@ class Idefics2Encoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
 
-    # Ignore copy
     def forward(
         self,
         inputs_embeds: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -290,21 +277,11 @@ class Idefics2Encoder(nn.Module):
                 This is useful if you want more control over how to convert
                 `input_ids` indices into associated vectorsthan the model's
                 internal embedding lookup matrix.
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)` 
-                , *optional*):
-                Mask to avoid performing attention on padding token indices.
-                Mask values selected in `[0, 1]`:
-
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
-        """  # noqa: E501
+        """
 
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
-                hidden_states,
-                attention_mask,
-            )
+            layer_outputs = encoder_layer(hidden_states, )
 
             hidden_states = layer_outputs
         return hidden_states
@@ -325,45 +302,17 @@ class Idefics2VisionTransformer(nn.Module):
     def get_input_embeddings(self):
         return self.embeddings
 
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
     def forward(
         self,
         pixel_values,
         patch_attention_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.tensor:
-        batch_size = pixel_values.size(0)
-        if patch_attention_mask is None:
-            patch_size = self.config.patch_size
-            patch_attention_mask = torch.ones((
-                batch_size,
-                pixel_values.size(2) // patch_size,
-                pixel_values.size(3) // patch_size,
-            ))
-            patch_attention_mask = patch_attention_mask.to(
-                dtype=torch.bool, device=pixel_values.device)
 
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask)
 
-        patch_attention_mask = patch_attention_mask.view(batch_size, -1)
-        # The call to `_upad_input` in `_flash_attention_forward` is expensive
-        # So when the `patch_attention_mask` is full of 1s (i.e. attending to
-        # the whole sequence),
-        # avoiding passing the attention_mask, which is equivalent to
-        # attending to the full sequence
-        if not torch.any(~patch_attention_mask):
-            patch_attention_mask = None
-        elif not self._use_flash_attention_2:
-            patch_attention_mask = _prepare_4d_attention_mask(
-                patch_attention_mask, hidden_states.dtype)
-
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            attention_mask=patch_attention_mask,
-        )
+        encoder_outputs = self.encoder(hidden_states)
 
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
