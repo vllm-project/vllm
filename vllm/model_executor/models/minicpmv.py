@@ -65,11 +65,12 @@ _KEYS_TO_MODIFY_MAPPING = {
 }
 
 
-class MiniCPMVInputs(TypedDict):
-    input_ids: torch.Tensor
-    pixel_values: List[torch.Tensor]
-    tgt_sizes: List[torch.Tensor]
+class MiniCPMVImagePixelInputs(TypedDict):
+    pixel_values: Union[torch.Tensor, List[torch.Tensor]]
+    tgt_sizes: torch.Tensor
 
+
+MiniCPMVImageInputs = MiniCPMVImagePixelInputs
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
 
@@ -500,43 +501,37 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         return image_bound
 
     def get_embedding(
-            self, data: MiniCPMVInputs) -> Tuple[torch.Tensor, torch.Tensor]:
-        input_ids = data["input_ids"]
-
-        vision_hidden_states = self.get_vision_hidden_states(data)
-        if vision_hidden_states is not None and len(vision_hidden_states) > 0:
+        self,
+        input_ids: torch.Tensor,
+        image_inputs: Optional[MiniCPMVImageInputs],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if image_inputs is None:  # No image
+            vlm_embedding = torch.tensor([], device=input_ids.device)
+            vision_hidden_states = torch.tensor([], device=input_ids.device)
+        else:
+            vision_hidden_states = self.get_vision_hidden_states(image_inputs)
             image_bounds = self.get_image_bounds(input_ids)
-        else:
-            image_bounds = []
 
-        if hasattr(self.config, "scale_emb"):
-            vlm_embedding = (self.llm.embed_tokens(input_ids) *
-                             self.config.scale_emb)
-        else:
-            vlm_embedding = self.llm.embed_tokens(input_ids)
-        vision_hidden_states = [
-            i.type(vlm_embedding.dtype) if isinstance(i, torch.Tensor) else i
-            for i in vision_hidden_states
-        ]
+            if hasattr(self.config, "scale_emb"):
+                vlm_embedding: torch.Tensor = (
+                    self.llm.embed_tokens(input_ids) * self.config.scale_emb)
+            else:
+                vlm_embedding = self.llm.embed_tokens(input_ids)
 
-        if len(vision_hidden_states) > 0 and len(image_bounds) > 0:
-            vision_hidden_states = torch.cat(vision_hidden_states, dim=0)
             image_indices = torch.stack([
                 torch.arange(r[0], r[1], dtype=torch.long)
                 for r in image_bounds
-            ]).to(vlm_embedding.device)
+            ]).to(vlm_embedding.device, vlm_embedding.dtype)
             vlm_embedding.scatter_(
                 0,
                 image_indices.view(-1, 1).repeat(1, vlm_embedding.shape[-1]),
                 vision_hidden_states.view(-1, vision_hidden_states.shape[-1]),
             )
+
         return vlm_embedding, vision_hidden_states
 
-    def _parse_and_validate_multimodal_inputs(
-        self,
-        input_ids: torch.Tensor,
-        **kwargs: object,
-    ) -> MiniCPMVInputs:
+    def _parse_and_validate_image_inputs(
+            self, **kwargs: object) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
 
@@ -544,23 +539,20 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
 
-        if not isinstance(tgt_sizes, (torch.Tensor, list)):
+        if not isinstance(tgt_sizes, torch.Tensor):
             raise ValueError("Incorrect type of target sizes. "
                              f"Got type: {type(tgt_sizes)}")
 
-        pixel_values_lst: List[torch.Tensor] = []
-        tgt_sizes_lst: List[torch.Tensor] = []
-        for b in range(len(pixel_values)):
-            assert isinstance(pixel_values[b], torch.Tensor)
-            assert isinstance(tgt_sizes[b], torch.Tensor)
+        if len(pixel_values) == 0:
+            return None
 
-            pixel_values_lst += pixel_values[b]
-            tgt_sizes_lst += tgt_sizes[b]
+        if len(pixel_values) != len(tgt_sizes):
+            raise ValueError("Inconsistent lengths, found: "
+                             f"{len(pixel_values)} vs. {len(tgt_sizes)}")
 
-        return MiniCPMVInputs(
-            pixel_values=pixel_values_lst,
-            input_ids=input_ids,
-            tgt_sizes=tgt_sizes_lst,
+        return MiniCPMVImageInputs(
+            pixel_values=pixel_values,
+            tgt_sizes=tgt_sizes,
         )
 
     def forward(
@@ -572,9 +564,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        inputs = self._parse_and_validate_multimodal_inputs(input_ids, **kwargs)
+        image_inputs = self._parse_and_validate_image_inputs(**kwargs)
 
-        vlm_embeddings, _ = self.get_embedding(inputs)
+        vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
 
         output = self.llm(
             input_ids=None,
@@ -662,7 +654,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
+    def get_vision_hidden_states(self,
+                                 data: MiniCPMVImageInputs) -> torch.Tensor:
         raise NotImplementedError
 
     def is_default_weight_loading(self, name: str) -> bool:
@@ -729,7 +722,7 @@ class MiniCPMV2(MiniCPMVBaseModel):
 
     def get_vision_embedding(
         self,
-        pixel_values: List[torch.Tensor],
+        pixel_values: Union[torch.Tensor, List[torch.Tensor]],
         patch_attn_mask: Optional[torch.Tensor] = None,
         tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -750,15 +743,11 @@ class MiniCPMV2(MiniCPMVBaseModel):
             res.append(self.resampler(vision_embedding, tgt_size))
         return torch.vstack(res)
 
-    def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
-        input_ids = data["input_ids"]
+    def get_vision_hidden_states(self,
+                                 data: MiniCPMVImageInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
-        if pixel_values is not None and len(pixel_values) > 0:
-            vision_hidden_states = self.get_vision_embedding(pixel_values)
-        else:
-            vision_hidden_states = torch.tensor([], device=input_ids.device)
 
-        return vision_hidden_states
+        return self.get_vision_embedding(pixel_values)
 
     def is_default_weight_loading(self, name: str) -> bool:
         return "resampler" in name or "vpm" in name
@@ -813,41 +802,34 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         vision_embedding = self.resampler(vision_embedding, tgt_sizes)
         return vision_embedding
 
-    def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
-        input_ids = data["input_ids"]
+    def get_vision_hidden_states(self,
+                                 data: MiniCPMVImageInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
         tgt_sizes = data["tgt_sizes"]
 
         device = self.vpm.embeddings.position_embedding.weight.device
         dtype = self.vpm.embeddings.position_embedding.weight.dtype
-        all_pixel_values = [
+        all_pixel_values_lst = [
             i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
         ]
-        if all_pixel_values:
-            tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
 
-            max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
-            assert isinstance(max_patches, int)
+        max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+        assert isinstance(max_patches, int)
 
-            all_pixel_values = torch.nn.utils.rnn.pad_sequence(
-                all_pixel_values, batch_first=True, padding_value=0.0)
-            B, L, _ = all_pixel_values.shape
-            all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
-                B, 3, -1, L)
+        all_pixel_values = torch.nn.utils.rnn.pad_sequence(
+            all_pixel_values_lst, batch_first=True, padding_value=0.0)
+        B, L, _ = all_pixel_values.shape
+        all_pixel_values = all_pixel_values.permute(0, 2,
+                                                    1).reshape(B, 3, -1, L)
 
-            patch_attn_mask = torch.zeros((B, 1, max_patches),
-                                          dtype=torch.bool,
-                                          device=device)
-            for i in range(B):
-                patch_attn_mask[i, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
+        patch_attn_mask = torch.zeros((B, 1, max_patches),
+                                      dtype=torch.bool,
+                                      device=device)
+        for i in range(B):
+            patch_attn_mask[i, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
 
-            vision_hidden_states = self.get_vision_embedding(
-                all_pixel_values.type(dtype), patch_attn_mask, tgt_sizes)
-
-        else:  # no image
-            vision_hidden_states = torch.tensor([], device=input_ids.device)
-
-        return vision_hidden_states
+        return self.get_vision_embedding(all_pixel_values.type(dtype),
+                                         patch_attn_mask, tgt_sizes)
 
     def is_default_weight_loading(self, name: str) -> bool:
         return "resampler" in name
@@ -914,46 +896,38 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
         ).last_hidden_state
         return vision_embedding
 
-    def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
-        input_ids = data["input_ids"]
+    def get_vision_hidden_states(self,
+                                 data: MiniCPMVImageInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
         tgt_sizes = data["tgt_sizes"]
 
         device = self.vpm.embeddings.position_embedding.weight.device
         dtype = self.vpm.embeddings.position_embedding.weight.dtype
-        all_pixel_values = [
+        all_pixel_values_lst = [
             i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
         ]
-        if all_pixel_values:
-            tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
 
-            max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
-            assert isinstance(max_patches, int)
+        max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+        assert isinstance(max_patches, int)
 
-            all_pixel_values = torch.nn.utils.rnn.pad_sequence(
-                all_pixel_values, batch_first=True, padding_value=0.0)
-            B, L, _ = all_pixel_values.shape
-            all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
-                B, 3, -1, L)
+        all_pixel_values = torch.nn.utils.rnn.pad_sequence(
+            all_pixel_values_lst, batch_first=True, padding_value=0.0)
+        B, L, _ = all_pixel_values.shape
+        all_pixel_values = all_pixel_values.permute(0, 2,
+                                                    1).reshape(B, 3, -1, L)
 
-            patch_attn_mask = torch.zeros((B, 1, max_patches),
-                                          dtype=torch.bool,
-                                          device=device)
-            for i in range(B):
-                patch_attn_mask[i,
-                                0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
-            vision_embedding = self.vpm(
-                all_pixel_values.type(dtype),
-                patch_attention_mask=patch_attn_mask,
-                tgt_sizes=tgt_sizes,
-            ).last_hidden_state
+        patch_attn_mask = torch.zeros((B, 1, max_patches),
+                                      dtype=torch.bool,
+                                      device=device)
+        for i in range(B):
+            patch_attn_mask[i, 0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
+        vision_embedding = self.vpm(
+            all_pixel_values.type(dtype),
+            patch_attention_mask=patch_attn_mask,
+            tgt_sizes=tgt_sizes,
+        ).last_hidden_state
 
-            vision_hidden_states = self.resampler(vision_embedding, tgt_sizes)
-
-        else:  # no image
-            vision_hidden_states = torch.tensor([], device=input_ids.device)
-
-        return vision_hidden_states
+        return self.resampler(vision_embedding, tgt_sizes)
 
     def is_default_weight_loading(self, name: str) -> bool:
         return "resampler" in name or "vpm" in name
