@@ -540,9 +540,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             start_cond |= (input_ids == tokenizer.slice_start_id)
             end_cond |= (input_ids == tokenizer.slice_end_id)
 
-        image_start_tokens, = torch.where(start_cond)
+        image_start_tokens = torch.where(start_cond)[0]
         image_start_tokens += 1
-        image_end_tokens, = torch.where(end_cond)
+        image_end_tokens = torch.where(end_cond)[0]
         valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
 
         if valid_image_nums == 0:
