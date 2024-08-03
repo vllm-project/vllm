@@ -82,9 +82,10 @@ class AsyncStream:
         self._queue.put_nowait(item)
 
     def finish(self, cancelled: bool = False) -> None:
-        self._finished = True
-        self._queue.put_nowait(
-            asyncio.CancelledError if cancelled else STOP_ITERATION)
+        if not self._finished:
+            self._finished = True
+            self._queue.put_nowait(
+                asyncio.CancelledError if cancelled else STOP_ITERATION)
 
     @property
     def finished(self) -> bool:
@@ -147,10 +148,11 @@ class RequestTracker:
         # while the output was generated
         if (stream := self._request_streams.get(request_id)) is not None:
             stream.put(request_output)
-        if request_output.finished:
-            if verbose:
-                logger.info("Finished request %s.", request_id)
-            self.abort_request(request_id)
+            if request_output.finished:
+                stream.finish()
+
+        if verbose and request_output.finished:
+            logger.info("Finished request %s.", request_id)
 
     def process_exception(self,
                           request_id: str,
@@ -198,12 +200,9 @@ class RequestTracker:
 
         self._finished_requests.put_nowait(request_id)
 
-        if request_id not in self._request_streams or self._request_streams[
-                request_id].finished:
-            # The request has already finished or been aborted.
-            return
-
-        self._request_streams[request_id].finish(cancelled=cancelled)
+        stream = self._request_streams.get(request_id, None)
+        if stream is not None:
+            stream.finish(cancelled=cancelled)
 
     def get_new_and_finished_requests(self) -> Tuple[List[Dict], Set[str]]:
         """Get the new requests and finished requests to be
@@ -682,7 +681,9 @@ class AsyncLLMEngine:
                 raise
             await asyncio.sleep(0)
 
-    def add_request(
+    # This method does not need to be async, but kept that way
+    # for backwards compatibility.
+    async def add_request(
         self,
         request_id: str,
         inputs: PromptInputs,
@@ -787,7 +788,7 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in self.add_request(
+        async for output in await self.add_request(
                 request_id,
                 inputs,
                 sampling_params,
@@ -865,7 +866,7 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in self.add_request(
+        async for output in await self.add_request(
                 request_id,
                 inputs,
                 pooling_params,
