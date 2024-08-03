@@ -546,7 +546,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
 
         return vlm_embedding, vision_hidden_states
 
-    def q(self, **kwargs: object) -> Optional[MiniCPMVImageInputs]:
+    def _parse_and_validate_image_inputs(
+            self, **kwargs: object) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
 
