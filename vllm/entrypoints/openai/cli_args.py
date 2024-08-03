@@ -97,6 +97,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action=LoRAParserAction,
         help="LoRA module configurations in the format name=path. "
         "Multiple modules can be specified.")
+    parser.add_argument("--enable-lora-router",
+                        action="store_true",
+                        help="If provided, the server will activate "
+                        "the server endpoint and allow loading & unloading "
+                        "lora models in runtime.")
     parser.add_argument(
         "--prompt-adapters",
         type=nullable_str,
