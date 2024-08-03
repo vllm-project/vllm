@@ -506,16 +506,14 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if image_inputs is None:
-            # No image
-            vlm_embedding = torch.tensor([], device=input_ids.device)
+        vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
+        if hasattr(self.config, "scale_emb"):
+            vlm_embedding *= self.config.scale_emb
+
+        if image_inputs is None:  # No image
             vision_hidden_states = torch.tensor([], device=input_ids.device)
         else:
             vision_hidden_states = self.get_vision_hidden_states(image_inputs)
-
-            vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
-            if hasattr(self.config, "scale_emb"):
-                vlm_embedding *= self.config.scale_emb
 
             # See NOTE in _parse_and_validate_inputs
             if len(image_inputs["image_bounds"]) > 0:
