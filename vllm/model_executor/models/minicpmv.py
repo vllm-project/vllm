@@ -69,8 +69,20 @@ _KEYS_TO_MODIFY_MAPPING = {
 
 
 class MiniCPMVImagePixelInputs(TypedDict):
-    pixel_values: Union[torch.Tensor, List[torch.Tensor]]
+    pixel_values: List[torch.Tensor]
+    """
+    Shape: `(batch_size * num_images, num_channels, height, width)`
+
+    Note that the image size may vary, so we pass it as a list
+    instead of a batched tensor.
+    """
+
     tgt_sizes: torch.Tensor
+    """
+    Shape: `(batch_size * num_images, 2)`
+
+    This should be in `(height, width)` format.
+    """
 
 
 MiniCPMVImageInputs = MiniCPMVImagePixelInputs
@@ -534,8 +546,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
 
         return vlm_embedding, vision_hidden_states
 
-    def _parse_and_validate_image_inputs(
-            self, **kwargs: object) -> Optional[MiniCPMVImageInputs]:
+    def q(self, **kwargs: object) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
 
@@ -543,20 +554,26 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
 
-        if not isinstance(tgt_sizes, torch.Tensor):
+        if not isinstance(tgt_sizes, (torch.Tensor, list)):
             raise ValueError("Incorrect type of target sizes. "
                              f"Got type: {type(tgt_sizes)}")
-
-        if len(pixel_values) == 0:
-            return None
 
         if len(pixel_values) != len(tgt_sizes):
             raise ValueError("Inconsistent lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
 
+        if len(pixel_values) == 0:
+            return None
+
+        pixel_values_flat: List[torch.Tensor] = []
+        tgt_sizes_flat: List[torch.Tensor] = []
+        for b in range(len(pixel_values)):
+            pixel_values_flat += pixel_values[b]
+            tgt_sizes_flat += tgt_sizes[b]
+
         return MiniCPMVImageInputs(
-            pixel_values=pixel_values,
-            tgt_sizes=tgt_sizes,
+            pixel_values=pixel_values_flat,
+            tgt_sizes=torch.stack(tgt_sizes_flat),
         )
 
     def forward(
@@ -726,7 +743,7 @@ class MiniCPMV2(MiniCPMVBaseModel):
 
     def get_vision_embedding(
         self,
-        pixel_values: Union[torch.Tensor, List[torch.Tensor]],
+        pixel_values: List[torch.Tensor],
         patch_attn_mask: Optional[torch.Tensor] = None,
         tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
