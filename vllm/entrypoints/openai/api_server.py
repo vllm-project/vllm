@@ -187,6 +187,7 @@ async def show_version():
 @router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
+
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
 
@@ -196,18 +197,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
                             status_code=generator.code)
 
     # if streaming is requested, handle streaming
-    # TODO implement for streaming later
+
     if request.stream:
-
-        if (openai_serving_chat.enable_auto_tools and
-                openai_serving_chat.tool_parser):
-            print('handling streaming response')
-
-            return StreamingResponse(content=generator,
-                                     media_type="text/event-stream")
-
-        else:
-            return StreamingResponse(content=generator,
+        return StreamingResponse(content=generator,
                                      media_type="text/event-stream")
 
     # handle non-streaming requests
