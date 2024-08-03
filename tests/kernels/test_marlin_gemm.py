@@ -9,14 +9,14 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES)
 from vllm.model_executor.layers.quantization.qqq import (
     MARLIN_QQQ_MAX_PARALLEL, MARLIN_QQQ_MIN_THREAD_N,
     MARLIN_QQQ_SUPPORTED_GROUP_SIZES, MARLIN_QQQ_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
-    MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_SUPPORTED_NUM_BITS,
-    marlin_make_empty_g_idx, marlin_permute_scales)
+    MARLIN_SUPPORTED_GROUP_SIZES, marlin_make_empty_g_idx,
+    marlin_permute_scales, query_marlin_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     pack_fp8_to_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -27,8 +27,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_qqq import (  # noqa: E501
     marlin_qqq_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    awq_pack, gptq_pack, quantize_weights, quantize_weights_with_zp,
-    sort_weights)
+    awq_pack, gptq_pack, gptq_quantize_weights, quantize_weights, sort_weights)
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
@@ -65,12 +64,13 @@ def rand_data(shape, dtype=torch.float16):
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("quant_type",
+                         query_marlin_supported_quant_types(False))
 @pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
-                            mnk_factors):
+def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
+                            act_order, mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
     size_m = m_factor
@@ -95,11 +95,11 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
     b_weight = rand_data((size_k, size_n))
 
     # Quantize (and apply act_order if provided)
-    w_ref, q_w, s, g_idx, rand_perm = quantize_weights(b_weight, num_bits,
-                                                       group_size, act_order)
+    w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(
+        b_weight, quant_type, group_size, act_order)
 
     # Pack to GPTQ format
-    q_w_gptq = gptq_pack(q_w, num_bits, size_k, size_n)
+    q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
 
     # For act_order, sort the "weights" and "g_idx" so that group ids are
     # increasing
@@ -108,8 +108,9 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
         q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
 
     # Pack to Marlin format
-    weight_perm = get_weight_perm(num_bits)
-    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
+    weight_perm = get_weight_perm(quant_type.size_bits)
+    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
+                                  weight_perm)
 
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.gptq_marlin_repack(
@@ -117,7 +118,7 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
         sort_indices,
         size_k,
         size_n,
-        num_bits,
+        quant_type.size_bits,
     )
     torch.cuda.synchronize()
 
@@ -128,10 +129,11 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("quant_type",
+                         query_marlin_supported_quant_types(False))
 @pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
+def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
                            mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
@@ -150,22 +152,25 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
     b_weight = rand_data((size_k, size_n))
 
     # Quantize
-    w_ref, q_w, s, zp = quantize_weights_with_zp(b_weight, num_bits,
-                                                 group_size)
+    w_ref, q_w, s, zp = quantize_weights(b_weight,
+                                         quant_type,
+                                         group_size,
+                                         zero_points=True)
 
     # Pack to AWQ format
-    q_w_awq = awq_pack(q_w, num_bits, size_k, size_n)
+    q_w_awq = awq_pack(q_w, quant_type.size_bits, size_k, size_n)
 
     # Pack to Marlin format
-    weight_perm = get_weight_perm(num_bits)
-    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
+    weight_perm = get_weight_perm(quant_type.size_bits)
+    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
+                                  weight_perm)
 
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.awq_marlin_repack(
         q_w_awq,
         size_k,
         size_n,
-        num_bits,
+        quant_type.size_bits,
     )
     torch.cuda.synchronize()
 
@@ -176,7 +181,8 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("quant_type",
+                         query_marlin_supported_quant_types(False))
 @pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
@@ -185,7 +191,7 @@ def test_awq_marlin_repack(k_chunk, n_chunk, num_bits, group_size,
 def test_gptq_marlin_gemm(
     k_chunk,
     n_chunk,
-    num_bits,
+    quant_type,
     group_size,
     mnk_factors,
     act_order,
@@ -211,7 +217,7 @@ def test_gptq_marlin_gemm(
     b_weight = rand_data((size_k, size_n))
 
     w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
-        b_weight, num_bits, group_size, act_order)
+        b_weight, quant_type, group_size, act_order)
 
     marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
 
@@ -226,7 +232,7 @@ def test_gptq_marlin_gemm(
         g_idx,
         sort_indices,
         workspace.scratch,
-        num_bits,
+        quant_type,
         a_input.shape[0],
         b_weight.shape[1],
         a_input.shape[1],
@@ -248,10 +254,10 @@ def test_gptq_marlin_gemm(
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_24_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_24_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("quant_type", GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES)
 @pytest.mark.parametrize("group_size", GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_gptq_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size,
+def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size,
                              mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
@@ -266,7 +272,7 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size,
     b_weight = rand_data((size_k, size_n))
 
     (w_24_ref, marlin_24_q_w_comp, marlin_24_meta,
-     marlin_24_s) = marlin_24_quantize(b_weight, num_bits, group_size)
+     marlin_24_s) = marlin_24_quantize(b_weight, quant_type, group_size)
 
     workspace_24 = MarlinWorkspace(size_n, GPTQ_MARLIN_24_MIN_THREAD_N,
                                    GPTQ_MARLIN_24_MAX_PARALLEL)
@@ -279,7 +285,7 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size,
         marlin_24_meta,
         marlin_24_s,
         workspace_24.scratch,
-        num_bits,
+        quant_type,
         a_input.shape[0],
         b_weight.shape[1],
         a_input.shape[1],
@@ -371,14 +377,15 @@ def test_fp8_marlin_gemm(
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", MARLIN_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("quant_type",
+                         query_marlin_supported_quant_types(True))
 @pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("use_fp32_reduce", USE_FP32_REDUCE_OPTS)
 def test_awq_marlin_gemm(
     k_chunk,
     n_chunk,
-    num_bits,
+    quant_type,
     group_size,
     mnk_factors,
     use_fp32_reduce,
@@ -396,7 +403,7 @@ def test_awq_marlin_gemm(
     b_weight = rand_data((size_k, size_n))
 
     w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
-        b_weight, num_bits, group_size)
+        b_weight, quant_type, group_size)
 
     g_idx = torch.empty(0, dtype=torch.int, device=marlin_q_w.device)
     sort_indices = torch.empty(0, dtype=torch.int, device=marlin_q_w.device)
@@ -414,7 +421,7 @@ def test_awq_marlin_gemm(
         g_idx,
         sort_indices,
         workspace.scratch,
-        num_bits,
+        quant_type,
         a_input.shape[0],
         b_weight.shape[1],
         a_input.shape[1],

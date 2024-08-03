@@ -5,6 +5,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.scalar_type import ScalarType, scalar_types
 
 from .quant_utils import pack_cols, unpack_cols
 
@@ -13,7 +14,6 @@ GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
 
-MARLIN_SUPPORTED_NUM_BITS = [4, 8]
 MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
 # In case there is a performance issue with Marlin, the variable below can be
@@ -22,76 +22,70 @@ MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 USE_FP32_REDUCE_DEFAULT = True
 
 
-def _check_marlin_supported(num_bits: int, group_size: int, is_sym: bool,
-                            min_capability: Optional[int],
-                            has_zp: bool) -> Tuple[bool, Optional[str]]:
-    if min_capability is not None:
+# For binary size and compile time, we don't support the same types for with and
+#  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
+#  TODO: we may want to move this into the C++ so its closer to the actual impl
+def query_marlin_supported_quant_types(has_zp: bool,
+                                       min_capability: Optional[int] = None):
+    if min_capability is None:
         major, minor = current_platform.get_device_capability()
-        device_capability = major * 10 + minor
-        if device_capability < min_capability:
-            return (False, "Marlin does not support device_capability = {}"
-                    ", the min_capability required is {}".format(
-                        device_capability, min_capability))
+        min_capability = major * 10 + minor
 
-    if num_bits not in MARLIN_SUPPORTED_NUM_BITS:
-        return (False, "Marlin does not support weight_bits = {}. "
-                "Only weight_bits = {} are supported.".format(
-                    num_bits, MARLIN_SUPPORTED_NUM_BITS))
+    if min_capability < 80:
+        return []
 
-    if group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
-        return (False, "Marlin does not support group_size = {}. Only "
-                "group_sizes = {} are supported.".format(
-                    group_size, MARLIN_SUPPORTED_GROUP_SIZES))
+    if has_zp:
+        # AWQ style, unsigned + runtime zero-point
+        return [scalar_types.uint4, scalar_types.uint8]
+    else:
+        # GPTQ style, unsigned + symmetric bias
+        # TODO: once fp8_marlin is merged into "gptq_marlin" we should be able
+        #  to add `scalar_types.float8_e4m3fn` here
+        return [scalar_types.uint4b8, scalar_types.uint8b128]
 
-    if not has_zp and not is_sym:
-        return (False,
-                "Marlin without zero_points must have symmetric quantization")
+
+def _check_marlin_supported(
+        quant_type: ScalarType,
+        group_size: Optional[int],
+        has_zp: bool,
+        min_capability: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+
+    if min_capability is None:
+        major, minor = current_platform.get_device_capability()
+        min_capability = major * 10 + minor
+
+    supported_types = query_marlin_supported_quant_types(
+        has_zp, min_capability)
+
+    if quant_type not in supported_types:
+        return (False, f"Marlin does not support weight_bits = {quant_type}. "
+                f"Only types = {supported_types} "
+                f"are supported (for group_size = {group_size}, "
+                f"min_capability = {min_capability}, zp = {has_zp}).")
+    if (group_size is None or group_size not in MARLIN_SUPPORTED_GROUP_SIZES):
+        return (False, f"Marlin does not support group_size = {group_size}. "
+                f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
+                "are supported.")
 
     return True, None
 
 
-def check_gptq_marlin_supported(num_bits: int, group_size: int, is_sym: bool,
-                                min_capability: int) -> bool:
-    cond, _ = _check_marlin_supported(num_bits,
-                                      group_size,
-                                      is_sym,
-                                      min_capability,
-                                      has_zp=False)
+def check_marlin_supported(quant_type: ScalarType,
+                           group_size: int,
+                           has_zp: bool = False,
+                           min_capability: Optional[int] = None) -> bool:
+    cond, _ = _check_marlin_supported(quant_type, group_size, has_zp,
+                                      min_capability)
     return cond
 
 
-def check_awq_marlin_supported(num_bits: int, group_size: int, has_zp: bool,
-                               min_capability: int) -> bool:
-    cond, _ = _check_marlin_supported(num_bits,
-                                      group_size,
-                                      False,
-                                      min_capability,
-                                      has_zp=has_zp)
-    return cond
-
-
-def verify_gptq_marlin_supported(num_bits: int, group_size: int,
-                                 is_sym: bool) -> None:
-    cond, err_msg = _check_marlin_supported(num_bits,
-                                            group_size,
-                                            is_sym,
-                                            min_capability=None,
-                                            has_zp=False)
+def verify_marlin_supported(quant_type: ScalarType,
+                            group_size: int,
+                            has_zp: bool = False) -> None:
+    cond, err_msg = _check_marlin_supported(quant_type, group_size, has_zp)
     if not cond:
         assert err_msg is not None
-        raise ValueError("GPTQ" + err_msg)
-
-
-def verify_awq_marlin_supported(num_bits: int, group_size: int,
-                                has_zp: bool) -> None:
-    cond, err_msg = _check_marlin_supported(num_bits,
-                                            group_size,
-                                            False,
-                                            min_capability=None,
-                                            has_zp=has_zp)
-    if not cond:
-        assert err_msg is not None
-        raise ValueError("AWQ" + err_msg)
+        raise ValueError(err_msg)
 
 
 def verify_marlin_supports_shape(output_size_per_partition: int,
@@ -245,7 +239,7 @@ def apply_gptq_marlin_linear(
         g_idx: torch.Tensor,
         g_idx_sort_indices: torch.Tensor,
         workspace: torch.Tensor,
-        num_bits: int,
+        wtype: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
         is_k_full: bool,
@@ -261,7 +255,7 @@ def apply_gptq_marlin_linear(
                                   g_idx,
                                   g_idx_sort_indices,
                                   workspace,
-                                  num_bits,
+                                  wtype,
                                   size_m=reshaped_x.shape[0],
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
@@ -283,7 +277,7 @@ def apply_awq_marlin_linear(
         g_idx: torch.Tensor,
         g_idx_sort_indices: torch.Tensor,
         workspace: torch.Tensor,
-        num_bits: int,
+        quant_type: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
         bias: Optional[torch.Tensor] = None,
@@ -298,7 +292,7 @@ def apply_awq_marlin_linear(
                                   g_idx,
                                   g_idx_sort_indices,
                                   workspace,
-                                  num_bits,
+                                  quant_type,
                                   size_m=reshaped_x.shape[0],
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,

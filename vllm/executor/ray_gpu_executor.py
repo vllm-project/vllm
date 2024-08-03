@@ -105,12 +105,19 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
 
+        # Used in ray compiled DAG: indexed first by PP rank,
+        # and then TP rank. In other words, the inner list is
+        # the TP group of workers for a PP rank.
+        self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
+
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
 
+        logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
         # Create the workers.
         driver_ip = get_ip()
+        logger.info("driver_ip: %s", driver_ip)
         worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
@@ -142,42 +149,49 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # Else, added to the list of workers.
                     self.workers.append(worker)
 
+        logger.debug("workers: %s", self.workers)
+        logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
         if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
             raise ValueError(
                 "Ray does not allocate any GPUs on the driver node. Consider "
                 "adjusting the Ray placement group or running the driver on a "
                 "GPU node.")
 
+        worker_ips = [
+            ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
+            for worker in self.workers
+        ]
+        ip_counts: Dict[str, int] = {}
+        for ip in worker_ips:
+            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+
+        def sort_by_driver_then_worker_ip(worker):
+            """
+            Sort the workers based on 3 properties:
+            1. If the worker is on the same node as the driver (vllm engine),
+                it should be placed first.
+            2. Then, if the worker is on a node with fewer workers, it should
+                be placed first.
+            3. Finally, if the work is on a node with smaller IP address, it
+                should be placed first.
+            """
+            ip = ray.get(worker.get_node_ip.remote())
+            return (ip != driver_ip, ip_counts[ip], ip)
+
+        # After sorting, the workers on the same node will be
+        # close to each other, and the workers on the driver
+        # node will be placed first.
+        self.workers = sorted(self.workers, key=sort_by_driver_then_worker_ip)
+
         # Get the set of GPU IDs used on each node.
         worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
                                                     use_dummy_driver=True)
 
-        # the order in `worker_node_and_gpu_ids` does not necessarily match
-        # the machine boundaries. We need to make sure that workers in the
-        # same node are assigned consecutive ranks.
-        # examples:
-        # [('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [0]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [0]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [1]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [2]), ('dfaad7adfdae57a694cc74490db45bd112c9f31243523e43ddc2e7f0', [3]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [1]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [2]), ('852a09a13c7503ef126d7c828454c741494b1be33a8627a5206604d9', [3])] # noqa
-
-        # initialize worker ranks with -1 (unassigned)
-        worker_ranks = [-1 for x in worker_node_and_gpu_ids]
-        current_rank = 0
-        while -1 in worker_ranks:
-            # whenever we find an unassigned worker, find the node
-            index = worker_ranks.index(-1)
-            current_node_id = worker_node_and_gpu_ids[index][0]
-            # assign ranks to all workers in the same node
-            for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
-                if node_id == current_node_id:
-                    worker_ranks[i] = current_rank
-                    current_rank += 1
-        # with the above example, worker_ranks will be [0, 4, 5, 6, 7, 1, 2, 3]
-
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_gpus = defaultdict(list)  # node id -> list of gpu ids
 
-        for worker_rank, (node_id, gpu_ids) in zip(worker_ranks,
-                                                   worker_node_and_gpu_ids):
-            node_workers[node_id].append(worker_rank)
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+            node_workers[node_id].append(i)
             # `gpu_ids` can be a list of strings or integers.
             # convert them to integers for consistency.
             # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
@@ -221,8 +235,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 local_rank=node_workers[node_id].index(rank),
                 rank=rank,
                 distributed_init_method=distributed_init_method,
-            ) for rank, (node_id,
-                         _) in zip(worker_ranks, worker_node_and_gpu_ids)
+            ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
         ]
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
@@ -230,6 +243,19 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+
+        if self.use_ray_spmd_worker:
+            for pp_rank in range(self.parallel_config.pipeline_parallel_size):
+                self.pp_tp_workers.append([])
+                for tp_rank in range(
+                        self.parallel_config.tensor_parallel_size):
+                    # PP=2, TP=4
+                    # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
+                    rank = (pp_rank * self.parallel_config.tensor_parallel_size
+                            ) + tp_rank
+                    assert len(self.pp_tp_workers[pp_rank]) == tp_rank
+                    assert pp_rank < len(self.pp_tp_workers)
+                    self.pp_tp_workers[pp_rank].append(self.workers[rank])
 
         # This is the list of workers that are rank 0 of each TP group EXCEPT
         # global rank 0. These are the workers that will broadcast to the
@@ -241,9 +267,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.non_driver_workers: List[RayWorkerWrapper] = []
 
         # Enforce rank order for correct rank to return final output.
-        for rank, worker in sorted(zip(worker_ranks[1:], self.workers)):
-            # We need to skip the driver worker, which we
-            # do by skipping worker_ranks[0] which is always 0.
+        for index, worker in enumerate(self.workers):
+            # The driver worker is rank 0 and not in self.workers.
+            rank = index + 1
             if rank % self.parallel_config.tensor_parallel_size == 0:
                 self.tp_driver_workers.append(worker)
             else:
@@ -376,16 +402,47 @@ class RayGPUExecutor(DistributedGPUExecutor):
             raise ValueError(f"Ray version {required_version} or greater is "
                              f"required, but found {current_version}")
 
-        from ray.dag import InputNode, MultiOutputNode
         assert self.parallel_config.use_ray
+        from ray.dag import InputNode, MultiOutputNode
+        from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
-        # Right now, compiled DAG requires at least 1 arg. We send
-        # a dummy value for now. It will be fixed soon.
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
         with InputNode() as input_data:
-            forward_dag = MultiOutputNode([
-                worker.execute_model_spmd.bind(  # type: ignore[attr-defined]
-                    input_data) for worker in self.workers
-            ])
+            # Example DAG: PP=2, TP=4
+            # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
+            #                         -> 1 -> (ExecuteModelReq, IntermediateOutput) -> 5 -> SamplerOutput   # noqa: E501
+            #                         -> 2 -> (ExecuteModelReq, IntermediateOutput) -> 6 -> SamplerOutput   # noqa: E501
+            #                         -> 3 -> (ExecuteModelReq, IntermediateOutput) -> 7 -> SamplerOutput   # noqa: E501
+
+            # All workers in the first TP group will take in the
+            # ExecuteModelRequest as input.
+            outputs = [input_data for _ in self.pp_tp_workers[0]]
+            for pp_rank, tp_group in enumerate(self.pp_tp_workers):
+                # Each PP worker takes in the output of the previous PP worker,
+                # and the TP group executes in SPMD fashion.
+                outputs = [
+                    worker.execute_model_spmd.
+                    bind(  # type: ignore[attr-defined]
+                        outputs[i]) for i, worker in enumerate(tp_group)
+                ]
+
+                last_pp_rank = len(self.pp_tp_workers) - 1
+                if pp_rank < last_pp_rank:
+                    # Specify how intermediate tensors should be passed
+                    # between pp stages, no need to specify for the last
+                    # pp stage.
+                    transport = "nccl" \
+                        if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
+                        else "auto"
+                    outputs = [
+                        output.with_type_hint(
+                            TorchTensorType(transport=transport))
+                        for output in outputs
+                    ]
+
+            forward_dag = MultiOutputNode(outputs)
+
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
 
     def __del__(self):
