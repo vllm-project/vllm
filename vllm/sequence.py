@@ -842,7 +842,7 @@ class EmbeddingSequenceGroupOutput(
         return self.embeddings == other.embeddings
 
 
-class IntermediateTensors(msgspec.Struct, omit_defaults=True, array_like=True, tag=True):
+class IntermediateTensors(msgspec.Struct, omit_defaults=True, array_like=True):
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.

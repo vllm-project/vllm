@@ -899,7 +899,6 @@ class LLMEngine:
                 "as performance will be severely degraded otherwise.")
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
-        # print("SANG-TODO batch size,", len(seq_group_metadata_list))
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[

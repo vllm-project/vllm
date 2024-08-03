@@ -19,7 +19,8 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata, SequenceGroupMetadataDelta)
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
+                           IntermediateTensors)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -326,14 +327,17 @@ class Worker(LocalOrDistributedWorkerBase):
         return output
 
     def _execute_model_spmd(
-        self, execute_model_req: ExecuteModelRequest
+        self,
+        execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Optional[List[SamplerOutput]]:
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list)
             execute_model_req.seq_group_metadata_list = (
                 new_seq_group_metadata_list)
-        output = super()._execute_model_spmd(execute_model_req)
+        output = super()._execute_model_spmd(execute_model_req,
+                                             intermediate_tensors)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

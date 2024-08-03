@@ -126,10 +126,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
 
-        logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
         # Create the workers.
         driver_ip = get_ip()
-        logger.info("driver_ip: %s", driver_ip)
         worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
@@ -313,7 +311,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # import pickle
         # serialized_data = pickle.dumps(execute_model_req)
 
-        serialized_data = self.input_encoder.encode((execute_model_req, None))
+        serialized_data = self.input_encoder.encode(execute_model_req)
         # # Open a file in binary write mode
         # import sys
         # if sys.getsizeof(serialized_data) > 60000:
@@ -504,7 +502,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
 
-        serialized_data = self.input_encoder.encode((execute_model_req, None))
+        serialized_data = self.input_encoder.encode(execute_model_req)
         dag_future = await self.forward_dag.execute_async(serialized_data)
         outputs = await dag_future
         return self.output_decoder.decode(outputs[0])

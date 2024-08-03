@@ -1,6 +1,7 @@
 import time
 import numpy as np
 
+
 class Timer:
 
     def __init__(self, msg):
@@ -14,7 +15,19 @@ class Timer:
         self.end = time.time()
         self.elapsed_us = (self.end - self.start) * 1000 * 1000
         print(f"{self.msg=}. Elapsed time: {self.elapsed_us:.2f} us")
-l = [i for i in range(4096)]
-from array import array
-with Timer("converesion"):
-    arr = array("I", l)
+
+
+# l = [i for i in range(4096)]
+# from array import array
+# with Timer("converesion"):
+#     arr = array("I", l)
+
+from ray import cloudpickle as pickle
+# import pickle
+
+bytes = b"1" * 65665
+with Timer("bytes pickling"):
+    data = pickle.dumps(bytes)
+with Timer("bytes deser"):
+    pickle.loads(data)
+

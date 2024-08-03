@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Type, Any
+from typing import List, Optional, Tuple, Type, Any, Union
 import msgspec
 from array import array
 
@@ -12,8 +12,6 @@ logger = init_logger(__name__)
 
 try:
     import ray
-
-    ModelRequest = Tuple[ExecuteModelRequest, Optional[IntermediateTensors]]
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
@@ -34,9 +32,14 @@ try:
                     deserialized.frombytes(obj)
                     return deserialized
 
-            self.input_decoder = msgspec.msgpack.Decoder(ModelRequest,
+            def enc_hook(obj: Any) -> Any:
+                if isinstance(obj, array):
+                    # convert the complex to a tuple of real, imag
+                    return obj.tobytes()
+
+            self.input_decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
                                                          dec_hook=dec_hook)
-            self.output_encoder = msgspec.msgpack.Encoder()
+            self.output_encoder = msgspec.msgpack.Encoder(enc_hook=enc_hook)
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -47,21 +50,25 @@ try:
             return node_id, gpu_ids
 
         def execute_model_spmd(
-            self,
-            serialized_model_request: bytes) -> bytes:
+            self, req_or_tuple: Union[bytes, Tuple[
+                bytes, Optional[IntermediateTensors]]]
+        ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
 
             Args:
-                req_or_tuple: A tuple containing the request and intermediate
-                    tensors. Intermediate tensors are None unless if it is
-                    provided because it is > 0 pipeline stage. The value is
-                    serialized (to optimize the serialization performance).
+                req_or_tuple: A requset or a tuple containing the
+                    request and intermediate tensors. Intermediate tensors are
+                    None unless if it is provided because it is > 0 pipeline
+                    stage. The request is serialized by msgspec.
             """
             # s = time.time()
-
-            execute_model_req, intermediate_tensors: ModelRequest = (
-                    self.input_decoder.decode(serialized_model_request))
+            if isinstance(req_or_tuple, bytes):
+                serialized_data, intermediate_tensors = req_or_tuple, None
+            else:
+                serialized_data, intermediate_tensors = req_or_tuple
+            execute_model_req = self.input_decoder.decode(
+                serialized_data)
 
             # import pickle
             # execute_model_req: ExecuteModelRequest = (
@@ -80,10 +87,11 @@ try:
                                                      intermediate_tensors)
             # Pipeline model request and output to the next pipeline stage.
             if isinstance(output, IntermediateTensors):
-                output = execute_model_req, output
+                output = self.output_encoder.encode(execute_model_req), output
+            else:
+                output = self.output_encoder.encode(output)
 
             # output = pickle.dumps(output)
-            output = self.output_encoder.encode(output)
             # print("SANG-TODO worker takes "
             #       f"{(time.time() - s) * 1000} ms index: {self.i}")
             self.i += 1

@@ -5,10 +5,7 @@ from vllm.adapter_commons.request import AdapterRequest
 import msgspec
 
 
-class LoRARequest(msgspec.Struct,
-                  AdapterRequest,
-                  omit_defaults=True,
-                  array_like=True):
+class LoRARequest(msgspec.Struct, omit_defaults=True, array_like=True):
     """
     Request for a LoRA adapter.
 
@@ -20,6 +17,7 @@ class LoRARequest(msgspec.Struct,
     lora_int_id must be globally unique for a given adapter.
     This is currently not enforced in vLLM.
     """
+    __metaclass__ = AdapterRequest
 
     lora_name: str
     lora_int_id: int
