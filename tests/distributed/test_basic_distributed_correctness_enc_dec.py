@@ -1,19 +1,13 @@
 """For encoder/decoder models only:
 Compare the outputs of HF and distributed vLLM when using greedy sampling.
-vLLM will allocate all the available memory, so we need to run the tests one
-by one. The solution is to pass arguments (model name) by environment
-variables.
+
 Run:
 ```sh
 cd $VLLM_PATH/tests
 
-TEST_DIST_MODEL=facebook/bart-large-cnn pytest \
-    distributed/test_basic_distributed_correctness_enc_dec.py
-TEST_DIST_MODEL=facebook/bart-large-cnn \
-    distributed/test_basic_distributed_correctness_enc_dec.py
+pytest distributed/test_basic_distributed_correctness_enc_dec.py
 ```
 """
-import os
 
 import pytest
 
@@ -21,46 +15,47 @@ from tests.models.utils import DecoderPromptType
 from vllm.utils import cuda_device_count_stateless
 
 from ..models.utils import check_logprobs_close
-
-MODELS = [
-    os.environ["TEST_DIST_MODEL"],
-]
-DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
+from ..utils import fork_new_process_for_each_test
 
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [64])
-@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("model, distributed_executor_backend", [
+    ("facebook/bart-large-cnn", "ray"),
+    ("facebook/bart-large-cnn", "mp"),
+])
+@fork_new_process_for_each_test
 def test_models(
+    model: str,
+    distributed_executor_backend: str,
     hf_runner,
     vllm_runner,
     example_encoder_decoder_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
 ) -> None:
     '''
     Test vLLM BART inference on more than one GPU, comparing
     outputs against HF as a baseline.
 
+    Fork a new process for each test, to prevent CUDA from
+    being re-initialized by successive tests within the same
+    process.
+
     Arguments:
 
+    * model: the HF ID of the specific BART variant under test
+    * distributed_executor_backend
     * hf_runner: HuggingFace (HF) test model runner
     * vllm_runner: vLLM test model runner
     * example_encoder_decoder_prompts: test fixture which provides a 
                                         dictionary of dummy prompts
-    * model: the HF ID of the specific BART variant under test
-    * dtype: the tensor datatype to employ
-    * max_tokens
-    * num_logprobs
     '''
 
-    distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
+    dtype = "float"
+    max_tokens = 64
+    num_logprobs = 5
 
+    # Example inputs with non-trivial (i.e. not None/empty) encoder &
+    # decoder prompts.
     test_prompts = example_encoder_decoder_prompts[DecoderPromptType.CUSTOM]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
