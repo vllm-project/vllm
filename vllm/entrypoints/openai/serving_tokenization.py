@@ -1,13 +1,11 @@
 from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
+from vllm.engine.protocol import AsyncEngineClient
+from vllm.entrypoints.chat_utils import load_chat_template, parse_chat_messages
+from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.engine.protocol import AsyncEngineClient
-from vllm.entrypoints.chat_utils import (ConversationMessage,
-                                         load_chat_template,
-                                         parse_chat_message_content)
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
                                               ErrorResponse,
@@ -17,7 +15,10 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
+from vllm.logger import init_logger
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 class OpenAIServingTokenization(OpenAIServing):
@@ -62,12 +63,12 @@ class OpenAIServingTokenization(OpenAIServing):
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
 
-            conversation: List[ConversationMessage] = []
+            conversation, mm_futures = parse_chat_messages(
+                request.messages, model_config, tokenizer)
 
-            for message in request.messages:
-                result = parse_chat_message_content(message, model_config,
-                                                    tokenizer)
-                conversation.extend(result.messages)
+            if mm_futures:
+                logger.warning(
+                    "Multi-modal inputs are ignored during tokenization")
 
             prompt = tokenizer.apply_chat_template(
                 add_generation_prompt=request.add_generation_prompt,
