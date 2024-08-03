@@ -360,6 +360,9 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
 
 
 def fork_new_process_for_each_test(f):
+    """Decorator to fork a new process for each test function.
+    See https://github.com/vllm-project/vllm/issues/7053 for more details.
+    """
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
