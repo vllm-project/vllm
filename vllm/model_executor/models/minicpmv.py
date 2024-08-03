@@ -742,16 +742,12 @@ class MiniCPMV2(MiniCPMVBaseModel):
         return torch.vstack(res)
 
     def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
-        if "vision_hidden_states" not in data:
-            pixel_values = data["pixel_values"]
-            if pixel_values is not None and len(pixel_values) > 0:
-                vision_hidden_states = self.get_vision_embedding(pixel_values)
-            else:
-                vision_hidden_states = torch.tensor([]).to(
-                    data["input_ids"].device)
-
+        input_ids = data["input_ids"]
+        pixel_values = data["pixel_values"]
+        if pixel_values is not None and len(pixel_values) > 0:
+            vision_hidden_states = self.get_vision_embedding(pixel_values)
         else:
-            vision_hidden_states = data["vision_hidden_states"]
+            vision_hidden_states = torch.tensor([], device=input_ids.device)
 
         return vision_hidden_states
 
@@ -809,43 +805,38 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         return vision_embedding
 
     def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
-        if "vision_hidden_states" not in data:
-            pixel_values = data["pixel_values"]
-            tgt_sizes = data["tgt_sizes"]
-            vision_hidden_states = []
+        input_ids = data["input_ids"]
+        pixel_values = data["pixel_values"]
+        tgt_sizes = data["tgt_sizes"]
 
-            device = self.vpm.embeddings.position_embedding.weight.device
-            dtype = self.vpm.embeddings.position_embedding.weight.dtype
-            all_pixel_values = [
-                i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
-            ]
-            if all_pixel_values:
-                tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
+        device = self.vpm.embeddings.position_embedding.weight.device
+        dtype = self.vpm.embeddings.position_embedding.weight.dtype
+        all_pixel_values = [
+            i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
+        ]
+        if all_pixel_values:
+            tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
 
-                max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
-                assert isinstance(max_patches, int)
+            max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+            assert isinstance(max_patches, int)
 
-                all_pixel_values = torch.nn.utils.rnn.pad_sequence(
-                    all_pixel_values, batch_first=True, padding_value=0.0)
-                B, L, _ = all_pixel_values.shape
-                all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
-                    B, 3, -1, L)
+            all_pixel_values = torch.nn.utils.rnn.pad_sequence(
+                all_pixel_values, batch_first=True, padding_value=0.0)
+            B, L, _ = all_pixel_values.shape
+            all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
+                B, 3, -1, L)
 
-                patch_attn_mask = torch.zeros((B, 1, max_patches),
-                                              dtype=torch.bool,
-                                              device=device)
-                for i in range(B):
-                    patch_attn_mask[i, :tgt_sizes[i][0] *
-                                    tgt_sizes[i][1]] = True
+            patch_attn_mask = torch.zeros((B, 1, max_patches),
+                                          dtype=torch.bool,
+                                          device=device)
+            for i in range(B):
+                patch_attn_mask[i, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
 
-                vision_hidden_states = self.get_vision_embedding(
-                    all_pixel_values.type(dtype), patch_attn_mask, tgt_sizes)
+            vision_hidden_states = self.get_vision_embedding(
+                all_pixel_values.type(dtype), patch_attn_mask, tgt_sizes)
 
-            else:
-                vision_hidden_states = torch.tensor([]).to(
-                    data["input_ids"].device)
-        else:
-            vision_hidden_states = data["vision_hidden_states"]
+        else:  # no image
+            vision_hidden_states = torch.tensor([], device=input_ids.device)
 
         return vision_hidden_states
 
@@ -915,48 +906,43 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
         return vision_embedding
 
     def get_vision_hidden_states(self, data: MiniCPMVInputs) -> torch.Tensor:
-        if "vision_hidden_states" not in data:
-            pixel_values = data["pixel_values"]
-            tgt_sizes = data["tgt_sizes"]
-            vision_hidden_states = []
+        input_ids = data["input_ids"]
+        pixel_values = data["pixel_values"]
+        tgt_sizes = data["tgt_sizes"]
 
-            device = self.vpm.embeddings.position_embedding.weight.device
-            dtype = self.vpm.embeddings.position_embedding.weight.dtype
-            all_pixel_values = [
-                i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
-            ]
-            if all_pixel_values:
-                tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
+        device = self.vpm.embeddings.position_embedding.weight.device
+        dtype = self.vpm.embeddings.position_embedding.weight.dtype
+        all_pixel_values = [
+            i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
+        ]
+        if all_pixel_values:
+            tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
 
-                max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
-                assert isinstance(max_patches, int)
+            max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+            assert isinstance(max_patches, int)
 
-                all_pixel_values = torch.nn.utils.rnn.pad_sequence(
-                    all_pixel_values, batch_first=True, padding_value=0.0)
-                B, L, _ = all_pixel_values.shape
-                all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
-                    B, 3, -1, L)
+            all_pixel_values = torch.nn.utils.rnn.pad_sequence(
+                all_pixel_values, batch_first=True, padding_value=0.0)
+            B, L, _ = all_pixel_values.shape
+            all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
+                B, 3, -1, L)
 
-                patch_attn_mask = torch.zeros((B, 1, max_patches),
-                                              dtype=torch.bool,
-                                              device=device)
-                for i in range(B):
-                    patch_attn_mask[i, 0, :tgt_sizes[i][0] *
-                                    tgt_sizes[i][1]] = True
-                vision_embedding = self.vpm(
-                    all_pixel_values.type(dtype),
-                    patch_attention_mask=patch_attn_mask,
-                    tgt_sizes=tgt_sizes,
-                ).last_hidden_state
+            patch_attn_mask = torch.zeros((B, 1, max_patches),
+                                          dtype=torch.bool,
+                                          device=device)
+            for i in range(B):
+                patch_attn_mask[i,
+                                0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
+            vision_embedding = self.vpm(
+                all_pixel_values.type(dtype),
+                patch_attention_mask=patch_attn_mask,
+                tgt_sizes=tgt_sizes,
+            ).last_hidden_state
 
-                vision_hidden_states = self.resampler(vision_embedding,
-                                                      tgt_sizes)
+            vision_hidden_states = self.resampler(vision_embedding, tgt_sizes)
 
-            else:  # no image
-                vision_hidden_states = torch.tensor([]).to(
-                    data["input_ids"].device)
-        else:
-            vision_hidden_states = data["vision_hidden_states"]
+        else:  # no image
+            vision_hidden_states = torch.tensor([], device=input_ids.device)
 
         return vision_hidden_states
 
