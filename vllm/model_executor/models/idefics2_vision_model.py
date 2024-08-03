@@ -52,7 +52,6 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
-
         self.patch_embedding = nn.Conv2d(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
@@ -60,7 +59,6 @@ class Idefics2VisionEmbeddings(nn.Module):
             stride=self.patch_size,
             padding="valid",
         )
-
         self.num_patches_per_side = self.image_size // self.patch_size
         self.num_patches = self.num_patches_per_side**2
         self.num_positions = self.num_patches
@@ -73,10 +71,8 @@ class Idefics2VisionEmbeddings(nn.Module):
         patch_attention_mask: torch.BoolTensor,
     ) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
-
         patch_embeds = self.patch_embedding(pixel_values)
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
-
         max_nb_patches_h, max_nb_patches_w = (
             max_im_h // self.patch_size,
             max_im_w // self.patch_size,
@@ -90,21 +86,17 @@ class Idefics2VisionEmbeddings(nn.Module):
         for batch_idx, p_attn_mask in enumerate(patch_attention_mask):
             nb_patches_h = p_attn_mask[:, 0].sum()
             nb_patches_w = p_attn_mask[0].sum()
-
             fractional_coords_h = torch.arange(0, 1 - 1e-6, 1 / nb_patches_h)
             fractional_coords_w = torch.arange(0, 1 - 1e-6, 1 / nb_patches_w)
-
             bucket_coords_h = torch.bucketize(fractional_coords_h,
                                               boundaries,
                                               right=True)
             bucket_coords_w = torch.bucketize(fractional_coords_w,
                                               boundaries,
                                               right=True)
-
             pos_ids = (bucket_coords_h[:, None] * self.num_patches_per_side +
                        bucket_coords_w).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
-
         position_ids = position_ids.to(self.position_embedding.weight.device)
         embeddings = embeddings + self.position_embedding(position_ids)
         return embeddings
@@ -129,14 +121,12 @@ class Idefics2VisionAttention(nn.Module):
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
-
         self.qkv_proj = QKVParallelLinear(
             self.embed_dim,
             self.head_dim,
             self.num_heads,
             quant_config=quant_config,
         )
-
         self.out_proj = RowParallelLinear(
             self.embed_dim,
             self.embed_dim,
@@ -155,7 +145,6 @@ class Idefics2VisionAttention(nn.Module):
         qkv, _ = self.qkv_proj(
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
-
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
         query_states = query_states.view(batch_size, q_len,
                                          self.num_heads_per_partition,
@@ -176,7 +165,6 @@ class Idefics2VisionAttention(nn.Module):
         )
         out = out.view(batch_size, q_len, -1)
         attn_output, _ = self.out_proj(out)
-
         return attn_output
 
 
@@ -207,7 +195,6 @@ class Idefics2VisionMLP(nn.Module):
         hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
-
         return hidden_states
 
 
@@ -234,16 +221,13 @@ class Idefics2EncoderLayer(nn.Module):
 
         """
         residual = hidden_states
-
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states, )
+        hidden_states = self.self_attn(hidden_states)
         hidden_states = residual + hidden_states
-
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
         return hidden_states
 
 
@@ -278,11 +262,9 @@ class Idefics2Encoder(nn.Module):
                 `input_ids` indices into associated vectorsthan the model's
                 internal embedding lookup matrix.
         """
-
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(hidden_states, )
-
+            layer_outputs = encoder_layer(hidden_states)
             hidden_states = layer_outputs
         return hidden_states
 
@@ -292,7 +274,6 @@ class Idefics2VisionTransformer(nn.Module):
     def __init__(self, config: Idefics2VisionConfig):
         super().__init__()
         embed_dim = config.hidden_size
-
         self.config = config
         self.embeddings = Idefics2VisionEmbeddings(config)
         self.encoder = Idefics2Encoder(config)
@@ -307,12 +288,9 @@ class Idefics2VisionTransformer(nn.Module):
         pixel_values,
         patch_attention_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.tensor:
-
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask)
-
         encoder_outputs = self.encoder(hidden_states)
-
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
