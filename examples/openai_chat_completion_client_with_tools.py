@@ -135,7 +135,6 @@ for call in completion_tool_calls:
         "name": call.function.name
     })
 
-
 chat_completion_2 = client.chat.completions.create(messages=messages,
                                                    model=model,
                                                    tools=tools,

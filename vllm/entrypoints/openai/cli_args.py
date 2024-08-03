@@ -39,10 +39,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         type=nullable_str,
                         default=None,
                         help="host name")
-    parser.add_argument("--port",
-                        type=int,
-                        default=8000,
-                        help="port number")
+    parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument(
         "--uvicorn-log-level",
         type=str,
@@ -154,8 +151,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help=
         'Enable auto tool choice for supported models. Use --tool-call-parser'
-        'to specify which parser to use'
-    )
+        'to specify which parser to use')
 
     parser.add_argument(
         "--tool-call-parser",

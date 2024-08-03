@@ -200,7 +200,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     if request.stream:
         return StreamingResponse(content=generator,
-                                     media_type="text/event-stream")
+                                 media_type="text/event-stream")
 
     # handle non-streaming requests
     else:

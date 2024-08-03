@@ -12,11 +12,11 @@ from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.utils import random_uuid
-from openai.types.chat import (
-    ChatCompletionContentPartParam,
-    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam,
-    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam
-)
+from openai.types.chat import (ChatCompletionContentPartParam,
+                               ChatCompletionMessageParam as
+                               OpenAIChatCompletionMessageParam,
+                               ChatCompletionContentPartParam as
+                               OpenAIChatCompletionContentPartParam)
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -38,6 +38,7 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 
     tool_calls: Optional[List[dict]]
 
+
 @final  # So that it should be compatible with Dict[str, str]
 class ConversationMessage(TypedDict, total=False):
     role: str
@@ -45,7 +46,6 @@ class ConversationMessage(TypedDict, total=False):
     tool_call_id: Optional[str]
     name: Optional[str]
     tool_calls: Optional[List]
-
 
 
 ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
@@ -69,6 +69,7 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     tool_call_id: Optional[str]
 
     tool_calls: Optional[List[dict]]
+
 
 class CustomChatCompletionContentPartParam(TypedDict, total=False):
     __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore

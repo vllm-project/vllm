@@ -159,8 +159,7 @@ class ToolParser:
         """
         raise NotImplementedError(
             'AbstractToolParser.extract_tool_calls_streaming has not been '
-            'implemented!'
-        )
+            'implemented!')
 
 
 class MistralToolParser(ToolParser):
