@@ -65,6 +65,7 @@ class MLPSpeculator(nn.Module):
     Trained speculators of this type are available on HF hub at:
     https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
     """
+
     def __init__(self, config: MLPSpeculatorConfig, **kwargs) -> None:
         super().__init__()
         self.n_predict = config.n_predict
