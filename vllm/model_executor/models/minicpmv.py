@@ -39,6 +39,7 @@ from transformers.configuration_utils import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -58,6 +59,8 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
+
+logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
@@ -417,13 +420,22 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     pattern = "(<image>./</image>)"
     image = multi_modal_data["image"]
     image_tags = re.findall(pattern, prompt)
-    assert len(image_tags) <= 1
-    text_chunks = prompt.split(pattern)
-    new_prompt = (text_chunks[0] +
-                  image_processor.get_slice_image_placeholder(image.size) +
-                  text_chunks[1])
 
-    new_token_ids = tokenizer.encode(new_prompt)
+    if len(image_tags) == 0:
+        new_token_ids = token_ids
+        new_prompt = prompt
+    else:
+        if len(image_tags) > 1:
+            logger.warning("Multiple image input is not supported yet, "
+                           "so any extra image tokens will be treated "
+                           "as plain text.")
+
+        text_chunks = prompt.split(pattern)
+        new_prompt = (text_chunks[0] +
+                      image_processor.get_slice_image_placeholder(image.size) +
+                      "".join(text_chunks[1:]))
+
+        new_token_ids = tokenizer.encode(new_prompt)
 
     llm_inputs = LLMInputs(
         prompt_token_ids=new_token_ids,
