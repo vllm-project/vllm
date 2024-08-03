@@ -529,11 +529,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             vision_hidden_states = self.get_vision_hidden_states(image_inputs)
             image_bounds = self.get_image_bounds(input_ids)
 
+            vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
             if hasattr(self.config, "scale_emb"):
-                vlm_embedding: torch.Tensor = (
-                    self.llm.embed_tokens(input_ids) * self.config.scale_emb)
-            else:
-                vlm_embedding = self.llm.embed_tokens(input_ids)
+                vlm_embedding = vlm_embedding * self.config.scale_emb
 
             image_indices = torch.stack([
                 torch.arange(r[0], r[1], dtype=torch.long)
