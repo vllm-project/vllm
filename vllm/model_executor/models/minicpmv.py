@@ -521,7 +521,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if image_inputs is None:  # No image
+        if image_inputs is None or len(image_inputs["pixel_values"]) == 0:
+            # No image
             vlm_embedding = torch.tensor([], device=input_ids.device)
             vision_hidden_states = torch.tensor([], device=input_ids.device)
         else:
