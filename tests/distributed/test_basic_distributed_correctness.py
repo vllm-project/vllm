@@ -28,18 +28,26 @@ DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize(
+    "model, distributed_executor_backend, attention_backend", [
+        ("facebook/opt-125m", "ray", ""),
+        ("facebook/opt-125m", "mp", ""),
+        ("facebook/opt-125m", "mp", "FLASHINFER"),
+        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER"),
+    ])
 def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
     model: str,
-    dtype: str,
-    max_tokens: int,
+    distributed_executor_backend: str,
+    attention_backend: str,
 ) -> None:
-    distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
+    if attention_backend:
+        os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
+
+    dtype = "half"
+    max_tokens = 5
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
