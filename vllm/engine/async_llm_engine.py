@@ -112,7 +112,7 @@ class RequestTracker:
 
     def __init__(self) -> None:
         self._request_streams: Dict[str, AsyncStream] = {}
-        self._finished_requests: asyncio.Queue[str] = asyncio.Queue()
+        self._aborted_requests: asyncio.Queue[str] = asyncio.Queue()
         self._new_requests: asyncio.Queue[Tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
@@ -203,20 +203,20 @@ class RequestTracker:
         if verbose:
             logger.info("Aborted request %s.", request_id)
 
-        self._finished_requests.put_nowait(request_id)
+        self._aborted_requests.put_nowait(request_id)
 
         stream = self._request_streams.pop(request_id, None)
         if stream is not None:
             stream.finish(cancelled=cancelled)
 
-    def get_new_and_finished_requests(self) -> Tuple[List[Dict], Set[str]]:
+    def get_new_and_aborted_requests(self) -> Tuple[List[Dict], Set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
         new_requests: List[Dict] = []
         finished_requests: Set[str] = set()
 
-        while not self._finished_requests.empty():
-            request_id = self._finished_requests.get_nowait()
+        while not self._aborted_requests.empty():
+            request_id = self._aborted_requests.get_nowait()
             finished_requests.add(request_id)
 
         while not self._new_requests.empty():
@@ -575,8 +575,8 @@ class AsyncLLMEngine:
 
         Returns True if there are in-progress requests."""
 
-        new_requests, finished_requests = (
-            self._request_tracker.get_new_and_finished_requests())
+        new_requests, aborted_requests = (
+            self._request_tracker.get_new_and_aborted_requests())
 
         for new_request in new_requests:
             # Add the request into the vLLM engine's waiting queue.
@@ -595,8 +595,8 @@ class AsyncLLMEngine:
                     verbose=self.log_requests,
                 )
 
-        if finished_requests:
-            await self._engine_abort(finished_requests)
+        if aborted_requests:
+            await self._engine_abort(aborted_requests)
 
         if self.engine_use_ray:
             request_outputs = await self.engine.step.remote()  # type: ignore
