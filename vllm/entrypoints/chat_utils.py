@@ -1,7 +1,7 @@
 import codecs
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Awaitable, Iterable, List, Optional, cast, Any
+from typing import Awaitable, Iterable, List, Optional, cast, Any, Union
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -158,7 +158,7 @@ def parse_chat_message_content(
     if role == 'assistant' and tool_calls is not None:
         messages = [
             ConversationMessage(role=role,
-                                content=content,
+                                content=cast(Union[str, None], content),
                                 tool_calls=list(tool_calls))
         ]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
@@ -168,8 +168,9 @@ def parse_chat_message_content(
         messages = [
             ConversationMessage(role=role,
                                 name=name,
-                                content=content,
-                                tool_call_id=tool_call_id)
+                                content=cast(Union[str, None], content),
+                                tool_call_id=cast(Union[str, None],
+                                                  tool_call_id))
         ]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
