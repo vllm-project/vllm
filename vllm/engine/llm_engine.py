@@ -38,9 +38,8 @@ from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer_group import (AnyTokenizer,
-                                                     BaseTokenizerGroup,
-                                                     get_tokenizer_group)
+from vllm.transformers_utils.tokenizer_group import (
+    AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
@@ -485,19 +484,12 @@ class LLMEngine:
         return self.get_tokenizer_group().get_lora_tokenizer(
             sequence.lora_request)
 
-    def _init_tokenizer(self, **tokenizer_init_kwargs) -> BaseTokenizerGroup:
-        init_kwargs = dict(
-            tokenizer_id=self.model_config.tokenizer,
-            enable_lora=bool(self.lora_config),
-            max_num_seqs=self.scheduler_config.max_num_seqs,
-            max_input_length=None,
-            tokenizer_mode=self.model_config.tokenizer_mode,
-            trust_remote_code=self.model_config.trust_remote_code,
-            revision=self.model_config.tokenizer_revision)
-        init_kwargs.update(tokenizer_init_kwargs)
-
-        return get_tokenizer_group(self.parallel_config.tokenizer_pool_config,
-                                   **init_kwargs)
+    def _init_tokenizer(self) -> BaseTokenizerGroup:
+        return init_tokenizer_from_configs(
+            model_config=self.model_config,
+            scheduler_config=self.scheduler_config,
+            parallel_config=self.parallel_config,
+            enable_lora=bool(self.lora_config))
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -759,9 +751,21 @@ class LLMEngine:
         """Gets the model configuration."""
         return self.model_config
 
+    def get_parallel_config(self) -> ParallelConfig:
+        """Gets the parallel configuration."""
+        return self.parallel_config
+
     def get_decoding_config(self) -> DecodingConfig:
         """Gets the decoding configuration."""
         return self.decoding_config
+
+    def get_scheduler_config(self) -> SchedulerConfig:
+        """Gets the scheduler configuration."""
+        return self.scheduler_config
+
+    def get_lora_config(self) -> LoRAConfig:
+        """Gets the LoRA configuration."""
+        return self.lora_config
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
