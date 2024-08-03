@@ -42,20 +42,20 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - label: "H100"
-    agents:
-      queue: H100
-    plugins:
-    - docker#v5.11.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
-        command:
-        - bash
-        - .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
-        mount-buildkite-agent: true
-        propagate-environment: true
-        ipc: host
-        gpus: all
-        environment:
-        - VLLM_USAGE_SOURCE
-        - HF_TOKEN
+  # - label: "H100"
+  #   agents:
+  #     queue: H100
+  #   plugins:
+  #   - docker#v5.11.0:
+  #       image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+  #       command:
+  #       - bash
+  #       - .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
+  #       mount-buildkite-agent: true
+  #       propagate-environment: true
+  #       ipc: host
+  #       gpus: all
+  #       environment:
+  #       - VLLM_USAGE_SOURCE
+  #       - HF_TOKEN
 
