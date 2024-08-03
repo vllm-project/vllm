@@ -541,7 +541,8 @@ class LLM:
         if isinstance(params, list):
             params = [
                 self._add_guided_processor(param, guided_options)
-                for param in params if isinstance(param, SamplingParams)
+                if isinstance(param, SamplingParams) else param
+                for param in params
             ]
         elif isinstance(params, SamplingParams):
             params = self._add_guided_processor(params, guided_options)
