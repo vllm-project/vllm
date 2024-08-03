@@ -1,7 +1,7 @@
 import codecs
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Awaitable, Iterable, List, Optional, cast
+from typing import Awaitable, Iterable, List, Optional, cast, Any
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -11,7 +11,6 @@ from openai.types.chat import ChatCompletionContentPartTextParam
 
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer
 from typing_extensions import Required, TypedDict
 
@@ -179,5 +178,6 @@ def parse_chat_message_content(
         messages = [ConversationMessage(role=role, content=content)]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
-    return _parse_chat_message_content_parts(role, content, model_config,
-                                             tokenizer)
+    return _parse_chat_message_content_parts(role,
+                                             cast(Iterable[Any], content),
+                                             model_config, tokenizer)

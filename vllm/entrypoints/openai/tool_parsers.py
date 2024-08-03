@@ -285,7 +285,7 @@ class MistralToolParser(ToolParser):
                     self.bot_token)[1]
                 parsable_arr = tool_call_message_portion.replace('\'', '"')
 
-                logger.debug('parsing: %s', parsable_arr)
+                #logger.debug('parsing: %s', parsable_arr)
 
                 # tool calls are generated in an array, so do partial JSON parsing on the entire array
                 tool_call_arr: List[Dict] = partial_json_parser.loads(
@@ -338,7 +338,7 @@ class MistralToolParser(ToolParser):
 
                 # if there is NOTHING in the array, e.g. if only the open bracket was streamed yet
                 else:
-                    logger.debug('No tool call detected yet!')
+                    #logger.debug('No tool call detected yet!')
                     return None
 
                 # if the current tool initial data incl. the id, type=function and idx not sent, send that
@@ -378,9 +378,7 @@ class MistralToolParser(ToolParser):
                     new_text = delta_text.replace('\'', '"')
 
                     if not cur_arguments and not prev_arguments:
-                        logger.debug(
-                            f'Skipping text {new_text} (tokens {delta_token_ids}) - no arguments yet'
-                        )
+
                         delta = None
                     elif not cur_arguments and prev_arguments:
                         logger.error(
@@ -508,7 +506,7 @@ class Hermes2ProToolParser(ToolParser):
         self.current_tool_name_sent: bool = False  # reset each time we encounter a new tool in the array
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
-        self.current_tool_name_sent: bool = False
+        self.current_tool_name_sent = False
         self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
