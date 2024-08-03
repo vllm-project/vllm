@@ -14,7 +14,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
+set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
@@ -32,7 +32,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.3.1")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.4.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
 
 #
@@ -67,6 +67,39 @@ endif()
 find_package(Torch REQUIRED)
 
 #
+# Add the `default` target which detects which extensions should be
+# built based on platform/architecture.  This is the same logic that
+# setup.py uses to select which extensions should be built and should
+# be kept in sync.
+#
+# The `default` target makes direct use of cmake easier since knowledge
+# of which extensions are supported has been factored in, e.g.
+#
+# mkdir build && cd build
+# cmake -G Ninja -DVLLM_PYTHON_EXECUTABLE=`which python3` -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=../vllm ..
+# cmake --build . --target default
+#
+add_custom_target(default)
+message(STATUS "Enabling core extension.")
+
+# Define _core_C extension
+#  built for (almost) every target platform, (excludes TPU and Neuron)
+
+set(VLLM_EXT_SRC
+  "csrc/core/torch_bindings.cpp")
+
+define_gpu_extension_target(
+  _core_C
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_EXT_SRC}
+  COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+  USE_SABI 3
+  WITH_SOABI)
+
+add_dependencies(default _core_C)
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
@@ -74,7 +107,7 @@ if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
     else()
-        message(FATAL_ERROR "Unsupported vLLM target device: ${VLLM_TARGET_DEVICE}")
+        return()
     endif()
     return()
 endif()
@@ -132,7 +165,7 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 #
-# Define extension targets
+# Define other extension targets
 #
 
 #
@@ -156,12 +189,15 @@ set(VLLM_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   include(FetchContent)
-  SET(CUTLASS_ENABLE_HEADERS_ONLY=ON)
+  SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         # CUTLASS 3.5.0
         GIT_TAG 7d49e6c7e2f8896c47f586706e67e1fb215529dc
+        # Shallow clone with depth 1
+        GIT_SHALLOW TRUE
+        GIT_PROGRESS TRUE
   )
   FetchContent_MakeAvailable(cutlass)
 
@@ -224,21 +260,6 @@ define_gpu_extension_target(
   WITH_SOABI)
 
 
-
-#
-# Add the `default` target which detects which extensions should be
-# built based on platform/architecture.  This is the same logic that
-# setup.py uses to select which extensions should be built and should
-# be kept in sync.
-#
-# The `default` target makes direct use of cmake easier since knowledge
-# of which extensions are supported has been factored in, e.g.
-#
-# mkdir build && cd build
-# cmake -G Ninja -DVLLM_PYTHON_EXECUTABLE=`which python3` -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=../vllm ..
-# cmake --build . --target default
-#
-add_custom_target(default)
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")

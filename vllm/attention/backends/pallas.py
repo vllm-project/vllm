@@ -91,6 +91,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -109,6 +110,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
+        if logits_soft_cap is not None:
+            raise NotImplementedError(
+                "Attention logits soft-capping is not supported.")
 
         if torch_xla.tpu.version() < 4:
             raise NotImplementedError("TPU version must be 4 or higher.")
