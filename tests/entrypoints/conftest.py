@@ -10,6 +10,7 @@ def sample_prompts():
         "The future of AI is",
     ]
 
+
 @pytest.fixture
 def sample_token_ids():
     return [
