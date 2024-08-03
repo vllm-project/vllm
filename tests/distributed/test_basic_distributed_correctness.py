@@ -19,11 +19,7 @@ import pytest
 from vllm.utils import cuda_device_count_stateless
 
 from ..models.utils import check_outputs_equal
-
-MODELS = [
-    os.environ["TEST_DIST_MODEL"],
-]
-DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
+from ..utils import fork_new_process_for_each_test
 
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
@@ -35,6 +31,7 @@ DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
         ("facebook/opt-125m", "mp", "FLASHINFER"),
         ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER"),
     ])
+@fork_new_process_for_each_test
 def test_models(
     hf_runner,
     vllm_runner,
