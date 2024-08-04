@@ -41,7 +41,7 @@ def backend_name_to_enum(backend_name: str, ) -> _Backend:
 
 def get_env_variable_force_attn_backend() -> Optional[_Backend]:
     '''
-    Get the backend override specified the vLLM attention
+    Get the backend override specified by the vLLM attention
     backend environment variable, if one is specified.
 
     Returns:
