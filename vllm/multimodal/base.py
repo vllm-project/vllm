@@ -250,8 +250,8 @@ class MultiModalPlugin(ABC):
     @abstractmethod
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         """
-        Calculate the maximum number of multimodal tokens input to the language
-        model. This does not include tokens that correspond to the input text.
+        Calculate the maximum number of tokens, corresponding to a single
+        instance of multimodal data, that are passed to the language model.
         """
         raise NotImplementedError
 
@@ -265,8 +265,9 @@ class MultiModalPlugin(ABC):
         max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
-        Register the maximum number of multi-modal tokens input to the
-        language model for a model class.
+        Register the maximum number of tokens, corresponding to a single
+        instance of multimodal data, that are passed to the language model
+        for a model class.
 
         If `None` is provided, then the default calculation is used instead.
 

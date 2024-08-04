@@ -3,7 +3,7 @@ from typing import Dict, Optional, Sequence
 
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, MultiModalConfig
 from vllm.logger import init_logger
 
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
@@ -114,8 +114,9 @@ class MultiModalRegistry:
         max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
-        Register the maximum number of tokens, belonging to a
-        specific modality, input to the language model for a model class.
+        Register the maximum number of tokens, corresponding to a single
+        instance of multimodal data belonging to a specific modality, that are
+        passed to the language model for a model class.
         """
         return self._get_plugin(data_type_key) \
             .register_max_multimodal_tokens(max_mm_tokens)
@@ -125,18 +126,32 @@ class MultiModalRegistry:
         max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
-        Register the maximum number of image tokens
-        input to the language model for a model class.
+        Register the maximum number of image tokens, corresponding to a single
+        image, that are passed to the language model for a model class.
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
-    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
+    def get_max_multimodal_tokens(
+        self,
+        model_config: ModelConfig,
+        multimodal_config: Optional[MultiModalConfig],
+    ) -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
-        
+
         See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
         """
-        return sum(
-            plugin.get_max_multimodal_tokens(model_config)
-            for plugin in self._plugins.values())
+        max_num_by_plugin = ({} if multimodal_config is None else
+                             multimodal_config.limit_per_prompt)
+
+        extra_keys = max_num_by_plugin.keys() - self._plugins.keys()
+        if extra_keys:
+            logger.warning(
+                "Detected extra keys in `--limit-mm-per-prompt` which "
+                "are not registered as multi-modal plugins: %s. "
+                "They will be ignored.", extra_keys)
+
+        return sum((max_num_by_plugin.get(key, 1) *
+                    plugin.get_max_multimodal_tokens(model_config))
+                   for key, plugin in self._plugins.items())
