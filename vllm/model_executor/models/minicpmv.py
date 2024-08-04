@@ -559,8 +559,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         input_ids: torch.Tensor,
         **kwargs: object,
     ) -> Optional[MiniCPMVImageInputs]:
-        image_bounds_flat = self._get_image_bounds(input_ids)
-
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
 
@@ -593,7 +591,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             return None
 
         return MiniCPMVImageInputs(
-            image_bounds=image_bounds_flat,
+            image_bounds=self._get_image_bounds(input_ids),
             pixel_values=pixel_values_flat,
             tgt_sizes=torch.stack(tgt_sizes_flat),
         )
