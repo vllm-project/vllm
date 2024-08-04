@@ -210,47 +210,49 @@ class StreamingAttentionSink(nn.Module):
                 attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
                 self.positions[i] = model_context_len - block_size + rem
 
-        # get all block tables and past positions into single tensor
-        # for batched torch ops, which don't need to be in for-loop
-        all_block_table = torch.cat(all_block_table)
-        all_pos = torch.cat(all_pos)
+        if len(all_block_table) > 0:
+            # get all block tables and past positions into single tensor
+            # for batched torch ops, which don't need to be in for-loop
+            all_block_table = torch.cat(all_block_table)
+            all_pos = torch.cat(all_pos)
 
-        # read unrotated keys from cache
-        # FA shape: [len(all_block_table), block_size, num_heads, head_size]
-        # XF shape: [len(all_block_table), num_heads, head_size/x, block_size, x]
-        prerope_keys = torch.index_select(key_cache, 0, all_block_table)
+            # read unrotated keys from cache
+            # FA shape: [len(all_block_table), block_size, num_heads, head_size]
+            # XF shape: [len(all_block_table), num_heads, head_size/x, block_size, x]
+            prerope_keys = torch.index_select(key_cache, 0, all_block_table)
 
-        # copy will be used to write back to cache after attn computation
-        prerope_keys_copy = prerope_keys.clone()
+            # copy will be used to write back to cache after attn computation
+            prerope_keys_copy = prerope_keys.clone()
 
-        # reshape for rotary embedding kernel
-        if self.attn_backend == _Backend.XFORMERS:
-            prerope_keys = prerope_keys.permute((0, 3, 1, 2, 4))
-        prerope_keys = prerope_keys.flatten(0, 1).flatten(1, -1)
-        # shape: [len(all_block_table) * block_size, num_heads * head_size]
+            # reshape for rotary embedding kernel
+            if self.attn_backend == _Backend.XFORMERS:
+                prerope_keys = prerope_keys.permute((0, 3, 1, 2, 4))
+            prerope_keys = prerope_keys.flatten(0, 1).flatten(1, -1)
+            # shape: [len(all_block_table) * block_size, num_heads * head_size]
 
-        # rotate keys with new positions
-        dummy_q = torch.zeros_like(prerope_keys)
-        _, roped_keys = self.rotary_emb(all_pos, dummy_q, prerope_keys)
+            # rotate keys with new positions
+            dummy_q = torch.zeros_like(prerope_keys)
+            _, roped_keys = self.rotary_emb(all_pos, dummy_q, prerope_keys)
 
-        # reshape for writing back to cache
-        if self.attn_backend == _Backend.XFORMERS:
-            roped_keys = roped_keys.unflatten(1, (key_cache.shape[1], key_cache.shape[2], key_cache.shape[4]))
-        else:  # flashattn
-            roped_keys = roped_keys.unflatten(1, (key_cache.shape[2], key_cache.shape[3]))
-        roped_keys = roped_keys.unflatten(0, (len(all_block_table), block_size))
-        if self.attn_backend == _Backend.XFORMERS:
-            roped_keys = roped_keys.permute((0, 2, 3, 1, 4))
+            # reshape for writing back to cache
+            if self.attn_backend == _Backend.XFORMERS:
+                roped_keys = roped_keys.unflatten(1, (key_cache.shape[1], key_cache.shape[2], key_cache.shape[4]))
+            else:  # flashattn
+                roped_keys = roped_keys.unflatten(1, (key_cache.shape[2], key_cache.shape[3]))
+            roped_keys = roped_keys.unflatten(0, (len(all_block_table), block_size))
+            if self.attn_backend == _Backend.XFORMERS:
+                roped_keys = roped_keys.permute((0, 2, 3, 1, 4))
 
-        # write rotated keys to cache for attention computation
-        key_cache.index_put_((all_block_table,), roped_keys)
+            # write rotated keys to cache for attention computation
+            key_cache.index_put_((all_block_table,), roped_keys)
 
         # compute attention in kernel
         q, k = self.rotary_emb(self.positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
-        # put original pre-rotated keys back in cache
-        key_cache.index_put_((all_block_table,), prerope_keys_copy)
+        if len(all_block_table) > 0:
+            # put original pre-rotated keys back in cache
+            key_cache.index_put_((all_block_table,), prerope_keys_copy)
 
         k_original = k_original.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)

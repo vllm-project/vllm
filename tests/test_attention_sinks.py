@@ -25,7 +25,7 @@ _RETRIEVAL_COLOR = "mint green"
     [
         # rope models
         ("meta-llama/Meta-Llama-3-8B-Instruct", 8192, True, 100, 400, True),
-        ("mistralai/Mistral-7B-Instruct-v0.2", 32768, True, 100, 400, False),
+        ("mistralai/Mistral-7B-Instruct-v0.2", 32768, True, 100, 600, False),
         # alibi models
         ("mosaicml/mpt-7b-chat", 2048, False, 500, 800, False),
         ("bigscience/bloom-7b1", 2048, False, 500, 800, False)
@@ -148,7 +148,7 @@ def test_eviction(
     )
     engine = LLMEngine.from_engine_args(engine_args)
 
-    total_blocks = engine.scheduler.block_manager.get_num_free_gpu_blocks()
+    total_blocks = engine.scheduler[0].block_manager.get_num_free_gpu_blocks()
     max_blocks_needed = (max_model_len // block_size) * batch_size
 
     request_id = 0
@@ -159,7 +159,7 @@ def test_eviction(
             request_id += 1
 
         engine.step()
-        free_blocks = engine.scheduler.block_manager.get_num_free_gpu_blocks()
+        free_blocks = engine.scheduler[0].block_manager.get_num_free_gpu_blocks()
         used_blocks = total_blocks - free_blocks
         assert used_blocks <= max_blocks_needed, (
             f"Number of used blocks ({used_blocks}) should be "
