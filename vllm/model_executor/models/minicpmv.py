@@ -516,11 +516,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             vision_hidden_states = self.get_vision_hidden_states(image_inputs)
 
             # See NOTE in _parse_and_validate_inputs
-            if len(image_inputs["image_bounds"]) > 0:
+            image_bounds = image_inputs["image_bounds"]
+            if len(image_bounds) > 0:
                 image_indices = torch.stack([
-                    torch.arange(r[0], r[1], dtype=torch.long)
-                    for r in image_inputs["image_bounds"]
-                ]).to(vlm_embedding.device, dtype=torch.long)
+                    torch.arange(start, end, dtype=torch.long)
+                    for start, end in image_bounds.tolist()
+                ]).to(vlm_embedding.device)
                 vlm_embedding.scatter_(
                     0,
                     image_indices.view(-1, 1).repeat(1,
