@@ -217,6 +217,8 @@ class LLMEngine:
         )
         # TODO(woosuk): Print more configs in debug mode.
 
+        import vllm.plugins  # noqa
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
