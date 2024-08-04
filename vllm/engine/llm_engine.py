@@ -643,7 +643,7 @@ class LLMEngine:
 
         if (len(decoder_input_ids) == 0
                 or decoder_input_ids[0] != decoder_start_token_id):
-            decoder_input_ids = [2] + decoder_input_ids
+            decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
 
         return decoder_input_ids
 
