@@ -7,7 +7,7 @@ import torch.distributed
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
 from vllm.attention.selector import (_Backend,
-                                     get_env_variable_force_attn_backend,
+                                     get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -121,7 +121,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # which is invalid for encoder/decoder models
             raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_BACKEND)
 
-        maybe_env_var_forced_backend = get_env_variable_force_attn_backend()
+        maybe_env_var_forced_backend = get_env_variable_attn_backend()
         maybe_global_forced_backend = get_global_forced_attn_backend()
         is_forced_by_global = maybe_global_forced_backend is not None
         is_forced_by_env_var = maybe_env_var_forced_backend is not None
