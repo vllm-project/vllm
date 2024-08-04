@@ -18,6 +18,7 @@ from vllm.utils import random_uuid
 # torch is mocked during docs generation,
 # so we have to provide the values as literals
 _MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
+_LONG_INFO: Union["torch.iinfo", Namespace]
 
 try:
     from sphinx.ext.autodoc.mock import _MockModule
