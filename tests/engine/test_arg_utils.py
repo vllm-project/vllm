@@ -6,8 +6,13 @@ from vllm.utils import FlexibleArgumentParser
 
 @pytest.mark.parametrize(("arg", "expected"), [
     (None, None),
-    ("image=16", {"image": 16}),
-    ("image=16,video=2", {"image": 16, "video": 2}),
+    ("image=16", {
+        "image": 16
+    }),
+    ("image=16,video=2", {
+        "image": 16,
+        "video": 2
+    }),
 ])
 def test_limit_mm_per_prompt_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
