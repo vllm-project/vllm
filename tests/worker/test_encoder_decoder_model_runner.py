@@ -140,28 +140,23 @@ def test_prepare_prompt(
         assert seq_group_metadata.token_chunk_size == seq_data.get_len()
         seq_group_metadata_list.append(seq_group_metadata)
 
-    # Build decoder model inputs &
-    # decoder self-attention KV caching data structures
-    decoder_only_model_input = (
-        model_runner._prepare_model_input_tensors(seq_group_metadata_list))
-    input_tokens = decoder_only_model_input.input_tokens
-    input_positions = decoder_only_model_input.input_positions
-    attn_metadata = decoder_only_model_input.attn_metadata
-    return_seq_lens = decoder_only_model_input.seq_lens
+    # Build
+    # * Decoder model inputs
+    # * Decoder self-attention KV caching data structures
+    # * Encoder model inputs
+    # * Encoder/decoder cross-attention KV caching data structures
+    model_input = model_runner.prepare_model_input(seq_group_metadata_list)
+
+    input_tokens = model_input.input_tokens
+    input_positions = model_input.input_positions
+    attn_metadata = model_input.attn_metadata
+    return_seq_lens = model_input.seq_lens
     slot_mapping = attn_metadata.slot_mapping
+    encoder_input_tokens = model_input.encoder_input_tokens
+    encoder_input_positions = model_input.encoder_input_positions
+    cross_slot_mapping = attn_metadata.cross_slot_mapping
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
-
-    # Augment model input data structure with encoder model
-    # inputs & encoder/decoder cross-attention KV caching
-    # data structures
-    (
-        attn_metadata,
-        encoder_input_tokens,
-        encoder_input_positions,
-    ) = (model_runner._prepare_encoder_model_input_tensors(
-        seq_group_metadata_list, decoder_only_model_input))
-    cross_slot_mapping = attn_metadata.cross_slot_mapping
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
     # Verify input metadata is correct for prompts.
@@ -346,28 +341,22 @@ def test_prepare_decode(
         assert seq_group_metadata.token_chunk_size == 1
         seq_group_metadata_list.append(seq_group_metadata)
 
-    # Build decoder model inputs &
-    # decoder self-attention KV caching data structures
-    decoder_only_model_input = (
-        model_runner._prepare_model_input_tensors(seq_group_metadata_list))
-    input_tokens = decoder_only_model_input.input_tokens
-    input_positions = decoder_only_model_input.input_positions
-    attn_metadata = decoder_only_model_input.attn_metadata
-    return_seq_lens = decoder_only_model_input.seq_lens
+    # Build
+    # * Decoder model inputs
+    # * Decoder self-attention KV caching data structures
+    # * Encoder model inputs
+    # * Encoder/decoder cross-attention KV caching data structures
+    model_input = model_runner.prepare_model_input(seq_group_metadata_list)
+    input_tokens = model_input.input_tokens
+    input_positions = model_input.input_positions
+    attn_metadata = model_input.attn_metadata
+    return_seq_lens = model_input.seq_lens
     slot_mapping = attn_metadata.slot_mapping
+    encoder_input_tokens = model_input.encoder_input_tokens
+    encoder_input_positions = model_input.encoder_input_positions
+    cross_slot_mapping = attn_metadata.cross_slot_mapping
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
-
-    # Augment model input data structure with encoder model
-    # inputs & encoder/decoder cross-attention KV caching
-    # data structures
-    (
-        attn_metadata,
-        encoder_input_tokens,
-        encoder_input_positions,
-    ) = (model_runner._prepare_encoder_model_input_tensors(
-        seq_group_metadata_list, decoder_only_model_input))
-    cross_slot_mapping = attn_metadata.cross_slot_mapping
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
     # Verify input metadata is correct for decode phase.
