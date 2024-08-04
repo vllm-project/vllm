@@ -22,8 +22,8 @@ class AsyncEngineRPCServer:
     def __init__(self, async_engine_args: AsyncEngineArgs,
                  usage_context: UsageContext, port: int):
         # Initialize engine first.
-        self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
-                                                      usage_context)
+        self.engine = AsyncLLMEngine.from_engine_args(
+            async_engine_args, usage_context=usage_context)
 
         # Initialize context.
         self.context = zmq.asyncio.Context()
