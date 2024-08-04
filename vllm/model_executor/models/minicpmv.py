@@ -392,14 +392,18 @@ class Resampler2_5(BaseResampler):
         return x
 
 
-def get_version_by_config(config: PretrainedConfig):
-    if not hasattr(config, "version"):
+def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
+    version_float = getattr(config, "version", None)
+
+    # The old configs do not include version number
+    # TODO: Remove this after the HF repos are updated
+    if version_float is None:
         if config.hidden_size == 2304 and config.query_num == 64:
             return (2, 0)
         return (2, 5)
-    else:
-        version = str(config.version).split(".")
-        return tuple([int(x) for x in version])
+
+    version_str = str(version_float)
+    return tuple(int(x) for x in version_str.split("."))
 
 
 def get_max_minicpmv_image_tokens(ctx: InputContext):
@@ -460,11 +464,11 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt = prompt
     else:
         text_chunks = prompt.split(pattern)
-        new_prompt = ""
+        new_prompt_chunks: List[str] = []
         for i in range(len(images)):
-            new_prompt += text_chunks[i] + \
-                        get_placeholder(images[i].size, i)
-        new_prompt += text_chunks[-1]
+            new_prompt_chunks += [text_chunks[i], get_placeholder(images[i].size, i)]
+        new_prompt_chunks.append(text_chunks[-1])
+        new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
 
     llm_inputs = LLMInputs(
