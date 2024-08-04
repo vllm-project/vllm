@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: Optional[int] = None
+    VLLM_RPC_PORT: int = 5570
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_INSTANCE_ID: Optional[str] = None
@@ -28,7 +29,9 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
+    VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -36,6 +39,7 @@ if TYPE_CHECKING:
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
+    VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -43,10 +47,10 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
-    VLLM_INSTALL_PUNICA_KERNELS: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
 
 
 def get_default_cache_root():
@@ -91,10 +95,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
-
-    # If set, vllm will install Punica kernels
-    "VLLM_INSTALL_PUNICA_KERNELS":
-    lambda: bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0"))),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -142,6 +142,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv('VLLM_PORT', '0'))
     if 'VLLM_PORT' in os.environ else None,
 
+    # used when the frontend api server is running in multi-processing mode,
+    # to communicate with the backend engine process over ZMQ.
+    'VLLM_RPC_PORT':
+    lambda: int(os.getenv('VLLM_PORT', '5570')),
+
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE":
@@ -175,6 +180,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
+
+    # Internal flag to enable Dynamo graph capture
+    "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
+    lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -241,10 +250,19 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
-    # CPU key-value cache space
+    # Pipeline stage partition strategy
+    "VLLM_PP_LAYER_PARTITION":
+    lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+
+    # (CPU backend only) CPU key-value cache space.
     # default is 4GB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
+
+    # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
+    # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
+    "VLLM_CPU_OMP_THREADS_BIND":
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
 
     # OpenVINO key-value cache space
     # default is 4GB
@@ -267,13 +285,20 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # execution on all workers.
     # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
     "VLLM_USE_RAY_SPMD_WORKER":
-    lambda: bool(os.getenv("VLLM_USE_RAY_SPMD_WORKER", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
     # If the env var is set, it uses the Ray's compiled DAG API
     # which optimizes the control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
-    lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
+
+    # If the env var is set, it uses NCCL for communication in
+    # Ray's compiled DAG. This flag is ignored if
+    # VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
+                 ),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -307,6 +332,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
     lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
+
+    # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
+    # the user to specify a max sequence length greater than
+    # the max length derived from the model's config.json.
+    # To enable this, set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1.
+    "VLLM_ALLOW_LONG_MAX_MODEL_LEN":
+    lambda:
+    (os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower() in
+     ("1", "true")),
 }
 
 # end-env-vars-definition

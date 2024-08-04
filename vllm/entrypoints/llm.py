@@ -6,11 +6,13 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
-                         TextTokensPrompt, TokensPrompt,
+from vllm.inputs import (PromptInputs, TextPrompt, TokensPrompt,
                          parse_and_batch_prompt)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
+from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -238,7 +240,7 @@ class LLM:
     @overload
     def generate(
         self,
-        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        inputs: Union[PromptInputs, Sequence[PromptInputs]],
         /,  # We may enable `inputs` keyword after removing the old API
         *,
         sampling_params: Optional[Union[SamplingParams,
@@ -255,7 +257,7 @@ class LLM:
                       "instead.")
     def generate(
         self,
-        prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
                        Optional[Union[str, List[str]]]] = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
@@ -263,6 +265,8 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        guided_options_request: Optional[Union[LLMGuidedOptions,
+                                               GuidedDecodingRequest]] = None
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -302,9 +306,15 @@ class LLM:
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            inputs = cast(
-                Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
-                prompts)
+            inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
+
+        if isinstance(guided_options_request, dict):
+            if len(guided_options_request) > 1:
+                raise ValueError(
+                    "You can only use one guided decoding but multiple is "
+                    f"specified: {guided_options_request}")
+            guided_options_request = GuidedDecodingRequest(
+                **guided_options_request)
 
         if sampling_params is None:
             # Use default sampling params.
@@ -314,7 +324,8 @@ class LLM:
             inputs=inputs,
             params=sampling_params,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+            guided_options=guided_options_request)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
@@ -383,7 +394,7 @@ class LLM:
     @overload
     def encode(
         self,
-        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        inputs: Union[PromptInputs, Sequence[PromptInputs]],
         /,  # We may enable `inputs` keyword after removing the old API
         *,
         pooling_params: Optional[Union[PoolingParams,
@@ -400,7 +411,7 @@ class LLM:
                       "instead.")
     def encode(
         self,
-        prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
                        Optional[Union[str, List[str]]]] = None,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
@@ -417,7 +428,7 @@ class LLM:
 
         Args:
             inputs: The inputs to the LLM. You may pass a sequence of inputs for
-                batch inference. See :class:`~vllm.inputs.PromptStrictInputs`
+                batch inference. See :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -446,9 +457,7 @@ class LLM:
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            inputs = cast(
-                Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
-                prompts)
+            inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
 
         if pooling_params is None:
             # Use default pooling params.
@@ -496,17 +505,11 @@ class LLM:
         inputs: List[PromptInputs] = []
         for i in range(num_requests):
             if prompts is not None:
-                if prompt_token_ids is not None:
-                    item = TextTokensPrompt(
-                        prompt=prompts[i],
-                        prompt_token_ids=prompt_token_ids[i])
-                else:
-                    item = TextPrompt(prompt=prompts[i])
+                item = TextPrompt(prompt=prompts[i])
+            elif prompt_token_ids is not None:
+                item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
             else:
-                if prompt_token_ids is not None:
-                    item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
-                else:
-                    raise AssertionError
+                raise AssertionError
 
             inputs.append(item)
 
@@ -514,11 +517,12 @@ class LLM:
 
     def _validate_and_add_requests(
         self,
-        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        inputs: Union[PromptInputs, Sequence[PromptInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        guided_options: Optional[GuidedDecodingRequest] = None,
     ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
@@ -533,6 +537,15 @@ class LLM:
                       list) and len(lora_request) != num_requests:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
+
+        if isinstance(params, list):
+            params = [
+                self._add_guided_processor(param, guided_options)
+                if isinstance(param, SamplingParams) else param
+                for param in params
+            ]
+        elif isinstance(params, SamplingParams):
+            params = self._add_guided_processor(params, guided_options)
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):
@@ -558,6 +571,24 @@ class LLM:
             params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request)
+
+    def _add_guided_processor(
+            self,
+            params: SamplingParams,
+            guided_options: Optional[GuidedDecodingRequest] = None):
+        if guided_options:
+            if guided_options.guided_decoding_backend is None:
+                decoding_config = self.llm_engine.get_decoding_config()
+                guided_options.guided_decoding_backend = (
+                    decoding_config.guided_decoding_backend)
+            guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
+                guided_options.guided_decoding_backend, guided_options,
+                self.get_tokenizer())
+            if guided_logits_processor:
+                if params.logits_processors is None:
+                    params.logits_processors = []
+                params.logits_processors.append(guided_logits_processor)
+        return params
 
     def _run_engine(
             self, *, use_tqdm: bool
