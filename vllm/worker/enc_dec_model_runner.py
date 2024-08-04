@@ -335,7 +335,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         encoder_input_positions: List[int] = []
         encoder_seq_lens: List[int] = []
         context_lens: List[int] = []
-        query_lens: List[int] = []
         cross_slot_mapping: List[int] = []
         cross_block_tables: List[List[int]] = []
 
@@ -372,8 +371,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
             encoder_seq_lens.append(seq_len)
             context_lens.append(context_len)
-            query_len = seq_len - context_len
-            query_lens.append(query_len)
             encoder_input_tokens.extend(tokens)
             encoder_input_positions.extend(list(range(context_len, seq_len)))
 

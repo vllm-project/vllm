@@ -713,9 +713,6 @@ class BartDecoder(nn.Module):
             Decoder output torch.Tensor
         """
 
-        #input_shape = decoder_input_ids.shape
-        #decoder_input_ids = decoder_input_ids.view(-1, input_shape[-1])
-
         inputs_embeds = self.embed_tokens(decoder_input_ids)
 
         # embed positions
