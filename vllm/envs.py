@@ -345,7 +345,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # List of plugins to load, separated by ':'
     "VLLM_PLUGINS":
-    lambda: os.getenv("VLLM_PLUGINS", "").split(":"),
+    lambda: [x for x in os.getenv("VLLM_PLUGINS", "").split(":") if x],
 }
 
 # end-env-vars-definition
