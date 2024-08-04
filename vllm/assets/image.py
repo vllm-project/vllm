@@ -1,10 +1,11 @@
-import shutil
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
-import requests
 from PIL import Image
+
+from vllm.connections import global_http_connection
+from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 
 from .base import get_cache_dir
 
@@ -22,11 +23,9 @@ def get_air_example_data_2_asset(filename: str) -> Image.Image:
     if not image_path.exists():
         base_url = "https://air-example-data-2.s3.us-west-2.amazonaws.com/vllm_opensource_llava"
 
-        with requests.get(f"{base_url}/{filename}", stream=True) as response:
-            response.raise_for_status()
-
-            with image_path.open("wb") as f:
-                shutil.copyfileobj(response.raw, f)
+        global_http_connection.download_file(f"{base_url}/{filename}",
+                                             image_path,
+                                             timeout=VLLM_IMAGE_FETCH_TIMEOUT)
 
     return Image.open(image_path)
 

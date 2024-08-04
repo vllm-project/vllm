@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple
+from typing import Any, Generator, Iterable, List, Optional, Tuple, Union
 
 import filelock
 import huggingface_hub.constants
@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
@@ -118,6 +119,7 @@ def convert_bin_to_safetensor_file(
 # TODO(woosuk): Move this to other place.
 def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
+
     quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
@@ -189,6 +191,7 @@ def download_weights_from_hf(
     cache_dir: Optional[str],
     allow_patterns: List[str],
     revision: Optional[str] = None,
+    ignore_patterns: Optional[Union[str, List[str]]] = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
 
@@ -200,6 +203,9 @@ def download_weights_from_hf(
             weight files. Files matched by any of the patterns will be
             downloaded.
         revision (Optional[str]): The revision of the model.
+        ignore_patterns (Optional[Union[str, List[str]]]): The patterns to
+            filter out the weight files. Files matched by any of the patterns
+            will be ignored.
 
     Returns:
         str: The path to the downloaded model weights.
@@ -223,6 +229,7 @@ def download_weights_from_hf(
         hf_folder = snapshot_download(
             model_name_or_path,
             allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
             cache_dir=cache_dir,
             tqdm_class=DisabledTqdm,
             revision=revision,
@@ -313,6 +320,13 @@ def filter_files_not_needed_for_inference(
     return hf_weights_files
 
 
+# explicitly use pure text format, with a newline at the end
+# this makes it impossible to see the animation in the progress bar
+# but will avoid messing up with ray or multiprocessing, which wraps
+# each line of output with some prefix.
+_BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
+
+
 def np_cache_weights_iterator(
     model_name_or_path: str, cache_dir: Optional[str], hf_folder: str,
     hf_weights_files: List[str]
@@ -321,6 +335,8 @@ def np_cache_weights_iterator(
 
     Will dump the model weights to numpy files if they are not already dumped.
     """
+    enable_tqdm = not torch.distributed.is_initialized(
+    ) or torch.distributed.get_rank() == 0
     # Convert the model weights from torch tensors to numpy arrays for
     # faster loading.
     np_folder = os.path.join(hf_folder, "np")
@@ -331,7 +347,12 @@ def np_cache_weights_iterator(
     with get_lock(model_name_or_path, cache_dir):
         if not os.path.exists(weight_names_file):
             weight_names: List[str] = []
-            for bin_file in hf_weights_files:
+            for bin_file in tqdm(
+                    hf_weights_files,
+                    desc="Loading np_cache checkpoint shards",
+                    disable=not enable_tqdm,
+                    bar_format=_BAR_FORMAT,
+            ):
                 state = torch.load(bin_file, map_location="cpu")
                 for name, param in state.items():
                     param_path = os.path.join(np_folder, name)
@@ -355,7 +376,14 @@ def safetensors_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    for st_file in hf_weights_files:
+    enable_tqdm = not torch.distributed.is_initialized(
+    ) or torch.distributed.get_rank() == 0
+    for st_file in tqdm(
+            hf_weights_files,
+            desc="Loading safetensors checkpoint shards",
+            disable=not enable_tqdm,
+            bar_format=_BAR_FORMAT,
+    ):
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
                 param = f.get_tensor(name)
@@ -366,7 +394,14 @@ def pt_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
-    for bin_file in hf_weights_files:
+    enable_tqdm = not torch.distributed.is_initialized(
+    ) or torch.distributed.get_rank() == 0
+    for bin_file in tqdm(
+            hf_weights_files,
+            desc="Loading pt checkpoint shards",
+            disable=not enable_tqdm,
+            bar_format=_BAR_FORMAT,
+    ):
         state = torch.load(bin_file, map_location="cpu")
         for name, param in state.items():
             yield name, param
@@ -440,6 +475,7 @@ def initialize_dummy_weights(
     model: torch.nn.Module,
     low: float = -1e-3,
     high: float = 1e-3,
+    seed: int = 1234,
 ) -> None:
     """Initialize model weights with random values.
 
@@ -447,17 +483,30 @@ def initialize_dummy_weights(
     measurements. Additionally, the model weights should not cause NaNs in the
     forward pass. We empirically found that initializing the weights with
     values between -1e-3 and 1e-3 works well for most models.
+
+    We use per-parameter random seed, so that dummy weights are consistent,
+    even if the model is partitioned across multiple devices. When the seed
+    is fixed, the random values generated by this function only depends on
+    the parameter's number of elements and its data type.
     """
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
+            if current_platform.is_tpu():
+                # XLA device does not support torch.Generator()
+                param.uniform_(low, high)
+                continue
+
+            generator = torch.Generator(device=param.data.device)
+            generator.manual_seed(seed)
             if torch.finfo(param.data.dtype).bits < 16:
                 # uniform_ doesn't support < 16-bit datatypes (FP8)
                 dtype = param.data.dtype
                 tmp_param = param.data.to(torch.float16)
-                tmp_param = tmp_param.uniform_(low, high).to(dtype)
+                tmp_param = tmp_param.uniform_(low, high,
+                                               generator=generator).to(dtype)
                 param.data.copy_(tmp_param)
             else:
-                param.uniform_(low, high)
+                param.uniform_(low, high, generator=generator)
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:

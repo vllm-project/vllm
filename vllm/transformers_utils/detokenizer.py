@@ -37,8 +37,10 @@ class Detokenizer:
             The prompt logprobs with the decoded tokens.
         """
         prms = seq_group.sampling_params
+        assert prms is not None
+
         # We can pick any sequence for the prompt.
-        seq = next(iter(seq_group.seqs_dict.values()))
+        seq = seq_group.get_seqs()[0]
         # Only prompt, without the generated token.
         all_token_ids = seq.get_token_ids()
         prompt_token_ids = all_token_ids[:-1]
@@ -165,6 +167,12 @@ class Detokenizer:
         return len(new_decoded_token_text)
 
 
+def _replace_none_with_empty(tokens: List[Optional[str]]):
+    for i, token in enumerate(tokens):
+        if token is None:
+            tokens[i] = ""
+
+
 def _convert_tokens_to_string_with_added_encoders(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     output_tokens: List[str],
@@ -223,6 +231,8 @@ def convert_prompt_ids_to_tokens(
     read_offset = len(new_tokens)
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
+    # This is required to guard against out-of-vocab prompt token ids
+    _replace_none_with_empty(new_tokens)
     return new_tokens, prefix_offset, read_offset
 
 

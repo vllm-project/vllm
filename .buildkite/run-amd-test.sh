@@ -55,7 +55,7 @@ while true; do
 done
 
 echo "--- Pulling container" 
-image_name="rocmshared/vllm-ci:${BUILDKITE_COMMIT}"
+image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull ${image_name}
 
@@ -66,11 +66,18 @@ trap remove_docker_container EXIT
 
 echo "--- Running container"
 
+HF_CACHE="$(realpath ~)/huggingface"
+mkdir -p ${HF_CACHE}
+HF_MOUNT="/root/.cache/huggingface"
+
 docker run \
         --device /dev/kfd --device /dev/dri \
         --network host \
+        --shm-size=16gb \
         --rm \
         -e HF_TOKEN \
+        -v ${HF_CACHE}:${HF_MOUNT} \
+        -e HF_HOME=${HF_MOUNT} \
         --name ${container_name} \
         ${image_name} \
         /bin/bash -c "${@}"

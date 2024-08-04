@@ -18,6 +18,8 @@ logger = init_logger(__name__)
 
 class OpenVINOExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "openvino"
         assert self.lora_config is None, "OpenVINO backend doesn't support LoRA"

@@ -11,17 +11,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding, BatchFeature)
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
+from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.sequence import SampleLogprobs
-from vllm.utils import cuda_device_count_stateless, is_cpu
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
+                        is_cpu)
 
 logger = init_logger(__name__)
 
@@ -71,6 +73,13 @@ class _ImageAssets(_ImageAssetsBase):
 
 IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
+
+
+@pytest.fixture(autouse=True)
+def init_test_http_connection():
+    # pytest_asyncio may use a different event loop per test
+    # so we need to make sure the async client is created anew
+    global_http_connection.reuse_client = False
 
 
 def cleanup():
@@ -124,13 +133,7 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-}
-
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class HfRunner:
@@ -149,10 +152,8 @@ class HfRunner:
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
-        is_sparseml_model: bool = False,
     ) -> None:
-        assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
 
@@ -167,9 +168,6 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
-            elif is_sparseml_model:
-                from sparseml.transformers import SparseAutoModelForCausalLM
-                auto_cls = SparseAutoModelForCausalLM
             else:
                 auto_cls = AutoModelForCausalLM
 
@@ -337,7 +335,6 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            input_ids = inputs.input_ids
 
             output = self.model.generate(
                 **self.wrap_device(inputs),
@@ -379,7 +376,7 @@ class HfRunner:
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
-            output_len = seq_ids.shape[0] - input_ids.shape[1]
+            output_len = len(seq_logprobs_lst)
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
@@ -530,10 +527,12 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         images: Optional[List[Image.Image]] = None,
+        stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
                                                 max_tokens=max_tokens,
-                                                logprobs=num_logprobs)
+                                                logprobs=num_logprobs,
+                                                stop_token_ids=stop_token_ids)
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images)
@@ -581,6 +580,10 @@ def get_tokenizer_pool_config(tokenizer_group_type):
     if tokenizer_group_type == "ray":
         return TokenizerPoolConfig(pool_size=1,
                                    pool_type="ray",
+                                   extra_config={})
+    if isinstance(tokenizer_group_type, type):
+        return TokenizerPoolConfig(pool_size=1,
+                                   pool_type=tokenizer_group_type,
                                    extra_config={})
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 

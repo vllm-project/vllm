@@ -1,7 +1,7 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
-#include "registration.h"
+#include "core/registration.h"
 
 #include <torch/library.h>
 
@@ -72,6 +72,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
 
+  // prepare_inputs advance_step
+  ops.def("advance_step", &advance_step);
+  ops.impl("advance_step", torch::kCUDA, &advance_step);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -137,9 +141,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_marlin_repack", &gptq_marlin_repack);
   ops.impl("gptq_marlin_repack", torch::kCUDA, &gptq_marlin_repack);
 
+  // awq_marlin repack from AWQ.
+  ops.def("awq_marlin_repack", &awq_marlin_repack);
+  ops.impl("awq_marlin_repack", torch::kCUDA, &awq_marlin_repack);
+
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def("fp8_marlin_gemm", &fp8_marlin_gemm);
   ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
+
+  // marlin_qqq_gemm for QQQ.
+  ops.def("marlin_qqq_gemm", &marlin_qqq_gemm);
+  ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
@@ -175,11 +187,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
-  // Compute FP8 quantized tensor and scaling factor.
+  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
   ops.def(
       "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
+
+  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! "
+      "scale, Tensor? scale_ub) -> "
+      "()");
+  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
+           &dynamic_per_token_scaled_fp8_quant);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
@@ -232,7 +252,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor! key_cache,"
       "                        Tensor! value_cache,"
       "                        Tensor slot_mapping,"
-      "                        str kv_cache_dtype) -> ()");
+      "                        str kv_cache_dtype,"
+      "                        float k_scale, float v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
 

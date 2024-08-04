@@ -11,6 +11,7 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonMetadataBuilder
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -31,6 +32,10 @@ class XFormersBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return XFormersMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["XFormersMetadataBuilder"]:
+        return XFormersMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -362,6 +367,11 @@ def _get_seq_len_block_table_args(
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
+class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
+
+    _metadata_cls = XFormersMetadata
+
+
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
@@ -398,9 +408,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
-        assert blocksparse_params is None, ValueError(
-            "XFormer does not support block-sparse attention.")
+        if blocksparse_params is not None:
+            raise ValueError(
+                "XFormers does not support block-sparse attention.")
+        if logits_soft_cap is not None:
+            raise ValueError(
+                "XFormers does not support attention logits soft capping.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
