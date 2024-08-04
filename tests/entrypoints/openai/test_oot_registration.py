@@ -5,8 +5,12 @@ from ...utils import RemoteOpenAIServer
 
 def test_oot_registration_for_api_server():
     cli_args = "--gpu-memory-utilization 0.10 --dtype float32".split()
-    path = os.path.dirname(os.path.dirname(__file__))
-    env_dict = {"VLLM_PLUGINS": "vllm_add_dummy_model", "PYTHONPATH": path}
+    path = os.path.dirname(os.path.dirname(__file__))  # tests/entrypoints/
+    root_path = os.path.dirname(os.path.dirname(path))  # root of the repo
+    env_dict = {
+        "VLLM_PLUGINS": "vllm_add_dummy_model",
+        "PYTHONPATH": f"{root_path}:{path}"
+    }
     with RemoteOpenAIServer("facebook/opt-125m", cli_args,
                             env_dict=env_dict) as server:
         client = server.get_client()
