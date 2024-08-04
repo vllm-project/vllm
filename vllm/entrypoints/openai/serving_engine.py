@@ -495,4 +495,3 @@ class OpenAIServing:
 
     def _is_model_supported(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)
-
