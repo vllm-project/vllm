@@ -1,6 +1,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from argparse import Namespace
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
@@ -13,6 +14,23 @@ from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.utils import random_uuid
+
+# torch is mocked during docs generation,
+# so we have to provide the values as literals
+_MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
+
+try:
+    from sphinx.ext.autodoc.mock import _MockModule
+
+    if isinstance(torch, _MockModule):
+        _LONG_INFO = _MOCK_LONG_INFO
+    else:
+        _LONG_INFO = torch.iinfo(torch.long)
+except ModuleNotFoundError:
+    _LONG_INFO = torch.iinfo(torch.long)
+
+assert _LONG_INFO.min == _MOCK_LONG_INFO.min
+assert _LONG_INFO.max == _MOCK_LONG_INFO.max
 
 
 class OpenAIBaseModel(BaseModel):
@@ -108,9 +126,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
-    seed: Optional[int] = Field(None,
-                                ge=torch.iinfo(torch.long).min,
-                                le=torch.iinfo(torch.long).max)
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
@@ -327,9 +343,7 @@ class CompletionRequest(OpenAIBaseModel):
     max_tokens: Optional[int] = 16
     n: int = 1
     presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = Field(None,
-                                ge=torch.iinfo(torch.long).min,
-                                le=torch.iinfo(torch.long).max)
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
