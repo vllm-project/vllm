@@ -366,7 +366,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 []  # Memory profiling
                 if
                 (is_prompt or cross_block_table is None) else cross_block_table
-            )  # Decode
+            )
 
             cross_block_tables.append(block_table)
 
