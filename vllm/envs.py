@@ -1,5 +1,5 @@
 import os
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
+    VLLM_PLUGINS: List[str] = []
 
 
 def get_default_cache_root():
@@ -341,6 +342,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower() in
      ("1", "true")),
+
+    # List of plugins to load, separated by ':'
+    "VLLM_PLUGINS":
+    lambda: os.getenv("VLLM_PLUGINS", "").split(":"),
 }
 
 # end-env-vars-definition
