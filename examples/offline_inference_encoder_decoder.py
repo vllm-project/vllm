@@ -13,7 +13,6 @@ dtype = "float"
 llm = LLM(
     model="facebook/bart-large-cnn",
     dtype=dtype,
-    # tensor_parallel_size=4,
 )
 
 # Get BART tokenizer
