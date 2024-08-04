@@ -10,6 +10,9 @@ from vllm.inputs import (PromptInputs, TextPrompt, TokensPrompt,
                          parse_and_batch_prompt)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
+from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -262,6 +265,8 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        guided_options_request: Optional[Union[LLMGuidedOptions,
+                                               GuidedDecodingRequest]] = None
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -303,6 +308,14 @@ class LLM:
         else:
             inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
 
+        if isinstance(guided_options_request, dict):
+            if len(guided_options_request) > 1:
+                raise ValueError(
+                    "You can only use one guided decoding but multiple is "
+                    f"specified: {guided_options_request}")
+            guided_options_request = GuidedDecodingRequest(
+                **guided_options_request)
+
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
@@ -311,7 +324,8 @@ class LLM:
             inputs=inputs,
             params=sampling_params,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+            guided_options=guided_options_request)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
@@ -508,6 +522,7 @@ class LLM:
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        guided_options: Optional[GuidedDecodingRequest] = None,
     ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
@@ -522,6 +537,15 @@ class LLM:
                       list) and len(lora_request) != num_requests:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
+
+        if isinstance(params, list):
+            params = [
+                self._add_guided_processor(param, guided_options)
+                if isinstance(param, SamplingParams) else param
+                for param in params
+            ]
+        elif isinstance(params, SamplingParams):
+            params = self._add_guided_processor(params, guided_options)
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):
@@ -547,6 +571,24 @@ class LLM:
             params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request)
+
+    def _add_guided_processor(
+            self,
+            params: SamplingParams,
+            guided_options: Optional[GuidedDecodingRequest] = None):
+        if guided_options:
+            if guided_options.guided_decoding_backend is None:
+                decoding_config = self.llm_engine.get_decoding_config()
+                guided_options.guided_decoding_backend = (
+                    decoding_config.guided_decoding_backend)
+            guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
+                guided_options.guided_decoding_backend, guided_options,
+                self.get_tokenizer())
+            if guided_logits_processor:
+                if params.logits_processors is None:
+                    params.logits_processors = []
+                params.logits_processors.append(guided_logits_processor)
+        return params
 
     def _run_engine(
             self, *, use_tqdm: bool
