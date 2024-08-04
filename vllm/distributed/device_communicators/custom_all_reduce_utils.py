@@ -145,6 +145,7 @@ def can_actually_p2p(
     p_tgt.start()
     p_src.join()
     p_tgt.join()
+    assert p_src.exitcode == 0 and p_tgt.exitcode == 0
     result: List[bool] = []
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
