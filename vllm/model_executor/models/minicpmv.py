@@ -466,7 +466,10 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         text_chunks = prompt.split(pattern)
         new_prompt_chunks: List[str] = []
         for i in range(len(images)):
-            new_prompt_chunks += [text_chunks[i], get_placeholder(images[i].size, i)]
+            new_prompt_chunks += [
+                text_chunks[i],
+                get_placeholder(images[i].size, i)
+            ]
         new_prompt_chunks.append(text_chunks[-1])
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
