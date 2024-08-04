@@ -637,9 +637,14 @@ class GroupCoordinator:
         tensor_dict: Dict[str, Any] = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
+                target_device = value.device
+                if 'cuda' in value.device:
+                    # receiving a cuda tensor
+                    # need to allocate buffer on LOCAL cuda device
+                    target_device = self.device
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
-                                     device=value.device)
+                                     device=target_device)
                 if tensor.numel() == 0:
                     # Skip broadcasting empty tensors.
                     _update_nested_dict(tensor_dict, key, tensor)
@@ -652,8 +657,8 @@ class GroupCoordinator:
                 else:
                     # use group for GPU tensors
                     torch.distributed.recv(tensor,
-                                           src=self.ranks[src],
-                                           group=group)
+                                        src=self.ranks[src],
+                                        group=group)
                 _update_nested_dict(tensor_dict, key, tensor)
             else:
                 _update_nested_dict(tensor_dict, key, value)
