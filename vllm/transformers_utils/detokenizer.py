@@ -1,7 +1,5 @@
 from typing import Dict, List, Optional, Tuple
 
-from transformers import PreTrainedTokenizer
-
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 
 from .tokenizer_group import AnyTokenizer, BaseTokenizerGroup
@@ -16,8 +14,7 @@ class Detokenizer:
     def __init__(self, tokenizer_group: BaseTokenizerGroup):
         self.tokenizer_group = tokenizer_group
 
-    def get_tokenizer_for_seq(self,
-                              sequence: Sequence) -> "PreTrainedTokenizer":
+    def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
         """Returns the HF tokenizer to use for a given sequence."""
         return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 

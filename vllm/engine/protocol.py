@@ -1,8 +1,6 @@
 from typing import (AsyncIterator, List, Mapping, Optional, Protocol,
                     runtime_checkable)
 
-from transformers import PreTrainedTokenizer
-
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptInputs
@@ -12,6 +10,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 @runtime_checkable
@@ -71,8 +70,8 @@ class AsyncEngineClient(Protocol):
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
-    ) -> PreTrainedTokenizer:
-        """Get the appropriate Tokenizer for the request"""
+    ) -> AnyTokenizer:
+        """Get the appropriate tokenizer for the request"""
         ...
 
     async def is_tracing_enabled(self) -> bool:

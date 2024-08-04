@@ -15,13 +15,13 @@ from openai.types.chat import (
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
 from pydantic import ConfigDict
-from transformers import PreTrainedTokenizer
 from typing_extensions import Required, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import async_get_and_parse_image
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -93,7 +93,7 @@ def load_chat_template(chat_template: Optional[str]) -> Optional[str]:
 
 @lru_cache(maxsize=None)
 def _image_token_str(model_config: ModelConfig,
-                     tokenizer: PreTrainedTokenizer) -> Optional[str]:
+                     tokenizer: AnyTokenizer) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
     model_type = model_config.hf_config.model_type
@@ -126,7 +126,7 @@ def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     model_config: ModelConfig,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: AnyTokenizer,
 ) -> ChatMessageParseResult:
     texts: List[str] = []
     mm_futures: List[Awaitable[MultiModalDataDict]] = []
@@ -177,7 +177,7 @@ def _parse_chat_message_content_parts(
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     model_config: ModelConfig,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: AnyTokenizer,
 ) -> ChatMessageParseResult:
     role = message["role"]
     content = message.get("content")
@@ -199,7 +199,7 @@ def _parse_chat_message_content(
 def parse_chat_messages(
     messages: List[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: AnyTokenizer,
 ) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalDataDict]]]:
     conversation: List[ConversationMessage] = []
     mm_futures: List[Awaitable[MultiModalDataDict]] = []

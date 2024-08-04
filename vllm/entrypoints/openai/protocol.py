@@ -6,13 +6,13 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 # torch is mocked during docs generation,
@@ -233,7 +233,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: PreTrainedTokenizer,
+            self, tokenizer: AnyTokenizer,
             guided_decode_logits_processor: Optional[LogitsProcessor],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
@@ -418,7 +418,7 @@ class CompletionRequest(OpenAIBaseModel):
     # doc: end-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: PreTrainedTokenizer,
+            self, tokenizer: AnyTokenizer,
             guided_decode_logits_processor: Optional[LogitsProcessor],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens

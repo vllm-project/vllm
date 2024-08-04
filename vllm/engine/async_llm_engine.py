@@ -4,8 +4,6 @@ from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Mapping,
                     Optional, Set, Tuple, Type, Union)
 
-from transformers import PreTrainedTokenizer
-
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
@@ -24,6 +22,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
@@ -508,7 +507,7 @@ class AsyncLLMEngine:
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
-    ) -> "PreTrainedTokenizer":
+    ) -> "AnyTokenizer":
         if self.engine_use_ray:
             return await self.engine.get_tokenizer.remote(  # type: ignore
                 lora_request)
