@@ -306,8 +306,8 @@ async def iterate_with_cancellation(
         if await is_cancelled():
             if pending:
                 with contextlib.suppress(BaseException):
-                    await iterator.aclose()
                     awaits[0].cancel()
+                    await iterator.aclose()
             raise asyncio.CancelledError("client cancelled")
         if done:
             try:
@@ -361,8 +361,8 @@ async def merge_async_iterators(
         # Cancel any remaining iterators
         for f, (_, it) in awaits.items():
             with contextlib.suppress(BaseException):
-                await it.aclose()
                 f.cancel()
+                await it.aclose()
 
 
 def get_ip() -> str:

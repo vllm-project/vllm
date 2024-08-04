@@ -38,7 +38,7 @@ async def test_merge_async_iterators():
                 yield f"item from iterator {idx}"
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
-            pass
+            print(f"iterator {idx} cancelled")
 
     iterators = [mock_async_iterator(i) for i in range(3)]
     merged_iterator: AsyncIterator[Tuple[int, str]] = merge_async_iterators(
