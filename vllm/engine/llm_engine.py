@@ -635,6 +635,7 @@ class LLMEngine:
 
         decoder_start_token_id: Optional[int] = (
             self._get_decoder_start_token_id())
+        assert decoder_start_token_id is not None
 
         if decoder_input_ids is None:
             # no decoder prompt input ->

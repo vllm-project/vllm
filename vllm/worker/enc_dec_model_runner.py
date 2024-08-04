@@ -6,8 +6,7 @@ import torch.distributed
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
-from vllm.attention.selector import (_Backend,
-                                     get_env_variable_attn_backend,
+from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -361,11 +360,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # tokens.
                 tokens = [encoder_seq_data.get_last_token_id()]
 
-            block_table = (
-                []  # Memory profiling
-                if
-                (is_prompt or cross_block_table is None) else cross_block_table
-            )
+            block_table = ([]  # Memory profiling
+                           if (is_prompt or cross_block_table is None) else
+                           cross_block_table)
 
             cross_block_tables.append(block_table)
 
