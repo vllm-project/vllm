@@ -3,7 +3,7 @@ from typing import Any, Dict
 import pytest
 import torch
 
-from vllm.distributed.parallel_state import (_split_tensor_dict,
+from vllm.distributed.group_coordinator import (_split_tensor_dict,
                                              _update_nested_dict)
 
 
