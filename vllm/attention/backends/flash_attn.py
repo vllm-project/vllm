@@ -493,15 +493,6 @@ class FlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
 
-            # send out the KV cache when current vllm is prefill instance
-            # the corresponding receive code is in vllm/worker/model_runner.py
-            if all([
-                envs.VLLM_DISAGG_PREFILL_ROLE == "prefill",
-                attn_metadata.prefill_metadata is not None]):
-                
-                get_disagg_group().push(key)
-                get_disagg_group().push(value)
-
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         assert key.shape[0] == num_prefill_tokens + num_decode_tokens
