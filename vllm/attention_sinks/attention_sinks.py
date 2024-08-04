@@ -113,6 +113,8 @@ class StreamingAttentionSink(nn.Module):
 
         # original keys will be written to key cache after attention
         k_original = k.clone()
+        device = q.device
+        context_lens_tensor = attn_metadata.context_lens_tensor
         
         if self.attn_backend == _Backend.FLASH_ATTN:
             # key cache shape: [num_blocks, block_size, num_heads, head_size]
@@ -160,7 +162,6 @@ class StreamingAttentionSink(nn.Module):
         if not self.chunked_prefill_enabled:
             assert attn_metadata.num_prefills == 0
         
-        device = q.device
         block_size = self.block_size
         model_context_len = self.model_context_len
 

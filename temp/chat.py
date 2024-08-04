@@ -69,10 +69,12 @@ def process_requests(engine: LLMEngine,
                 num_tokens = len(out.token_ids)
                 cum_logprob = out.cumulative_logprob
                 avg_logprob = cum_logprob / num_tokens
-                print(f"Prompt length: {len(request_output.prompt_token_ids)} tokens")
-                print(f"\nOUTPUT: ({num_tokens} tokens)")
+                print("~" * 100)
+                print(f"\nPrompt length: {len(request_output.prompt_token_ids)} tokens")
+                print(f"OUTPUT: ({num_tokens} tokens)")
                 print(out.text, "\n")
                 print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, f"isnan={math.isnan(cum_logprob)}")
+                print("~" * 100)
 
 
 if __name__ == "__main__":
@@ -82,8 +84,8 @@ if __name__ == "__main__":
     model = "bigscience/bloom-7b1"
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
     model = "mosaicml/mpt-7b-chat"
-    model = "meta-llama/Meta-Llama-3-8B-Instruct"
     model = "lmsys/vicuna-7b-v1.5"
+    model = "meta-llama/Meta-Llama-3-8B-Instruct"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
@@ -96,5 +98,5 @@ if __name__ == "__main__":
     engine = LLMEngine.from_engine_args(args)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     prompts = get_prompt(model, magic_word=True)
-    prompts = get_long_prompt()
+    # prompts = get_long_prompt()
     process_requests(engine, prompts, tokenizer)
