@@ -520,7 +520,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                 image_indices = torch.stack([
                     torch.arange(r[0], r[1], dtype=torch.long)
                     for r in image_inputs["image_bounds"]
-                ]).to(vlm_embedding.device, vlm_embedding.dtype)
+                ]).to(vlm_embedding.device, dtype=torch.long)
                 vlm_embedding.scatter_(
                     0,
                     image_indices.view(-1, 1).repeat(1,
@@ -540,9 +540,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
             start_cond |= (input_ids == tokenizer.slice_start_id)
             end_cond |= (input_ids == tokenizer.slice_end_id)
 
-        image_start_tokens = torch.where(start_cond)[0]
+        image_start_tokens, = torch.where(start_cond)
         image_start_tokens += 1
-        image_end_tokens = torch.where(end_cond)[0]
+        image_end_tokens, = torch.where(end_cond)
         valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
 
         if valid_image_nums == 0:
