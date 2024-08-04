@@ -222,7 +222,8 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
             # wrap raised exception to provide more information
             raise RuntimeError(
                 f"Error happened when batch testing "
-                f"peer-to-peer access from {batch_src} to {batch_tgt}") from e
+                f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
+                f"{returned.stderr.decode()}") from e
         result = pickle.loads(returned.stdout)
         for _i, _j, r in zip(batch_src, batch_tgt, result):
             cache[f"{_i}->{_j}"] = r
