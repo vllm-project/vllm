@@ -14,6 +14,18 @@ from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
+
+class NestedInputs(UserDict):
+
+    def __init__(self, model_inputs: BatchFeature):
+        super().__init__({"model_inputs": model_inputs})
+
+        self.model_inputs = model_inputs
+
+    def to(self, device: torch.types.Device):
+        return NestedInputs(self.model_inputs.to(device))
+
+
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
@@ -94,17 +106,6 @@ def run_test(
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model, torch.no_grad():
-
-        class NestedInputs(UserDict):
-
-            def __init__(self, model_inputs: BatchFeature):
-                super().__init__({"model_inputs": model_inputs})
-
-                self.model_inputs = model_inputs
-
-            def to(self, device: torch.types.Device):
-                return NestedInputs(self.model_inputs.to(device))
-
         hf_processor = hf_model.processor
         hf_model.processor = lambda **kw: NestedInputs(
             hf_processor(**kw)  # type: ignore
@@ -224,17 +225,6 @@ def run_multi_image_test(
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model, torch.no_grad():
-
-        class NestedInputs(UserDict):
-
-            def __init__(self, model_inputs: BatchFeature):
-                super().__init__({"model_inputs": model_inputs})
-
-                self.model_inputs = model_inputs
-
-            def to(self, device: torch.types.Device):
-                return NestedInputs(self.model_inputs.to(device))
-
         hf_processor = hf_model.processor
         hf_model.processor = lambda **kw: NestedInputs(
             hf_processor(**kw)  # type: ignore
