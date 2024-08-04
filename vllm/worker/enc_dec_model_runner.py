@@ -143,6 +143,24 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             if maybe_env_var_forced_backend != _Backend.XFORMERS:
                 raise_backend_err()
 
+    def _list_to_int32_tensor(
+        self,
+        _list: List[int],
+    ) -> torch.Tensor:
+        return torch.tensor(_list, dtype=torch.int32, device=self.device)
+
+    def _list_to_long_tensor(
+        self,
+        _list: List[int],
+    ) -> torch.Tensor:
+        return torch.tensor(_list, dtype=torch.long, device=self.device)
+
+    def _empty_int32_tensor(self) -> torch.Tensor:
+        return self._list_to_int32_tensor([])
+
+    def _empty_long_tensor(self) -> torch.Tensor:
+        return self._list_to_long_tensor([])
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -311,7 +329,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         Constructs a new model inputs data structure, based on
         (1) the existing fields in the `model_inputs` argument,
-        and (2) the following addition fields that are
+        and (2) the following additional fields which are
         computed (or in the case of `attn_metadata`, updated) 
         by this function:
         * attn_metadata
@@ -330,123 +348,124 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         * Updated model inputs data structure
         """
 
-        encoder_input_tokens: List[int] = []
-        encoder_input_positions: List[int] = []
-        encoder_seq_lens: List[int] = []
-        context_lens: List[int] = []
-        cross_slot_mapping: List[int] = []
-        cross_block_tables: List[List[int]] = []
-
         if len(seq_group_metadata_list) == 0:
-            # Leave the encoder/cross-attention input
-            # fields at default values if the seq group
-            # metadata list arg is an empty list
             return (model_input.attn_metadata, None, None)
 
-        for seq_group_metadata in seq_group_metadata_list:
-            is_prompt = seq_group_metadata.is_prompt
+        # Since we are not supporting chunked prefill either the entire
+        # batch is prefill or it is decode
+        is_prompt = seq_group_metadata_list[0].is_prompt
 
-            encoder_seq_data = seq_group_metadata.encoder_seq_data
-            cross_block_table = seq_group_metadata.cross_block_table
-            context_len = (0 if is_prompt else encoder_seq_data.get_len())
+        # Build encoder inputs
+        encoder_seq_lens: List[int] = []
+        if is_prompt:
+            # Prefill phase.
+            cross_block_tables = self._empty_int32_tensor()
 
-            seq_len = encoder_seq_data.get_len()
+            # Extract input tokens/positions, cross-attention slot-mapping,
+            # & seq len from each sequence group metadata
+            (
+                encoder_input_tokens,
+                encoder_input_positions,
+                cross_slot_mapping,
+            ) = (
+                [],
+                [],
+                [],
+            )
+            for seq_group_metadata in seq_group_metadata_list:
+                # Build seq lens
+                seq_len = seq_group_metadata.encoder_seq_data.get_len()
+                token_ids = seq_group_metadata.encoder_seq_data.get_token_ids()
+                encoder_seq_lens.append(seq_len)
 
-            block_table = []  # Default for memory profiling
-            if is_prompt:
-                tokens = encoder_seq_data.get_token_ids()[context_len:seq_len]
-            else:
-                # Optimization. get_token_ids requires the entire copy of
-                # tokens.
-                tokens = [encoder_seq_data.get_last_token_id()]
+                # Build slot mapping
+                is_profile_run = (seq_group_metadata.block_tables is None)
+                if is_profile_run:
+                    # During memory profiling, the block tables are not
+                    # initialized yet. In this case, we just use a dummy
+                    # slot mapping.
+                    # In embeddings, the block tables are {seq_id: None}.
+                    cross_slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+                else:
+                    for i in range(0, seq_len):
+                        block_number = seq_group_metadata.cross_block_table[
+                            i // self.block_size]
+                        block_offset = i % self.block_size
+                        slot = block_number * self.block_size + block_offset
+                        cross_slot_mapping.append(slot)
 
-            block_table = ([]  # Memory profiling
-                           if (is_prompt or cross_block_table is None) else
-                           cross_block_table)
+                # Build encoder input tokens
+                encoder_input_tokens.extend(token_ids)
+                encoder_input_positions.extend(list(range(0, seq_len)))
 
-            cross_block_tables.append(block_table)
+            # Convert tokens/positions & cross-attention
+            # slot-mapping to encoder input tensors
+            encoder_input_tokens_tensor = self._list_to_long_tensor(
+                encoder_input_tokens)
+            encoder_input_positions_tensor = self._list_to_long_tensor(
+                encoder_input_positions)
+            cross_slot_mapping_tensor = self._list_to_long_tensor(
+                cross_slot_mapping)
 
-            encoder_seq_lens.append(seq_len)
-            context_lens.append(context_len)
-            encoder_input_tokens.extend(tokens)
-            encoder_input_positions.extend(list(range(context_len, seq_len)))
+        else:
+            # Decode phase.
+            encoder_input_tokens_tensor = self._empty_long_tensor()
+            encoder_input_positions_tensor = self._empty_long_tensor()
+            cross_slot_mapping_tensor = self._empty_long_tensor()
 
-            is_profile_run = (seq_group_metadata.block_tables is None)
-            if is_profile_run:
-                # During memory profiling, the block tables are not
-                # initialized yet. In this case, we just use a dummy
-                # slot mapping.
-                # In embeddings, the block tables are {seq_id: None}.
-                cross_slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
-                continue
+            # Extract cross-attention block tables &
+            # seq len from each sequence group metadata.
+            # Cross-attention block tables are empty
+            # during vLLM memory profiling.
+            cross_block_tables = []
+            for seq_group_metadata in seq_group_metadata_list:
+                encoder_seq_lens.append(
+                    seq_group_metadata.encoder_seq_data.get_len())
+                cross_block_table = seq_group_metadata.cross_block_table
+                cross_block_tables.append([] if (
+                    cross_block_table is None) else cross_block_table)
 
-            # Compute the slot mapping.
-            block_table = cross_block_table
+            # Convert cross-attention block tables to encoder input tensor
+            cross_block_tables = make_tensor_with_pad(
+                cross_block_tables,
+                max_len=max(
+                    len(block_table) for block_table in cross_block_tables),
+                pad=0,
+                dtype=torch.int32,
+                device=self.device,
+            )
 
-            for i in range(context_len, seq_len):
-
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                cross_slot_mapping.append(slot)
-
-        encoder_max_seq_len = max(encoder_seq_lens, default=0)
-
-        max_cross_block_table_len = max(
-            len(block_table) for block_table in cross_block_tables)
-        cross_block_tables = make_tensor_with_pad(
-            cross_block_tables,
-            max_len=max_cross_block_table_len,
-            pad=0,
-            dtype=torch.int,
-            device=self.device,
-        )
-
-        encoder_seq_lens_tensor = torch.tensor(encoder_seq_lens,
-                                               dtype=torch.int,
-                                               device=self.device)
-
+        # Compute encoder sequence lengths & encoder
+        # sequence starting offset tensors
+        max_encoder_seq_len = max(encoder_seq_lens, default=0)
+        encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
         encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
                                             1,
                                             dtype=torch.int32,
                                             device=self.device)
-
         torch.cumsum(encoder_seq_lens_tensor,
                      dim=0,
                      dtype=encoder_seq_start_loc.dtype,
                      out=encoder_seq_start_loc[1:])
 
+        # Update attention metadata with encoder-oriented attributes
         attn_metadata = model_input.attn_metadata
         assert attn_metadata is not None
-
-        cross_slot_mapping_tensor = torch.tensor(cross_slot_mapping,
-                                                 dtype=torch.long,
-                                                 device=self.device)
-
-        if seq_group_metadata.is_prompt:
-
-            encoder_input_tokens_tensor = torch.tensor(encoder_input_tokens,
-                                                       dtype=torch.long,
-                                                       device=self.device)
-            encoder_input_positions_tensor = torch.tensor(
-                encoder_input_positions, dtype=torch.long, device=self.device)
-
-        else:
-
-            encoder_input_tokens_tensor = torch.tensor([],
-                                                       dtype=torch.long,
-                                                       device=self.device)
-            encoder_input_positions_tensor = torch.tensor([],
-                                                          dtype=torch.long,
-                                                          device=self.device)
-
-        # Set encoder-oriented attention metadata fields
-        attn_metadata.num_encoder_tokens = sum(encoder_seq_lens)
-        attn_metadata.encoder_seq_lens = encoder_seq_lens
-        attn_metadata.encoder_seq_lens_tensor = encoder_seq_lens_tensor
-        attn_metadata.max_encoder_seq_len = encoder_max_seq_len
-        attn_metadata.cross_slot_mapping = cross_slot_mapping_tensor
-        attn_metadata.cross_block_tables = cross_block_tables
+        (
+            attn_metadata.num_encoder_tokens,
+            attn_metadata.encoder_seq_lens,
+            attn_metadata.encoder_seq_lens_tensor,
+            attn_metadata.max_encoder_seq_len,
+            attn_metadata.cross_slot_mapping,
+            attn_metadata.cross_block_tables,
+        ) = (
+            sum(encoder_seq_lens),
+            encoder_seq_lens,
+            encoder_seq_lens_tensor,
+            max_encoder_seq_len,
+            cross_slot_mapping_tensor,
+            cross_block_tables,
+        )
 
         return (attn_metadata, encoder_input_tokens_tensor,
                 encoder_input_positions_tensor)

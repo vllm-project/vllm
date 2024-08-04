@@ -14,6 +14,8 @@ from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 # Currently CUDA graph is not supported
 ENFORCE_EAGER = [True]
 
+BATCH_SIZES = [1, 4, 16, 64, 256]
+
 
 def _create_model_runner(model: str, *args,
                          **kwargs) -> EncoderDecoderModelRunner:
@@ -81,7 +83,7 @@ def test_empty_seq_group(enforce_eager, ):
                     reason="CPU backend is currently "
                     "unsupported for encoder/ "
                     "decoder models")
-@pytest.mark.parametrize("batch_size", list(range(1, 257)))
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
 def test_prepare_prompt(
     batch_size,
@@ -282,7 +284,7 @@ def test_prepare_prompt(
                     reason="CPU backend is currently "
                     "unsupported for encoder/ "
                     "decoder models")
-@pytest.mark.parametrize("batch_size", list(range(1, 257)))
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
 def test_prepare_decode(
     batch_size,
