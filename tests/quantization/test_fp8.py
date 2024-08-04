@@ -123,7 +123,7 @@ def test_scaled_fp8_quant(dtype) -> None:
     assert torch.allclose(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
     # Padding
-    y, _ = ops.scaled_fp8_quant(x, inv_scale, batch_dim_padding=17)
+    y, _ = ops.scaled_fp8_quant(x, inv_scale, num_token_padding=17)
     assert y.shape[0] == 17
     assert torch.allclose(
         ref_y,
