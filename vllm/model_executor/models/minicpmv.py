@@ -399,7 +399,7 @@ def get_version_by_config(config: PretrainedConfig):
         return (2, 5)
     else:
         version = str(config.version).split(".")
-        return tuple([int(x) for x in version])    
+        return tuple([int(x) for x in version])
 
 
 def get_max_minicpmv_image_tokens(ctx: InputContext):
