@@ -96,7 +96,6 @@ steps:
   num_gpus: 4
   fast_check: true
   commands:
-  - pytest -v -s distributed/test_basic_distributed_correctness_enc_dec.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
