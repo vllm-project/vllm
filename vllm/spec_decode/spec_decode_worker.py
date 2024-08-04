@@ -75,7 +75,9 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
         typical_acceptance_sampler_posterior_alpha,
-        disable_logprobs=speculative_config.disable_logprobs)
+        disable_logprobs=speculative_config.disable_logprobs,
+        disable_log_stats=speculative_config.disable_log_stats,
+    )
 
     return spec_decode_worker
 
@@ -116,6 +118,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
+        disable_log_stats: bool,
     ) -> "SpecDecodeWorker":
 
         allow_zero_draft_token_step = True
@@ -171,6 +174,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker,
             scorer_worker,
             disable_logprobs=disable_logprobs,
+            disable_log_stats=disable_log_stats,
             disable_by_batch_size=disable_by_batch_size,
             spec_decode_sampler=spec_decode_sampler,
             allow_zero_draft_token_step=allow_zero_draft_token_step)
@@ -181,6 +185,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         spec_decode_sampler: SpecDecodeBaseSampler,
         disable_logprobs: bool,
+        disable_log_stats: bool,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
         allow_zero_draft_token_step: Optional[bool] = True,
@@ -203,6 +208,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_logprobs: If set to True, token log probabilities will
                 not be output in both the draft worker and the target worker.
                 If set to False, log probabilities will be output by both.
+            disable_log_stats: If set to True, disable periodic printing of
+                speculative stage times.
             disable_by_batch_size: If the batch size is larger than this,
                 disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
@@ -237,6 +244,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
         self._disable_logprobs = disable_logprobs
+        self._disable_log_stats = disable_log_stats
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -736,19 +744,28 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             sampler_output_list[
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics
 
-            (average_time_per_proposal_tok_ms, scoring_time_ms,
-             verification_time_ms) = stage_times
-
             # Log time spent in each stage periodically.
             # This is periodic because the rejection sampler emits metrics
             # periodically.
-            logger.info(
-                "SpecDecodeWorker stage times: "
-                "average_time_per_proposal_tok_ms=%.02f "
-                "scoring_time_ms=%.02f verification_time_ms=%.02f",
-                average_time_per_proposal_tok_ms, scoring_time_ms,
-                verification_time_ms)
+            self._maybe_log_stage_times(*stage_times)
+
         return sampler_output_list
+
+    def _maybe_log_stage_times(self, average_time_per_proposal_tok_ms: float,
+                               scoring_time_ms: float,
+                               verification_time_ms: float) -> None:
+        """Log the speculative stage times. If stat logging is disabled, do
+        nothing.
+        """
+        if self._disable_log_stats:
+            return
+
+        logger.info(
+            "SpecDecodeWorker stage times: "
+            "average_time_per_proposal_tok_ms=%.02f "
+            "scoring_time_ms=%.02f verification_time_ms=%.02f",
+            average_time_per_proposal_tok_ms, scoring_time_ms,
+            verification_time_ms)
 
     def _create_dummy_logprob_lists(
         self,
