@@ -81,6 +81,29 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
+        sampling_params = seq_group.sampling_params
+        if sampling_params.n == 1 and not sampling_params.use_beam_search:
+            # only have one output sample
+            sample = outputs.samples[0]
+            # only have one sequence
+            seq = seq_group.seqs[0]
+            seq.append_token_id(sample.output_token, sample.logprobs)
+            if sampling_params.detokenize and self.detokenizer:
+                new_char_count = self.detokenizer.decode_sequence_inplace(
+                    seq, sampling_params)
+            else:
+                new_char_count = 0
+            self.stop_checker.maybe_stop_sequence(
+                seq,
+                new_char_count,
+                sampling_params,
+                lora_req=seq_group.lora_request,
+            )
+            if seq.is_finished():
+                for scheduler in self.scheduler:
+                    scheduler.free_seq(seq)
+            return
+
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
