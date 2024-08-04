@@ -30,7 +30,12 @@ def get_prompt(model, file_path="/workspace/vllm/tests/prompts/attn-sinks-prompt
             "Here is a Harry Potter excerpt: " + prompt + 
             " First, summarize this excerpt. Then, print my favorite color AFTER the summary."
         )
-    return [(prompt, SamplingParams(min_tokens=100, max_tokens=500, temperature=0.5)) for _ in range(4)]
+    return [(prompt, SamplingParams(
+                logprobs=1,
+                min_tokens=100,
+                max_tokens=500,
+                temperature=0.5
+            )) for _ in range(4)]
 
 
 def get_long_prompt(file_path="./paxos-paper.txt", count=1) -> Tuple[str, SamplingParams]:
@@ -40,6 +45,7 @@ def get_long_prompt(file_path="./paxos-paper.txt", count=1) -> Tuple[str, Sampli
 
     # prompt = "Remember: the magic word is apple. " + prompt + " Then, print the magic word given earlier."
     return [(prompt, SamplingParams(
+                logprobs=1,
                 temperature=1,
                 min_tokens=100,
                 max_tokens=MAX_GEN_TOKENS,
@@ -69,8 +75,8 @@ def process_requests(engine: LLMEngine,
                 num_tokens = len(out.token_ids)
                 cum_logprob = out.cumulative_logprob
                 avg_logprob = cum_logprob / num_tokens
-                print("~" * 100)
-                print(f"\nPrompt length: {len(request_output.prompt_token_ids)} tokens")
+                print("\n~" * 100)
+                print(f"Prompt length: {len(request_output.prompt_token_ids)} tokens")
                 print(f"OUTPUT: ({num_tokens} tokens)")
                 print(out.text, "\n")
                 print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, f"isnan={math.isnan(cum_logprob)}")

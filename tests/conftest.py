@@ -497,6 +497,7 @@ class VllmRunner:
         prompts: List[str],
         sampling_params: SamplingParams,
     ) -> List[Tuple[str, float]]:
+        assert sampling_params.logprobs is not None
         req_outputs = self.model.generate(prompts,
                                           sampling_params=sampling_params)
         outputs: List[Tuple[str, float]] = []

@@ -287,6 +287,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.runner = runner
         self.model_input_cls = self.runner._model_input_cls
         self.attn_backend = self.runner.attn_backend
+        self.model_config = self.runner.model_config
         self.scheduler_config = self.runner.scheduler_config
         self.sliding_window = self.runner.sliding_window
         self.block_size = self.runner.block_size

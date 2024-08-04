@@ -83,7 +83,6 @@ def _get_attention_sink(
         attn_backend,
         num_kv_heads,
         model_attn.head_dim,
-        getattr(model_attn.attn, "kv_scale", 1.0),
         getattr(model_attn, "rotary_emb", None),
         model_attn.attn,
         chunked_prefill_enabled

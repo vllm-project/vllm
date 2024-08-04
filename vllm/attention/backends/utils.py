@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Dict, List, Type, TypeVar, Union
 import torch
 
 from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
+from vllm.config import ModelConfig
 from vllm.utils import make_tensor_with_pad
 
 # Error string(s) for encoder/decoder
@@ -49,7 +50,8 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
 def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
-                         block_tables: Dict[int, List[int]]):
+                         block_tables: Dict[int, List[int]],
+                         model_config: ModelConfig):
     """
     Compute slot mapping.
     """
@@ -69,7 +71,25 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
     # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
     block_table = block_tables[seq_id]
     slot_mapping.extend([PAD_SLOT_ID] * max(0, start_idx - context_len))
+
+    # Numbers for attention sinks logic
+    max_model_len = model_config.max_model_len
+    num_evicted_tokens = ((seq_len - max_model_len - 1)
+                            // block_size + 1) * block_size
+    window_start_pos = block_size + num_evicted_tokens
+
     for i in range(max(start_idx, context_len), seq_len):
+        # Attention sinks: abs pos for slot needs to be shifted
+        #                  back when past max model length
+        if (model_config.use_attention_sinks
+            and seq_len > max_model_len):
+            if block_size <= i < window_start_pos:
+                # skip over evicted tokens
+                continue
+            else:
+                # edit abs pos of token i
+                i -= num_evicted_tokens
+
         block_number = block_table[i // block_size]
         block_offset = i % block_size
         slot = block_number * block_size + block_offset
@@ -100,6 +120,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.block_size = input_builder.block_size
         self.use_v2_block_manager = (
             input_builder.scheduler_config.use_v2_block_manager)
+        self.model_config = input_builder.model_config
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -145,7 +166,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                 self.use_v2_block_manager)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+                                 self.block_size, inter_data.block_tables,
+                                 self.model_config)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):

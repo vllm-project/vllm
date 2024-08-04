@@ -53,6 +53,7 @@ def test_correctness(
     prompt = _get_prompt(model, test_retrieval=test_retrieval)
     prompts = [prompt] * batch_size
     params = SamplingParams(
+        logprobs=1,
         temperature=0.5,
         min_tokens=min_tokens,
         max_tokens=max_tokens
@@ -128,7 +129,11 @@ def test_eviction(
 ):
     prompt = _get_prompt(model)
     prompts = [prompt] * batch_size
-    sampling_params = SamplingParams(min_tokens=200, max_tokens=201)
+    sampling_params = SamplingParams(
+        logprobs=1,
+        min_tokens=200,
+        max_tokens=201
+    )
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
     

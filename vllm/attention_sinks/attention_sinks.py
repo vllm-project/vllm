@@ -25,7 +25,6 @@ class StreamingAttentionSink(nn.Module):
         attn_backend: _Backend,
         num_kv_heads: int,
         head_dim: int,
-        kv_scale: float,
         rotary_emb_layer: Optional[RotaryEmbedding],
         attn_layer: Attention,
         chunked_prefill_enabled: bool
@@ -37,7 +36,6 @@ class StreamingAttentionSink(nn.Module):
         self.attn_backend = attn_backend
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.kv_scale = kv_scale
         self.rotary_emb = rotary_emb_layer
         self.use_alibi = rotary_emb_layer is None
         self.attn = attn_layer
@@ -144,6 +142,8 @@ class StreamingAttentionSink(nn.Module):
                     value_cache,
                     attn_metadata.slot_mapping.flatten(),
                     self.kv_cache_dtype,
+                    self.attn._k_scale,
+                    self.attn._v_scale,
                 )
             elif self.attn_backend == _Backend.XFORMERS:
                 PagedAttention.write_to_paged_cache(
@@ -153,7 +153,8 @@ class StreamingAttentionSink(nn.Module):
                     value_cache,
                     attn_metadata.slot_mapping,
                     self.kv_cache_dtype,
-                    self.kv_scale
+                    self.attn._k_scale,
+                    self.attn._v_scale,
                 )
 
             return attn_output
@@ -293,6 +294,8 @@ class StreamingAttentionSink(nn.Module):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
+                self.attn._k_scale,
+                self.attn._v_scale,
             )
         elif self.attn_backend == _Backend.XFORMERS:
             PagedAttention.write_to_paged_cache(
@@ -302,7 +305,8 @@ class StreamingAttentionSink(nn.Module):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                self.kv_scale
+                self.attn._k_scale,
+                self.attn._v_scale,
             )
         
         return attn_output

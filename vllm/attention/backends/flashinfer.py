@@ -226,6 +226,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.block_size = input_builder.block_size
         self.use_v2_block_manager = (
             input_builder.scheduler_config.use_v2_block_manager)
+        self.model_config = input_builder.model_config
 
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.
@@ -294,7 +295,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.use_v2_block_manager)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+                                 self.block_size, inter_data.block_tables,
+                                 self.model_config)
 
             # It is not necessary to add paged_kv_indices, paged_kv_indptr,
             # and paged_kv_last_page_len for profile run because we will
