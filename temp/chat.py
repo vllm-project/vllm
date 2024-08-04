@@ -35,7 +35,16 @@ def get_prompt(model, file_path="/workspace/vllm/tests/prompts/attn-sinks-prompt
                 min_tokens=100,
                 max_tokens=500,
                 temperature=0.5
-            )) for _ in range(4)]
+            )) for _ in range(1)]
+
+
+def get_short_prompt() -> List[Tuple[str, SamplingParams]]:
+    prompt = "Tell me the story of the boy who cried wolf."
+    return [(prompt, SamplingParams(
+                logprobs=1,
+                min_tokens=50,
+                max_tokens=200
+            )) for _ in range(1)]
 
 
 def get_long_prompt(file_path="./paxos-paper.txt", count=1) -> Tuple[str, SamplingParams]:
@@ -54,7 +63,7 @@ def get_long_prompt(file_path="./paxos-paper.txt", count=1) -> Tuple[str, Sampli
 
 def process_requests(engine: LLMEngine,
                      test_prompts: List[Tuple[str, SamplingParams]],
-                     tokenizer):
+                     do_print: bool):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
 
@@ -75,12 +84,14 @@ def process_requests(engine: LLMEngine,
                 num_tokens = len(out.token_ids)
                 cum_logprob = out.cumulative_logprob
                 avg_logprob = cum_logprob / num_tokens
-                print("\n~" * 100)
-                print(f"Prompt length: {len(request_output.prompt_token_ids)} tokens")
-                print(f"OUTPUT: ({num_tokens} tokens)")
-                print(out.text, "\n")
-                print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, f"isnan={math.isnan(cum_logprob)}")
-                print("~" * 100)
+                
+                if do_print:
+                    print("\n", "~" * 100)
+                    print(f"Prompt length: {len(request_output.prompt_token_ids)} tokens")
+                    print(f"OUTPUT: ({num_tokens} tokens)")
+                    print(out.text, "\n")
+                    print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, f"isnan={math.isnan(cum_logprob)}")
+                    print("~" * 100)
 
 
 if __name__ == "__main__":
@@ -104,5 +115,6 @@ if __name__ == "__main__":
     engine = LLMEngine.from_engine_args(args)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     prompts = get_prompt(model, magic_word=True)
+    # prompts = get_short_prompt()
     # prompts = get_long_prompt()
-    process_requests(engine, prompts, tokenizer)
+    process_requests(engine, prompts, do_print=False)
