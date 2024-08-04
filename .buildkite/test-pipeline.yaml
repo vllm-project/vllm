@@ -112,10 +112,11 @@ steps:
   - pytest -v -s tokenization
 
 - label: Entrypoints Test
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   mirror_hardwares: [amd]
-
   commands:
+  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
 
