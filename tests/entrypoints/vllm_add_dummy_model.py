@@ -15,5 +15,6 @@ class MyOPTForCausalLM(OPTForCausalLM):
         logits[:, 0] += 1.0
         return logits
 
+
 # register our dummy model
 ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)

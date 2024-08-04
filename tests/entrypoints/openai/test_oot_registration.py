@@ -1,12 +1,14 @@
+import os
+
 from ...utils import RemoteOpenAIServer
 
 
 def test_oot_registration_for_api_server():
     cli_args = "--gpu-memory-utilization 0.10 --dtype float32".split()
-    with RemoteOpenAIServer("facebook/opt-125m",
-                            cli_args,
-                            env_dict={"VLLM_PLUGINS":
-                                      "vllm_add_dummy_model"}) as server:
+    path = os.path.dirname(os.path.dirname(__file__))
+    env_dict = {"VLLM_PLUGINS": "vllm_add_dummy_model", "PYTHONPATH": path}
+    with RemoteOpenAIServer("facebook/opt-125m", cli_args,
+                            env_dict=env_dict) as server:
         client = server.get_client()
         completion = client.chat.completions.create(
             model="facebook/opt-125m",
