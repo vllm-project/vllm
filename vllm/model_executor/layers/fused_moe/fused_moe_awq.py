@@ -3,8 +3,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-
-from .fused_moe import fused_experts, moe_align_block_size
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_experts, moe_align_block_size)
 
 logger = init_logger(__name__)
 
@@ -43,12 +43,11 @@ def fused_experts_awq(
     # If large seq_len prefill, dequantize and use the fp16 MoE kernel.
     do_naive_dequant = hidden_states.shape[:-1].numel() >= NAIVE_THRESHOLD
     if do_naive_dequant:
-        # TODO: why is this not contiguous already?
-        # from @dsikka: because of the permutation operation
+        # NOTE: not contiguous because of the permutation operation
         dequant_w1 = ops.awq_dequantize(w1, w1_scales, w1_qzeros, 0, 0,
-                                        0).permute(0, 2, 1)
+                                        0).permute(0, 2, 1).contiguous()
         dequant_w2 = ops.awq_dequantize(w2, w2_scales, w2_qzeros, 0, 0,
-                                        0).permute(0, 2, 1)
+                                        0).permute(0, 2, 1).contiguous()
 
         return fused_experts(hidden_states, dequant_w1, dequant_w2,
                              topk_weights, topk_ids)

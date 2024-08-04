@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -8,7 +8,7 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   fused_experts_awq)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -65,9 +65,8 @@ class AWQConfig(QuantizationConfig):
         zero_point = cls.get_from_keys(config, ["zero_point"])
         return cls(weight_bits, group_size, zero_point)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module,
-            prefix: str) -> Optional[Union["AWQMoEMethod", "AWQLinearMethod"]]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
             return AWQLinearMethod(self)
         elif isinstance(layer, FusedMoE):
@@ -202,7 +201,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w13_qweight, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "is_transposed": True,
+                "input_dim": 0,
+                "output_dim": 1,
                 **extra_weight_attrs
             })
 
@@ -217,7 +217,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w2_qweight, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "is_transposed": True,
+                "input_dim": 0,
+                "output_dim": 1,
                 **extra_weight_attrs
             })
 
@@ -231,7 +232,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
                                requires_grad=False)
         layer.register_parameter("w13_scales", w13_scales)
         set_weight_attrs(w13_scales, {
-            "is_transposed": True,
+            "input_dim": 0,
+            "output_dim": 1,
             **extra_weight_attrs
         })
 
@@ -243,7 +245,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
                               requires_grad=False)
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, {
-            "is_transposed": True,
+            "input_dim": 0,
+            "output_dim": 1,
             **extra_weight_attrs
         })
 
@@ -260,7 +263,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w13_qzeros, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "is_transposed": True,
+                "input_dim": 0,
+                "output_dim": 1,
                 **extra_weight_attrs
             })
 
@@ -275,7 +279,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w2_qzeros, {
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "is_transposed": True,
+                "input_dim": 0,
+                "output_dim": 1,
                 **extra_weight_attrs
             })
 

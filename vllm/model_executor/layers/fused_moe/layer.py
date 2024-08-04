@@ -225,9 +225,9 @@ class FusedMoE(torch.nn.Module):
 
         # If transposed, weight is saved as [input_dim, output_dim]
         # Otherwise, weight is saved as     [output_dim, input_dim]
-        is_transposed = getattr(param, "is_transposed", False)
-        input_dim = 0 if is_transposed else 1
-        output_dim = 1 if is_transposed else 0
+        # Default is not transposed/input dim is dim 1
+        input_dim = getattr(param, "input_dim", 1)
+        output_dim = getattr(param, "output_dim", 0)
 
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim

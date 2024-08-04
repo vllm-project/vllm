@@ -18,8 +18,8 @@ if HAS_TRITON:
 
     __all__ += [
         "fused_moe",
-        "fused_topk",
         "fused_experts",
+        "fused_topk",
         "get_config_file_name",
         "grouped_topk",
     ]
