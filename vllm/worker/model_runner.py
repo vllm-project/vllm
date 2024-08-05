@@ -1,3 +1,5 @@
+# This file has been modified by Neural Magic
+
 import dataclasses
 import gc
 import inspect
@@ -1742,10 +1744,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         return [output]
 
 
-class CUDAGraphRunner:
+# NOTE: this is nn.Module so the profiler can properly capture/group
+#  kernels calls made within the graph
+class CUDAGraphRunner(nn.Module):
 
     def __init__(self, model: nn.Module, backend_name: str,
                  attn_state: AttentionState, is_encoder_decoder_model: bool):
+        super().__init__()
         self.model = model
         self.backend_name = backend_name
         self.attn_state = attn_state
@@ -1891,9 +1896,6 @@ class CUDAGraphRunner:
             return self.output_buffers["hidden_states"]
 
         return self.output_buffers
-
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
