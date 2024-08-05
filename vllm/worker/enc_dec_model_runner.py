@@ -360,7 +360,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         encoder_seq_lens: List[int] = []
         if is_prompt:
             # Prefill phase.
-            cross_block_tables = self._empty_int32_tensor().view(num_seqs,-1)
+            cross_block_tables = self._empty_int32_tensor().view(num_seqs, -1)
 
             # Extract input tokens/positions, cross-attention slot-mapping,
             # & seq len from each sequence group metadata
