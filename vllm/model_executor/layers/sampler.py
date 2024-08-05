@@ -482,8 +482,9 @@ def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
     seq_groups: Optional[List[SequenceGroupToSample]] = None,
+    is_fallback: bool = False,
 ) -> torch.Tensor:
-    if num_samples > 1:
+    if num_samples > 1 and not is_fallback:
         probs = probs.repeat_interleave(num_samples, dim=0)
     if seq_groups is None:
         q = torch.empty_like(probs)
@@ -535,12 +536,9 @@ def _top_k_top_p_multinomial_with_flashinfer(
         top_ps,
     )
     if not success.all():
-        warnings.warn("Sampling failed, fallback to greedy sampling.",
+        warnings.warn("Sampling with FlashInfer failed, fallback.",
                       stacklevel=2)
-        probs = probs.masked_fill(torch.isnan(probs), 0.0)
-        argmax_ids = torch.argmax(probs, dim=-1)
-        batch_next_token_ids = torch.where(success, batch_next_token_ids,
-                                           argmax_ids)
+        return _multinomial(probs, num_samples, seq_groups, is_fallback=True)
     return batch_next_token_ids.view(-1, num_samples)
 
 
