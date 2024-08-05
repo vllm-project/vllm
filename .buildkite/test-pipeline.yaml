@@ -41,6 +41,11 @@ steps:
   fast_check: true
   source_file_dependencies:
   - vllm/
+  - tests/async_engine
+  - tests/test_inputs
+  - tests/multimodal
+  - tests/test_utils
+  - tests/worker
   commands:
   - pytest -v -s async_engine # Async Engine
   - pytest -v -s test_inputs.py
@@ -53,6 +58,7 @@ steps:
   fast_check: true
   source_file_dependencies:
   - vllm/
+  - tests/basic_correctness
   commands:
   # This flashinfer installation will fail on AMD ROCm, so it is set as optional.
   - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl || true
@@ -68,6 +74,7 @@ steps:
   source_file_dependencies:
   - vllm/core
   - vllm/distributed
+  - tests/core
   commands:
   - pytest -v -s core
 
@@ -76,6 +83,7 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/entrypoints
+  - tests/entrypoints
   commands:
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
@@ -86,6 +94,8 @@ steps:
   fast_check: true
   source_file_dependencies:
   - vllm/
+  - tests/distributed
+  - tests/spec_decode/e2e/test_integration_dist_tp4
   commands:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
@@ -96,6 +106,8 @@ steps:
 - label: Metrics, Tracing Test # 10min
   source_file_dependencies:
   - vllm/
+  - tests/metrics
+  - tests/tracing
   commands:
   - pytest -v -s metrics 
   - "pip install \
@@ -109,6 +121,7 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
+  - tests/test_regression
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -116,6 +129,8 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
+  - tests/engine
+  - tests/tokenization
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
@@ -139,6 +154,7 @@ steps:
 - label: Models Test # 1hr10min
   source_file_dependencies:
   - vllm/
+  - tests/models
   commands:
     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
     - pytest -v -s models -m \"not vlm\"
@@ -154,6 +170,7 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
+  - tests/prefix_caching
   commands:
     - pytest -v -s prefix_caching
 
@@ -161,17 +178,20 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
+  - tests/samplers
   command: pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/model_executor/layers
+  - tests/test_logits_processor
   command: pytest -v -s test_logits_processor.py
 
 - label: Speculative decoding tests # 22min
   source_file_dependencies:
   - vllm/spec_decode
+  - tests/spec_decode
   commands:
     # See https://github.com/vllm-project/vllm/issues/5152
     - export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -181,6 +201,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - csrc/punica
+  - tests/lora
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
 
@@ -188,6 +209,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/attention
+  - tests/kernels
   commands:
     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
     - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -197,6 +219,7 @@ steps:
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
+  - tests/tensorizer_loader
   commands:
     - apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -215,6 +238,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - tests/quantization
   command: pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
@@ -236,6 +260,7 @@ steps:
   num_gpus: 2
   source_file_dependencies:
   - vllm/distributed
+  - tests/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
@@ -246,6 +271,7 @@ steps:
   num_nodes: 2
   source_file_dependencies:
   - vllm/
+  - tests/distributed/test_same_node
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
@@ -259,6 +285,7 @@ steps:
   num_gpus: 2
   source_file_dependencies:
   - vllm/
+  - tests/distributed
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -273,6 +300,7 @@ steps:
   num_gpus: 4
   source_file_dependencies:
   - vllm/
+  - tests/distributed/test_pipeline_parallel
   commands:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
@@ -282,6 +310,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - csrc/punica
+  - tests/lora/test_long_context
   commands:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
