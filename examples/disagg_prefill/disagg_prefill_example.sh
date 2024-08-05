@@ -3,10 +3,8 @@
 # We will launch 2 vllm instances (1 for prefill and 1 for decode),
 # and then transfer the KV cache between them.
 
-export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
-# export NCCL_DEBUG=INFO
-export NCCL_BUFFSIZE=67108864
+export VLLM_PORT=12345
 
 # a function that waits vLLM server to start
 wait_for_server() {
@@ -18,7 +16,7 @@ wait_for_server() {
 }
 
 # prefilling instance
-VLLM_LOGGING_LEVEL=DEBUG VLLM_HOST_IP=$(hostname -I | awk '{print $1}') VLLM_PORT=2345 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0 python3 \
+VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
@@ -28,7 +26,7 @@ VLLM_LOGGING_LEVEL=DEBUG VLLM_HOST_IP=$(hostname -I | awk '{print $1}') VLLM_POR
     --max-model-len 10000 &
 
 # decoding instance
-VLLM_LOGGING_LEVEL=DEBUG VLLM_HOST_IP=$(hostname -I | awk '{print $1}') VLLM_PORT=2345 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=1 python3 \
+VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
@@ -46,39 +44,26 @@ wait_for_server 8200
 #   1. send the request to prefill instance, with max_tokens set to 1
 #   2. send the request again to decode instance, no modification
 
+# send to prefill instance, let it only do prefill by setting max_token=1
+curl -m 5 http://localhost:8100/v1/completions \
+-H "Content-Type: application/json" \
+-d '{
+"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"prompt": "'$i' San Francisco is a",
+"max_tokens": 1,
+"temperature": 0
+}'
 
-for i in {0..0}
-do
-  # send to prefill instance
-  curl -m 5 http://localhost:8100/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-  "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-  "prompt": "'$i' San Francisco is a",
-  "max_tokens": 1,
-  "temperature": 0
-  }'
+# send to decode instance
+curl -m 5 http://localhost:8100/v1/completions \
+-H "Content-Type: application/json" \
+-d '{
+"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"prompt": "'$i' San Francisco is a",
+"max_tokens": 50,
+"temperature": 0
+}'
 
-  curl -m 5 http://localhost:8100/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-  "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-  "prompt": "'$i' San Francisco is a",
-  "max_tokens": 1,
-  "temperature": 0
-  }'
 
-  # # send to decode instance
-  # curl -m 60 http://localhost:8200/v1/completions \
-  # -H "Content-Type: application/json" \
-  # -d '{
-  # "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-  # "prompt": "'$i' San Francisco is a",
-  # "max_tokens": 5,
-  # "temperature": 0
-  # }'
-
-done
-
-# kill command:
-# ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+# clean up
+ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
