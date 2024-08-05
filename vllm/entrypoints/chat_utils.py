@@ -158,7 +158,7 @@ def parse_chat_message_content(
     if role == 'assistant' and tool_calls is not None:
         messages = [
             ConversationMessage(role=role,
-                                content=cast(Union[str, None], content),
+                                content=cast(Optional[str], content),
                                 tool_calls=list(tool_calls))
         ]
         return ChatMessageParseResult(messages=messages, mm_futures=[])

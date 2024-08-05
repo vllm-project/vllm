@@ -160,7 +160,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # validation for OpenAI tools
             # tool_choice = "required" is not supported
-        if request.tool_choice != 'required':
+        if request.tool_choice == 'required':
             return self.create_error_response('tool_choice = "required" is not supported!')
 
             # "auto" tools requires --enable-api-tools --enable-auto-tool-choice and --tool-parser
