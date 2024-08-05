@@ -362,6 +362,8 @@ class WorkerWrapperBase:
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
+        import vllm.plugins  # noqa
+
         if self.worker_class_fn:
             worker_class = self.worker_class_fn()
         else:
