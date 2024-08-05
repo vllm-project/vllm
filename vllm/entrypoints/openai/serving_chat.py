@@ -158,6 +158,21 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))
 
+        # validation for OpenAI tools
+        try:
+            # tool_choice = "required" is not supported
+            assert(request.tool_choice != 'required', 'tool_choice="required" is not supported.')
+
+            # "auto" tools requires --enable-api-tools --enable-auto-tool-choice and --tool-parser
+            if request.tool_choice == 'auto':
+                assert(self.enable_auto_tools and self.tool_parser is not None,
+                       '"auto" tool choice requires --enable-auto-tool-choice and --tool-parser to be set')
+
+        except Exception as e:
+            logger.error('Error validating OpenAI tool configuration: %s', e)
+            return self.create_error_response(str(e))
+
+
         request_id = f"chat-{random_uuid()}"
         try:
 
@@ -380,8 +395,7 @@ class OpenAIServingChat(OpenAIServing):
                             previous_text=previous_texts[i],
                             current_text=output.text,
                             delta_text=delta_text,
-                            previous_token_ids=output.
-                            token_ids[:-1 * len(delta_token_ids)],
+                            previous_token_ids=output.token_ids[:-1 * len(delta_token_ids)],
                             current_token_ids=output.token_ids,
                             delta_token_ids=delta_token_ids)
                     else:
