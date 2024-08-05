@@ -28,7 +28,7 @@ class LoRARequest(msgspec.Struct, omit_defaults=True, array_like=True):
     __hash__ = AdapterRequest.__hash__
 
     def __post_init__(self):
-        if 'lora_local_path' in self.__dict__:
+        if 'lora_local_path' in self.__struct_fields__:
             warnings.warn(
                 "The 'lora_local_path' attribute is deprecated "
                 "and will be removed in a future version. "
