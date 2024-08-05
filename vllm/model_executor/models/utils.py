@@ -1,10 +1,21 @@
-from typing import Dict, List, Protocol, Tuple
+from typing import Dict, Iterable, List, Protocol, Tuple
 
 import torch
 from torch.func import functional_call
 
 from vllm.multimodal import BatchedTensors
 from vllm.utils import is_pin_memory_available
+
+
+def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
+    """
+    Helper function to load weights for inner models.
+    """
+    for name, loaded_weight in weights:
+        name = name.split(".")
+        if prefix == name.pop(0):
+            name = ".".join(name)
+            yield name, loaded_weight
 
 
 def merge_vision_embeddings(input_ids: torch.Tensor,
