@@ -29,8 +29,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest, ErrorResponse,
-                                              LivenessResponse,
-                                              ReadinessResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
 # yapf: enable
@@ -98,13 +96,13 @@ async def health() -> Response:
     name="readiness",
     tags=["technical"],
 )
-async def get_readiness() -> ReadinessResponse:
+async def get_readiness() -> Response:
     """Readiness probe for k8s"""
     d_worker = openai_serving_chat.engine.engine.model_executor.driver_worker
     model_weights = d_worker.model_runner.model_memory_usage
 
     if model_weights > 0:
-        return ReadinessResponse(ready="ok")
+        return Response(status_code=200)
 
 
 @router.post("/tokenize")

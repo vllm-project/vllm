@@ -720,17 +720,3 @@ class DetokenizeRequest(OpenAIBaseModel):
 
 class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
-    
-
-class ReadinessResponse(OpenAIBaseModel):
-    """Return object for readiness probe"""
-
-    ready: str = Field(None, title="Ready message")
-    model_config = {
-        "json_schema_extra": {
-            "examples": [{
-                    "ready": "ok"
-                }
-            ]
-        }
-    }

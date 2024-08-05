@@ -69,4 +69,3 @@ async def test_get_readiness_ok(client: openai.AsyncOpenAI):
     response = requests.get(base_url + "/ready")
 
     assert response.status_code == HTTPStatus.OK
-    assert response.json() == {"ready": "ok"}
