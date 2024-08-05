@@ -132,6 +132,7 @@ def test_mm_limits(image_assets, mm_registry, num_images, limit, is_valid):
         mm_registry.map_input(model_config, mm_inputs)
 
 
+# NOTE: We don't test zero images since the HF processor doesn't support it
 @pytest.mark.parametrize("num_images", [1, 2])
 def test_image_mapper_multi(image_assets, mm_registry, num_images):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
