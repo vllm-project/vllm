@@ -1,5 +1,5 @@
 import functools
-from typing import Dict, Optional, Sequence
+from typing import Dict, Mapping, Optional, Sequence
 
 from vllm.config import ModelConfig, MultiModalConfig
 from vllm.logger import init_logger
@@ -94,7 +94,7 @@ class MultiModalRegistry:
             input_dict = plugin.map_input(model_config, data_value)
 
             num_items = len(data_value) if isinstance(data_value, list) else 1
-            max_items = self.get_limit_per_prompt(model_config, plugin)
+            max_items = self._limits_by_model[model_config][data_key]
             if num_items > max_items:
                 raise ValueError(
                     f"You set {data_key}={max_items} (or defaulted to 1) in "
@@ -177,13 +177,12 @@ class MultiModalRegistry:
                     plugin.get_max_multimodal_tokens(model_config))
                    for key, plugin in self._plugins.items())
 
-    def get_limit_per_prompt(
+    def get_mm_limits_per_prompt(
         self,
         model_config: ModelConfig,
-        plugin: MultiModalPlugin,
-    ) -> int:
+    ) -> Mapping[str, int]:
         """
-        Get the maximum number of multi-modal inputs belonging to a specific
-        modality that are allowed per prompt for a model class.
+        Get the maximum number of multi-modal inputs for each modality
+        that are allowed per prompt for a model class.
         """
-        return self._limits_by_model[model_config][plugin.get_data_key()]
+        return self._limits_by_model[model_config]

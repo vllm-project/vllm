@@ -1,4 +1,5 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -13,8 +14,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -135,9 +135,11 @@ def get_max_llava_next_image_tokens(ctx: InputContext):
     )
 
 
-def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
+def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
+                              mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(LlavaNextConfig)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
     image_feature_size = get_max_llava_next_image_tokens(ctx)
 
@@ -145,12 +147,14 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
         seq_data = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
+            num_images,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
 
         mm_data = dummy_image_for_clip(
             vision_config,
+            num_images,
             image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
             image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         )

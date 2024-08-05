@@ -60,6 +60,7 @@ def dummy_seq_data_for_blip(
 
 def dummy_image_for_blip(
     hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
+    num_images: int,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -71,7 +72,7 @@ def dummy_image_for_blip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": [image] * num_images}
 
 
 def input_processor_for_blip(
