@@ -1,7 +1,7 @@
 import asyncio
-import concurrent.futures
 import os
 from collections import defaultdict
+from concurrent import futures
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -375,33 +375,26 @@ class RayGPUExecutor(DistributedGPUExecutor):
             # Start the driver worker task after all the ray workers'.
             if not use_dummy_driver:
                 # Driver task will run in this python process
-                if run_driver_in_background_thread:
-                    if not ray_worker_outputs:
-                        # no background thread required when there are
-                        # no concurrent worker tasks
-                        driver_output = self.driver_worker.execute_method(
-                            method, *driver_args, **driver_kwargs)
-                        all_worker_outputs = [driver_output]
-                    else:
-                        # Poll driver and worker tasks concurrently
-                        # in background threads
-                        with concurrent.futures.ThreadPoolExecutor(
-                                max_workers=2) as executor:
-                            driver_poll_thread = executor.submit(
-                                self.driver_worker.execute_method, method,
-                                *driver_args, **driver_kwargs)
-                            worker_poll_thread = executor.submit(
-                                ray.get, ray_worker_outputs)
+                if run_driver_in_background_thread and ray_worker_outputs:
+                    # If ray worker tasks exist, poll driver and worker
+                    # tasks concurrently in background threads
+                    with futures.ThreadPoolExecutor(max_workers=2) as executor:
+                        driver_poll_thread = executor.submit(
+                            self.driver_worker.execute_method, method,
+                            *driver_args, **driver_kwargs)
+                        worker_poll_thread = executor.submit(
+                            ray.get, ray_worker_outputs)
 
-                            for completed_future in concurrent.futures.as_completed(
-                                [driver_poll_thread, worker_poll_thread]):
-                                # Will raise exception if underlying thread raises
-                                res = completed_future.result()
-                                if not isinstance(res, list):
-                                    driver_output = [res]
-                                else:
-                                    worker_outputs = res
-                        all_worker_outputs = driver_output + worker_outputs
+                        for completed_future in futures.as_completed(
+                            [driver_poll_thread, worker_poll_thread]):
+                            # Will raise exception if
+                            # underlying thread raises
+                            res = completed_future.result()
+                            if not isinstance(res, list):
+                                driver_output = [res]
+                            else:
+                                worker_outputs = res
+                    all_worker_outputs = driver_output + worker_outputs
                 else:
                     driver_output = self.driver_worker.execute_method(
                         method, *driver_args, **driver_kwargs)
