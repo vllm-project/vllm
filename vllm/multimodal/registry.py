@@ -91,7 +91,6 @@ class MultiModalRegistry:
 
         for data_key, data_value in data.items():
             plugin = self._get_plugin(data_key)
-            input_dict = plugin.map_input(model_config, data_value)
 
             num_items = len(data_value) if isinstance(data_value, list) else 1
             max_items = self._limits_by_model[model_config][data_key]
@@ -101,6 +100,7 @@ class MultiModalRegistry:
                     f"`--limit-mm-per-prompt`, but found {num_items} items "
                     "in the same prompt.")
 
+            input_dict = plugin.map_input(model_config, data_value)
             for input_key, input_tensor in input_dict.items():
                 if input_key in merged_dict:
                     raise ValueError(f"The input mappers (keys={set(data)}) "
