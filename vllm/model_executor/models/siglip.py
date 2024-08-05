@@ -68,6 +68,7 @@ def dummy_seq_data_for_siglip(
 def dummy_image_for_siglip(
     hf_config: SiglipVisionConfig,
     num_images: int,
+    *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
 ):

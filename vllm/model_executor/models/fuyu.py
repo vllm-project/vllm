@@ -104,9 +104,10 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
 
 
 def dummy_image_for_fuyu(
+    num_images: int,
+    *,
     image_width: int,
     image_height: int,
-    num_images: int,
 ):
     image = Image.new("RGB", (image_width, image_height), color=0)
     return {"image": image if num_images == 1 else [image] * num_images}
@@ -116,8 +117,9 @@ def dummy_data_for_fuyu(ctx: InputContext, seq_len: int,
                         mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
     seq_data = dummy_seq_data_for_fuyu(ctx, seq_len, num_images)
-    mm_data = dummy_image_for_fuyu(MAX_IMAGE_FEATURE_SIZE_WIDTH,
-                                   MAX_IMAGE_FEATURE_SIZE_HEIGHT, num_images)
+    mm_data = dummy_image_for_fuyu(num_images,
+                                   image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+                                   image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT)
     return seq_data, mm_data
 
 
