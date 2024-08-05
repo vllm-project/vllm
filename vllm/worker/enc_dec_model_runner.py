@@ -354,13 +354,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # Since we are not supporting chunked prefill either the entire
         # batch is prefill or it is decode
         is_prompt = seq_group_metadata_list[0].is_prompt
-        num_seqs = len(seq_group_metadata_list)
 
         # Build encoder inputs
         encoder_seq_lens: List[int] = []
         if is_prompt:
             # Prefill phase.
-            cross_block_tables = self._empty_int32_tensor().view(num_seqs, -1)
+            cross_block_tables = self._empty_int32_tensor().view(
+                len(seq_group_metadata_list), -1)
 
             # Extract input tokens/positions, cross-attention slot-mapping,
             # & seq len from each sequence group metadata
