@@ -374,9 +374,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
             # Start the driver worker task after all the ray workers'.
             if not use_dummy_driver:
-                if not ray_worker_outputs or not run_driver_in_background_thread:
-                    # Corner case; no special handling as no concurrency with
-                    # worker tasks is involved
+                if not run_driver_in_background_thread or not ray_worker_outputs:
+                    # no background thread required when there are
+                    # no concurrent worker tasks
                     all_worker_outputs = [
                         self.driver_worker.execute_method(
                             method, *driver_args, **driver_kwargs)
