@@ -1,3 +1,4 @@
+import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
@@ -214,3 +215,17 @@ def nvtx_range(msg, *args, **kwargs):
         yield
     finally:
         torch.cuda.nvtx.range_pop()
+
+
+class Timer:
+    """Basic timer context manager for measuring CPU time.
+    """
+
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.end_time = time.time()
+        self.elapsed_time_s = self.end_time - self.start_time
+        self.elapsed_time_ms = self.elapsed_time_s * 1000
