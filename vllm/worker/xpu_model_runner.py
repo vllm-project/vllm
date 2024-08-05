@@ -9,12 +9,12 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import supports_vision
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
@@ -89,6 +89,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         kv_cache_dtype: Optional[str] = "auto",
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         *args,
         **kwargs,
     ):
@@ -120,8 +122,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         )
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
+        self.input_registry = input_registry
+        self.mm_registry = mm_registry
+        self.multi_modal_input_mapper = mm_registry \
+            .create_input_mapper(model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -166,7 +170,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         model_config = self.model_config
         mm_config = self.multimodal_config
 
-        mm_registry = MULTIMODAL_REGISTRY
+        input_registry = self.input_registry
+        mm_registry = self.mm_registry
         mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
 
         if supports_vision(self.model):
@@ -186,7 +191,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
 
-            seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
+            seq_data, dummy_multi_modal_data = input_registry \
                 .dummy_data_for_profiling(model_config, seq_len, mm_registry)
 
             seq = SequenceGroupMetadata(

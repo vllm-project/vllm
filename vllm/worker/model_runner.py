@@ -30,7 +30,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
-from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -42,7 +42,7 @@ from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalRegistry)
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -647,6 +647,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -699,8 +701,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ) if num_attn_heads else None
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
+        self.input_registry = input_registry
+        self.mm_registry = mm_registry
+        self.multi_modal_input_mapper = mm_registry \
+            .create_input_mapper(model_config)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -886,7 +890,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         model_config = self.model_config
         mm_config = self.multimodal_config
 
-        mm_registry = MULTIMODAL_REGISTRY
+        input_registry = self.input_registry
+        mm_registry = self.mm_registry
         mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
 
         if supports_vision(self.model):
@@ -908,7 +913,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
+            seq_data, dummy_multi_modal_data = input_registry \
                 .dummy_data_for_profiling(model_config, seq_len, mm_registry)
 
             seq = SequenceGroupMetadata(
