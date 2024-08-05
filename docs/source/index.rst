@@ -38,7 +38,7 @@ vLLM is flexible and easy to use with:
 
 * Seamless integration with popular HuggingFace models
 * High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-* Tensor parallelism support for distributed inference
+* Tensor parallelism and pipeline parallelism support for distributed inference
 * Streaming outputs
 * OpenAI-compatible API server
 * Support NVIDIA GPUs and AMD GPUs
@@ -105,6 +105,7 @@ Documentation
 
    quantization/supported_hardware
    quantization/auto_awq
+   quantization/bnb
    quantization/fp8
    quantization/fp8_e5m2_kvcache
    quantization/fp8_e4m3_kvcache
@@ -115,6 +116,12 @@ Documentation
 
    automatic_prefix_caching/apc
    automatic_prefix_caching/details
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Performance benchmarks
+
+   performance_benchmark/benchmarks
 
 .. toctree::
    :maxdepth: 2

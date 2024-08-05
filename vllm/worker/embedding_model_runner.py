@@ -5,13 +5,15 @@ import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.multimodal import MultiModalInputs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.model_runner import GPUModelRunnerBase, ModelInputForGPU
+from vllm.worker.model_runner import (GPUModelRunnerBase, ModelInputForGPU,
+                                      ModelInputForGPUBuilder)
 
 logger = init_logger(__name__)
 
@@ -28,6 +30,7 @@ class EmbeddingModelRunner(
         GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
         ModelInputForGPUWithPoolingMetadata)
+    _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def __init__(
         self,
@@ -40,6 +43,7 @@ class EmbeddingModelRunner(
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
     ):
         super().__init__(model_config,
@@ -51,6 +55,7 @@ class EmbeddingModelRunner(
                          lora_config=lora_config,
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
+                         prompt_adapter_config=prompt_adapter_config,
                          multimodal_config=multimodal_config)
 
     @torch.inference_mode()
@@ -71,6 +76,13 @@ class EmbeddingModelRunner(
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
+        if self.prompt_adapter_config:
+            assert model_input.prompt_adapter_requests is not None
+            assert model_input.prompt_adapter_mapping is not None
+            self.set_active_prompt_adapters(
+                model_input.prompt_adapter_requests,
+                model_input.prompt_adapter_mapping)
+
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -88,11 +100,16 @@ class EmbeddingModelRunner(
         kv_caches = [None] * num_layers
 
         execute_model_kwargs = {
-            "input_ids": model_input.input_tokens,
-            "positions": model_input.input_positions,
-            "kv_caches": kv_caches,
-            "attn_metadata": model_input.attn_metadata,
-            **(model_input.multi_modal_kwargs or {}),
+            "input_ids":
+            model_input.input_tokens,
+            "positions":
+            model_input.input_positions,
+            "kv_caches":
+            kv_caches,
+            "attn_metadata":
+            model_input.attn_metadata,
+            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                         device=self.device),
         }
 
         hidden_states = model_executable(**execute_model_kwargs)

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
-                    Type, Union)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -8,13 +7,13 @@ import torch.nn as nn
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import supports_vision
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
@@ -49,7 +48,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
     input_positions: Optional[torch.Tensor] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
+    multi_modal_kwargs: Optional[BatchedTensorInputs] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -88,6 +87,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         *args,
         **kwargs,
@@ -98,6 +98,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.cache_config = cache_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
@@ -107,9 +108,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
         self.kv_cache_dtype = kv_cache_dtype
         self.block_size = cache_config.block_size
-        self.max_context_len_to_capture = (
-            self.model_config.max_context_len_to_capture
-            if self.model_config is not None else 0)
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
@@ -247,7 +245,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 # just use seq_lens instead.
                 seq_lens,
                 self.device,
-                pin_memory=False)
+                pin_memory=False,
+                generators=self.get_generators(finished_requests_ids))
             # Broadcast the metadata.
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -336,11 +335,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                                        dtype=torch.int,
                                        device=self.device)
 
-        max_block_table_len = max(
-            len(block_table) for block_table in block_tables)
         block_tables = make_tensor_with_pad(
             block_tables,
-            max_len=max_block_table_len,
             pad=0,
             dtype=torch.int,
             device=self.device,
@@ -379,11 +375,16 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": model_input.input_tokens,
-            "positions": model_input.input_positions,
-            "kv_caches": kv_caches,
-            "attn_metadata": model_input.attn_metadata,
-            **(model_input.multi_modal_kwargs or {}),
+            "input_ids":
+            model_input.input_tokens,
+            "positions":
+            model_input.input_positions,
+            "kv_caches":
+            kv_caches,
+            "attn_metadata":
+            model_input.attn_metadata,
+            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                         device=self.device),
         }
 
         hidden_states = model_executable(**execute_model_kwargs)
@@ -407,7 +408,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               Mapping[str, BatchedTensors]]:
+               BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -499,8 +500,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             block_tables=torch.tensor([], device=self.device, dtype=torch.int),
         )
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)

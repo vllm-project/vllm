@@ -68,6 +68,8 @@ html_theme_options = {
     'use_repository_button': True,
     'use_edit_page_button': True,
 }
+html_static_path = ["_static"]
+html_js_files = ["custom.js"]
 
 # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
 READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
@@ -94,6 +96,7 @@ def setup(app):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
+    "aiohttp",
     "cpuinfo",
     "torch",
     "transformers",
@@ -108,6 +111,7 @@ autodoc_mock_imports = [
     "tqdm",
     "tensorizer",
     "pynvml",
+    "outlines",
 ]
 
 for mock_target in autodoc_mock_imports:
@@ -141,5 +145,6 @@ intersphinx_mapping = {
 }
 
 autodoc_preserve_defaults = True
+autodoc_warningiserror = True
 
 navigation_with_keys = False
