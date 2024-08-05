@@ -164,55 +164,48 @@ async def main(args):
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
-    # Read all the lines from the input file.
-    file_lines = [
-        line.strip()
-        for line in (await read_file(args.input_file)).strip().split("\n")
-        if line.strip()
-    ]
-
-    # Function that runs a single request.
-    run_request = None
-
-    # Determine the type of request (chat completion or embedding) based on the
-    # first request. Note that run_batch only supports one type of request for
-    # the entire input file.
-    first_request = BatchRequestInput.model_validate_json(file_lines[0])
-    if isinstance(first_request.body, ChatCompletionRequest):
-        openai_serving_chat = OpenAIServingChat(
-            engine,
-            model_config,
-            served_model_names,
-            args.response_role,
-            lora_modules=None,
-            prompt_adapters=None,
-            request_logger=request_logger,
-            chat_template=None,
-        )
-        run_request = lambda request: run_request_chat(openai_serving_chat,
-                                                       request)
-    elif isinstance(first_request.body, EmbeddingRequest):
-        openai_serving_embedding = OpenAIServingEmbedding(
-            engine,
-            model_config,
-            served_model_names,
-            request_logger=request_logger,
-        )
-        run_request = lambda request: run_request_embedding(
-            openai_serving_embedding, request)
-    else:
-        raise ValueError("Only /v1/chat/completions and /v1/embeddings are"
-                         "supported in the batch endpoint.")
-
-    assert run_request is not None
+    openai_serving_chat = None
+    openai_serving_embedding = None
 
     # Submit all requests in the file to the engine "concurrently".
     response_futures: List[Awaitable[BatchRequestOutput]] = []
-    for request_json in file_lines:
+    for request_json in (await read_file(args.input_file)).strip().split("\n"):
+        # Skip empty lines.
         request_json = request_json.strip()
         if not request_json:
             continue
+
         request = BatchRequestInput.model_validate_json(request_json)
+       
+        # Determine the type of request and set the appropriate handler.
+        if request.url == "/v1/chat/completions":
+            if openai_serving_chat is None:
+                openai_serving_chat = OpenAIServingChat(
+                    engine,
+                    model_config,
+                    served_model_names,
+                    args.response_role,
+                    lora_modules=None,
+                    prompt_adapters=None,
+                    request_logger=request_logger,
+                    chat_template=None,
+                )
+            run_request = lambda request: run_request_chat(openai_serving_chat,
+                                                        request)
+        elif request.url == "/v1/embeddings":
+            if openai_serving_embedding is None:
+                openai_serving_embedding = OpenAIServingEmbedding(
+                    engine,
+                    model_config,
+                    served_model_names,
+                    request_logger=request_logger,
+                )
+            run_request = lambda request: run_request_embedding(
+                openai_serving_embedding, request)
+        else:
+            raise ValueError("Only /v1/chat/completions and /v1/embeddings are"
+                            "supported in the batch endpoint.")
+
         response_futures.append(run_request(request))
 
     responses = await asyncio.gather(*response_futures)
