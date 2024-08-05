@@ -23,8 +23,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE = True
-
 
 class RayGPUExecutor(DistributedGPUExecutor):
 
@@ -373,12 +371,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
             # Start the driver worker task after all the ray workers'.
             if not use_dummy_driver:
-                if PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE:
-                    all_worker_outputs = ray.get([
-                        ray.put(
-                            self.driver_worker.execute_method(
-                                method, *driver_args, **driver_kwargs))
-                    ] + ray_worker_outputs)
+                if not ray_worker_outputs:
+                    # Corner case; no special handling as no concurrency with
+                    # worker tasks is involved
+                    all_worker_outputs = [
+                        self.driver_worker.execute_method(
+                            method, *driver_args, **driver_kwargs)
+                    ]
                 else:
                     # If not wanting to always store driver result in ray
                     # object store one can simply poll driver and worker
