@@ -357,7 +357,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables).to(
+            block_tables = torch.from_numpy(input_block_tables).to(
                 device, non_blocking=True)
 
             last_paged_kv_indptr = self.paged_kv_indptr[-1]

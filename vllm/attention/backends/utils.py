@@ -181,7 +181,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables).to(
+            block_tables = torch.from_numpy(input_block_tables).to(
                 device, non_blocking=True)
         else:
             block_tables = make_tensor_with_pad(
