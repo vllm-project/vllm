@@ -344,7 +344,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-    
+
         # load llm backbone
         llm_weights = filter_weights(llm_weights, "language_model")
         self.language_model.load_weights(llm_weights)
