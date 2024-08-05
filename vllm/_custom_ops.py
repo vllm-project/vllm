@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -14,11 +15,8 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
-    import vllm._moe_C
-
-with contextlib.suppress(ImportError):
     # ruff: noqa: F401
-    import vllm._punica_C
+    import vllm._moe_C
 
 
 def is_custom_op_supported(op_name: str) -> bool:
@@ -223,10 +221,10 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 # marlin_24
 def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
-                        workspace: torch.Tensor, num_bits: int, size_m: int,
-                        size_n: int, size_k: int) -> torch.Tensor:
+                        workspace: torch.Tensor, b_q_type: ScalarType,
+                        size_m: int, size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
-                                            workspace, num_bits, size_m,
+                                            workspace, b_q_type, size_m,
                                             size_n, size_k)
 
 
@@ -282,14 +280,22 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
-def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                     b_scales: torch.Tensor, b_zeros: torch.Tensor,
-                     g_idx: torch.Tensor, perm: torch.Tensor,
-                     workspace: torch.Tensor, num_bits: int, size_m: int,
-                     size_n: int, size_k: int, is_k_full: bool, has_zp: bool,
-                     use_fp32_reduce: bool) -> torch.Tensor:
+def gptq_marlin_gemm(a: torch.Tensor,
+                     b_q_weight: torch.Tensor,
+                     b_scales: torch.Tensor,
+                     b_zeros: torch.Tensor,
+                     g_idx: torch.Tensor,
+                     perm: torch.Tensor,
+                     workspace: torch.Tensor,
+                     b_q_type: ScalarType,
+                     size_m: int,
+                     size_n: int,
+                     size_k: int,
+                     is_k_full: bool,
+                     has_zp: bool = False,
+                     use_fp32_reduce: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
-                                         g_idx, perm, workspace, num_bits,
+                                         g_idx, perm, workspace, b_q_type,
                                          size_m, size_n, size_k, is_k_full,
                                          has_zp, use_fp32_reduce)
 
@@ -549,43 +555,6 @@ def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
 def register_graph_buffers(fa: int, handles: List[str],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
-
-
-# punica
-def dispatch_bgmv(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
-                                      scale)
-
-
-def dispatch_bgmv_low_level(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-    h_in: int,
-    h_out: int,
-    y_offset: int,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv_low_level(
-        y,
-        x,
-        w_t_all,
-        indicies,
-        layer_idx,
-        scale,
-        h_in,
-        h_out,
-        y_offset,
-    )
 
 
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456
