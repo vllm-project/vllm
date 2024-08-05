@@ -1,44 +1,41 @@
 """Compare the outputs of HF and distributed vLLM when using greedy sampling.
-The second test will hang if more than one test is run per command, so we need
-to run the tests one by one. The solution is to pass arguments (model name) by
-environment variables.
 
 Run:
 ```sh
-TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf \
-    test_multimodal_broadcast.py
-TEST_DIST_MODEL=microsoft/Phi-3-vision-128k-instruct \
-    test_multimodal_broadcast.py
+pytest -s -v test_multimodal_broadcast.py
 ```
 """
-import os
 
 import pytest
 
 from vllm.utils import cuda_device_count_stateless
 
-model = os.environ["TEST_DIST_MODEL"]
-
-if model.startswith("llava-hf/llava-1.5"):
-    from ..models.test_llava import models, run_test
-elif model.startswith("llava-hf/llava-v1.6"):
-    from ..models.test_llava_next import models, run_test
-else:
-    raise NotImplementedError(f"Unsupported model: {model}")
+from ..utils import fork_new_process_for_each_test
 
 
-@pytest.mark.parametrize("tensor_parallel_size", [2])
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets,
-                tensor_parallel_size: int, dtype: str, max_tokens: int,
-                num_logprobs: int) -> None:
-    if cuda_device_count_stateless() < tensor_parallel_size:
-        pytest.skip(
-            f"Need at least {tensor_parallel_size} GPUs to run the test.")
+@pytest.mark.skipif(cuda_device_count_stateless() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+@pytest.mark.parametrize("model, distributed_executor_backend", [
+    ("llava-hf/llava-1.5-7b-hf", "ray"),
+    ("llava-hf/llava-v1.6-mistral-7b-hf", "ray"),
+    ("llava-hf/llava-1.5-7b-hf", "mp"),
+    ("llava-hf/llava-v1.6-mistral-7b-hf", "mp"),
+])
+@fork_new_process_for_each_test
+def test_models(hf_runner, vllm_runner, image_assets, model: str,
+                distributed_executor_backend: str) -> None:
 
-    distributed_executor_backend = os.getenv("DISTRIBUTED_EXECUTOR_BACKEND")
+    dtype = "half"
+    max_tokens = 5
+    num_logprobs = 5
+    tensor_parallel_size = 2
+
+    if model.startswith("llava-hf/llava-1.5"):
+        from ..models.test_llava import models, run_test
+    elif model.startswith("llava-hf/llava-v1.6"):
+        from ..models.test_llava_next import models, run_test
+    else:
+        raise NotImplementedError(f"Unsupported model: {model}")
 
     run_test(
         hf_runner,
