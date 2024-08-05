@@ -302,23 +302,9 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
             use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_tower is not None:
-                    for (param_name, shard_name,
-                         shard_id) in stacked_params_mapping:
-                        if shard_name not in name:
-                            continue
-                        name = name.replace(shard_name, param_name)
-                        # Skip loading extra bias for GPTQ models.
-                        if name.endswith(".bias") and name not in params_dict:
-                            continue
-                        param = params_dict[name]
-                        weight_loader = param.weight_loader
-                        weight_loader(param, loaded_weight, shard_id)
-                        break
-                    else:
-                        # Skip loading extra bias for GPTQ models.
-                        if name.endswith(".bias") and name not in params_dict:
-                            continue
-                        use_default_weight_loading = True
+                    # We only do sharding for language model and
+                    # not vision model for now.
+                    use_default_weight_loading = True
             else:
                 for (param_name, shard_name,
                      shard_id) in stacked_params_mapping:
