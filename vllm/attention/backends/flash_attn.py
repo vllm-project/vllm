@@ -101,6 +101,7 @@ def flash_attn_with_kvcache(
         block_table=block_table,
         softmax_scale=softmax_scale,
         causal=causal,
+        softcap=softcap,
         alibi_slopes=alibi_slopes,
         softcap=softcap,
     )
