@@ -402,10 +402,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     all_worker_outputs = driver_output + worker_outputs
             else:
                 assert self.driver_dummy_worker is not None
-                all_worker_outputs = ray.get([
-                    self.driver_dummy_worker.execute_method.remote(
-                        method, *driver_args, **driver_kwargs)
-                ] + ray_worker_outputs)
+                driver_output = self.driver_dummy_worker.execute_method.remote(
+                    method, *driver_args, **driver_kwargs)
+                all_worker_outputs = ray.get([driver_output] +
+                                             ray_worker_outputs)
         else:
             all_worker_outputs = ray.get(ray_worker_outputs)
 
