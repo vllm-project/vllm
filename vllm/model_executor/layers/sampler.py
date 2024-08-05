@@ -515,14 +515,16 @@ def _top_k_top_p_multinomial(
         uniform_samples = torch.rand((max_top_k_round, batch_size),
                                      device=probs.device)
     else:
-        uniform_samples_cpu = np.empty((max_top_k_round, batch_size))
+        uniform_samples_cpu = np.empty((max_top_k_round, batch_size),
+                                       dtype=np.float32)
         sample_idx = 0
         for seq_group in seq_groups:
             seq_ids = seq_group.seq_ids
             stride = len(seq_ids) * num_samples
             assert seq_group.generator is not None
             uniform_samples_cpu[:, sample_idx:sample_idx + stride] = \
-                seq_group.generator.random((max_top_k_round, stride))
+                seq_group.generator.random((max_top_k_round, stride),
+                                           dtype=np.float32)
             sample_idx += stride
         uniform_samples = async_numpy_to_tensor(uniform_samples_cpu,
                                                 probs.device)
@@ -629,8 +631,8 @@ def _sample_with_torch(
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
-                sampled_token_ids_tensor[
-                    long_sample_indices] = multinomial_samples[sampling_type]
+                sampled_token_ids_tensor[long_sample_indices] = \
+                    multinomial_samples[sampling_type].to(torch.long)
 
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
