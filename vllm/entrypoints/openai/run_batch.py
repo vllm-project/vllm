@@ -11,9 +11,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
-                                              ChatCompletionRequest,
                                               ChatCompletionResponse,
-                                              EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -164,8 +162,9 @@ async def main(args):
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
-    openai_serving_chat = None
-    openai_serving_embedding = None
+    # Initialize the openai serving objects.
+    serving_chat = None
+    serving_embedding = None
 
     # Submit all requests in the file to the engine "concurrently".
     response_futures: List[Awaitable[BatchRequestOutput]] = []
@@ -176,37 +175,32 @@ async def main(args):
             continue
 
         request = BatchRequestInput.model_validate_json(request_json)
-       
-        # Determine the type of request and set the appropriate handler.
+
+        # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            if openai_serving_chat is None:
-                openai_serving_chat = OpenAIServingChat(
-                    engine,
-                    model_config,
-                    served_model_names,
-                    args.response_role,
-                    lora_modules=None,
-                    prompt_adapters=None,
-                    request_logger=request_logger,
-                    chat_template=None,
-                )
-            run_request = lambda request: run_request_chat(openai_serving_chat,
-                                                        request)
+            serving_chat = serving_chat or OpenAIServingChat(
+                engine,
+                model_config,
+                served_model_names,
+                args.response_role,
+                lora_modules=None,
+                prompt_adapters=None,
+                request_logger=request_logger,
+                chat_template=None,
+            )
+            response_futures.append(run_request_chat(serving_chat, request))
         elif request.url == "/v1/embeddings":
-            if openai_serving_embedding is None:
-                openai_serving_embedding = OpenAIServingEmbedding(
-                    engine,
-                    model_config,
-                    served_model_names,
-                    request_logger=request_logger,
-                )
-            run_request = lambda request: run_request_embedding(
-                openai_serving_embedding, request)
+            serving_embedding = serving_embedding or OpenAIServingEmbedding(
+                engine,
+                model_config,
+                served_model_names,
+                request_logger=request_logger,
+            )
+            response_futures.append(
+                run_request_embedding(serving_embedding, request))
         else:
             raise ValueError("Only /v1/chat/completions and /v1/embeddings are"
-                            "supported in the batch endpoint.")
-
-        response_futures.append(run_request(request))
+                             "supported in the batch endpoint.")
 
     responses = await asyncio.gather(*response_futures)
 
