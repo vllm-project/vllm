@@ -71,7 +71,7 @@ def dummy_image_for_clip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": [image] * num_images}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
 def input_processor_for_clip(

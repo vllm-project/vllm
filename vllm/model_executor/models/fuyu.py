@@ -109,7 +109,7 @@ def dummy_image_for_fuyu(
     num_images: int,
 ):
     image = Image.new("RGB", (image_width, image_height), color=0)
-    return {"image": [image] * num_images}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
 def dummy_data_for_fuyu(ctx: InputContext, seq_len: int,

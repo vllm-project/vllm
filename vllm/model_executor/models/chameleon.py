@@ -87,7 +87,7 @@ def dummy_image_for_chameleon(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": [image] * num_images}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
 def dummy_data_for_chameleon(ctx: InputContext, seq_len: int,
