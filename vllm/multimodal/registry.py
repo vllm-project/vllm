@@ -1,4 +1,5 @@
 import functools
+from collections import defaultdict
 from typing import Dict, Mapping, Optional, Sequence
 
 from vllm.config import ModelConfig, MultiModalConfig
@@ -26,7 +27,12 @@ class MultiModalRegistry:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
         self._init_limits_per_plugin = {k: 0 for k in self._plugins}
-        self._limits_by_model: Dict[ModelConfig, Dict[str, int]] = {}
+
+        # NOTE: get_max_multimodal_tokens is only called for multi-modal models,
+        # but dummy_data_for_profiling is called for all models, which in turn
+        # invokes get_mm_limits_per_prompt.
+        self._limits_by_model: Dict[ModelConfig, Dict[str, int]] = defaultdict(
+            lambda: self._init_limits_per_plugin)
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
@@ -185,10 +191,4 @@ class MultiModalRegistry:
         Get the maximum number of multi-modal inputs for each modality
         that are allowed per prompt for a model class.
         """
-        # NOTE: get_max_multimodal_tokens is only called for multi-modal models,
-        # but dummy_data_for_profiling is called for all models, which in turn
-        # invokes this function.
-        return self._limits_by_model.get(
-            model_config,
-            self._init_limits_per_plugin,
-        )
+        return self._limits_by_model[model_config]
