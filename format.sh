@@ -242,12 +242,6 @@ echo 'vLLM isort: Done'
 # NOTE: Keep up to date with .github/workflows/clang-format.yml
 CLANG_FORMAT_EXCLUDES=(
     'csrc/moe/topk_softmax_kernels.cu'
-    'csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu'
-    'csrc/punica/bgmv/bgmv_config.h'
-    'csrc/punica/bgmv/bgmv_impl.cuh'
-    'csrc/punica/bgmv/vec_dtypes.cuh'
-    'csrc/punica/punica_ops.cu'
-    'csrc/punica/type_convert.h'
 )
 
 # Format specified files with clang-format
