@@ -187,7 +187,7 @@ class MultiModalRegistry:
         """
         # NOTE: get_max_multimodal_tokens is only called for multi-modal models,
         # but dummy_data_for_profiling is called for all models, which in turn
-        # invoke this function.
+        # invokes this function.
         return self._limits_by_model.get(
             model_config,
             self._init_limits_per_plugin,
