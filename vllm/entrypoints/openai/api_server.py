@@ -116,8 +116,6 @@ async def get_readiness() -> ReadinessResponse:
 
     if model_weights > 0:
         return ReadinessResponse(ready="ok")
-    else:
-        return ReadinessResponse(ready="ko")
 
 
 @router.post("/tokenize")
