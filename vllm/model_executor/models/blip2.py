@@ -20,7 +20,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .utils import merge_vision_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -470,7 +470,7 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_blip2_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
-class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
+class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: Blip2Config,

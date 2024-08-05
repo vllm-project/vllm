@@ -39,7 +39,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .utils import merge_vision_embeddings
 
 logger = init_logger(__name__)
@@ -214,7 +214,7 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_fuyu_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_fuyu)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
-class FuyuForCausalLM(nn.Module, SupportsVision):
+class FuyuForCausalLM(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: FuyuConfig,

@@ -10,10 +10,10 @@ logger = init_logger(__name__)
 
 
 @runtime_checkable
-class SupportsVision(Protocol):
+class SupportsMultiModal(Protocol):
     """The interface required for all vision language models (VLMs)."""
 
-    supports_vision: ClassVar[Literal[True]] = True
+    supports_multimodal: ClassVar[Literal[True]] = True
     """
     A flag that indicates this model supports vision inputs.
 
@@ -29,30 +29,31 @@ class SupportsVision(Protocol):
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
 @runtime_checkable
-class _SupportsVisionType(Protocol):
-    supports_vision: Literal[True]
+class _SupportsMultiModalType(Protocol):
+    supports_multimodal: Literal[True]
 
     def __call__(self, *, multimodal_config: MultiModalConfig) -> None:
         ...
 
 
 @overload
-def supports_vision(model: Type[object]) -> TypeGuard[Type[SupportsVision]]:
+def supports_multimodal(
+        model: Type[object]) -> TypeGuard[Type[SupportsMultiModal]]:
     ...
 
 
 @overload
-def supports_vision(model: object) -> TypeGuard[SupportsVision]:
+def supports_multimodal(model: object) -> TypeGuard[SupportsMultiModal]:
     ...
 
 
-def supports_vision(
+def supports_multimodal(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsVision]], TypeGuard[SupportsVision]]:
+) -> Union[TypeGuard[Type[SupportsMultiModal]], TypeGuard[SupportsMultiModal]]:
     if isinstance(model, type):
-        return isinstance(model, _SupportsVisionType)
+        return isinstance(model, _SupportsMultiModalType)
 
-    return isinstance(model, SupportsVision)
+    return isinstance(model, SupportsMultiModal)
 
 
 @runtime_checkable
