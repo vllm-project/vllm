@@ -227,10 +227,18 @@ class VocabParallelEmbedding(torch.nn.Module):
             linear_method = quant_config.get_quant_method(self, prefix=prefix)
         if linear_method is None:
             linear_method = UnquantizedEmbeddingMethod()
-        if not method_has_implemented_embedding(type(linear_method)):
+
+        # If we are making an embedding layer, then our quantization linear
+        # method must implement the embedding operation. If we are another
+        # layer type like ParallelLMHead, this is not important.
+        is_embedding_layer = type(self.__class__) is VocabParallelEmbedding
+        linear_method_implements_embedding = method_has_implemented_embedding(
+            type(linear_method))
+        if is_embedding_layer and not linear_method_implements_embedding:
             raise NotImplementedError(
                 f"The class {type(linear_method).__name__} must implement "
-                "the 'embedding' method.")
+                "the 'embedding' method, see UnquantizedEmbeddingMethod.")
+
         self.linear_method: QuantizeMethodBase = linear_method
 
         if params_dtype is None:
