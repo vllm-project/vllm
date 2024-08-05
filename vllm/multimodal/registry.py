@@ -185,4 +185,10 @@ class MultiModalRegistry:
         Get the maximum number of multi-modal inputs for each modality
         that are allowed per prompt for a model class.
         """
-        return self._limits_by_model[model_config]
+        # NOTE: get_max_multimodal_tokens is only called for multi-modal models,
+        # but dummy_data_for_profiling is called for all models, which in turn
+        # invoke this function.
+        return self._limits_by_model.get(
+            model_config,
+            self._init_limits_per_plugin,
+        )
