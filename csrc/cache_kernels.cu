@@ -159,7 +159,8 @@ __global__ void reshape_and_cache_kernel(
                                          // block_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
-    const int head_size, const int block_size, const int x,
+//     const int head_size, const int block_size, const int x,
+    const int head_size, const int block_size,
     const float kv_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -167,7 +168,7 @@ __global__ void reshape_and_cache_kernel(
     // Padding token that should be ignored.
     return;
   }
-
+    int x =1 ;
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
@@ -286,7 +287,8 @@ __global__ void reshape_and_cache_vmm_kernel(
           reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
           reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
           slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
-          num_heads, head_size, block_size, x, kv_scale);
+          num_heads, head_size, block_size,kv_scale);
+//           num_heads, head_size, block_size,x, kv_scale);
 
 void reshape_and_cache(
     torch::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -301,7 +303,8 @@ void reshape_and_cache(
   int num_heads = key.size(1);
   int head_size = key.size(2);
   int block_size = key_cache.size(3);
-  int x = key_cache.size(4);
+//   int x = key_cache.size(4);
+  int x = 1;
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);

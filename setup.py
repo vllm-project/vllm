@@ -48,7 +48,8 @@ def is_ccache_available() -> bool:
 
 
 def is_ninja_available() -> bool:
-    return which("ninja") is not None
+    # return which("ninja") is not None
+    return False
 
 
 def remove_prefix(text, prefix):
@@ -173,7 +174,8 @@ class cmake_build_ext(build_ext):
             # Default build tool to whatever cmake picks.
             build_tool = []
         subprocess.check_call(
-            ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
+            # ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
+            ['cmake', ext.cmake_lists_dir, *cmake_args],
             cwd=self.build_temp)
 
     def build_extensions(self) -> None:

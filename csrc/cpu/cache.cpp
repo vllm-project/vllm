@@ -114,7 +114,8 @@ void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
   int num_heads = key.size(1);
   int head_size = key.size(2);
   int block_size = key_cache.size(3);
-  int x = key_cache.size(4);
+//  int x = key_cache.size(4);
+  int x = 1;
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
