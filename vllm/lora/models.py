@@ -248,7 +248,7 @@ class LoRAModel(AdapterModel):
                     f" target modules in {expected_lora_modules}"
                     f" but received {unexpected_modules}."
                     f" Please verify that the loaded LoRA module is correct")
-            tensors = torch.load(lora_bin_file_path, map_location="device")
+            tensors = torch.load(lora_bin_file_path, map_location=device)
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
@@ -258,7 +258,7 @@ class LoRAModel(AdapterModel):
                 new_embeddings_tensor_path)
         elif os.path.isfile(new_embeddings_bin_file_path):
             embeddings = torch.load(new_embeddings_bin_file_path,
-                                    map_location="device")
+                                    map_location=device)
 
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
