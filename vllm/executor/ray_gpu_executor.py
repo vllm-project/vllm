@@ -380,6 +380,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
                                 method, *driver_args, **driver_kwargs))
                     ] + ray_worker_outputs)
                 else:
+                    # If not wanting to always store driver result in ray object
+                    # store one can simply poll driver and worker tasks concurrently
+                    # in background threads
                     with concurrent.futures.ThreadPoolExecutor(
                             max_workers=2) as executor:
                         driver_poll_thread = executor.submit(
