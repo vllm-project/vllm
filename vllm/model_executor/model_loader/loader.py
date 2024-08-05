@@ -142,6 +142,25 @@ def _get_model_initialization_kwargs(
     return extra_kwargs
 
 
+def _build_model(
+    model_class: Type[nn.Module],
+    hf_config: PretrainedConfig,
+    cache_config: Optional[CacheConfig],
+    quant_config: Optional[QuantizationConfig],
+    *,
+    lora_config: Optional[LoRAConfig],
+    multimodal_config: Optional[MultiModalConfig],
+    scheduler_config: Optional[SchedulerConfig]) -> nn.Module:
+    extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
+                                                    multimodal_config,
+                                                    scheduler_config)
+
+    return model_class(config=hf_config,
+                       cache_config=cache_config,
+                       quant_config=quant_config,
+                       **extra_kwargs)
+
+
 def _initialize_model(
         model_config: ModelConfig,
         load_config: LoadConfig,
@@ -150,7 +169,10 @@ def _initialize_model(
         cache_config: CacheConfig,
         scheduler_config: Optional[SchedulerConfig] = None) -> nn.Module:
     """Initialize a model with the given configurations."""
-    return init_model_from_hf(
+    model_class, _ = get_model_architecture(model_config)
+
+    return _build_model(
+        model_class,
         model_config.hf_config,
         quant_config=_get_quantization_config(model_config, load_config),
         lora_config=lora_config,
@@ -162,7 +184,7 @@ def _initialize_model(
 
 def init_model_from_hf(
     hf_config: PretrainedConfig,
-    cache_config: Optional[CacheConfig],
+    cache_config: CacheConfig,
     quant_config: Optional[QuantizationConfig],
     *,
     lora_config: Optional[LoRAConfig] = None,
@@ -170,14 +192,16 @@ def init_model_from_hf(
     scheduler_config: Optional[SchedulerConfig] = None,
 ) -> nn.Module:
     model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
-    extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
-                                                    multimodal_config,
-                                                    scheduler_config)
 
-    return model_class(config=hf_config,
-                       cache_config=cache_config,
-                       quant_config=quant_config,
-                       **extra_kwargs)
+    return _build_model(
+        model_class,
+        hf_config,
+        cache_config,
+        quant_config,
+        lora_config=lora_config,
+        multimodal_config=multimodal_config,
+        scheduler_config=scheduler_config,
+    )
 
 
 class BaseModelLoader(ABC):
