@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
@@ -815,6 +816,9 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
+            _use_delta=(
+                envs.VLLM_USE_RAY_SPMD_WORKER
+                    and parallel_config.use_ray)
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

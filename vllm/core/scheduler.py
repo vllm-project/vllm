@@ -6,7 +6,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-import vllm.envs as envs
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
@@ -998,9 +997,7 @@ class Scheduler:
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            # When SPMD mode is enabled, we only send delta data except for
-            # the first request to reduce serialization cost.
-            if is_first_prefill or not envs.VLLM_USE_RAY_SPMD_WORKER:
+            if is_first_prefill or not self.scheduler_config._use_delta:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1021,7 +1018,8 @@ class Scheduler:
                     prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
             else:
-                # Delta is used only for spmd workers.
+                # When SPMD mode is enabled, we only send delta data except for
+                # the first request to reduce serialization cost.
                 seq_data_delta = {}
                 for id, data in seq_data.items():
                     seq_data_delta[id] = data.get_delta()

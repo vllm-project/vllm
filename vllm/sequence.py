@@ -227,6 +227,7 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
         """
         self._num_computed_tokens = 0
         self._stage = SequenceStage.PREFILL
+        self._new_appended_tokens = []
 
     def get_num_uncomputed_tokens(self) -> int:
         """Return the number of prefill tokens that are not computed."""
