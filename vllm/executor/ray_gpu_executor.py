@@ -1,10 +1,11 @@
 import asyncio
 import os
+from array import array
 from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
 import msgspec
-from array import array
 
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
@@ -36,7 +37,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
         # Currently, this requires USE_RAY_SPMD_WORKER=True.
         self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG
-        self.i = 0
         # If the env var is set, then we do not distinguish between the
         # "driver worker" vs other workers. Also, the rank 0 worker will
         # be executed in a remote Ray worker. Currently this requires
@@ -307,27 +307,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        # s = time.time()
-        # import pickle
-        # serialized_data = pickle.dumps(execute_model_req)
-
         serialized_data = self.input_encoder.encode(execute_model_req)
-        # # Open a file in binary write mode
-        # import sys
-        # if sys.getsizeof(serialized_data) > 60000:
-        #     with open('example.bin', 'wb') as file:
-        #         # Write bytes to the file
-        #         file.write(serialized_data)
-
-        # print("SANG-TODO input serialization takes "
-        #       f"{(time.time() - s) * 1000} ms index: {self.i}")
-
         outputs = ray.get(self.forward_dag.execute(serialized_data))
-        # output = pickle.loads(outputs[0])
         output = self.output_decoder.decode(outputs[0])
-        # print(f"SANG-TODO e2e takes {(time.time() - s) * 1000} "
-        #       f"ms index: {self.i}")
-        self.i += 1
         return output
 
     def _run_workers(

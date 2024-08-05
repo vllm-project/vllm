@@ -1,6 +1,7 @@
+from array import array
 from itertools import chain, count
 from typing import Iterator, List, Tuple
-from array import array
+
 import torch
 
 from vllm import SamplingParams

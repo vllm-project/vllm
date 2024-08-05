@@ -1,7 +1,8 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional, Union
 from array import array
+from typing import Optional, Union
+
 import torch
 import torch.nn as nn
 from PIL import Image

@@ -1,8 +1,9 @@
 import warnings
 from typing import Optional
 
-from vllm.adapter_commons.request import AdapterRequest
 import msgspec
+
+from vllm.adapter_commons.request import AdapterRequest
 
 
 class LoRARequest(msgspec.Struct, omit_defaults=True, array_like=True):

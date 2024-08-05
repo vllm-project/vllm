@@ -1,6 +1,7 @@
-from typing import List, Optional, Tuple, Type, Any, Union
-import msgspec
 from array import array
+from typing import Any, List, Optional, Tuple, Type, Union
+
+import msgspec
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -24,7 +25,6 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
-            self.i = 0
 
             def dec_hook(type: Type, obj: Any) -> Any:
                 if type is array:
@@ -50,31 +50,26 @@ try:
             return node_id, gpu_ids
 
         def execute_model_spmd(
-            self, req_or_tuple: Union[bytes, Tuple[
-                bytes, Optional[IntermediateTensors]]]
+            self, req_or_tuple: Union[bytes,
+                                      Tuple[bytes,
+                                            Optional[IntermediateTensors]]]
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
 
             Args:
-                req_or_tuple: A requset or a tuple containing the
+                req_or_tuple: A request or a tuple containing the
                     request and intermediate tensors. Intermediate tensors are
                     None unless if it is provided because it is > 0 pipeline
                     stage. The request is serialized by msgspec.
             """
-            # s = time.time()
             if isinstance(req_or_tuple, bytes):
                 serialized_data, intermediate_tensors = req_or_tuple, None
             else:
                 serialized_data, intermediate_tensors = req_or_tuple
-            execute_model_req = self.input_decoder.decode(
-                serialized_data)
 
-            # import pickle
-            # execute_model_req: ExecuteModelRequest = (
-            #     pickle.loads(execute_model_req))
-            # print("SANG-TODO input deserialization takes "
-            #       f"{(time.time() - s) * 1000} ms index: {self.i}")
+            execute_model_req = self.input_decoder.decode(serialized_data)
+
             # TODO(swang): This is needed right now because Ray aDAG executes
             # on a background thread, so we need to reset torch's current
             # device.
@@ -91,10 +86,6 @@ try:
             else:
                 output = self.output_encoder.encode(output)
 
-            # output = pickle.dumps(output)
-            # print("SANG-TODO worker takes "
-            #       f"{(time.time() - s) * 1000} ms index: {self.i}")
-            self.i += 1
             return output
 
     ray_import_err = None

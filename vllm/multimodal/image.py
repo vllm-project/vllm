@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Optional, Tuple, TypeVar, Any
+from typing import Any, List, Optional, Tuple, TypeVar
 
 import torch
 from PIL import Image

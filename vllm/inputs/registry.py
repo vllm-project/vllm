@@ -1,5 +1,5 @@
-from array import array
 import functools
+from array import array
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type,
                     TypeVar)

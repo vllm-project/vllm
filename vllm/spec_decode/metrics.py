@@ -1,7 +1,7 @@
 import time
 from typing import Callable, Optional
-import msgspec
 
+import msgspec
 import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (

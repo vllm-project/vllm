@@ -1,7 +1,8 @@
 """Minimal implementation of CLIPVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional
 from array import array
+from typing import Optional
+
 import torch
 import torch.nn as nn
 from PIL import Image

@@ -1,5 +1,6 @@
-from vllm.adapter_commons.request import AdapterRequest
 import msgspec
+
+from vllm.adapter_commons.request import AdapterRequest
 
 
 class PromptAdapterRequest(msgspec.Struct, array_like=True,

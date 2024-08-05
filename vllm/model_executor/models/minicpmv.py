@@ -23,9 +23,9 @@
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
+from array import array
 from functools import partial
 from typing import Dict, Iterable, List, Optional, Tuple, Union
-from array import array
 
 import numpy as np
 import torch

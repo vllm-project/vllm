@@ -1,11 +1,11 @@
 """Sampling parameters for text generation."""
 import copy
 from enum import IntEnum
-from typing import Any, Callable, Dict, List, Optional, Union, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
+import msgspec
 import torch
 from typing_extensions import Annotated
-import msgspec
 
 from vllm.logger import init_logger
 

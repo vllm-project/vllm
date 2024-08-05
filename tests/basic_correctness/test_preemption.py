@@ -219,7 +219,7 @@ def test_swap_infeasible(
             # decode blocks are not enough to finish.
             num_gpu_blocks_override=prefill_blocks + decode_blocks,
             max_model_len=(prefill_blocks + decode_blocks) * BLOCK_SIZE,
-            # worker_use_ray=worker_use_ray,
+            worker_use_ray=worker_use_ray,
     ) as vllm_model:
         sampling_params = SamplingParams(n=beam_width,
                                          use_beam_search=True,

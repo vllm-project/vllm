@@ -1,7 +1,8 @@
+from array import array
 from functools import cached_property
 from typing import (Any, Dict, Iterable, List, Literal, Optional, Tuple,
                     TypedDict)
-from array import array
+
 import torch
 import torch.nn.functional as F
 from PIL import Image

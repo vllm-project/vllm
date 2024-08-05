@@ -18,9 +18,9 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           IntermediateTensors)
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SamplerOutput, SequenceGroupMetadata,
+                           SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -318,13 +318,6 @@ class Worker(LocalOrDistributedWorkerBase):
             new_seq_group_metadata_list.append(
                 self._seq_group_metadata_cache[request_id])
         return new_seq_group_metadata_list
-
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        output = super().execute_model(execute_model_req)
-        return output
 
     def _execute_model_spmd(
         self,

@@ -1,5 +1,6 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 from array import array
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+
 import torch
 from PIL import Image
 from torch import nn

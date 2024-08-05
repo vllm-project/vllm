@@ -6,17 +6,17 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
-                    Union, Any)
-
-import torch
+from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
+                    Tuple, Union)
 
 import msgspec
+import torch
+
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.base import MultiModalDataDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.multimodal.base import MultiModalDataDict
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
@@ -132,10 +132,10 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
-
-    # Used to get delta input.
-    _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
+
+    # Below fields are used to get delta input.
+    _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self, ) -> None:
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(

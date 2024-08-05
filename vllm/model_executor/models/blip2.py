@@ -1,5 +1,6 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 from array import array
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+
 import torch
 import torch.nn as nn
 from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionConfig,

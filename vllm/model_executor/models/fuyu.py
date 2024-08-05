@@ -16,8 +16,9 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 from array import array
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
