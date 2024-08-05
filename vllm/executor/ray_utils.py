@@ -87,7 +87,7 @@ try:
                                                      intermediate_tensors)
             # Pipeline model request and output to the next pipeline stage.
             if isinstance(output, IntermediateTensors):
-                output = self.output_encoder.encode(execute_model_req), output
+                output = serialized_data, output
             else:
                 output = self.output_encoder.encode(output)
 
