@@ -20,7 +20,7 @@ if is_hpu():
     except ImportError:
         logger.warning("Could not import HPU FusedRoPE kernel. "
                        "vLLM will use forward_native implementation of RoPE.")
-    FusedRoPE = None
+        FusedRoPE = None
 else:
     FusedRoPE = None
 
