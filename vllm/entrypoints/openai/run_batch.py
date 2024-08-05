@@ -7,10 +7,13 @@ import aiohttp
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    BatchRequestInput, BatchRequestOutput, BatchResponseData,
-    ChatCompletionRequest, ChatCompletionResponse, EmbeddingRequest,
-    EmbeddingResponse, ErrorResponse)
+from vllm.entrypoints.openai.protocol import (BatchRequestInput,
+                                              BatchRequestOutput,
+                                              BatchResponseData,
+                                              ChatCompletionRequest,
+                                              ChatCompletionResponse,
+                                              EmbeddingRequest,
+                                              EmbeddingResponse, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
