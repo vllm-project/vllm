@@ -28,7 +28,8 @@ from vllm.sequence import SequenceData
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
-    assert image_size % patch_size == 0
+    # Since interpolation is applied, the image size need not be divisible
+    # assert image_size % patch_size == 0
     return image_size // patch_size
 
 
