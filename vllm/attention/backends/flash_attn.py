@@ -31,7 +31,8 @@ torch.library.define("vllm::flash_attn_varlen_func",
                       "bool causal, "
                       "(int, int) window_size, "
                       "float[]? alibi_slopes, "
-                      "Tensor? block_table"
+                      "Tensor? block_table, "
+                      "float? softcap"
                       ") -> Tensor"))
 
 
@@ -50,6 +51,7 @@ def _flash_attn_varlen_func(
     window_size,
     alibi_slopes,
     block_table,
+    softcap,
 ):
     return flash_attn_varlen_func(
         q=q,
@@ -62,6 +64,7 @@ def _flash_attn_varlen_func(
         softmax_scale=softmax_scale,
         causal=causal,
         window_size=window_size,
+        softcap=softcap,
         alibi_slopes=alibi_slopes,
         block_table=block_table,
     )
@@ -82,6 +85,7 @@ def _flash_attn_varlen_func_fake(
     window_size,
     alibi_slopes,
     block_table,
+    softcap,
 ):
     return torch.empty(out_shape,
                        dtype=q.dtype,
@@ -97,7 +101,8 @@ torch.library.define("vllm::flash_attn_with_kvcache", ("(int[] out_shape, "
                                                        "Tensor cache_seqlens, "
                                                        "float softmax_scale, "
                                                        "bool causal, "
-                                                       "float[]? alibi_slopes"
+                                                       "float[]? alibi_slopes, "
+                                                       "float? softcap"
                                                        ") -> Tensor"))
 
 
@@ -112,15 +117,17 @@ def _flash_attn_with_kvcache(
     softmax_scale,
     causal,
     alibi_slopes,
+    softcap,
 ):
     return flash_attn_with_kvcache(
         decode_query,
         key_cache,
         value_cache,
-        block_table=block_table,
         cache_seqlens=cache_seqlens,
+        block_table=block_table,
         softmax_scale=softmax_scale,
         causal=causal,
+        softcap=softcap,
         alibi_slopes=alibi_slopes,
     )
 
@@ -136,6 +143,7 @@ def _flash_attn_with_kvcache_fake(
     softmax_scale,
     causal,
     alibi_slopes,
+    softcap,
 ):
     return torch.empty(out_shape,
                        dtype=decode_query.dtype,
@@ -678,25 +686,25 @@ class FlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output_shape = output[num_prefill_tokens:].squeeze(1).size()
+            output_shape = output[num_prefill_tokens:].size()
             output[
                 num_prefill_tokens:] = torch.ops.vllm.flash_attn_with_kvcache(
                     output_shape,
                     decode_query.unsqueeze(1),
                     key_cache,
                     value_cache,
-                    block_table=prefill_meta.block_tables,
+                    block_table=decode_meta.block_tables,
                     cache_seqlens=decode_meta.seq_lens_tensor,
                     softmax_scale=self.scale,
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
-                )
+                ).squeeze(1)
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output_shape = output[num_prefill_tokens:].squeeze(1).size()
-            output[num_prefill_tokens:] = flash_attn_with_kvcache(
+            output_shape = output[num_prefill_tokens:].size()
+            output[num_prefill_tokens:] = torch.ops.vllm.flash_attn_with_kvcache(
                 output_shape,
                 decode_query.unsqueeze(1),
                 key_cache,
@@ -706,6 +714,7 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
+                softcap=0.0,
             ).squeeze(1)
 
         # Reshape the output tensor.
