@@ -30,7 +30,9 @@ class AsyncEngineRPCServer:
 
         # Init socket for readiness state.
         self.socket = self.context.socket(zmq.constants.ROUTER)
-        self.socket.bind(f"tcp://localhost:{port}")
+        # Note numeric form of localhost should be used for zmq bind(),
+        # see https://stackoverflow.com/a/8958414
+        self.socket.bind(f"tcp://127.0.0.1:{port}")
 
     def cleanup(self):
         """Cleanup all resources."""
