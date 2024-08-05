@@ -894,8 +894,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         mm_registry = self.mm_registry
         mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
 
-        if supports_vision(self.model):
-            max_mm_tokens = mm_registry.get_max_multimodal_tokens(model_config)
+        max_mm_tokens = mm_registry.get_max_multimodal_tokens(model_config)
+        if max_mm_tokens > 0:
             max_num_seqs_orig = max_num_seqs
             max_num_seqs = min(max_num_seqs,
                                max_num_batched_tokens // max_mm_tokens)
