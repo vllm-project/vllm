@@ -33,7 +33,6 @@ steps:
   working_dir: "/vllm-workspace/test_docs/docs"
   fast_check: true
   no_gpu: True
-  source_file_dependencies: [] # always run
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
