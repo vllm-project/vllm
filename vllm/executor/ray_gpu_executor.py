@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE = False
+PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE = True
 
 
 class RayGPUExecutor(DistributedGPUExecutor):
