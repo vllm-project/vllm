@@ -632,9 +632,9 @@ class EngineArgs:
             '--preemption-mode',
             type=str,
             default=None,
-            help='If \'recompute\', the engine performs preemption by block '
-            'swapping; If \'swap\', the engine performs preemption by block '
-            'swapping.')
+            help='If \'recompute\', the engine performs preemption by '
+            'recomputing; If \'swap\', the engine performs preemption by '
+            'block swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -792,6 +792,7 @@ class EngineArgs:
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
+            disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
             draft_token_acceptance_method=\

@@ -16,9 +16,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.launcher import serve_http
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.server import serve_http
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -113,7 +113,8 @@ async def run_server(args: Namespace,
     logger.info("args: %s", args)
 
     app = await init_app(args, llm_engine)
-    await serve_http(
+
+    shutdown_task = await serve_http(
         app,
         host=args.host,
         port=args.port,
@@ -125,6 +126,8 @@ async def run_server(args: Namespace,
         ssl_cert_reqs=args.ssl_cert_reqs,
         **uvicorn_kwargs,
     )
+
+    await shutdown_task
 
 
 if __name__ == "__main__":
