@@ -22,11 +22,11 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceOutput)
 from vllm.utils import async_numpy_to_tensor
 
-HAS_FLASHINFER = True
 try:
-    from flashinfer.sampling import top_k_top_p_sampling_from_probs
+    from flashinfer.sampling import (top_k_top_p_sampling_from_probs as
+                                     flashinfer_top_k_top_p_sampling)
 except ImportError:
-    HAS_FLASHINFER = False
+    flashinfer_top_k_top_p_sampling = None
 
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
@@ -130,7 +130,7 @@ class Sampler(nn.Module):
         # Use in-place division to avoid creating a new tensor.
         logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
-        if do_top_p_top_k and not HAS_FLASHINFER:
+        if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
 
@@ -502,7 +502,7 @@ def _multinomial(
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
-def _top_k_top_p_multinomial(
+def _top_k_top_p_multinomial_with_flashinfer(
         probs: torch.Tensor, top_ks: torch.Tensor, top_ps: torch.Tensor,
         num_samples: int, seq_groups: Optional[List[SequenceGroupToSample]]):
     max_top_k_round = 32
@@ -528,7 +528,7 @@ def _top_k_top_p_multinomial(
             sample_idx += stride
         uniform_samples = async_numpy_to_tensor(uniform_samples_cpu,
                                                 probs.device)
-    batch_next_token_ids, success = top_k_top_p_sampling_from_probs(
+    batch_next_token_ids, success = flashinfer_top_k_top_p_sampling(
         probs,
         uniform_samples,
         top_ks,
@@ -611,15 +611,16 @@ def _sample_with_torch(
                     sampling_params = seq_group.sampling_params
                     max_best_of_in_batch = max(max_best_of_in_batch,
                                                sampling_params.best_of)
-            if HAS_FLASHINFER:
-                multinomial_samples[sampling_type] = _top_k_top_p_multinomial(
-                    probs[long_sample_indices],
-                    sampling_tensors.top_ks[long_sample_indices],
-                    sampling_tensors.top_ps[long_sample_indices],
-                    max_best_of_in_batch,
-                    seq_groups
-                    if sampling_type == SamplingType.RANDOM_SEED else None,
-                )
+            if flashinfer_top_k_top_p_sampling is not None:
+                multinomial_samples[
+                    sampling_type] = _top_k_top_p_multinomial_with_flashinfer(
+                        probs[long_sample_indices],
+                        sampling_tensors.top_ks[long_sample_indices],
+                        sampling_tensors.top_ps[long_sample_indices],
+                        max_best_of_in_batch,
+                        seq_groups
+                        if sampling_type == SamplingType.RANDOM_SEED else None,
+                    )
             else:
                 seeded_args = {} if sampling_type == SamplingType.RANDOM else {
                     "seq_groups": seq_groups,
