@@ -374,34 +374,39 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
             # Start the driver worker task after all the ray workers'.
             if not use_dummy_driver:
-                if (not run_driver_in_background_thread
+                # Driver task will run in this python process
+                if run_driver_in_background_thread:
+                    if not ray_worker_outputs:
                         # no background thread required when there are
                         # no concurrent worker tasks
-                        or not ray_worker_outputs):
-                    all_worker_outputs = [
-                        self.driver_worker.execute_method(
+                        driver_output = self.driver_worker.execute_method(
                             method, *driver_args, **driver_kwargs)
-                    ]
-                else:
-                    # Poll driver and worker tasks concurrently
-                    # in background threads
-                    with concurrent.futures.ThreadPoolExecutor(
-                            max_workers=2) as executor:
-                        driver_poll_thread = executor.submit(
-                            self.driver_worker.execute_method, method,
-                            *driver_args, **driver_kwargs)
-                        worker_poll_thread = executor.submit(
-                            ray.get, ray_worker_outputs)
+                        all_worker_outputs = [driver_output]
+                    else:
+                        # Poll driver and worker tasks concurrently
+                        # in background threads
+                        with concurrent.futures.ThreadPoolExecutor(
+                                max_workers=2) as executor:
+                            driver_poll_thread = executor.submit(
+                                self.driver_worker.execute_method, method,
+                                *driver_args, **driver_kwargs)
+                            worker_poll_thread = executor.submit(
+                                ray.get, ray_worker_outputs)
 
-                        for completed_future in concurrent.futures.as_completed(
-                            [driver_poll_thread, worker_poll_thread]):
-                            # Will raise exception if underlying thread raises
-                            res = completed_future.result()
-                            if not isinstance(res, list):
-                                driver_output = [res]
-                            else:
-                                worker_outputs = res
-                    all_worker_outputs = driver_output + worker_outputs
+                            for completed_future in concurrent.futures.as_completed(
+                                [driver_poll_thread, worker_poll_thread]):
+                                # Will raise exception if underlying thread raises
+                                res = completed_future.result()
+                                if not isinstance(res, list):
+                                    driver_output = [res]
+                                else:
+                                    worker_outputs = res
+                        all_worker_outputs = driver_output + worker_outputs
+                else:
+                    driver_output = self.driver_worker.execute_method(
+                        method, *driver_args, **driver_kwargs)
+                    all_worker_outputs = [driver_output
+                                          ] + ray.get(ray_worker_outputs)
             else:
                 assert self.driver_dummy_worker is not None
                 driver_output = self.driver_dummy_worker.execute_method.remote(
