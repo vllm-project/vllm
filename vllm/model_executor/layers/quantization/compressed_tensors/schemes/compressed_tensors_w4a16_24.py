@@ -8,14 +8,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
-
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedvLLMParameter)
-
 from vllm.scalar_type import scalar_types
-
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
 W4A16SPARSE24_SUPPORTED_TYPES_MAP = {
@@ -51,6 +48,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         return 80
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # required by torch.compile to be torch.nn.Parameter
         layer.weight_packed = Parameter(layer.weight_packed.data,
                                         requires_grad=False)
         layer.scale_packed = Parameter(layer.scale_packed.data,

@@ -9,7 +9,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
     marlin_permute_scales, replace_tensor, verify_marlin_supported,
     verify_marlin_supports_shape)
-
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
@@ -65,7 +64,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
 
         # If group_size is -1, we are in channelwise case.
-        channelwise = self.group_size == -1
+        channelwise = (self.group_size == -1)
         group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = (input_size != input_size_per_partition)
         # In the case of channelwise quantization, we need to replicate the

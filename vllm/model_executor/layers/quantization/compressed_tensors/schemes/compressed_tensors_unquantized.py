@@ -23,6 +23,7 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
         return 70
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # required by torch.compile to be torch.nn.Parameter
         layer.weight = torch.nn.Parameter(layer.weight.data,
                                           requires_grad=False)
 

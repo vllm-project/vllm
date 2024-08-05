@@ -46,6 +46,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
+            # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(layer.weight_scale.data,
                                            requires_grad=False)
 
@@ -92,6 +93,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
 
+        # min requirement for fp8 kernels
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
