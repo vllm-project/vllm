@@ -209,6 +209,7 @@ def run_multi_image_test(
     with vllm_runner(model,
                      max_model_len=4096,
                      max_num_seqs=1,
+                     limit_mm_per_prompt={"image": len(images)},
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
