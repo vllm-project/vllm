@@ -1,9 +1,9 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
-from typing import Type, TypedDict, TypeVar, Union, cast
+from typing import Type, TypedDict, TypeVar, Union, cast, final
 
 import torch
 import torch.types
@@ -115,16 +115,21 @@ class MultiModalInputs(_MultiModalInputsBase):
                                batched_inputs)
 
 
+@final
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Modality types that are predefined by vLLM."""
 
-    image: Image.Image
-    """The input image."""
+    image: Union[Image.Image, List[Image.Image]]
+    """The input image(s)."""
 
 
-MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]
+MultiModalDataDict = Union[MultiModalDataBuiltins,
+                           Mapping[str, Union[object, List[object]]]]
 """
 A dictionary containing an item for each modality type to input.
+
+If an item is a list, it is considered as multiple inputs for the purposes of
+`--limit-mm-per-prompt`.
 
 Note:
     This dictionary also accepts modality keys defined outside
@@ -133,7 +138,8 @@ Note:
     Read more on that :ref:`here <adding_multimodal_plugin>`.
 """
 
-MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
+MultiModalInputMapper = Callable[[InputContext, Union[object, List[object]]],
+                                 MultiModalInputs]
 """
 Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
@@ -177,8 +183,11 @@ class MultiModalPlugin(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
+    def _default_input_mapper(
+        self,
+        ctx: InputContext,
+        data: Union[object, List[object]],
+    ) -> MultiModalInputs:
         """
         Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
@@ -221,7 +230,7 @@ class MultiModalPlugin(ABC):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: object) -> MultiModalInputs:
+                  data: Union[object, List[object]]) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.

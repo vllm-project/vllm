@@ -1,13 +1,11 @@
 import functools
 from typing import Dict, Optional, Sequence
 
-import torch
-
 from vllm.config import ModelConfig, MultiModalConfig
 from vllm.logger import init_logger
 
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
-                   MultiModalPlugin, MultiModalTokensCalc)
+                   MultiModalPlugin, MultiModalTokensCalc, NestedTensors)
 from .image import ImagePlugin
 
 logger = init_logger(__name__)
@@ -26,6 +24,9 @@ class MultiModalRegistry:
             *,
             plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS) -> None:
         self._plugins = {p.get_data_key(): p for p in plugins}
+
+        self._init_limits_per_plugin = {k: 0 for k in self._plugins}
+        self._limits_by_model: Dict[ModelConfig, Dict[str, int]] = {}
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
@@ -86,11 +87,19 @@ class MultiModalRegistry:
 
         See :meth:`MultiModalPlugin.map_input` for more details.
         """
-        merged_dict: Dict[str, torch.Tensor] = {}
+        merged_dict: Dict[str, NestedTensors] = {}
 
         for data_key, data_value in data.items():
-            input_dict = self._get_plugin(data_key) \
-                .map_input(model_config, data_value)
+            plugin = self._get_plugin(data_key)
+            input_dict = plugin.map_input(model_config, data_value)
+
+            num_items = len(data_value) if isinstance(data_value, list) else 1
+            max_items = self.get_limit_per_prompt(model_config, plugin)
+            if num_items > max_items:
+                raise ValueError(
+                    f"You set {max_items}={data_key} in "
+                    f"`--limit-mm-per-prompt`, but found {num_items} items "
+                    "in the same prompt.")
 
             for input_key, input_tensor in input_dict.items():
                 if input_key in merged_dict:
@@ -142,16 +151,39 @@ class MultiModalRegistry:
 
         See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
         """
-        max_num_by_plugin = ({} if multimodal_config is None else
-                             multimodal_config.limit_per_prompt)
+        if multimodal_config is None:
+            limits_per_plugin = self._init_limits_per_plugin
+        else:
+            config_limits_per_plugin = multimodal_config.limit_per_prompt
 
-        extra_keys = max_num_by_plugin.keys() - self._plugins.keys()
-        if extra_keys:
-            logger.warning(
-                "Detected extra keys in `--limit-mm-per-prompt` which "
-                "are not registered as multi-modal plugins: %s. "
-                "They will be ignored.", extra_keys)
+            extra_keys = config_limits_per_plugin.keys() - self._plugins.keys()
+            if extra_keys:
+                logger.warning(
+                    "Detected extra keys in `--limit-mm-per-prompt` which "
+                    "are not registered as multi-modal plugins: %s. "
+                    "They will be ignored.", extra_keys)
 
-        return sum((max_num_by_plugin.get(key, 1) *
+            # TODO: Automatically determine the limits based on budget
+            # once more models support multi-image inputs and thus we don't
+            # need to set a default of 1
+            limits_per_plugin = {
+                key: config_limits_per_plugin.get(key, 1)
+                for key in self._plugins
+            }
+
+        self._limits_by_model[model_config] = limits_per_plugin
+
+        return sum((limits_per_plugin[key] *
                     plugin.get_max_multimodal_tokens(model_config))
                    for key, plugin in self._plugins.items())
+
+    def get_limit_per_prompt(
+        self,
+        model_config: ModelConfig,
+        plugin: MultiModalPlugin,
+    ) -> int:
+        """
+        Get the maximum number of multi-modal inputs belonging to a specific
+        modality that are allowed per prompt for a model class.
+        """
+        return self._limits_by_model[model_config][plugin.get_data_key()]

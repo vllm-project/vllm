@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Optional, Tuple, TypeVar
+from typing import List, Optional, Tuple, TypeVar, Union
 
 import torch
 from PIL import Image
@@ -110,9 +110,13 @@ class ImagePlugin(MultiModalPlugin):
             model_config.model,
             trust_remote_code=model_config.trust_remote_code)
 
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
+    def _default_input_mapper(
+        self,
+        ctx: InputContext,
+        data: Union[object, List[object]],
+    ) -> MultiModalInputs:
         model_config = ctx.model_config
+
         if isinstance(data, (Image.Image, list)):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
