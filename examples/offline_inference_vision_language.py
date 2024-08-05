@@ -65,7 +65,8 @@ def run_phi3v(question):
 # PaliGemma
 def run_paligemma(question):
 
-    prompt = question
+    # PaliGemma has special prompt format for VQA
+    prompt = "caption en"
     llm = LLM(model="google/paligemma-3b-mix-224")
 
     return llm, prompt
@@ -106,6 +107,20 @@ def run_minicpmv(question):
     return llm, prompt
 
 
+# InternVL
+def run_internvl(question):
+    # Generally, InternVL can use chatml template for conversation
+    TEMPLATE = "<|im_start|>User\n{prompt}<|im_end|>\n<|im_start|>Assistant\n"
+    prompt = f"<image>\n{question}\n"
+    prompt = TEMPLATE.format(prompt=prompt)
+    llm = LLM(
+        model="OpenGVLab/InternVL2-4B",
+        trust_remote_code=True,
+        max_num_seqs=5,
+    )
+    return llm, prompt
+
+
 # BLIP-2
 def run_blip2(question):
 
@@ -125,6 +140,7 @@ model_example_map = {
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
+    "internvl_chat": run_internvl,
 }
 
 

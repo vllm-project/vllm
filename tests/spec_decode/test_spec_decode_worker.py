@@ -34,8 +34,11 @@ def test_correctly_calls_draft_model(k: int, batch_size: int,
     target_worker = mock_worker()
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     worker = SpecDecodeWorker(
-        draft_worker, target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method), metrics_collector)
+        draft_worker,
+        target_worker,
+        mock_spec_decode_sampler(acceptance_sampler_method),
+        disable_logprobs=False,
+        metrics_collector=metrics_collector)
     exception_secret = 'artificial stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
 
@@ -74,8 +77,11 @@ def test_correctly_calls_target_model(k: int, batch_size: int,
     set_random_seed(1)
 
     worker = SpecDecodeWorker(
-        draft_worker, target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method), metrics_collector)
+        draft_worker,
+        target_worker,
+        mock_spec_decode_sampler(acceptance_sampler_method),
+        disable_logprobs=False,
+        metrics_collector=metrics_collector)
     worker.init_device()
 
     vocab_size = 32_000
@@ -159,8 +165,11 @@ def test_correctly_calls_spec_decode_sampler(k: int, batch_size: int,
 
     set_random_seed(1)
 
-    worker = SpecDecodeWorker(draft_worker, target_worker, spec_decode_sampler,
-                              metrics_collector)
+    worker = SpecDecodeWorker(draft_worker,
+                              target_worker,
+                              spec_decode_sampler,
+                              disable_logprobs=False,
+                              metrics_collector=metrics_collector)
     worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
@@ -249,8 +258,11 @@ def test_correctly_formats_output(k: int, batch_size: int,
 
     set_random_seed(1)
     spec_decode_sampler = mock_spec_decode_sampler(acceptance_sampler_method)
-    worker = SpecDecodeWorker(draft_worker, target_worker, spec_decode_sampler,
-                              metrics_collector)
+    worker = SpecDecodeWorker(draft_worker,
+                              target_worker,
+                              spec_decode_sampler,
+                              disable_logprobs=False,
+                              metrics_collector=metrics_collector)
     worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
@@ -479,9 +491,13 @@ def test_k_equals_zero(k: int, batch_size: int,
     set_random_seed(1)
 
     worker = SpecDecodeWorker(
-        draft_worker, target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method), False,
-        metrics_collector)
+        proposer_worker=draft_worker,
+        scorer_worker=target_worker,
+        spec_decode_sampler=mock_spec_decode_sampler(
+            acceptance_sampler_method),
+        disable_logprobs=False,
+        metrics_collector=metrics_collector,
+    )
 
     seq_group_metadata_list, _, _ = create_batch(batch_size,
                                                  k,
@@ -526,9 +542,13 @@ def test_empty_input_batch(k: int, batch_size: int,
     set_random_seed(1)
 
     worker = SpecDecodeWorker(
-        draft_worker, target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method), False,
-        metrics_collector)
+        proposer_worker=draft_worker,
+        scorer_worker=target_worker,
+        spec_decode_sampler=mock_spec_decode_sampler(
+            acceptance_sampler_method),
+        disable_logprobs=False,
+        metrics_collector=metrics_collector,
+    )
 
     seq_group_metadata_list, _, _ = create_batch(batch_size,
                                                  k,
@@ -560,8 +580,13 @@ def test_init_device(acceptance_sampler_method: str):
     spec_decode_sampler = mock_spec_decode_sampler(acceptance_sampler_method)
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    worker = SpecDecodeWorker(draft_worker, target_worker, spec_decode_sampler,
-                              False, metrics_collector)
+    worker = SpecDecodeWorker(
+        proposer_worker=draft_worker,
+        scorer_worker=target_worker,
+        spec_decode_sampler=spec_decode_sampler,
+        disable_logprobs=False,
+        metrics_collector=metrics_collector,
+    )
     worker.init_device()
 
     draft_worker.init_device.assert_called_once()
@@ -583,9 +608,11 @@ def test_initialize_cache(acceptance_sampler_method):
     target_worker = mock_worker()
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    worker = SpecDecodeWorker(
-        draft_worker, target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method), metrics_collector)
+    worker = SpecDecodeWorker(proposer_worker=draft_worker,
+                              scorer_worker=target_worker,
+                              spec_decode_sampler=mock_spec_decode_sampler(
+                                  acceptance_sampler_method),
+                              metrics_collector=metrics_collector)
 
     kwargs = {"num_gpu_blocks": 1024, "num_cpu_blocks": 1023}
     worker.initialize_cache(**kwargs)
@@ -725,7 +752,8 @@ def test_populate_seq_ids_with_bonus_tokens():
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
         target_logprobs=target_token_logprobs,
-        k=k)
+        k=k,
+        stage_times=(0, 0, 0))
     # Verify that _seq_with_bonus_token_in_last_step contains the following:
     # 1. Sequence IDs that were already present in
     #    _seq_with_bonus_token_in_last_step but were not part of the current
