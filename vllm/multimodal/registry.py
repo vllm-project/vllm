@@ -97,7 +97,7 @@ class MultiModalRegistry:
             max_items = self.get_limit_per_prompt(model_config, plugin)
             if num_items > max_items:
                 raise ValueError(
-                    f"You set {max_items}={data_key} in "
+                    f"You set {data_key}={max_items} (or defaulted to 1) in"
                     f"`--limit-mm-per-prompt`, but found {num_items} items "
                     "in the same prompt.")
 
