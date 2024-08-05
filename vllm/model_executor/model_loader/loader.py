@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
@@ -33,6 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
+from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_lora,
                                                    supports_vision)
@@ -148,15 +150,34 @@ def _initialize_model(
         cache_config: CacheConfig,
         scheduler_config: Optional[SchedulerConfig] = None) -> nn.Module:
     """Initialize a model with the given configurations."""
-    model_class = get_model_architecture(model_config)[0]
-    quant_config = _get_quantization_config(model_config, load_config)
+    return init_model_from_hf(
+        model_config.hf_config,
+        quant_config=_get_quantization_config(model_config, load_config),
+        lora_config=lora_config,
+        multimodal_config=multimodal_config,
+        cache_config=cache_config,
+        scheduler_config=scheduler_config,
+    )
 
-    return model_class(config=model_config.hf_config,
+
+def init_model_from_hf(
+    hf_config: PretrainedConfig,
+    cache_config: Optional[CacheConfig],
+    quant_config: Optional[QuantizationConfig],
+    *,
+    lora_config: Optional[LoRAConfig] = None,
+    multimodal_config: Optional[MultiModalConfig] = None,
+    scheduler_config: Optional[SchedulerConfig] = None,
+) -> nn.Module:
+    model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
+    extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
+                                                    multimodal_config,
+                                                    scheduler_config)
+
+    return model_class(config=hf_config,
                        cache_config=cache_config,
                        quant_config=quant_config,
-                       **_get_model_initialization_kwargs(
-                           model_class, lora_config, multimodal_config,
-                           scheduler_config))
+                       **extra_kwargs)
 
 
 class BaseModelLoader(ABC):
