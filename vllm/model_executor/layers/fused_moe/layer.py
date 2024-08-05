@@ -83,16 +83,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             "The CPU backend currently does not support MoE.")
 
     def forward_tpu(self, layer: torch.nn.Module, x: torch.Tensor,
-                    topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                    use_grouped_topk: bool) -> torch.Tensor:
+                    use_grouped_topk: bool, topk: int,
+                    gating_output: torch.Tensor, renormalize: bool,
+                    **kwargs) -> torch.Tensor:
 
+        from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe
         assert not use_grouped_topk
-        return fused_experts(hidden_states=x,
-                             w1=layer.w13_weight,
-                             w2=layer.w2_weight,
-                             topk_weights=topk_weights,
-                             topk_ids=topk_ids,
-                             inplace=True)
+        return fused_moe(hidden_states=x,
+                         w1=layer.w13_weight,
+                         w2=layer.w2_weight,
+                         topk=topk,
+                         gating_output=gating_output,
+                         renormalize=renormalize)
 
 
 class FusedMoE(torch.nn.Module):
@@ -254,7 +256,8 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             expert_data.copy_(loaded_weight)
         else:
-            raise ValueError
+            raise ValueError(
+                f"Expected shard_id w1,w2 or w3 but got {shard_id}")
 
     def _select_experts(self, hidden_states: torch.Tensor,
                         router_logits: torch.Tensor):
@@ -286,6 +289,9 @@ class FusedMoE(torch.nn.Module):
             x=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            topk=self.top_k,
+            gating_output=router_logits,
+            renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk)
 
         # Optionally reduce.

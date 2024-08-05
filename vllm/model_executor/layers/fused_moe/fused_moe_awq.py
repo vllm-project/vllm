@@ -57,17 +57,31 @@ def fused_experts_awq(
 
     x = hidden_states.view(hidden_states.shape[0], 1, *hidden_states.shape[1:])
 
-    gate_up = ops.awq_fused_moe(x, w1, w1_scales, w1_qzeros, topk_weights,
-                                sorted_token_ids, expert_ids,
-                                num_tokens_post_padded, False, pack_factor)
+    gate_up = ops.awq_fused_moe(input=x,
+                                qweight=w1,
+                                scales=w1_scales,
+                                qzeros=w1_qzeros,
+                                topk_weights=topk_weights,
+                                sorted_token_ids=sorted_token_ids,
+                                expert_ids=expert_ids,
+                                num_tokens_post_padded=num_tokens_post_padded,
+                                mul_weights=False,
+                                pack_factor=pack_factor)
 
     out = torch.empty((gate_up.shape[:-1] + (gate_up.shape[-1] // 2, )),
                       dtype=hidden_states.dtype,
                       device=hidden_states.device)
     ops.silu_and_mul(out, gate_up)
 
-    out = ops.awq_fused_moe(out, w2, w2_scales, w2_qzeros, topk_weights,
-                            sorted_token_ids, expert_ids,
-                            num_tokens_post_padded, True, pack_factor)
+    out = ops.awq_fused_moe(input=out,
+                            qweight=w2,
+                            scales=w2_scales,
+                            qzeros=w2_qzeros,
+                            topk_weights=topk_weights,
+                            sorted_token_ids=sorted_token_ids,
+                            expert_ids=expert_ids,
+                            num_tokens_post_padded=num_tokens_post_padded,
+                            mul_weights=True,
+                            pack_factor=pack_factor)
 
     return torch.sum(out, dim=1)
