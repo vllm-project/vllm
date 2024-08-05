@@ -366,9 +366,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # so we only explicitly execute on the driver worker if using a
         # non-SPMD worker class.
         if not self.use_ray_spmd_worker:
-            # Concurrently poll driver worker and remote ray workers
-            # to avoid deadlock when performing distributed init
-            # (see: https://github.com/vllm-project/vllm/issues/3455)
             driver_args = args if all_args is None else all_args[0]
             driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
 
@@ -377,7 +374,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 # Driver task will run in this python process
                 if run_driver_in_background_thread and ray_worker_outputs:
                     # If ray worker tasks exist, poll driver and worker
-                    # tasks concurrently in background threads
+                    # tasks concurrently in background threads.
+                    #
+                    # This can avoid deadlock if the driver task is
+                    # blocking on some out of band comm that is invalidated
+                    # by a Ray worker exception.
+                    #
+                    # See: https://github.com/vllm-project/vllm/issues/3455
                     with futures.ThreadPoolExecutor(max_workers=2) as executor:
                         driver_poll_thread = executor.submit(
                             self.driver_worker.execute_method, method,
