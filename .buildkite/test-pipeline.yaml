@@ -179,7 +179,7 @@ steps:
 
 - label: Samplers Test
   #mirror_hardwares: [amd]
-  command:
+  commands:
     - pytest -v -s samplers
     # Test for flashinfer samplers
     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
