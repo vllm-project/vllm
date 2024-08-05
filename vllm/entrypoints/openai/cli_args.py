@@ -140,11 +140,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="If specified, will run the OpenAI frontend server in the same "
         "process as the model serving engine.")
 
-    parser.add_argument("--enable-api-tools",
-                        action="store_true",
-                        help="Enable OpenAI-like tools API "
-                        "(only function calls are currently supported)")
-
     parser.add_argument(
         "--enable-auto-tool-choice",
         action="store_true",
