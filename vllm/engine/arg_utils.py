@@ -665,7 +665,7 @@ class EngineArgs:
             '--collect-model-forward-time',
             type=bool,
             default=EngineArgs.collect_model_forward_time,
-            help="If set to True and otlp-traces-endpoint is set, "
+            help="If set to True and --otlp-traces-endpoint is set, "
             "collects model forward time in traces. This involves "
             "use of a blocking operation and hence might have a "
             "performance impact.")

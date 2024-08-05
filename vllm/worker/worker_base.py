@@ -218,9 +218,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
-        start_time = time.time()
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
+	start_time = time.time()
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
