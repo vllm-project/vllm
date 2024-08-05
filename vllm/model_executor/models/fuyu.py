@@ -41,7 +41,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, is_pp_missing_parameter
+from .utils import is_pp_missing_parameter, merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -233,7 +233,8 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         self.language_model = PersimmonForCausalLM(config,
                                                    cache_config=cache_config,
                                                    quant_config=quant_config)
-        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
     def _parse_and_validate_image_input(self, **kwargs: object):
         image_patches = kwargs.pop("image_patches", None)

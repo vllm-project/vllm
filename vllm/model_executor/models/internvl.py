@@ -29,7 +29,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, is_pp_missing_parameter
+from .utils import merge_vision_embeddings
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -298,7 +298,8 @@ class InternVLChatModel(nn.Module, SupportsVision):
             nn.Linear(llm_hidden_size, llm_hidden_size))
 
         self.img_context_token_id = None
-        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()

@@ -43,7 +43,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, is_pp_missing_parameter, make_empty_intermediate_tensors_factory
+from .utils import is_pp_missing_parameter, merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -465,7 +465,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         if list(data.shape[1:]) != [2]:

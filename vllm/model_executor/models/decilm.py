@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only DeciLM model compatible with HuggingFace weights."""
 
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable, Optional, Tuple
 
 import torch
 from transformers import LlamaConfig

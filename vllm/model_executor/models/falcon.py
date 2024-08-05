@@ -28,9 +28,9 @@ from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce, get_pp_group)
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -47,7 +47,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
-from .utils import make_layers, make_empty_intermediate_tensors_factory, is_pp_missing_parameter
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
@@ -358,8 +359,9 @@ class FalconModel(nn.Module):
 
         # Final Layer Norm
         self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def forward(self, input_ids: torch.LongTensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
@@ -411,7 +413,8 @@ class FalconForCausalLM(nn.Module):
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,

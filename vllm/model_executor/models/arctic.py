@@ -32,7 +32,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.arctic import ArcticConfig
 
-from .utils import is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 logger = init_logger(__name__)
 
@@ -382,8 +383,9 @@ class ArcticModel(nn.Module):
             prefix=f"{prefix}.layers")
         self._attn_implementation = config._attn_implementation
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def forward(
         self,
@@ -431,7 +433,8 @@ class ArcticForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

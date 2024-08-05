@@ -27,9 +27,8 @@ from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              get_pp_group)
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -44,7 +43,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import JAISConfig
 
-from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class SwiGLUActivation(nn.Module):
@@ -240,8 +240,9 @@ class JAISModel(nn.Module):
             lambda prefix: JAISBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.n_embd)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.n_embd))
 
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor,
@@ -293,7 +294,8 @@ class JAISLMHeadModel(nn.Module):
         self.logits_processor = LogitsProcessor(vocab_size=config.vocab_size,
                                                 scale=self.output_logits_scale)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,

@@ -6,9 +6,9 @@ import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce, get_pp_group)
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
@@ -26,7 +26,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
-from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class DbrxRouter(nn.Module):
@@ -335,8 +336,9 @@ class DbrxModel(nn.Module):
                                                       nn.Parameter):
                 # Remove the bias term in Linear and LayerNorm.
                 module.register_parameter("bias", None)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.d_model)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.d_model))
 
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor,
@@ -385,7 +387,8 @@ class DbrxForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,

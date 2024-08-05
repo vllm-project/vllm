@@ -49,7 +49,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
-from .utils import is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class Qwen2MLP(nn.Module):
@@ -248,8 +249,9 @@ class Qwen2Model(nn.Module):
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -350,7 +352,8 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

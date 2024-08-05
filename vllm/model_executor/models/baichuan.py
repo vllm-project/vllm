@@ -27,9 +27,8 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              get_pp_group)
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -47,7 +46,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
-from .utils import is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -275,8 +275,9 @@ class BaiChuanModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def forward(
         self,
@@ -350,7 +351,8 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

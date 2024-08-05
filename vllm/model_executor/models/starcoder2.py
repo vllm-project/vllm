@@ -26,7 +26,7 @@ from transformers import Starcoder2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size, get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -42,7 +42,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
-from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class Starcoder2Attention(nn.Module):
@@ -214,8 +215,9 @@ class Starcoder2Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
@@ -264,7 +266,8 @@ class Starcoder2ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

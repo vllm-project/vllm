@@ -30,9 +30,9 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce, get_pp_group)
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -53,7 +53,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
-from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class MiniCPMMoE(nn.Module):
@@ -362,8 +363,9 @@ class MiniCPMModel(nn.Module):
                                                quant_config),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], self.config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], self.config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
@@ -471,7 +473,8 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
         self.logits_processor = LogitsProcessor(unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -23,7 +23,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_max_clip_image_tokens, input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, is_pp_missing_parameter, make_empty_intermediate_tensors_factory
+from .utils import is_pp_missing_parameter, merge_vision_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -158,7 +158,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                                                 config.text_config.vocab_size,
                                                 logit_scale)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size

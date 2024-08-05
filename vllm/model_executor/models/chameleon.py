@@ -10,7 +10,7 @@ from transformers import ChameleonConfig, ChameleonVQVAEConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.distributed import get_tensor_model_parallel_world_size, get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -33,9 +33,9 @@ from vllm.multimodal.image import (cached_get_tokenizer,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from vllm.utils import print_warning_once
 
-from .utils import is_pp_missing_parameter, make_empty_intermediate_tensors_factory, make_layers
-
 from .interfaces import SupportsVision
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 logger = init_logger(__name__)
 
@@ -837,8 +837,9 @@ class ChameleonModel(nn.Module):
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.vqmodel = ChameleonVQVAE(config.vq_config)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -921,7 +922,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsVision):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
 

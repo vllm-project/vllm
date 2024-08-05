@@ -26,7 +26,7 @@ from transformers import GPTBigCodeConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import get_tensor_model_parallel_world_size, get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -42,7 +42,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
-from .utils import make_layers, make_empty_intermediate_tensors_factory, is_pp_missing_parameter
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -211,12 +212,13 @@ class GPTBigCodeModel(nn.Module):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prompt: GPTBigCodeBlock(config, cache_config, quant_config),
+            lambda prefix: GPTBigCodeBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.n_embd)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.n_embd))
 
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor,
@@ -276,7 +278,8 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

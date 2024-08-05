@@ -59,9 +59,9 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
+from .utils import is_pp_missing_parameter
 
 logger = init_logger(__name__)
-from .utils import is_pp_missing_parameter, make_empty_intermediate_tensors_factory
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
@@ -515,7 +515,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.llm.make_empty_intermediate_tensors)
 
     def get_embedding(
         self,

@@ -30,7 +30,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
 
-from .utils import is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class QWenMLP(nn.Module):
@@ -203,8 +204,9 @@ class QWenModel(nn.Module):
             lambda prefix: QWenBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def forward(
         self,
@@ -256,7 +258,8 @@ class QWenLMHeadModel(nn.Module):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,

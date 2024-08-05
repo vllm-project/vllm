@@ -8,7 +8,7 @@ from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import PoolerOutput, IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .utils import is_pp_missing_parameter
 
@@ -31,7 +31,8 @@ class LlamaEmbeddingModel(nn.Module):
         super().__init__()
         self.model = LlamaModel(**kwargs)
         self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

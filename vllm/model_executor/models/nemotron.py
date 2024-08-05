@@ -47,7 +47,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import NemotronConfig
 
 from .interfaces import SupportsLoRA
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 # The architecture is pretty similar to Llama, with these changes:
 # - There is no gate_proj, just up_proj
@@ -328,8 +329,9 @@ class NemotronModel(nn.Module):
                                             eps=config.norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -442,7 +444,8 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA):
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,

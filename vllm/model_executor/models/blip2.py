@@ -21,7 +21,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, is_pp_missing_parameter, make_empty_intermediate_tensors_factory
+from .utils import is_pp_missing_parameter, merge_vision_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -486,6 +486,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         self.unpadded_vocab_size = config.text_config.vocab_size
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size)
         self.sampler = Sampler()
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
     def get_lm_head(self):
         return self.language_model.decoder.embed_tokens

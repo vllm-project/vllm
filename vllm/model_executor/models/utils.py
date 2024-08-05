@@ -1,11 +1,11 @@
-from typing import Dict, List, Protocol, Tuple, Callable
+from typing import Callable, Dict, List, Protocol, Tuple
 
 import torch
 from torch.func import functional_call
 
 from vllm.multimodal import BatchedTensors
-from vllm.utils import is_pin_memory_available
 from vllm.sequence import IntermediateTensors
+from vllm.utils import is_pin_memory_available
 
 
 def merge_vision_embeddings(input_ids: torch.Tensor,

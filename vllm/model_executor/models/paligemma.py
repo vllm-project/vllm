@@ -22,7 +22,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .interfaces import SupportsVision
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import merge_vision_embeddings, is_pp_missing_parameter
+from .utils import is_pp_missing_parameter, merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -146,7 +146,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size

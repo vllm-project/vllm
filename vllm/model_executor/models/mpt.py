@@ -8,9 +8,8 @@ import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              get_pp_group)
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -26,7 +25,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
-from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 def _get_alibi_slopes(
@@ -232,8 +232,9 @@ class MPTModel(nn.Module):
                         module.bias, nn.Parameter):
                     # Remove the bias term in Linear and LayerNorm.
                     module.register_parameter("bias", None)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.d_model)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.d_model))
 
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor,
@@ -273,7 +274,8 @@ class MPTForCausalLM(nn.Module):
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,

@@ -29,31 +29,31 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import get_compressed_tensors_cache_scale
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    kv_cache_scales_loader,
-    maybe_remap_kv_scale_name,
-)
+    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class LlamaMLP(nn.Module):
@@ -198,8 +198,8 @@ class LlamaDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
                 config, "original_max_position_embeddings", None):
-            rope_scaling[
-                "original_max_position_embeddings"] = config.original_max_position_embeddings
+            rope_scaling["original_max_position_embeddings"] = (
+                config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
@@ -405,8 +405,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def forward(
         self,
@@ -444,7 +445,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue

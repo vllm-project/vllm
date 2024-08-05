@@ -28,7 +28,7 @@ from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_patch_grid_length, input_processor_for_clip)
 from .interfaces import SupportsVision
 from .llava import LlavaMultiModalProjector
-from .utils import merge_vision_embeddings, is_pp_missing_parameter
+from .utils import is_pp_missing_parameter, merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -245,8 +245,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                                                 config.text_config.vocab_size,
                                                 logit_scale)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.make_empty_intermediate_tensors_factory(
-            ["hidden_states, residuals"])
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
