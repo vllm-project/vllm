@@ -195,7 +195,7 @@ class MessageQueue:
             # message. otherwise, we will only receive the first subscription
             # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
             self.local_socket.setsockopt(XPUB_VERBOSE, True)
-            local_subscribe_port = get_open_port(is_for_dist_init = False)
+            local_subscribe_port = get_open_port()
             self.local_socket.bind(f"tcp://*:{local_subscribe_port}")
 
             self.current_idx = 0
@@ -211,7 +211,7 @@ class MessageQueue:
             # create a publish-subscribe socket to communicate large data
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
-            remote_subscribe_port = get_open_port(is_for_dist_init = False)
+            remote_subscribe_port = get_open_port()
             self.remote_socket.bind(f"tcp://*:{remote_subscribe_port}")
 
         else:

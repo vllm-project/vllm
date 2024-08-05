@@ -53,10 +53,10 @@ benchmark() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=100
+  num_prompts=50
   qps=$1
   prefix_len=50
-  input_len="100"
+  input_len=2048
   output_len=$2
 
 
@@ -143,19 +143,19 @@ benchmark() {
 
 
 # large model
-VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8100 \
     -tp 4 \
-    --max-model-len 10000 \
+    --max-model-len 30000 \
     --gpu-memory-utilization 0.8 &
-VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
   -m vllm.entrypoints.openai.api_server \
   --model $model \
   --port 8200 \
   -tp 4 \
-  --max-model-len 10000 \
+  --max-model-len 30000 \
   --gpu-memory-utilization 0.8 &
 
 # # Small Model
@@ -181,8 +181,8 @@ VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
   wait_for_server 8200
 
   # launch a proxy server that listen from port 8000
-  python3 disagg_prefill_proxy_server.py &
-  sleep 1
+  # python3 disagg_prefill_proxy_server.py &
+  # sleep 1
 
   python3 ../benchmark_serving.py \
           --backend vllm \
@@ -193,7 +193,23 @@ VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
           --sonnet-output-len $output_len \
           --sonnet-prefix-len $prefix_len \
           --num-prompts $num_prompts \
-          --port 8000 \
+          --port 8100 \
+          --save-result \
+          --result-dir $results_folder \
+          --result-filename disagg_prefill_2xtp4.json \
+          --request-rate $qps
+
+
+  python3 ../benchmark_serving.py \
+          --backend vllm \
+          --model $model \
+          --dataset-name $dataset_name \
+          --dataset-path $dataset_path \
+          --sonnet-input-len $input_len \
+          --sonnet-output-len $output_len \
+          --sonnet-prefix-len $prefix_len \
+          --num-prompts $num_prompts \
+          --port 8200 \
           --save-result \
           --result-dir $results_folder \
           --result-filename disagg_prefill_2xtp4.json \
@@ -230,8 +246,8 @@ main() {
   rm -rf results
   mkdir results
 
-  default_qps=10
-  default_output_len=150
+  default_qps=1
+  default_output_len=1
 
   # for target_qps in 2 4 8 16
   # do

@@ -631,9 +631,12 @@ class GroupCoordinator:
         tensor_dict: Dict[str, Any] = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
+                target_device = value.device
+                if 'cuda' in target_device:
+                    target_device = self.device
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
-                                     device=value.device)
+                                     device=target_device)
                 if tensor.numel() == 0:
                     # Skip broadcasting empty tensors.
                     tensor_dict[key] = tensor
@@ -653,11 +656,12 @@ class GroupCoordinator:
                     torch.distributed.recv(tensor,
                                            src=self.ranks[src],
                                            group=metadata_group)
+
                 else:
                     # use group for GPU tensors
                     torch.distributed.recv(tensor,
-                                           src=self.ranks[src],
-                                           group=group)
+                                            src=self.ranks[src],
+                                            group=group)
                 if use_all_gather:
                     # do the allgather
                     tensor = all_gather_group.all_gather(  # type: ignore
