@@ -333,9 +333,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         # you can only either use guided decoding or tools, not both
-        if (guide_count > 1 and "tool_choice" in data
-                and data["tool_choice"] != "none"
-                and data["tool_choice"] != "auto"):
+        if guide_count > 1 and data.get('tool_choice', 'none') not in ("none", "auto"):
             raise ValueError(
                 "You can only either use guided decoding or tools, not both.")
         return data
