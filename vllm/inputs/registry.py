@@ -1,4 +1,5 @@
 import functools
+from collections import UserDict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Callable, Dict, Mapping, Optional, Protocol,
                     Tuple, Type, TypeVar)
@@ -81,6 +82,21 @@ class DummyDataFactory(Protocol):
             :data:`InputProcessor` is not applied to the dummy data.
         """
         ...
+
+
+class _MultiModalCounts(UserDict):
+    """
+    Wraps `mm_counts` for a more informative error message
+    when attempting to access a plugin that does not exist.
+    """
+
+    def __getitem__(self, key: str) -> int:
+        try:
+            return super().__getitem__(key)
+        except KeyError as exc:
+            msg = (f"There is no multi-modal plugin with the key: {key}. "
+                   f"Available keys: {set(self.keys())}")
+            raise KeyError(msg) from exc
 
 
 InputProcessor = Callable[[InputContext, LLMInputs], LLMInputs]
@@ -167,7 +183,7 @@ class InputRegistry:
         seq_data, mm_data = dummy_factory(
             InputContext(model_config),
             seq_len,
-            mm_counts,
+            _MultiModalCounts(mm_counts),
         )
 
         # Having more tokens is over-conservative but otherwise fine
