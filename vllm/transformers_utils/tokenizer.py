@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Optional, Union
 
 import huggingface_hub
@@ -55,7 +56,7 @@ def get_cached_tokenizer(
 
 
 def get_tokenizer(
-    tokenizer_name: str,
+    tokenizer_name: Union[str, Path],
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
@@ -90,6 +91,13 @@ def get_tokenizer(
 
     if "truncation_side" not in kwargs:
         kwargs["truncation_side"] = "left"
+
+    # Separate model folder from file path for GGUF models
+    is_gguf = Path(tokenizer_name).is_file() and Path(
+        tokenizer_name).suffix == ".gguf"
+    if is_gguf:
+        kwargs["gguf_file"] = Path(tokenizer_name).name
+        tokenizer_name = Path(tokenizer_name).parent
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(

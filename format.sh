@@ -242,6 +242,11 @@ echo 'vLLM isort: Done'
 # NOTE: Keep up to date with .github/workflows/clang-format.yml
 CLANG_FORMAT_EXCLUDES=(
     'csrc/moe/topk_softmax_kernels.cu'
+    'csrc/quantization/gguf/ggml-common.h'
+    'csrc/quantization/gguf/dequantize.cuh'
+    'csrc/quantization/gguf/vecdotq.cuh'
+    'csrc/quantization/gguf/mmq.cuh'
+    'csrc/quantization/gguf/mmvq.cuh'
 )
 
 # Format specified files with clang-format
