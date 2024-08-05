@@ -22,3 +22,4 @@ outlines >= 0.0.43, < 0.1 # Requires torch >= 2.1.0
 typing_extensions
 filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
 pyzmq
+gguf == 0.9.1
