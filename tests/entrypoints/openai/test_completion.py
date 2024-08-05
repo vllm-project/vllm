@@ -87,15 +87,13 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
     ]
 
 
-@pytest.fixture(scope="module")
-def server(default_server_args):
+@pytest.fixture(scope="module",
+                params=["", "--disable-frontend-multiprocessing"])
+def client(default_server_args, request):
+    if request.param:
+        default_server_args.append(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
-
-
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+        yield remote_server.get_async_client()
 
 
 @pytest.mark.asyncio
