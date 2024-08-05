@@ -7,6 +7,7 @@ import aiohttp
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
@@ -14,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               ChatCompletionResponse,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
