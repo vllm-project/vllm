@@ -6,9 +6,7 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -102,15 +100,9 @@ class GGUFLinearMethod(LinearMethodBase):
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
-        if isinstance(layer, QKVParallelLinear):
-            qweight_type = Parameter(torch.empty(3, dtype=torch.uint8),
-                                     requires_grad=False)
-        elif isinstance(layer, MergedColumnParallelLinear):
-            qweight_type = Parameter(torch.empty(2, dtype=torch.uint8),
-                                     requires_grad=False)
-        else:
-            qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
-                                     requires_grad=False)
+        qweight_type = Parameter(torch.empty(len(output_partition_sizes),
+                                             dtype=torch.uint8),
+                                 requires_grad=False)
         set_weight_attrs(
             qweight_type, {
                 "is_gguf_weight_type": True,
