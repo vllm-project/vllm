@@ -639,7 +639,7 @@ class OpenAIServingChat(OpenAIServing):
                 last_msg_content = conversation[-1]["content"] or ''
 
             for choice in choices:
-                full_message = last_msg_content + choice.message.content if choice.message.content else ''
+                full_message = last_msg_content + (choice.message.content or '')
                 choice.message.content = full_message
 
         num_prompt_tokens = len(final_res.prompt_token_ids)
