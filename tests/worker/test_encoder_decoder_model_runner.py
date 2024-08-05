@@ -263,14 +263,7 @@ def test_prepare_prompt(
                                                seq_len - 1)
         selected_token_start_idx += seq_len
 
-    sampling_metadata = SamplingMetadata.prepare(
-        seq_group_metadata_list,
-        seq_lens,
-        query_lens=seq_lens,
-        device=model_runner.device,
-        pin_memory=model_runner.pin_memory,
-    )
-
+    sampling_metadata = model_input.sampling_metadata
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(
         expected_selected_token_indices,
@@ -478,14 +471,7 @@ def test_prepare_decode(
         expected_selected_token_indices.append(selected_token_start_idx)
         selected_token_start_idx += 1
 
-    sampling_metadata = SamplingMetadata.prepare(
-        seq_group_metadata_list,
-        seq_lens,
-        query_lens=seq_lens,
-        device=model_runner.device,
-        pin_memory=model_runner.pin_memory,
-    )
-
+    sampling_metadata = model_input.sampling_metadata
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(
         expected_selected_token_indices,
