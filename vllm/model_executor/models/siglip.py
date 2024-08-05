@@ -2,7 +2,7 @@
 within a vision language model."""
 
 import math
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 from PIL import Image
@@ -12,8 +12,7 @@ from transformers.models.siglip.modeling_siglip import SiglipAttention
 from vllm_flash_attn import flash_attn_func
 from xformers.ops import memory_efficient_attention
 
-from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig
+from vllm.config import ModelConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
@@ -209,13 +208,13 @@ class SiglipVisionEmbeddings(nn.Module):
         return embeddings
 
 
+# NOTE: Not used - kept for later when we TP the ViT
 # TODO(ChristopherCho): Implement TP version of Attention
 class SiglipTPAttention(nn.Module):
 
     def __init__(
         self,
         config,
-        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -257,8 +256,6 @@ class SiglipTPAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
         batch_size, q_len, _ = hidden_states.size()
@@ -271,8 +268,6 @@ class SiglipTPAttention(nn.Module):
             q=query_states,
             k=key_states,
             v=value_states,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             batch_size=batch_size,
             q_len=q_len,
         )
@@ -280,8 +275,7 @@ class SiglipTPAttention(nn.Module):
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
-    def _basic_attention_forward(self, q, k, v, batch_size, q_len, *args,
-                                 **kwargs):
+    def _basic_attention_forward(self, q, k, v, batch_size, q_len):
         q = q.view(batch_size, q_len, self.num_heads,
                    self.head_dim).transpose(1, 2)
         k = k.view(batch_size, q_len, self.num_heads,
@@ -329,6 +323,7 @@ class SiglipTPAttention(nn.Module):
         return attn_output
 
 
+# NOTE: Not used - kept for later when we TP the ViT
 # TODO(ChristopherCho): flash_attn_func is not working properly.
 #                       It constantly throws a CUDA error.
 class SiglipFlashAttention2(SiglipTPAttention):
@@ -366,6 +361,7 @@ class SiglipFlashAttention2(SiglipTPAttention):
         return attn_output
 
 
+# NOTE: Not used - kept for later when we TP the ViT
 class SiglipSdpaAttention(SiglipTPAttention):
 
     def __init__(self, *args, **kwargs):
@@ -373,8 +369,7 @@ class SiglipSdpaAttention(SiglipTPAttention):
         self.is_causal = False
         self.attn_fn = self._sdpa_attention_forward
 
-    def _sdpa_attention_forward(self, q, k, v, batch_size, q_len, *args,
-                                **kwargs):
+    def _sdpa_attention_forward(self, q, k, v, batch_size, q_len):
         q = q.view(batch_size, q_len, self.num_heads,
                    self.head_dim).transpose(1, 2)
         k = k.view(batch_size, q_len, self.num_heads,
@@ -391,14 +386,14 @@ class SiglipSdpaAttention(SiglipTPAttention):
         return attn_output
 
 
+# NOTE: Not used - kept for later when we TP the ViT
 class SiglipxFormersAttention(SiglipTPAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.attn_fn = self._xformers_attention_forward
 
-    def _xformers_attention_forward(self, q, k, v, batch_size, q_len, *args,
-                                    **kwargs):
+    def _xformers_attention_forward(self, q, k, v, batch_size, q_len):
         q = q.view(batch_size, q_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, q_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, q_len, self.num_heads, self.head_dim)
@@ -414,6 +409,7 @@ class SiglipxFormersAttention(SiglipTPAttention):
         return attn_output
 
 
+# NOTE: Not used - kept for later when we TP the ViT
 SIGLIP_ATTENTION_CLASSES = {
     "eager": SiglipTPAttention,
     "flash_attention_2": SiglipFlashAttention2,
@@ -459,20 +455,13 @@ class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
         config: SiglipConfig,
-        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
 
+        # TODO(ChristopherCho): use TP'ed Attention block
         self.self_attn = SiglipAttention(config)
-        # TODO(ChristopherCho): Implement TP version of Attention
-        # self.self_attn = \
-        #     SIGLIP_ATTENTION_CLASSES[config._attn_implementation](
-        #         config,
-        #         cache_config=cache_config,
-        #         quant_config=quant_config,
-        #     )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -485,19 +474,11 @@ class SiglipEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-    ) -> Tuple[torch.FloatTensor]:
+    ) -> Tuple[torch.Tensor]:
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
         hidden_states, _ = self.self_attn(hidden_states=hidden_states)
-        # TODO(ChristopherCho): Implement TP version of Attention
-        # hidden_states = self.self_attn(
-        #     hidden_states=hidden_states,
-        #     kv_caches=kv_caches,
-        #     attn_metadata=attn_metadata,
-        # )
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -505,9 +486,7 @@ class SiglipEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, )
-
-        return outputs
+        return hidden_states, None
 
 
 class SiglipEncoder(nn.Module):
@@ -515,7 +494,6 @@ class SiglipEncoder(nn.Module):
     def __init__(
         self,
         config: SiglipConfig,
-        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -523,7 +501,6 @@ class SiglipEncoder(nn.Module):
         self.layers = nn.ModuleList([
             SiglipEncoderLayer(
                 config,
-                cache_config=cache_config,
                 quant_config=quant_config,
             ) for _ in range(config.num_hidden_layers)
         ])
@@ -531,74 +508,12 @@ class SiglipEncoder(nn.Module):
     def forward(
         self,
         inputs_embeds: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> Tuple:
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            encoder_states = (hidden_states, )
-            layer_outputs = encoder_layer(
-                hidden_states=hidden_states,
-                kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
-            )
-            hidden_states = layer_outputs[0]
+            hidden_states, _ = encoder_layer(hidden_states)
 
-        encoder_states = encoder_states + (hidden_states, )
-
-        return (hidden_states, encoder_states)
-
-
-class SiglipVisionTransformer(nn.Module):
-
-    def __init__(
-        self,
-        config: SiglipVisionConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
-        super().__init__()
-        self.config = config
-        embed_dim = config.hidden_size
-
-        self.embeddings = SiglipVisionEmbeddings(config)
-        self.encoder = SiglipEncoder(
-            config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-        )
-        self.post_layernorm = nn.LayerNorm(embed_dim,
-                                           eps=config.layer_norm_eps)
-        self.use_head = (True if not hasattr(config, "vision_use_head") else
-                         config.vision_use_head)
-        if self.use_head:
-            self.head = SiglipMultiheadAttentionPoolingHead(
-                config=config, quant_config=quant_config)
-
-    def forward(
-        self,
-        pixel_values,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        interpolate_pos_encoding: Optional[bool] = True,
-    ) -> Tuple:
-        hidden_states = self.embeddings(
-            pixel_values,
-            interpolate_pos_encoding=interpolate_pos_encoding,
-        )
-
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-        )
-
-        last_hidden_state = encoder_outputs[0]
-        last_hidden_state = self.post_layernorm(last_hidden_state)
-
-        pooled_output = self.head(last_hidden_state) if self.use_head else None
-
-        return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+        return hidden_states
 
 
 class SiglipMultiheadAttentionPoolingHead(nn.Module):
@@ -632,6 +547,50 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         return hidden_state[:, 0]
 
 
+class SiglipVisionTransformer(nn.Module):
+
+    def __init__(
+        self,
+        config: SiglipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__()
+        self.config = config
+        embed_dim = config.hidden_size
+
+        self.embeddings = SiglipVisionEmbeddings(config)
+        self.encoder = SiglipEncoder(
+            config,
+            quant_config=quant_config,
+        )
+        self.post_layernorm = nn.LayerNorm(embed_dim,
+                                           eps=config.layer_norm_eps)
+        self.use_head = (True if not hasattr(config, "vision_use_head") else
+                         config.vision_use_head)
+        if self.use_head:
+            self.head = SiglipMultiheadAttentionPoolingHead(
+                config=config, quant_config=quant_config)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: Optional[bool] = True,
+    ) -> Tuple:
+        hidden_states = self.embeddings(
+            pixel_values,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+        )
+
+        encoder_outputs = self.encoder(inputs_embeds=hidden_states, )
+
+        last_hidden_state = encoder_outputs[0]
+        last_hidden_state = self.post_layernorm(last_hidden_state)
+
+        pooled_output = self.head(last_hidden_state) if self.use_head else None
+
+        return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+
+
 class SiglipVisionModel(nn.Module):
     config_class = SiglipVisionConfig
     main_input_name = "pixel_values"
@@ -639,13 +598,11 @@ class SiglipVisionModel(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.vision_model = SiglipVisionTransformer(
             config,
-            cache_config,
             quant_config,
         )
 
@@ -654,14 +611,10 @@ class SiglipVisionModel(nn.Module):
 
     def forward(
         self,
-        pixel_values,
-        kv_caches: List[torch.Tensor] = None,
-        attn_metadata: AttentionMetadata = None,
+        pixel_values: torch.Tensor,
         interpolate_pos_encoding: Optional[bool] = False,
     ) -> Tuple:
         return self.vision_model(
             pixel_values=pixel_values,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )

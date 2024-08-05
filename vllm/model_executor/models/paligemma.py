@@ -183,23 +183,16 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         self,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
 
         target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_outputs = vision_tower(pixel_values.to(dtype=target_dtype),
-                                     kv_caches, attn_metadata)
+        image_features = vision_tower(pixel_values.to(dtype=target_dtype))
 
-        selected_image_features = image_outputs[0]
-
-        return selected_image_features
+        return image_features
 
     def _process_image_pixels(
         self,
         inputs: PaliGemmaImagePixelInputs,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         assert self.vision_tower is not None
 
@@ -208,23 +201,15 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         return self._image_pixels_to_features(
             self.vision_tower,
             pixel_values,
-            kv_caches,
-            attn_metadata,
         )
 
     def _process_image_input(
         self,
         image_input: PaliGemmaImageInputs,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
 
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(
-            image_input,
-            kv_caches,
-            attn_metadata,
-        )
+        image_features = self._process_image_pixels(image_input, )
 
         return self.multi_modal_projector(image_features)
 
@@ -239,11 +224,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         parsed_image_input = self._parse_and_validate_image_input(**kwargs)
 
         if parsed_image_input is not None:
-            vision_embeddings = self._process_image_input(
-                parsed_image_input,
-                kv_caches,
-                attn_metadata,
-            )
+            vision_embeddings = self._process_image_input(parsed_image_input)
             # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
             vision_embeddings = vision_embeddings * (self.config.hidden_size**
                                                      -0.5)
