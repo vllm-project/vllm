@@ -154,12 +154,20 @@ class cmake_build_ext(build_ext):
         outdir = os.path.abspath(
             os.path.dirname(self.get_ext_fullpath(ext.name)))
 
+
+
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
             '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
+
+
+        # What is this used for? In CMakefiles?
+        # TODO: decide if we really need this, because we have VLLM_TARGET_DEVICE
+        # if _is_xpu():
+            # cmake_args += ['DVLLM_BUILD_XPU_OPS=ON']
 
         verbose = envs.VERBOSE
         if verbose:
@@ -237,7 +245,7 @@ class cmake_build_ext(build_ext):
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu()))
+            and not (_is_neuron() or _is_tpu() or _is_xpu()))
 
 
 def _is_hip() -> bool:
