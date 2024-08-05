@@ -18,16 +18,13 @@ def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               multimodal_config: Optional[MultiModalConfig],
               cache_config: CacheConfig) -> nn.Module:
     loader = get_model_loader(load_config)
-    m = loader.load_model(model_config=model_config,
-                          device_config=device_config,
-                          lora_config=lora_config,
-                          multimodal_config=multimodal_config,
-                          parallel_config=parallel_config,
-                          scheduler_config=scheduler_config,
-                          cache_config=cache_config)
-    return m
-    #return torch.compile(m, backend='eager')
-    #return torch.compile(m, backend='eager', fullgraph=True)
+    return loader.load_model(model_config=model_config,
+                             device_config=device_config,
+                             lora_config=lora_config,
+                             multimodal_config=multimodal_config,
+                             parallel_config=parallel_config,
+                             scheduler_config=scheduler_config,
+                             cache_config=cache_config)
 
 
 __all__ = [
