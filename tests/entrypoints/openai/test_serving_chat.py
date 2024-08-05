@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import suppress
 from dataclasses import dataclass
 from unittest.mock import MagicMock
@@ -81,3 +82,30 @@ def test_serving_chat_should_set_correct_max_tokens():
         asyncio.run(serving_chat.create_chat_completion(req))
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+
+def test_tool_calls_message_is_parsed_correctly_in_chat_completion_request():
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{
+            "role":
+            "assistant",
+            'tool_calls': [{
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "get_capital",
+                    "arguments": json.dumps({"country": "France"})
+                }
+            }]
+        }],
+    )
+
+    assert req.messages[0]['tool_calls'] == [{
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "get_capital",
+            "arguments": json.dumps({"country": "France"})
+        }
+    }]
