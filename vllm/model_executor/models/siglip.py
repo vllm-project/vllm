@@ -258,21 +258,7 @@ class SiglipAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        try:
-            self.attn = Attention(
-                self.num_heads,
-                self.head_dim,
-                self.scale,
-                cache_config=cache_config,
-                quant_config=quant_config,
-            )
-            self.attn_fn = self._vllm_attention_forward
-        except Exception:
-            # For some pretrained Siglip models, the backend is not supported
-            # (e.g. google/siglip-so400m-patch14-384 has hidden_size=1152
-            #  with num_attention_heads=16, which is not supported)
-            # If the backend is not supported, fall back to the default
-            self.attn_fn = self._basic_attention_forward
+        self.attn_fn = self._basic_attention_forward
 
     def forward(
         self,
@@ -299,10 +285,6 @@ class SiglipAttention(nn.Module):
 
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
-
-    def _vllm_attention_forward(self, q, k, v, kv_caches, attn_metadata, *args,
-                                **kwargs):
-        return self.attn(q, k, v, kv_caches, attn_metadata)
 
     def _basic_attention_forward(self, q, k, v, batch_size, q_len, *args,
                                  **kwargs):
@@ -438,11 +420,39 @@ class SiglipxFormersAttention(SiglipAttention):
         return attn_output
 
 
+class SiglipvLLMAttention(SiglipAttention):
+
+    def __init__(self,
+                 config: SiglipConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 *args,
+                 **kwargs):
+        super().__init__(config,
+                         *args,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
+                         **kwargs)
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            cache_config=cache_config,
+            quant_config=quant_config,
+        )
+        self.attn_fn = self._vllm_attention_forward
+
+    def _vllm_attention_forward(self, q, k, v, kv_caches, attn_metadata, *args,
+                                **kwargs):
+        return self.attn(q, k, v, kv_caches, attn_metadata)
+
+
 SIGLIP_ATTENTION_CLASSES = {
     "eager": SiglipAttention,
     "flash_attention_2": SiglipFlashAttention2,
     "sdpa": SiglipSdpaAttention,
     "xformers": SiglipxFormersAttention,
+    "vllm": SiglipvLLMAttention,
 }
 
 
