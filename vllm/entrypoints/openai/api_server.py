@@ -92,7 +92,7 @@ async def health() -> Response:
 
 @router.get(
     "/ready",
-    response_model=ReadinessResponse,
+    response_model=Response,
     name="readiness",
     tags=["technical"],
 )
