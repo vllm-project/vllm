@@ -165,14 +165,6 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 #
-# Add warning-related flags to VLLM_GPU_FLAGS
-#
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-    # Treat warnings as errors
-    list(APPEND VLLM_GPU_FLAGS -Werror all-warnings)
-endif()
-
-#
 # Define other extension targets
 #
 
@@ -235,6 +227,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           COMPILE_FLAGS
           "-gencode arch=compute_90a,code=sm_90a")
   endif()
+
 endif()
 
 define_gpu_extension_target(
@@ -247,12 +240,6 @@ define_gpu_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
-
-# Include CUTLASS headers as system headers to avoid warnings
-target_include_directories(_C SYSTEM PRIVATE
-  ${CUTLASS_INCLUDE_DIR}
-  ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-)
 
 #
 # _moe_C extension
