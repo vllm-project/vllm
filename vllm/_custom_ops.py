@@ -176,6 +176,35 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
                                      block_tables)
 
 
+# fused quant layer norm ops
+def rms_norm_dynamic_per_token_quant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    scale_ub: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None,
+    is_asymmetric_quant=False,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+
+    # Support asymmetric quant only for int8 quantization.
+    assert not is_asymmetric_quant or quant_dtype == torch.int8
+    # scale_ub arg is only supported for fp8 quant
+    assert scale_ub is None or quant_dtype == torch.float8_e4m3fn
+
+    output = torch.empty_like(input, device=input.device, dtype=quant_dtype)
+    scales = torch.empty((input.numel() // input.shape[-1], 1),
+                         device=input.device,
+                         dtype=torch.float32)
+    azps = torch.empty_like(scales, device=input.device,
+                            dtype=torch.int32) if is_asymmetric_quant else None
+
+    torch.ops._C.rms_norm_dynamic_per_token_quant(output, input, weight,
+                                                  scales, epsilon, scale_ub,
+                                                  residual, azps)
+    return output, scales, azps
+
+
 # quantization ops
 # awq
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
