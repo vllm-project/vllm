@@ -145,6 +145,7 @@ def can_actually_p2p(
     p_tgt.start()
     p_src.join()
     p_tgt.join()
+    assert p_src.exitcode == 0 and p_tgt.exitcode == 0
     result: List[bool] = []
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
@@ -189,10 +190,10 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
     if cuda_visible_devices is None:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
-    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
-    path = os.path.expanduser(
-        f"{VLLM_CONFIG_ROOT}/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json"
-    )
+
+    path = os.path.join(
+        envs.VLLM_CACHE_ROOT,
+        f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     from vllm.distributed.parallel_state import get_world_group
     if ((not is_distributed or get_world_group().local_rank == 0)
@@ -221,7 +222,8 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
             # wrap raised exception to provide more information
             raise RuntimeError(
                 f"Error happened when batch testing "
-                f"peer-to-peer access from {batch_src} to {batch_tgt}") from e
+                f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
+                f"{returned.stderr.decode()}") from e
         result = pickle.loads(returned.stdout)
         for _i, _j, r in zip(batch_src, batch_tgt, result):
             cache[f"{_i}->{_j}"] = r

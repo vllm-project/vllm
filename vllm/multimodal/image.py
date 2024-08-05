@@ -100,6 +100,7 @@ def repeat_and_pad_image_tokens(
 
 
 class ImagePlugin(MultiModalPlugin):
+    """Plugin for image data."""
 
     def get_data_key(self) -> str:
         return "image"
@@ -112,7 +113,7 @@ class ImagePlugin(MultiModalPlugin):
     def _default_input_mapper(self, ctx: InputContext,
                               data: object) -> MultiModalInputs:
         model_config = ctx.model_config
-        if isinstance(data, Image.Image):
+        if isinstance(data, (Image.Image, list)):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "

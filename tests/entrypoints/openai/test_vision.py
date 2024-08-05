@@ -2,10 +2,8 @@ from typing import Dict, List
 
 import openai
 import pytest
-import pytest_asyncio
-import ray
 
-from vllm.multimodal.utils import ImageFetchAiohttp, encode_image_base64
+from vllm.multimodal.utils import encode_image_base64, fetch_image
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
 
@@ -23,17 +21,8 @@ TEST_IMAGE_URLS = [
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(ray_ctx):
-    return RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
+def server():
+    args = [
         "--dtype",
         "bfloat16",
         "--max-model-len",
@@ -41,7 +30,10 @@ def server(ray_ctx):
         "--enforce-eager",
         "--chat-template",
         str(LLAVA_CHAT_TEMPLATE),
-    ])
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")
@@ -49,11 +41,10 @@ def client(server):
     return server.get_async_client()
 
 
-@pytest_asyncio.fixture(scope="session")
-async def base64_encoded_image() -> Dict[str, str]:
+@pytest.fixture(scope="session")
+def base64_encoded_image() -> Dict[str, str]:
     return {
-        image_url:
-        encode_image_base64(await ImageFetchAiohttp.fetch_image(image_url))
+        image_url: encode_image_base64(fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS
     }
 

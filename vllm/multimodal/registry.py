@@ -15,10 +15,8 @@ logger = init_logger(__name__)
 
 class MultiModalRegistry:
     """
-    A registry to dispatch data processing
-    according to its modality and the target model.
-
-    The registry handles both external and internal data input.
+    A registry that dispatches data processing to the
+    :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
     """
 
     DEFAULT_PLUGINS = (ImagePlugin(), )
@@ -30,6 +28,12 @@ class MultiModalRegistry:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
+        """
+        Register a multi-modal plugin so it can be recognized by vLLM.
+
+        See also:
+            :ref:`adding_multimodal_plugin`
+        """
         data_type_key = plugin.get_data_key()
 
         if data_type_key in self._plugins:
@@ -75,7 +79,11 @@ class MultiModalRegistry:
                   data: MultiModalDataDict) -> MultiModalInputs:
         """
         Apply an input mapper to the data passed to the model.
-        
+
+        The data belonging to each modality is passed to the corresponding
+        plugin which in turn converts the data into into keyword arguments
+        via the input mapper registered for that model.
+
         See :meth:`MultiModalPlugin.map_input` for more details.
         """
         merged_dict: Dict[str, torch.Tensor] = {}

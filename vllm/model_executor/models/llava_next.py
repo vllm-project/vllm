@@ -21,7 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
@@ -43,7 +43,7 @@ MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
 
 class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: BatchedTensors
+    data: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
 
@@ -62,12 +62,10 @@ class LlavaNextImagePixelInputs(TypedDict):
 LlavaNextImageInputs = LlavaNextImagePixelInputs
 
 
-# Taken from: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L91
-# NOTE: new_height and new_width are further incremented to properly invert the
-# floordiv operation: https://github.com/huggingface/transformers/blob/v4.42.2/src/transformers/models/llava_next/modeling_llava_next.py#L133
+# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L79
 def _get_llava_next_num_unpadded_features(
-    height: int,
-    width: int,
+    original_height: int,
+    original_width: int,
     npatches: int,
     num_patch_height: int,
     num_patch_width: int,
@@ -75,25 +73,24 @@ def _get_llava_next_num_unpadded_features(
     current_height = npatches * num_patch_height
     current_width = npatches * num_patch_width
 
-    aspect_ratio: float = width / height
-    current_aspect_ratio: float = current_width / current_height
+    aspect_ratio = original_width / original_height
+    current_aspect_ratio = current_width / current_height
+
     if aspect_ratio > current_aspect_ratio:
-        new_height = (height * current_width) // width
-        if new_height % 2 == 1:
-            new_height += 1
-        current_height = new_height
+        new_height = (original_height * current_width) // original_width
+        padding = (current_height - new_height) // 2
+        current_height -= padding * 2
     else:
-        new_width = (width * current_height) // height
-        if new_width % 2 == 1:
-            new_width += 1
-        current_width = new_width
+        new_width = (original_width * current_height) // original_height
+        padding = (current_width - new_width) // 2
+        current_width -= padding * 2
 
     unpadded_features = current_height * current_width
     newline_features = current_height
     return (unpadded_features, newline_features)
 
 
-# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L111
+# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
 def get_llava_next_image_feature_size(
     hf_config: LlavaNextConfig,
     *,
@@ -109,9 +106,7 @@ def get_llava_next_image_feature_size(
         )
         base_feature_size = num_patches * num_patches
 
-        # Note: We follow the "wrong" width/height order
-        # [ref: PR huggingface/transformers#31588]
-        num_patch_width, num_patch_height = get_anyres_image_grid_shape(
+        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
             image_size=(input_height, input_width),
             grid_pinpoints=hf_config.image_grid_pinpoints,
             patch_size=vision_config.image_size,
@@ -220,8 +215,17 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         self.config = config
         self.multimodal_config = multimodal_config
 
+        # Initialize the vision tower only up to the required feature layer
+        vision_feature_layer = config.vision_feature_layer
+        if vision_feature_layer < 0:
+            num_hidden_layers = config.vision_config.num_hidden_layers \
+                + vision_feature_layer + 1
+        else:
+            num_hidden_layers = vision_feature_layer + 1
+
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = CLIPVisionModel(config=config.vision_config)
+        self.vision_tower = CLIPVisionModel(
+            config.vision_config, num_hidden_layers_override=num_hidden_layers)
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
@@ -238,7 +242,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             quant_config=quant_config)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size, logit_scale)
+                                                config.text_config.vocab_size,
+                                                logit_scale)
         self.sampler = Sampler()
 
         self.image_newline = nn.Parameter(
@@ -310,8 +315,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values,
-                                      self.config.vision_feature_layer)
+        image_features = vision_tower(pixel_values)
 
         return self._select_image_features(
             image_features,
@@ -338,11 +342,12 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             if patch_embeddings.shape[0] > 1:
                 other_patch_embeds = patch_embeddings[1:]
 
+                # Move to CPU to avoid floating-point errors
+                orig_height, orig_width = image_size.tolist()
+
                 # image_aspect_ratio == "anyres"
-                # Note: We follow the "wrong" width/height order
-                # [ref: PR huggingface/transformers#31588]
-                num_patch_width, num_patch_height = get_anyres_image_grid_shape(
-                    image_size,
+                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+                    (orig_height, orig_width),
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
@@ -354,7 +359,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                         .permute(4, 0, 2, 1, 3).contiguous() \
                         .flatten(1, 2).flatten(2, 3)
                     other_patch_embeds = unpad_image(other_patch_embeds,
-                                                     image_size)
+                                                     (orig_height, orig_width))
                     other_patch_embeds = torch.cat((
                         other_patch_embeds,
                         self.image_newline[:, None, None] \
@@ -387,7 +392,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
     def _process_image_pixels(
         self,
         inputs: LlavaNextImagePixelInputs,
-    ) -> BatchedTensors:
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
         assert self.vision_tower is not None
 
         pixel_values = inputs["data"]
@@ -414,7 +419,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         ]
 
     def _process_image_input(
-            self, image_input: LlavaNextImageInputs) -> BatchedTensors:
+        self,
+        image_input: LlavaNextImageInputs,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
         patch_embeddings = self._process_image_pixels(image_input)
 
         image_sizes = image_input.get("image_sizes")
@@ -559,7 +566,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                     break
                 else:
                     use_default_weight_loading = True
-            if use_default_weight_loading:
+            if use_default_weight_loading and name in params_dict:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

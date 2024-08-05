@@ -1,17 +1,20 @@
 import random
+from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData, SequenceGroupMetadata
+from vllm.triton_utils.sample import get_num_triton_sampler_splits
 from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
-                        maybe_expand_dim)
+                        make_tensor_with_pad, maybe_expand_dim)
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
+# Some triton sampler related code is guarded before it is ready.
+_USE_TRITON_SAMPLER = False
 
 
 @dataclass
@@ -86,6 +89,12 @@ class SamplingMetadata:
             The first tuple is [1, 2] (sampled index within original logit),
             and the second tuple is [0, 1] (sampled index within pruned logit).
         num_prompts: Number of prompt sequence groups in seq_groups.
+        skip_sampler_cpu_output: Indicates if we want to skip the GPU=>CPU 
+            serialization of token outputs.
+        reuse_sampling_tensors: Indicates if we want to reuse sampling 
+            tensors that are part of the sampler forward pass. Currently,
+            it is mainly used for multi-step decode.
+            
     """
 
     def __init__(
@@ -94,11 +103,15 @@ class SamplingMetadata:
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         num_prompts: int,
+        skip_sampler_cpu_output: bool = False,
+        reuse_sampling_tensors: bool = False,
     ) -> None:
         self.seq_groups = seq_groups
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
         self.num_prompts = num_prompts
+        self.skip_sampler_cpu_output = skip_sampler_cpu_output
+        self.reuse_sampling_tensors = reuse_sampling_tensors
 
     @staticmethod
     def prepare(
@@ -107,6 +120,7 @@ class SamplingMetadata:
         query_lens: Optional[List[int]],
         device: str,
         pin_memory: bool,
+        generators: Optional[Dict[str, torch.Generator]] = None,
     ) -> "SamplingMetadata":
         (
             seq_groups,
@@ -114,7 +128,7 @@ class SamplingMetadata:
             categorized_sample_indices,
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
-                                device)
+                                device, generators)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -149,6 +163,7 @@ def _prepare_seq_groups(
     seq_lens: List[int],
     query_lens: Optional[List[int]],
     device: str,
+    generators: Optional[Dict[str, torch.Generator]] = None,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
         SamplingType, List[Tuple[int, int]]], int]:
     """Prepare sequence groups and indices for sampling.
@@ -159,8 +174,10 @@ def _prepare_seq_groups(
             Index of prompt len should match with seq_group_metadata_list.
         query_lens: A list of query lengths. Prompt lens include the length
             of entire prompt tokens, and it could be shorter.
-        device: A device to use for random number generator,
+        device: A device to use for random number generators,
             `SequenceGroupToSample.generator`.
+        generators: A store of per-request random number generators used
+            for seeded requests.
 
     Returns:
         seq_groups: A list of sequence group to sample.
@@ -206,8 +223,10 @@ def _prepare_seq_groups(
 
         if seq_group_metadata.is_prompt:
             if sampling_params.seed is not None:
-                seq_group_metadata.state.generator = torch.Generator(
-                    device=device).manual_seed(sampling_params.seed)
+                generator = torch.Generator(device=device).manual_seed(
+                    sampling_params.seed)
+                if generators is not None:
+                    generators[seq_group_metadata.request_id] = generator
 
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
@@ -223,6 +242,9 @@ def _prepare_seq_groups(
             # Decode
             prompt_logprob_len = 0
             sample_len = len(seq_ids) if do_sample else 0
+
+            if sampling_params.seed is not None and generators is not None:
+                generator = generators.get(seq_group_metadata.request_id)
 
         # Update indices to select from the model output.
         """
@@ -267,9 +289,6 @@ def _prepare_seq_groups(
                         range(sample_idx, sample_idx + sample_len))))
             logit_idx += sample_len
             sample_idx += sample_len
-
-        if sampling_params.seed is not None:
-            generator = seq_group_metadata.state.generator
 
         seq_groups.append(
             SequenceGroupToSample(
@@ -319,8 +338,8 @@ class SamplingTensors:
             user-defined seed for each sequence.
         extra_entropy: extra entropy to use when generating seeds.
         """
-        prompt_tokens: List[List[int]] = []
-        output_tokens: List[List[int]] = []
+        prompt_tokens: List[array] = []
+        output_tokens: List[array] = []
         top_ks: List[int] = []
         temperatures: List[float] = []
         top_ps: List[float] = []
@@ -330,14 +349,16 @@ class SamplingTensors:
         repetition_penalties: List[float] = []
         sampling_seeds: List[int] = []
         sample_indices: List[int] = []
-        prompt_best_of: List[int] = []
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
 
-        # We need one base seed per Triton slice.
-        seeds_to_generate = (extra_seeds_to_generate +
-                             get_num_triton_sampler_splits(vocab_size))
+        if _USE_TRITON_SAMPLER:
+            prompt_best_of: List[int] = []
+
+            # We need one base seed per Triton slice.
+            seeds_to_generate = (extra_seeds_to_generate +
+                                 get_num_triton_sampler_splits(vocab_size))
 
         assert sampling_metadata.seq_groups is not None
         for seq_group in sampling_metadata.seq_groups:
@@ -349,9 +370,6 @@ class SamplingTensors:
             r = sampling_params.repetition_penalty
             top_p = sampling_params.top_p
             min_p = sampling_params.min_p
-            seed = sampling_params.seed
-
-            is_greedy = sampling_params.sampling_type == SamplingType.GREEDY
 
             # k should not be greater than the vocab size.
             top_k = min(sampling_params.top_k, vocab_size)
@@ -372,8 +390,7 @@ class SamplingTensors:
                 do_penalties = True
 
             is_prompt = seq_group.is_prompt
-            if (seq_group.is_prompt
-                    and sampling_params.prompt_logprobs is not None):
+            if (is_prompt and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
                 query_len = seq_group.query_len
@@ -398,23 +415,27 @@ class SamplingTensors:
                 frequency_penalties += [f] * len(seq_ids)
                 repetition_penalties += [r] * len(seq_ids)
 
-            if is_prompt:
-                prompt_best_of.append(sampling_params.best_of)
-                query_len = seq_group.query_len
-                assert query_len is not None
+            if _USE_TRITON_SAMPLER:
+                if is_prompt:
+                    prompt_best_of.append(sampling_params.best_of)
+                    query_len = seq_group.query_len
+                    assert query_len is not None
 
-            for seq_id in seq_ids:
-                seq_data = seq_group.seq_data[seq_id]
-                extra_entropy = extra_entropy or ()
-                seq_seeds = cls._get_sequence_seeds(
-                    seed,
-                    seq_data.get_len(),
-                    *extra_entropy,
-                    seq_id,
-                    seeds_to_generate=seeds_to_generate,
-                    is_greedy=is_greedy)
-                sampling_seeds.append(seq_seeds)
-            sample_indices.extend(seq_group.sample_indices)
+                seed = sampling_params.seed
+                is_greedy = sampling_params.sampling_type == SamplingType.GREEDY
+
+                for seq_id in seq_ids:
+                    seq_data = seq_group.seq_data[seq_id]
+                    extra_entropy = extra_entropy or ()
+                    seq_seeds = cls._get_sequence_seeds(
+                        seed,
+                        seq_data.get_len(),
+                        *extra_entropy,
+                        seq_id,
+                        seeds_to_generate=seeds_to_generate,
+                        is_greedy=is_greedy)
+                    sampling_seeds.append(seq_seeds)
+                sample_indices.extend(seq_group.sample_indices)
 
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
@@ -422,13 +443,15 @@ class SamplingTensors:
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
-                    prompt_tokens.extend([] for _ in range(prefill_len))
-                    output_tokens.extend([] for _ in range(prefill_len))
+                    prompt_tokens.extend(
+                        array('l') for _ in range(prefill_len))
+                    output_tokens.extend(
+                        array('l') for _ in range(prefill_len))
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
-                        prompt_tokens.append(list(seq_data.prompt_token_ids))
-                        output_tokens.append(list(seq_data.output_token_ids))
+                        prompt_tokens.append(seq_data.prompt_token_ids_array)
+                        output_tokens.append(seq_data.output_token_ids_array)
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,
@@ -444,9 +467,9 @@ class SamplingTensors:
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
                    sampling_seeds: List[int], sample_indices: List[int],
-                   prompt_tokens: List[List[int]],
-                   output_tokens: List[List[int]], vocab_size: int,
-                   extra_seeds_to_generate: int, device: torch.device,
+                   prompt_tokens: List[array], output_tokens: List[array],
+                   vocab_size: int, extra_seeds_to_generate: int,
+                   device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
@@ -455,18 +478,24 @@ class SamplingTensors:
         do_penalties = prompt_tokens or output_tokens
 
         if do_penalties:
-            prompt_max_len = max([len(tokens) for tokens in prompt_tokens],
-                                 default=0)
-            prompt_padded_tokens = [
-                tokens + [vocab_size] * (prompt_max_len - len(tokens))
-                for tokens in prompt_tokens
-            ]
-            output_max_len = max([len(tokens) for tokens in output_tokens],
-                                 default=0)
-            output_padded_tokens = [
-                tokens + [vocab_size] * (output_max_len - len(tokens))
-                for tokens in output_tokens
-            ]
+            prompt_t = make_tensor_with_pad(
+                prompt_tokens,
+                vocab_size,
+                device="cpu",
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            )
+            output_t = make_tensor_with_pad(
+                output_tokens,
+                vocab_size,
+                device="cpu",
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            )
+        else:
+            empty_tensor = torch.empty(0, device=device, dtype=torch.long)
+            prompt_t = empty_tensor
+            output_t = empty_tensor
 
         temperatures_t = torch.tensor(
             temperatures,
@@ -516,22 +545,6 @@ class SamplingTensors:
             dtype=torch.long,
             pin_memory=pin_memory,
         )
-        if do_penalties:
-            prompt_tensor = torch.tensor(
-                prompt_padded_tokens,
-                device="cpu",
-                dtype=torch.long,
-                pin_memory=pin_memory,
-            )
-            output_tensor = torch.tensor(
-                output_padded_tokens,
-                device="cpu",
-                dtype=torch.long,
-                pin_memory=pin_memory,
-            )
-        else:
-            prompt_tensor = None
-            output_tensor = None
         # need to transpose and make contiguous to
         # copy the tensor correctly.
         # [batch_size, n_seeds] -> [n_seeds, batch_size]
@@ -540,7 +553,7 @@ class SamplingTensors:
             device="cpu",
             dtype=torch.long,
             pin_memory=pin_memory,
-        ).T.contiguous()
+        ).t().contiguous()
 
         # Because the memory is pinned, we can do non-blocking
         # transfer to device.
@@ -554,16 +567,6 @@ class SamplingTensors:
             extra_seeds_gpu = None
         sampling_seeds_gpu = sampling_seeds_gpu[:num_base_seeds]
 
-        if do_penalties:
-            prompt_tokens_gpu = prompt_tensor.to(device=device,
-                                                 non_blocking=True)
-            output_tokens_gpu = output_tensor.to(device=device,
-                                                 non_blocking=True)
-        else:
-            empty_tensor = torch.empty(0, device=device, dtype=torch.long)
-            prompt_tokens_gpu = empty_tensor
-            output_tokens_gpu = empty_tensor
-
         return cls(
             temperatures=temperatures_t.to(device=device, non_blocking=True),
             top_ps=top_ps_t.to(device=device, non_blocking=True),
@@ -575,8 +578,8 @@ class SamplingTensors:
                                                          non_blocking=True),
             repetition_penalties=repetition_penalties_t.to(device=device,
                                                            non_blocking=True),
-            prompt_tokens=prompt_tokens_gpu,
-            output_tokens=output_tokens_gpu,
+            prompt_tokens=prompt_t.to(device=device, non_blocking=True),
+            output_tokens=output_t.to(device=device, non_blocking=True),
             sampling_seeds=sampling_seeds_gpu,
             sample_indices=sample_indices_t.to(device=device,
                                                non_blocking=True),

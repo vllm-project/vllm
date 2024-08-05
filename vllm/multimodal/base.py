@@ -1,24 +1,39 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import (Any, Callable, Dict, List, Optional, Type, TypedDict,
-                    TypeVar, Union)
+from typing import Any, Callable, Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Type, TypedDict, TypeVar, Union, cast
 
 import torch
 import torch.types
 from PIL import Image
 from torch import nn
+from typing_extensions import TypeAlias
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
+from vllm.utils import JSONTree, json_map_leaves
 
 logger = init_logger(__name__)
 
-BatchedTensors = Union[torch.Tensor, List[torch.Tensor]]
+NestedTensors = Union[GenericSequence[torch.Tensor], torch.Tensor]
 """
-If each input tensor in the batch has the same size, this is a single batched
-tensor; otherwise, this is a list of tensors with one element per batch.
+Use a list instead of a tensor if the dimensions of each element do not match.
+Currently only supports up to singly nested list of tensors.
+"""
+
+BatchedTensors: TypeAlias = JSONTree[torch.Tensor]
+"""
+A nested JSON structure of tensors which have been batched via
+:meth:`MultiModalInputs.batch`.
+"""
+
+BatchedTensorInputs: TypeAlias = Dict[str, JSONTree[torch.Tensor]]
+"""
+A dictionary containing nested tensors which have been batched via
+:meth:`MultiModalInputs.batch`.
 """
 
 if sys.version_info < (3, 9):
@@ -27,7 +42,7 @@ if sys.version_info < (3, 9):
         pass
 else:
 
-    class _MultiModalInputsBase(UserDict[str, torch.Tensor]):
+    class _MultiModalInputsBase(UserDict[str, NestedTensors]):
         pass
 
 
@@ -38,36 +53,44 @@ class MultiModalInputs(_MultiModalInputsBase):
     """
 
     @staticmethod
-    def try_concat(
-        tensors: List[torch.Tensor],
-        *,
-        device: torch.types.Device,
-    ) -> BatchedTensors:
-        # Avoid initializing CUDA too early
-        import torch
+    def _try_concat(tensors: List[NestedTensors]) -> BatchedTensors:
+        """
+        If each input tensor in the batch has the same shape, return a single
+        batched tensor; otherwise, return a list of :class:`NestedTensors` with
+        one element per item in the batch.
+        """
+        # may be list rather than tensors
+        if isinstance(tensors[0], list):
+            return [[t for t in tensor[0]]
+                    for tensor in cast(List[List[torch.Tensor]], tensors)]
 
-        unbatched_shape = tensors[0].shape[1:]
+        tensors_ = cast(List[torch.Tensor], tensors)
 
-        for tensor in tensors:
+        unbatched_shape = tensors_[0].shape[1:]
+
+        for tensor in tensors_:
             if tensor.shape[1:] != unbatched_shape:
-                return [
-                    tensor.squeeze(0).to(device=device) for tensor in tensors
-                ]
+                return [tensor.squeeze(0) for tensor in tensors_]
 
-        return torch.cat(tensors, dim=0).to(device=device)
+        return torch.cat(tensors_, dim=0)
 
     @staticmethod
-    def batch(
-        inputs_list: List["MultiModalInputs"],
-        device: torch.types.Device,
-    ) -> Dict[str, BatchedTensors]:
-        """Batch multiple inputs together into a dictionary."""
+    def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
+        """
+        Batch multiple inputs together into a dictionary.
+
+        The resulting dictionary has the same keys as the inputs.
+        If the corresponding value from each input is a tensor and they all
+        share the same shape, the output value is a single batched tensor;
+        otherwise, the output value is a list containing the original value
+        from each input.
+        """
         if len(inputs_list) == 0:
             return {}
 
         keys = inputs_list[0].keys()
 
-        item_lists: Dict[str, List[torch.Tensor]] = defaultdict(list)
+        item_lists: Dict[str, List[NestedTensors]] = defaultdict(list)
 
         for inputs in inputs_list:
             if inputs.keys() != keys:
@@ -78,22 +101,36 @@ class MultiModalInputs(_MultiModalInputsBase):
                 item_lists[k].append(v)
 
         return {
-            k: MultiModalInputs.try_concat(item_list, device=device)
+            k: MultiModalInputs._try_concat(item_list)
             for k, item_list in item_lists.items()
         }
 
+    @staticmethod
+    def as_kwargs(
+        batched_inputs: BatchedTensorInputs,
+        *,
+        device: torch.types.Device,
+    ) -> BatchedTensorInputs:
+        return json_map_leaves(lambda x: x.to(device, non_blocking=True),
+                               batched_inputs)
+
 
 class MultiModalDataBuiltins(TypedDict, total=False):
+    """Modality types that are predefined by vLLM."""
+
     image: Image.Image
+    """The input image."""
 
 
 MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]
 """
 A dictionary containing an item for each modality type to input.
 
-The data belonging to each modality is converted into keyword arguments 
-to the model by the corresponding mapper. By default, the mapper of 
-the corresponding plugin with the same modality key is applied.
+Note:
+    This dictionary also accepts modality keys defined outside
+    :class:`MultiModalDataBuiltins` as long as a customized plugin is registered
+    through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
+    Read more on that :ref:`here <adding_multimodal_plugin>`.
 """
 
 MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
@@ -123,6 +160,9 @@ class MultiModalPlugin(ABC):
     process the same data differently). This registry is in turn used by
     :class:`~MultiModalRegistry` which acts at a higher level
     (i.e., the modality of the data).
+
+    See also:
+        :ref:`adding_multimodal_plugin`
     """
 
     def __init__(self) -> None:
@@ -183,8 +223,8 @@ class MultiModalPlugin(ABC):
     def map_input(self, model_config: ModelConfig,
                   data: object) -> MultiModalInputs:
         """
-        Apply an input mapper to a data passed
-        to the model, transforming the data into a dictionary of model inputs.
+        Transform the data into a dictionary of model inputs using the
+        input mapper registered for that model.
 
         The model is identified by ``model_config``.
 
