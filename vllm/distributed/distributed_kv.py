@@ -237,27 +237,7 @@ def buffer_kv_caches_send_and_listen_for_input_hash(
 
     logger.debug("My query lens is %s, seq len is %s, rank is %s",
                  str(query_lens), str(seq_lens), torch.distributed.get_rank())
-
-    # failed = False
-    # reason = ""
-
-    # if sum(query_lens) != sum(seq_lens):
-    #     logger.error("Query len sum is %d but seq len sum is %d", sum(query_lens), sum(seq_lens))
-    #     failed=True
-    # if sum(query_lens) != len(_input_tokens_list):
-    #     logger.error("Input tokens len is %d, doesn't match with query lens sum %d",
-    #                  sum(query_lens),
-    #                  len(_input_tokens_list))
-    #     failed=True
-    # if slot_mapping.shape[0] != len(_input_tokens_list):
-    #     logger.error("Slot mapping shape is %s, mismatch with input shape %s",
-    #                  slot_mapping.shape,
-    #                  len(_input_tokens_list))
-    #     failed=True
-    # if failed:
-    #     import subprocess
-    #     subprocess.run("ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9", shell=True)
-
+                 
     # query_lens contains new KV caches that are added to vLLM.
     # so we will send them to decode instance
     # FIXME(Kuntai): This assume that all requests are prefill.
