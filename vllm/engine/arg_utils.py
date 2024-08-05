@@ -16,8 +16,7 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-        BaseTokenizerGroup)
+    from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 logger = init_logger(__name__)
 
@@ -34,12 +33,16 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 
     out_dict: Dict[str, int] = {}
     for item in val.split(","):
-        key, value = item.split("=")
+        try:
+            key, value = item.split("=")
+        except TypeError as exc:
+            msg = "Each item should be in the form KEY=VALUE"
+            raise ValueError(msg) from exc
 
         try:
             out_dict[key] = int(value)
         except ValueError as exc:
-            msg = f"Failed to parse {value} as integer for key {key}"
+            msg = f"Failed to parse value of item {key}={value}"
             raise ValueError(msg) from exc
 
     return out_dict
