@@ -42,6 +42,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 class GPTJAttention(nn.Module):
 
     def __init__(
@@ -194,7 +195,8 @@ class GPTJModel(nn.Module):
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.n_embd)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.n_embd)
 
     def forward(
         self,
@@ -213,7 +215,7 @@ class GPTJModel(nn.Module):
             hidden_states = layer(
                 position_ids,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:

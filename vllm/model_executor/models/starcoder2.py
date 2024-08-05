@@ -44,6 +44,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 class Starcoder2Attention(nn.Module):
 
     def __init__(self,
@@ -208,21 +209,18 @@ class Starcoder2Model(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Starcoder2DecoderLayer(config, cache_config,
-                                                  quant_config=quant_config),
+            lambda prefix: Starcoder2DecoderLayer(
+                config, cache_config, quant_config=quant_config),
             prefix=f"{prefix}.layers",
         )
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: IntermediateTensors
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                intermediate_tensors: IntermediateTensors) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             hidden_states = self.embed_tokens(input_ids)
         else:
@@ -230,7 +228,8 @@ class Starcoder2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states = layer(positions, hidden_states, kv_caches[i-self.start_layer],
+            hidden_states = layer(positions, hidden_states,
+                                  kv_caches[i - self.start_layer],
                                   attn_metadata)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})

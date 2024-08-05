@@ -30,8 +30,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce,
-                              get_pp_group)
+                              tensor_model_parallel_all_reduce, get_pp_group)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -353,21 +352,19 @@ class FalconModel(nn.Module):
         # Transformer blocks
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: FalconDecoderLayer(config, cache_config, quant_config),
+            lambda prefix: FalconDecoderLayer(config, cache_config,
+                                              quant_config),
             prefix=f"{prefix}.h")
 
         # Final Layer Norm
         self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
-    def forward(
-        self,
-        input_ids: torch.LongTensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: IntermediateTensors
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.LongTensor, positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                intermediate_tensors: IntermediateTensors) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             hidden_states = self.word_embeddings(input_ids)
         else:
@@ -377,7 +374,7 @@ class FalconModel(nn.Module):
             hidden_states = layer(
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:
@@ -424,13 +421,8 @@ class FalconForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            intermediate_tensors
-        )
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

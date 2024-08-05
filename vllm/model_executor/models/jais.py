@@ -46,6 +46,7 @@ from vllm.transformers_utils.configs import JAISConfig
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 class SwiGLUActivation(nn.Module):
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
@@ -234,18 +235,17 @@ class JAISModel(nn.Module):
             self.embeddings_scale = config.embeddings_scale
         else:
             self.embeddings_scale = config.mup_embeddings_scale
-        self,start_layer, self.end_layer, self.h = make_layers(config.num_hidden_layers,
-                                                               lambda prefix: JAISBlock(config, cache_config, quant_config),
-                                                               prefix=f"{prefix}.h")
+        self, start_layer, self.end_layer, self.h = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: JAISBlock(config, cache_config, quant_config),
+            prefix=f"{prefix}.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.n_embd)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.n_embd)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
@@ -256,13 +256,15 @@ class JAISModel(nn.Module):
             else:
                 hidden_states = inputs_embeds
             hidden_states *= torch.tensor(float(self.embeddings_scale),
-                                        dtype=hidden_states.dtype)
+                                          dtype=hidden_states.dtype)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i-self.start_layer], attn_metadata)
+            hidden_states = layer(hidden_states,
+                                  kv_caches[i - self.start_layer],
+                                  attn_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})

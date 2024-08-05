@@ -31,8 +31,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce,
-                              get_pp_group)
+                              tensor_model_parallel_all_reduce, get_pp_group)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -52,6 +51,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
+
 
 class DeepseekMLP(nn.Module):
 
@@ -349,14 +349,12 @@ class DeepseekModel(nn.Module):
                                                 quant_config=quant_config),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, positions: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
@@ -368,10 +366,13 @@ class DeepseekModel(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i-self.start_layer], attn_metadata,
-                                            residual)
+                                            kv_caches[i - self.start_layer],
+                                            attn_metadata, residual)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

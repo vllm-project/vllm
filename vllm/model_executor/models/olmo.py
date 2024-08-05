@@ -47,6 +47,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 class OlmoAttention(nn.Module):
     """
     This is the attention block where the output is computed as
@@ -225,8 +226,7 @@ class OlmoModel(nn.Module):
                  config: OlmoConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""
-                 ):
+                 prefix: str = ""):
         super().__init__()
         self.config = config
 
@@ -234,19 +234,18 @@ class OlmoModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OlmoDecoderLayer(config, cache_config, quant_config),
+            lambda prefix: OlmoDecoderLayer(config, cache_config, quant_config
+                                            ),
             prefix=f"{prefix}.layers")
         self.norm = nn.LayerNorm(config.hidden_size,
                                  elementwise_affine=False,
                                  bias=False)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, positions: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """
@@ -269,7 +268,7 @@ class OlmoModel(nn.Module):
             hidden_states = self.layers[i](
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
 

@@ -244,11 +244,13 @@ class XverseModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: XverseDecoderLayer(config, cache_config, quant_config),
+            lambda prefix: XverseDecoderLayer(config, cache_config,
+                                              quant_config),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
     def forward(
         self,
@@ -268,12 +270,15 @@ class XverseModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

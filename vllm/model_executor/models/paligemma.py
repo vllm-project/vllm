@@ -241,7 +241,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
-                                            intermediate_tensors, 
+                                            intermediate_tensors,
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states

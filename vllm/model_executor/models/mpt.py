@@ -28,6 +28,7 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 def _get_alibi_slopes(
     total_num_heads: int,
     alibi_bias_max: int,
@@ -231,14 +232,12 @@ class MPTModel(nn.Module):
                         module.bias, nn.Parameter):
                     # Remove the bias term in Linear and LayerNorm.
                     module.register_parameter("bias", None)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.d_model)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.d_model)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
@@ -248,7 +247,7 @@ class MPTModel(nn.Module):
             hidden_states = block(
                 position_ids,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:

@@ -26,6 +26,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 def load_column_parallel_weight(param: torch.nn.Parameter,
                                 loaded_weight: torch.Tensor):
     tp = get_tensor_model_parallel_world_size()
@@ -312,9 +313,10 @@ class Phi3SmallModel(nn.Module):
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Phi3SmallDecoderLayer(config, int(prefix.split('.')[-1]), cache_config, quant_config),
-            prefix=f"{prefix}.layers"
-        )
+            lambda prefix: Phi3SmallDecoderLayer(config,
+                                                 int(prefix.split('.')[-1]),
+                                                 cache_config, quant_config),
+            prefix=f"{prefix}.layers")
 
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_epsilon)
@@ -348,7 +350,7 @@ class Phi3SmallModel(nn.Module):
             hidden_states = layer(
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:
@@ -383,7 +385,6 @@ class Phi3SmallForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
-
 
         # tokens in tiktoken but not used
         if hasattr(config, 'dummy_token_indices'):

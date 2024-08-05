@@ -51,6 +51,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 @torch.compile
 def layer_norm_func(hidden_states, weight, variance_epsilon):
     input_dtype = hidden_states.dtype
@@ -280,18 +281,17 @@ class CohereModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: CohereDecoderLayer(config, cache_config, quant_config),
+            lambda prefix: CohereDecoderLayer(config, cache_config,
+                                              quant_config),
             prefix=f"{prefix}.layers")
         self.norm = LayerNorm(param_shape=(config.hidden_size),
                               eps=config.layer_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, positions: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
@@ -306,12 +306,15 @@ class CohereModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -368,7 +371,8 @@ class CohereForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

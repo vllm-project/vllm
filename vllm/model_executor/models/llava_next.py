@@ -245,7 +245,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                                                 config.text_config.vocab_size,
                                                 logit_scale)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.make_empty_intermediate_tensors_factory(["hidden_states, residuals"])
+        self.make_empty_intermediate_tensors = self.make_empty_intermediate_tensors_factory(
+            ["hidden_states, residuals"])
 
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
@@ -511,7 +512,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
-                                            intermediate_tensors, 
+                                            intermediate_tensors,
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -561,8 +562,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                      shard_id) in stacked_params_mapping:
                     if weight_name not in name:
                         continue
-                    if is_pp_missing_parameter(name.replace(weight_name,
-                                                            param_name), self):
+                    if is_pp_missing_parameter(
+                            name.replace(weight_name, param_name), self):
                         continue
                     param = params_dict[name.replace(weight_name, param_name)]
                     weight_loader = param.weight_loader

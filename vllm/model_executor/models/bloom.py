@@ -44,6 +44,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
     base = torch.tensor(
@@ -241,12 +242,12 @@ class BloomModel(nn.Module):
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: BloomBlock(config, cache_config, quant_config),
-            prefix=f"{prefix}.h"
-        )
+            prefix=f"{prefix}.h")
 
         # Final Layer Norm
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
     def forward(
         self,
@@ -267,7 +268,7 @@ class BloomModel(nn.Module):
             hidden_states = layer(
                 position_ids,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:

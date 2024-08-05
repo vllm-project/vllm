@@ -377,13 +377,13 @@ class ArcticModel(nn.Module):
             org_num_embeddings=self.vocab_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: ArcticDecoderLayer(config,
-                                              int(prefix.split(".")[-1]),
-                                              cache_config, quant_config),
+            lambda prefix: ArcticDecoderLayer(config, int(
+                prefix.split(".")[-1]), cache_config, quant_config),
             prefix=f"{prefix}.layers")
         self._attn_implementation = config._attn_implementation
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
     def forward(
         self,
@@ -397,10 +397,11 @@ class ArcticModel(nn.Module):
             hidden_states = self.embed_tokens(input_ids)
         else:
             assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"] 
+            hidden_states = intermediate_tensors["hidden_states"]
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states = layer(positions, hidden_states, kv_caches[i-self.start_layer],
+            hidden_states = layer(positions, hidden_states,
+                                  kv_caches[i - self.start_layer],
                                   attn_metadata)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -430,7 +431,7 @@ class ArcticForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors 
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
     def forward(
         self,

@@ -12,6 +12,7 @@ from vllm.sequence import PoolerOutput, IntermediateTensors
 
 from .utils import is_pp_missing_parameter
 
+
 class LlamaEmbeddingModel(nn.Module):
     """A model that uses Llama with additional embedding functionalities.
 
@@ -42,7 +43,8 @@ class LlamaEmbeddingModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         return self.model.forward(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors, inputs_embeds)
+                                  attn_metadata, intermediate_tensors,
+                                  inputs_embeds)
 
     def pooler(
         self,

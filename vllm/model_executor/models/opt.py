@@ -235,7 +235,8 @@ class OPTDecoder(nn.Module):
         else:
             self.final_layer_norm = None
 
-        self.start_layer, self.end_layer, self.layers = make_layers(config.num_hidden_layers,  
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
             lambda prefix: OPTDecoderLayer(config, cache_config, quant_config),
             prefix=f"{prefix}.layers")
 
@@ -264,7 +265,9 @@ class OPTDecoder(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states = layer(hidden_states, kv_caches[i-self.start_layer], attn_metadata)
+            hidden_states = layer(hidden_states,
+                                  kv_caches[i - self.start_layer],
+                                  attn_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -285,7 +288,8 @@ class OPTModel(nn.Module):
     ):
         super().__init__()
         self.decoder = OPTDecoder(config, cache_config, quant_config)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.decoder.get_input_embeddings(input_ids)

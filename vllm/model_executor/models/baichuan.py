@@ -270,11 +270,13 @@ class BaiChuanModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: BaiChuanDecoderLayer(config, position_embedding, cache_config, quant_config),
+            lambda prefix: BaiChuanDecoderLayer(config, position_embedding,
+                                                cache_config, quant_config),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
     def forward(
         self,
@@ -283,7 +285,7 @@ class BaiChuanModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors,
-    ) -> Union[torch.Tensor. IntermediateTensors]:
+    ) -> Union[torch.Tensor.IntermediateTensors]:
         if get_pp_group().is_first_rank:
             hidden_states = self.embed_tokens(input_ids)
             residual = None
@@ -296,7 +298,7 @@ class BaiChuanModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
             )

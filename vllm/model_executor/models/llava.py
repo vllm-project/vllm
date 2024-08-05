@@ -287,7 +287,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
-                                            intermediate_tensors, 
+                                            intermediate_tensors,
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -337,7 +337,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                      shard_id) in stacked_params_mapping:
                     if weight_name not in name:
                         continue
-                    if is_pp_missing_parameter(name.replace(weight_name, param_name), self):
+                    if is_pp_missing_parameter(
+                            name.replace(weight_name, param_name), self):
                         continue
                     param = params_dict[name.replace(weight_name, param_name)]
                     weight_loader = param.weight_loader

@@ -826,7 +826,7 @@ class ChameleonModel(nn.Module):
             config.vocabulary_map)
         decoder_layer = ChameleonDecoderLayer if not self.config.swin_norm \
             else ChameleonSwinDecoderLayer
-        
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer(config=config,
@@ -879,12 +879,15 @@ class ChameleonModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

@@ -8,8 +8,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce,
-                              get_pp_group)
+                              tensor_model_parallel_all_reduce, get_pp_group)
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
@@ -28,6 +27,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
+
 
 class DbrxRouter(nn.Module):
     """A Router implementation for DBRX that returns logits for each expert
@@ -335,14 +335,12 @@ class DbrxModel(nn.Module):
                                                       nn.Parameter):
                 # Remove the bias term in Linear and LayerNorm.
                 module.register_parameter("bias", None)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.d_model)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.d_model)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
@@ -355,7 +353,7 @@ class DbrxModel(nn.Module):
             hidden_states = block(
                 position_ids,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:

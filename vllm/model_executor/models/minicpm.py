@@ -32,8 +32,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce,
-                              get_pp_group)
+                              tensor_model_parallel_all_reduce, get_pp_group)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -394,12 +393,15 @@ class MiniCPMModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -470,7 +472,6 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
                                                 config.vocab_size)
         self.sampler = Sampler()
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
-
 
     def forward(
         self,

@@ -83,7 +83,8 @@ class LlamaMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. " "Only silu is supported for now.")
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -126,7 +127,8 @@ class LlamaAttention(nn.Module):
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         # MistralConfig has an optional head_dim introduced by Mistral-Nemo
-        self.head_dim = getattr(config, "head_dim", self.hidden_size // self.total_num_heads)
+        self.head_dim = getattr(config, "head_dim",
+                                self.hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -194,17 +196,22 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(config, "original_max_position_embeddings", None):
-            rope_scaling["original_max_position_embeddings"] = config.original_max_position_embeddings
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        if rope_scaling is not None and getattr(
+                config, "original_max_position_embeddings", None):
+            rope_scaling[
+                "original_max_position_embeddings"] = config.original_max_position_embeddings
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
-        attention_bias = getattr(config, "attention_bias", False) or getattr(config, "bias", False)
+        attention_bias = getattr(config, "attention_bias", False) or getattr(
+            config, "bias", False)
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=getattr(config, "num_key_value_heads", config.num_attention_heads),
+            num_kv_heads=getattr(config, "num_key_value_heads",
+                                 config.num_attention_heads),
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
@@ -221,8 +228,10 @@ class LlamaDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -237,13 +246,16 @@ class LlamaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions, hidden_states=hidden_states, kv_cache=kv_cache, attn_metadata=attn_metadata
-        )
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states,
+                                       kv_cache=kv_cache,
+                                       attn_metadata=attn_metadata)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -261,20 +273,24 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
-        lora_vocab = (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
-        if get_pp_group().is_first_rank or (config.tie_word_embeddings and get_pp_group().is_last_rank):
+        if get_pp_group().is_first_rank or (config.tie_word_embeddings
+                                            and get_pp_group().is_last_rank):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
-            )
+                self.vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size)
         else:
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: LlamaDecoderLayer(
-                config=config, cache_config=cache_config, quant_config=quant_config, prefix=prefix
-            ),
+            lambda prefix: LlamaDecoderLayer(config=config,
+                                             cache_config=cache_config,
+                                             quant_config=quant_config,
+                                             prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
@@ -307,23 +323,35 @@ class LlamaModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions, hidden_states, kv_caches[i - self.start_layer], attn_metadata, residual
-            )
+            hidden_states, residual = layer(positions, hidden_states,
+                                            kv_caches[i - self.start_layer],
+                                            attn_metadata, residual)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
 class LlamaForCausalLM(nn.Module, SupportsLoRA):
-    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"], "gate_up_proj": ["gate_proj", "up_proj"]}
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
 
     # LoRA specific attributes
-    supported_lora_modules = ["qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens", "lm_head"]
-    embedding_modules = {"embed_tokens": "input_embeddings", "lm_head": "output_embeddings"}
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
+        "lm_head"
+    ]
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings"
+    }
     embedding_padding_modules = ["lm_head"]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
@@ -346,7 +374,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = LlamaModel(config, cache_config, quant_config, lora_config=lora_config, prefix="model")
+        self.model = LlamaModel(config,
+                                cache_config,
+                                quant_config,
+                                lora_config=lora_config,
+                                prefix="model")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -359,22 +391,22 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     DEFAULT_VOCAB_PADDING_SIZE
                     # We need bigger padding if using lora for kernel
                     # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
+                    if not lora_config else
+                    lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
 
             logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, config.vocab_size, logit_scale)
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    logit_scale)
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
+            ["hidden_states", "residual"], config.hidden_size)
 
     def forward(
         self,
@@ -384,14 +416,18 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors)
+        model_output = self.model(input_ids, positions, kv_caches,
+                                  attn_metadata, intermediate_tensors)
         return model_output
 
-    def compute_logits(self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
         return logits
 
-    def sample(self, logits: torch.Tensor, sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
+    def sample(self, logits: torch.Tensor,
+               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
@@ -420,7 +456,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             if scale_name := get_compressed_tensors_cache_scale(name):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
                 continue
@@ -453,7 +490,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
@@ -463,8 +501,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
-            quantization_param_path, tp_rank, tp_size, self.config.num_hidden_layers, self.config.__class__.model_type
-        ):
+                quantization_param_path, tp_rank, tp_size,
+                self.config.num_hidden_layers,
+                self.config.__class__.model_type):
             if not isinstance(self.model.layers[layer_idx], nn.Identity):
                 layer_self_attn = self.model.layers[layer_idx].self_attn
 
@@ -477,4 +516,5 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             if hasattr(layer_self_attn, "kv_scale"):
                 layer_self_attn.attn._kv_scale = scaling_factor
             else:
-                raise RuntimeError("Self attention has no KV cache scaling " "factor attribute!")
+                raise RuntimeError("Self attention has no KV cache scaling "
+                                   "factor attribute!")

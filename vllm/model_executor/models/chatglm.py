@@ -277,7 +277,7 @@ class GLMTransformer(nn.Module):
             hidden_states = layer(
                 hidden_states=hidden_states,
                 position_ids=position_ids,
-                kv_cache=kv_caches[i-self.start_layer],
+                kv_cache=kv_caches[i - self.start_layer],
                 attn_metadata=attn_metadata,
             )
         if get_pp_group().is_last_rank:
@@ -313,11 +313,8 @@ class ChatGLMModel(nn.Module):
             ["hidden_states"], config.hidden_size)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:

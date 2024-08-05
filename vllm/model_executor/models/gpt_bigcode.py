@@ -215,14 +215,12 @@ class GPTBigCodeModel(nn.Module):
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.n_embd)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.n_embd)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
@@ -234,7 +232,9 @@ class GPTBigCodeModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i-self.start_layer], attn_metadata)
+            hidden_states = layer(hidden_states,
+                                  kv_caches[i - self.start_layer],
+                                  attn_metadata)
 
         if not get_pp_group().is_last_rank:
             intermediate_tensors["hidden_states"] = hidden_states

@@ -204,7 +204,8 @@ class GPT2Model(nn.Module):
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = self.make_empty_intermediate_tensors_factory(["hidden_states"], config.n_embd) 
+        self.make_empty_intermediate_tensors = self.make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.n_embd)
 
     def forward(
         self,

@@ -42,6 +42,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
+
 class GPTNeoXAttention(nn.Module):
 
     def __init__(
@@ -208,16 +209,13 @@ class GPTNeoXModel(nn.Module):
         )
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
                                              eps=config.layer_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: IntermediateTensors
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                intermediate_tensors: IntermediateTensors) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             hidden_states = self.embed_in(input_ids)
         else:
@@ -227,7 +225,7 @@ class GPTNeoXModel(nn.Module):
             hidden_states = layer(
                 position_ids,
                 hidden_states,
-                kv_caches[i-self.start_layer],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:
