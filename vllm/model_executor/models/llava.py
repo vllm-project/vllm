@@ -126,8 +126,16 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
     raise NotImplementedError(msg)
 
 
-def _init_vision_tower(hf_config: LlavaConfig, num_hidden_layers: int):
+def _init_vision_tower(hf_config: LlavaConfig):
     vision_config = hf_config.vision_config
+
+    # Initialize the vision tower only up to the required feature layer
+    vision_feature_layer = hf_config.vision_feature_layer
+    if vision_feature_layer < 0:
+        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
+            + vision_feature_layer + 1
+    else:
+        num_hidden_layers = vision_feature_layer + 1
 
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPVisionModel(
@@ -160,16 +168,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # Initialize the vision tower only up to the required feature layer
-        vision_feature_layer = config.vision_feature_layer
-        if vision_feature_layer < 0:
-            num_hidden_layers = config.vision_config.num_hidden_layers \
-                + vision_feature_layer + 1
-        else:
-            num_hidden_layers = vision_feature_layer + 1
-
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = _init_vision_tower(config, num_hidden_layers)
+        self.vision_tower = _init_vision_tower(config)
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
