@@ -664,7 +664,7 @@ class HabanaMemoryProfiler:
         return (
             f"{format_bytes(self.consumed_device_memory)} of device memory "
             f"({format_bytes(self.final_device_memory)}/"
-            f"({format_bytes(HabanaMemoryProfiler.total_device_memory())} used)"
+            f"{format_bytes(HabanaMemoryProfiler.total_device_memory())} used)"
             f" and {format_bytes(self.consumed_host_memory)} of host memory "
             f"({format_bytes(self.final_host_memory)}/"
             f"{format_bytes(HabanaMemoryProfiler.total_host_memory())} used)")
