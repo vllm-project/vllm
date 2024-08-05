@@ -21,6 +21,25 @@ INPUT_EMBEDDING_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "
 {"custom_id": "request-4", "method": "POST", "url": "/v1/embeddings", "body": {"model": "NonExistModel", "input": "Hello world!"}}"""
 
 
+def test_empty_file():
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write("")
+        input_file.flush()
+        proc = subprocess.Popen([
+            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
+            input_file.name, "-o", output_file.name, "--model",
+            "intfloat/e5-mistral-7b-instruct"
+        ], )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        assert contents.strip() == ""
+
+
 def test_completions():
     with tempfile.NamedTemporaryFile(
             "w") as input_file, tempfile.NamedTemporaryFile(
