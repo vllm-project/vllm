@@ -33,7 +33,7 @@ def get_clip_num_patches(*, image_size: int, patch_size: int) -> int:
 
 def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
     return get_clip_num_patches(image_size=hf_config.image_size,
-                                patch_size=hf_config.patch_size)
+                                patch_size=hf_config.patch_size) + 1
 
 
 def get_max_clip_image_tokens(hf_config: CLIPVisionConfig) -> int:

@@ -22,13 +22,13 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
-                   dummy_seq_data_for_clip, get_clip_patch_grid_length,
-                   input_processor_for_clip)
+                   dummy_seq_data_for_clip, get_clip_image_feature_size,
+                   get_clip_patch_grid_length, input_processor_for_clip)
 from .interfaces import SupportsVision
 from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
-                     dummy_seq_data_for_siglip, get_siglip_patch_grid_length,
-                     input_processor_for_siglip)
+                     dummy_seq_data_for_siglip, get_siglip_image_feature_size,
+                     get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import filter_weights, merge_vision_embeddings
 
 logger = init_logger(__name__)
@@ -105,17 +105,17 @@ def get_llava_next_image_feature_size(
             image_size=vision_config.image_size,
             patch_size=vision_config.patch_size,
         )
+        base_feature_size = get_clip_image_feature_size(vision_config)
     elif isinstance(vision_config, SiglipVisionConfig):
         num_patches = get_siglip_patch_grid_length(
             image_size=vision_config.image_size,
             patch_size=vision_config.patch_size,
         )
+        base_feature_size = get_siglip_image_feature_size(vision_config)
     else:
         msg = f"Unsupported vision config: {type(vision_config)}"
         raise NotImplementedError(msg)
 
-    base_feature_size = num_patches * num_patches
-    
     strategy = hf_config.vision_feature_select_strategy
     if strategy == "default":
         base_feature_size -= 1
@@ -134,15 +134,13 @@ def get_llava_next_image_feature_size(
         unpadded_feature_size,
         newline_feature_size,
     ) = _get_llava_next_num_unpadded_features(input_height, input_width,
-                                              num_patches,
-                                              num_patch_height,
+                                              num_patches, num_patch_height,
                                               num_patch_width)
 
     return unpadded_feature_size + newline_feature_size + base_feature_size
 
 
 def get_max_llava_next_image_tokens(ctx: InputContext):
-
     return get_llava_next_image_feature_size(
         ctx.get_hf_config(LlavaNextConfig),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
@@ -261,7 +259,6 @@ def _init_vision_tower(hf_config: LlavaNextConfig):
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
-
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -543,7 +540,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         if image_input is not None:
             vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = self.language_model.model.get_input_embeddings(input_ids)
+            inputs_embeds = self.language_model.model.get_input_embeddings(
+                input_ids)
 
             inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
@@ -576,7 +574,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
-        vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(weights, 4)
+        vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(
+            weights, 4)
 
         # load vision encoder
         vit_weights = filter_weights(vit_weights, "vision_tower")

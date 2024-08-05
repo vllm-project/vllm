@@ -63,23 +63,34 @@ def get_max_llava_image_tokens(ctx: InputContext):
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, CLIPVisionConfig):
-        return get_max_clip_image_tokens(vision_config)
+        num_image_tokens = get_max_clip_image_tokens(vision_config)
     elif isinstance(vision_config, SiglipVisionConfig):
-        return get_max_siglip_image_tokens(vision_config)
+        num_image_tokens = get_max_siglip_image_tokens(vision_config)
+    else:
+        msg = f"Unsupported vision config: {type(vision_config)}"
+        raise NotImplementedError(msg)
 
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
+    strategy = hf_config.vision_feature_select_strategy
+    if strategy == "default":
+        return num_image_tokens - 1
+    elif strategy == "full":
+        return num_image_tokens
+    else:
+        raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
 
 def dummy_data_for_llava(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
 
+    image_feature_size = get_max_llava_image_tokens(ctx)
+
     if isinstance(vision_config, CLIPVisionConfig):
         seq_data = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             image_token_id=hf_config.image_token_index,
+            image_feature_size_override=image_feature_size,
         )
 
         mm_data = dummy_image_for_clip(vision_config)
@@ -89,6 +100,7 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
             vision_config,
             seq_len,
             image_token_id=hf_config.image_token_index,
+            image_feature_size_override=image_feature_size,
         )
 
         mm_data = dummy_image_for_siglip(vision_config)
@@ -107,12 +119,15 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
 
+    image_feature_size = get_max_llava_image_tokens(ctx)
+
     if isinstance(vision_config, CLIPVisionConfig):
         return input_processor_for_clip(
             model_config,
             vision_config,
             llm_inputs,
             image_token_id=hf_config.image_token_index,
+            image_feature_size_override=image_feature_size,
         )
     elif isinstance(vision_config, SiglipVisionConfig):
         return input_processor_for_siglip(
@@ -120,6 +135,7 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
             vision_config,
             llm_inputs,
             image_token_id=hf_config.image_token_index,
+            image_feature_size_override=image_feature_size,
         )
 
     msg = f"Unsupported vision config: {type(vision_config)}"
