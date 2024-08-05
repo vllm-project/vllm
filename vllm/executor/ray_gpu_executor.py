@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import os
 from collections import defaultdict
 from itertools import islice, repeat
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
+
+PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE = False
 
 
 class RayGPUExecutor(DistributedGPUExecutor):
@@ -358,7 +361,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
             # Just return futures
             return ray_worker_outputs
 
-        driver_worker_output = []
+        def get_worker_outputs():
+            return ray.get(ray_worker_outputs)
+
         # In SPMD mode, the driver worker is the same as any other worker,
         # so we only explicitly execute on the driver worker if using a
         # non-SPMD worker class.
@@ -368,23 +373,46 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
             # Start the driver worker after all the ray workers.
             if not use_dummy_driver:
-                driver_worker_output = [
-                    self.driver_worker.execute_method(method, *driver_args,
-                                                      **driver_kwargs)
-                ]
+                # Concurrently poll driver worker and remote ray workers
+                # in background thread to avoid deadlock when performing
+                # distributed init
+                # (see: https://github.com/vllm-project/vllm/issues/3455)
+                if PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE:
+                    with concurrent.futures.ThreadPoolExecutor(
+                            max_workers=2) as executor:
+                        driver_poll_thread = executor.submit(
+                            self.driver_worker.execute_method, method,
+                            *driver_args, **driver_kwargs)
+                        worker_poll_thread = executor.submit(
+                            get_worker_outputs)
+
+                        for completed_future in concurrent.futures.as_completed(
+                            [driver_poll_thread, worker_poll_thread]):
+                            # Will raise exception if underlying thread raises
+                            res = completed_future.result()
+                            if not isinstance(res, list):
+                                driver_output = [res]
+                            else:
+                                worker_outputs = res
+                        all_worker_outputs = driver_output + worker_outputs
+                else:
+                    ray.get([
+                        ray.put(self.driver_worker.execute_method, method, *
+                                driver_args, **driver_kwargs)
+                    ] + ray_worker_outputs)
             else:
                 assert self.driver_dummy_worker is not None
-                driver_worker_output = [
-                    ray.get(
-                        self.driver_dummy_worker.execute_method.remote(
-                            method, *driver_args, **driver_kwargs))
-                ]
+                # Concurrently poll remote driver worker and remote ray workers
+                # to avoid deadlock
+                # (see: https://github.com/vllm-project/vllm/issues/3455)
+                all_worker_outputs = ray.get([
+                    self.driver_dummy_worker.execute_method.remote(
+                        method, *driver_args, **driver_kwargs)
+                ] + ray_worker_outputs)
+        else:
+            all_worker_outputs = ray.get(ray_worker_outputs)
 
-        # Get the results of the ray workers.
-        if self.workers:
-            ray_worker_outputs = ray.get(ray_worker_outputs)
-
-        return driver_worker_output + ray_worker_outputs
+        return all_worker_outputs
 
     def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
         """Wait for futures returned from _run_workers() with
