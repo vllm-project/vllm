@@ -1,5 +1,5 @@
 # Default ROCm 6.1 base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1.3_ubuntu22.04_py3.10_pytorch_release-2.1.2"
 
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
@@ -178,4 +178,5 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     if ls libs/*.whl; then \
     python3 -m pip install libs/*.whl; fi
 
-CMD ["/bin/bash"]
+ENV VLLM_USAGE_SOURCE production-docker-image-rocm
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
