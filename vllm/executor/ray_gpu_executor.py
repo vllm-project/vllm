@@ -374,7 +374,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             # Start the driver worker task after all the ray workers'.
             if not use_dummy_driver:
                 if PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE:
-                    ray.get([
+                    all_worker_outputs = ray.get([
                         ray.put(
                             self.driver_worker.execute_method(
                                 method, *driver_args, **driver_kwargs))
@@ -396,7 +396,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                                 driver_output = [res]
                             else:
                                 worker_outputs = res
-                        all_worker_outputs = driver_output + worker_outputs
+                    all_worker_outputs = driver_output + worker_outputs
             else:
                 assert self.driver_dummy_worker is not None
                 all_worker_outputs = ray.get([
