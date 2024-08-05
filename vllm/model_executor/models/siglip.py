@@ -534,7 +534,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
                                       eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(config=config, quant_config=quant_config)
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         batch_size = hidden_state.shape[0]
         probe = self.probe.repeat(batch_size, 1, 1)
 
@@ -575,20 +575,21 @@ class SiglipVisionTransformer(nn.Module):
         self,
         pixel_values: torch.Tensor,
         interpolate_pos_encoding: bool = True,
-    ) -> Tuple:
+    ) -> torch.Tensor:
         hidden_states = self.embeddings(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
 
-        encoder_outputs = self.encoder(inputs_embeds=hidden_states, )
+        encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
-        last_hidden_state = encoder_outputs[0]
-        last_hidden_state = self.post_layernorm(last_hidden_state)
+        last_hidden_state = self.post_layernorm(encoder_outputs)
 
-        pooled_output = self.head(last_hidden_state) if self.use_head else None
+        # TODO: add this back when pooled_output is used in inference
+        # if self.use_head:
+        # pooled_output = self.head(last_hidden_state)
 
-        return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+        return last_hidden_state
 
 
 class SiglipVisionModel(nn.Module):
