@@ -1137,8 +1137,9 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
 
 torch::Tensor gptq_marlin_24_gemm_meta(
     torch::Tensor& a, torch::Tensor& b_q_weight, torch::Tensor& b_meta,
-    torch::Tensor& b_scales, torch::Tensor& workspace, int64_t num_bits,
-    int64_t size_m, int64_t size_n, int64_t size_k) {
+    torch::Tensor& b_scales, torch::Tensor& workspace,
+    vllm::ScalarTypeTorchPtr const& b_q_type, int64_t size_m, int64_t size_n,
+    int64_t size_k) {
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   return torch::empty({size_m, size_n}, options);
 }

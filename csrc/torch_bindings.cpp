@@ -152,8 +152,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_24_gemm(Tensor a, Tensor b_q_weight, Tensor b_meta, "
-      "Tensor b_scales, Tensor! workspace, int num_bits, int size_m, "
-      "int size_n, int size_k) -> Tensor");
+      "Tensor b_scales, Tensor! workspace, "
+      "__torch__.torch.classes._core_C.ScalarType b_q_type, "
+      "int size_m, int size_n, int size_k) -> Tensor");
   ops.impl("gptq_marlin_24_gemm", torch::kCUDA, &gptq_marlin_24_gemm);
   ops.impl("gptq_marlin_24_gemm", torch::kMeta, &gptq_marlin_24_gemm_meta);
 
@@ -176,7 +177,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
       "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor! workspace, "
-      "int num_bits, int size_m, int size_n, int size_k, bool is_k_full, "
+      "__torch__.torch.classes._core_C.ScalarType b_q_type, "
+      "int size_m, int size_n, int size_k, bool is_k_full, "
       "bool has_zp, bool use_fp32_reduce) -> Tensor");
   ops.impl("gptq_marlin_gemm", torch::kCUDA, &gptq_marlin_gemm);
   ops.impl("gptq_marlin_gemm", torch::kMeta, &gptq_marlin_gemm_meta);
