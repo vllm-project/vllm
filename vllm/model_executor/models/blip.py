@@ -31,13 +31,13 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
 
 
 def get_blip_image_feature_size(
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig], ) -> int:
+        hf_config: Union[BlipVisionConfig, Blip2VisionConfig]) -> int:
     return get_blip_num_patches(image_size=hf_config.image_size,
                                 patch_size=hf_config.patch_size)
 
 
 def get_max_blip_image_tokens(
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig], ) -> int:
+        hf_config: Union[BlipVisionConfig, Blip2VisionConfig]) -> int:
     return get_blip_image_feature_size(hf_config)
 
 

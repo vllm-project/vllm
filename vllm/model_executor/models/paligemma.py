@@ -208,7 +208,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     ) -> torch.Tensor:
 
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input, )
+        image_features = self._process_image_pixels(image_input)
 
         return self.multi_modal_projector(image_features)
 
