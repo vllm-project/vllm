@@ -1,8 +1,15 @@
-from typing import Dict, Iterable, List, Protocol, Tuple
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 import torch
+import torch.nn as nn
 from torch.func import functional_call
+from transformers import PretrainedConfig
 
+from vllm.config import (CacheConfig, LoRAConfig, MultiModalConfig,
+                         SchedulerConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.loader import build_model
+from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal import BatchedTensors
 from vllm.utils import is_pin_memory_available
 
@@ -16,6 +23,28 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
         if prefix == name.pop(0):
             name = ".".join(name)
             yield name, loaded_weight
+
+
+def init_inner_model(
+    hf_config: PretrainedConfig,
+    cache_config: Optional[CacheConfig],
+    quant_config: Optional[QuantizationConfig],
+    *,
+    lora_config: Optional[LoRAConfig] = None,
+    multimodal_config: Optional[MultiModalConfig] = None,
+    scheduler_config: Optional[SchedulerConfig] = None,
+) -> nn.Module:
+    model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
+
+    return build_model(
+        model_class,
+        hf_config,
+        cache_config,
+        quant_config,
+        lora_config=lora_config,
+        multimodal_config=multimodal_config,
+        scheduler_config=scheduler_config,
+    )
 
 
 def merge_vision_embeddings(input_ids: torch.Tensor,

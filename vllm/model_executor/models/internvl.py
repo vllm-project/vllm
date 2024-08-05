@@ -17,7 +17,6 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.loader import init_model_from_hf
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -29,7 +28,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsVision
-from .utils import filter_weights, merge_vision_embeddings
+from .utils import filter_weights, init_inner_model, merge_vision_embeddings
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -283,8 +282,8 @@ class InternVLChatModel(nn.Module, SupportsVision):
         self.vision_model = InternVisionModel(
             config.vision_config, num_hidden_layers_override=num_hidden_layers)
 
-        self.language_model = init_model_from_hf(config.text_config,
-                                                 cache_config, quant_config)
+        self.language_model = init_inner_model(config.text_config,
+                                               cache_config, quant_config)
 
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
