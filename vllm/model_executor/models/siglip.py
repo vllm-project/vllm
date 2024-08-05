@@ -191,8 +191,8 @@ class SiglipVisionEmbeddings(nn.Module):
         return patch_pos_embed
 
     def forward(self,
-                pixel_values: torch.FloatTensor,
-                interpolate_pos_encoding=False) -> torch.Tensor:
+                pixel_values: torch.Tensor,
+                interpolate_pos_encoding: bool = False) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values.to(
@@ -574,7 +574,7 @@ class SiglipVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        interpolate_pos_encoding: Optional[bool] = True,
+        interpolate_pos_encoding: bool = True,
     ) -> Tuple:
         hidden_states = self.embeddings(
             pixel_values,
@@ -612,8 +612,8 @@ class SiglipVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        interpolate_pos_encoding: Optional[bool] = False,
-    ) -> Tuple:
+        interpolate_pos_encoding: bool = False,
+    ) -> torch.Tensor:
         return self.vision_model(
             pixel_values=pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
