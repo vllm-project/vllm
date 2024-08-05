@@ -2,7 +2,7 @@
 within a vision language model."""
 
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from PIL import Image
@@ -14,26 +14,18 @@ from xformers.ops import memory_efficient_attention
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
 from vllm.sequence import SequenceData
-from vllm.utils import is_hip
-
-from .utils import is_pp_missing_parameter
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -673,81 +665,3 @@ class SiglipVisionModel(nn.Module):
             attn_metadata=attn_metadata,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            if scale_name := get_compressed_tensors_cache_scale(name):
-                # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-    # If this function is called, it should always initialize KV cache scale
-    # factors (or else raise an exception). Thus, handled exceptions should
-    # make sure to leave KV cache scale factors in a known good (dummy) state
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path,
-                tp_rank,
-                tp_size,
-                self.config.num_hidden_layers,
-                self.config.__class__.model_type,
-        ):
-            if not isinstance(self.model.layers[layer_idx], nn.Identity):
-                layer_self_attn = self.model.layers[layer_idx].self_attn
-
-            if is_hip():
-                # The scaling factor convention we are assuming is
-                # quantized_value * scaling_factor ~= true_value
-                # which is consistent with the practice of setting
-                # scaling_factor = tensor_amax / FPtype_max
-                scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
-            else:
-                raise RuntimeError("Self attention has no KV cache scaling "
-                                   "factor attribute!")
