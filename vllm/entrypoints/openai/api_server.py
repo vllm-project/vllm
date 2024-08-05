@@ -2,15 +2,13 @@ import asyncio
 import importlib
 import inspect
 import re
-import signal
+from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from multiprocessing import Process
 from typing import AsyncIterator, Set
 
-import fastapi
-import uvicorn
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -22,6 +20,7 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.protocol import AsyncEngineClient
+from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 # yapf conflicts with isort for this block
@@ -71,7 +70,7 @@ def model_is_embedding(model_name: str) -> bool:
 
 
 @asynccontextmanager
-async def lifespan(app: fastapi.FastAPI):
+async def lifespan(app: FastAPI):
 
     async def _force_log():
         while True:
@@ -135,7 +134,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 router = APIRouter()
 
 
-def mount_metrics(app: fastapi.FastAPI):
+def mount_metrics(app: FastAPI):
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app())
     # Workaround for 307 Redirect for /metrics
@@ -225,8 +224,8 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-def build_app(args):
-    app = fastapi.FastAPI(lifespan=lifespan)
+def build_app(args: Namespace) -> FastAPI:
+    app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
 
@@ -274,11 +273,10 @@ def build_app(args):
     return app
 
 
-async def build_server(
+async def init_app(
     async_engine_client: AsyncEngineClient,
-    args,
-    **uvicorn_kwargs,
-) -> uvicorn.Server:
+    args: Namespace,
+) -> FastAPI:
     app = build_app(args)
 
     if args.served_model_name is not None:
@@ -334,62 +332,31 @@ async def build_server(
     )
     app.root_path = args.root_path
 
-    logger.info("Available routes are:")
-    for route in app.routes:
-        if not hasattr(route, 'methods'):
-            continue
-        methods = ', '.join(route.methods)
-        logger.info("Route: %s, Methods: %s", route.path, methods)
-
-    config = uvicorn.Config(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level=args.uvicorn_log_level,
-        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-        ssl_keyfile=args.ssl_keyfile,
-        ssl_certfile=args.ssl_certfile,
-        ssl_ca_certs=args.ssl_ca_certs,
-        ssl_cert_reqs=args.ssl_cert_reqs,
-        **uvicorn_kwargs,
-    )
-
-    return uvicorn.Server(config)
+    return app
 
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
-    shutdown_task = None
     async with build_async_engine_client(args) as async_engine_client:
+        app = await init_app(async_engine_client, args)
 
-        server = await build_server(
-            async_engine_client,
-            args,
+        shutdown_task = await serve_http(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level=args.uvicorn_log_level,
+            timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+            ssl_keyfile=args.ssl_keyfile,
+            ssl_certfile=args.ssl_certfile,
+            ssl_ca_certs=args.ssl_ca_certs,
+            ssl_cert_reqs=args.ssl_cert_reqs,
             **uvicorn_kwargs,
         )
 
-        loop = asyncio.get_running_loop()
-
-        server_task = loop.create_task(server.serve())
-
-        def signal_handler() -> None:
-            # prevents the uvicorn signal handler to exit early
-            server_task.cancel()
-
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
-        loop.add_signal_handler(signal.SIGTERM, signal_handler)
-
-        try:
-            await server_task
-        except asyncio.CancelledError:
-            logger.info("Gracefully stopping http server")
-            shutdown_task = server.shutdown()
-
-    if shutdown_task:
-        # NB: Await server shutdown only after the backend context is exited
-        await shutdown_task
+    # NB: Await server shutdown only after the backend context is exited
+    await shutdown_task
 
 
 if __name__ == "__main__":
@@ -399,4 +366,5 @@ if __name__ == "__main__":
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+
     asyncio.run(run_server(args))
