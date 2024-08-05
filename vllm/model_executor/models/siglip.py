@@ -509,18 +509,6 @@ class SiglipEncoderLayer(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.FloatTensor]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`):
-                Input to the layer of shape `(batch, seq_len, embed_dim)`.
-            attention_mask (`torch.FloatTensor`):
-                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)`
-                where padding elements are indicated by very large negative
-                values.
-            output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all attention
-                layers. See `attentions` under returned tensors for more detail.
-        """
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
