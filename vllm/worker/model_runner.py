@@ -23,6 +23,7 @@ except ImportError:
     BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ObservabilityConfig,
@@ -578,9 +579,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 for inter_data in self.inter_data_list
             ])
             lora_mapping = LoRAMapping(
-                lora_index_mapping,
-                lora_prompt_mapping,
-            )
+                **dict(index_mapping=lora_index_mapping,
+                       prompt_mapping=lora_prompt_mapping,
+                       is_prefill=not self.decode_only))
 
         # Prompt adapter data.
         prompt_adapter_requests: Set[PromptAdapterRequest] = set()
@@ -787,6 +788,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "Using FP8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
+
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend="eager")
 
     def save_sharded_state(
         self,
@@ -1154,9 +1160,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
-                            [0] * batch_size,
-                            [0] * batch_size,
-                        )
+                            **dict(index_mapping=[0] * batch_size,
+                                   prompt_mapping=[0] * batch_size,
+                                   is_prefill=False))
                         self.set_active_loras(set(), lora_mapping)
 
                     if self.prompt_adapter_config:

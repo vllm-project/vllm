@@ -4,7 +4,7 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 NORM2FN = {
     'rms_norm': RMSNorm,
@@ -113,10 +114,10 @@ class InternAttention(nn.Module):
 
         if self.qk_normalization:
             B_, H_, N_, D_ = q.shape
-            q = self.q_norm(q.transpose(1, 2).flatten(-2, -1)).view(
-                B_, N_, H_, D_).transpose(1, 2)
-            k = self.k_norm(k.transpose(1, 2).flatten(-2, -1)).view(
-                B_, N_, H_, D_).transpose(1, 2)
+            q = self.q_norm.forward_native(q.transpose(1, 2).flatten(
+                -2, -1)).view(B_, N_, H_, D_).transpose(1, 2)
+            k = self.k_norm.forward_native(k.transpose(1, 2).flatten(
+                -2, -1)).view(B_, N_, H_, D_).transpose(1, 2)
 
         x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
         x = x.transpose(1, 2).reshape(B, N, C)
@@ -268,3 +269,11 @@ class InternVisionModel(nn.Module):
         encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
         return encoder_outputs
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
