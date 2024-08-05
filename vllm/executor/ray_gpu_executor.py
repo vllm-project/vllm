@@ -361,9 +361,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
             # Just return futures
             return ray_worker_outputs
 
-        def get_worker_outputs():
-            return ray.get(ray_worker_outputs)
-
         # In SPMD mode, the driver worker is the same as any other worker,
         # so we only explicitly execute on the driver worker if using a
         # non-SPMD worker class.
@@ -384,7 +381,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                             self.driver_worker.execute_method, method,
                             *driver_args, **driver_kwargs)
                         worker_poll_thread = executor.submit(
-                            get_worker_outputs)
+                            ray.get, ray_worker_outputs)
 
                         for completed_future in concurrent.futures.as_completed(
                             [driver_poll_thread, worker_poll_thread]):
