@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import get_device_capability_stateless, is_hip, is_tpu
+from vllm.utils import is_hip, is_tpu
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)

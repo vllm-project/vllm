@@ -463,6 +463,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "Loading a weight without `output_dim` attribute in "
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
+        
+        if getattr(self.quant_method, "scales_shard_indexer", None) is not None and output_dim is None:
+            param_data, loaded_weight = self.quant_method.scales_shard_indexer(param_data, loaded_weight, loaded_shard_id)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)

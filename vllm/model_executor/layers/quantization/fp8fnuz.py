@@ -42,7 +42,7 @@ class Fp8FnuzConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return ["fp8fnuz_config.json"]
+        return ["serenity_config.json"]
 
     @classmethod
     def from_config(cls, config) -> "Fp8FnuzConfig":
@@ -225,7 +225,7 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
                 res += bias
         else:
             _save_shapes(m, n, k)
-            res, _ = torch._scaled_mm(x_quant,
+            res = torch._scaled_mm(x_quant,
                                       weight.t(),
                                       out_dtype=x.dtype,
                                       scale_a=asf,
