@@ -11,7 +11,7 @@ from transformers import SiglipConfig, SiglipVisionConfig
 from vllm_flash_attn import flash_attn_func
 from xformers.ops import memory_efficient_attention
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -420,39 +420,11 @@ class SiglipxFormersAttention(SiglipAttention):
         return attn_output
 
 
-class SiglipvLLMAttention(SiglipAttention):
-
-    def __init__(self,
-                 config: SiglipConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 *args,
-                 **kwargs):
-        super().__init__(config,
-                         *args,
-                         cache_config=cache_config,
-                         quant_config=quant_config,
-                         **kwargs)
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scale,
-            cache_config=cache_config,
-            quant_config=quant_config,
-        )
-        self.attn_fn = self._vllm_attention_forward
-
-    def _vllm_attention_forward(self, q, k, v, kv_caches, attn_metadata, *args,
-                                **kwargs):
-        return self.attn(q, k, v, kv_caches, attn_metadata)
-
-
 SIGLIP_ATTENTION_CLASSES = {
     "eager": SiglipAttention,
     "flash_attention_2": SiglipFlashAttention2,
     "sdpa": SiglipSdpaAttention,
     "xformers": SiglipxFormersAttention,
-    "vllm": SiglipvLLMAttention,
 }
 
 
