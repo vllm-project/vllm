@@ -240,7 +240,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
         ]
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
-        self._run_workers("init_device")
+        # must run driver in background thread if len(workers) > 0 to avoid
+        # NCCL init deadlock (https://github.com/vllm-project/vllm/pull/7159)
+        self._run_workers("init_device", run_driver_in_background_thread=True)
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
@@ -310,6 +312,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
+        run_driver_in_background_thread: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers. Can be used in the following
@@ -371,7 +374,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
             # Start the driver worker task after all the ray workers'.
             if not use_dummy_driver:
-                if not ray_worker_outputs:
+                if not ray_worker_outputs or not run_driver_in_background_thread:
                     # Corner case; no special handling as no concurrency with
                     # worker tasks is involved
                     all_worker_outputs = [
