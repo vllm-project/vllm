@@ -147,31 +147,26 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         mm_data: Optional[MultiModalDataDict] = None
+
         try:
             if len(mm_futures):
                 # since we support only single mm data currently
-                assert len(
-                    mm_futures
-                ) == 1, "Multiple 'image_url' input is currently not supported."
+                if len(mm_futures) != 1:
+                    return self.create_error_response("Multiple 'image_url' input is currently not supported.")
                 mm_data = await mm_futures[0]
         except Exception as e:
             logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))
 
         # validation for OpenAI tools
-        try:
             # tool_choice = "required" is not supported
-            assert(request.tool_choice != 'required', 'tool_choice="required" is not supported.')
+        if request.tool_choice != 'required':
+            return self.create_error_response('tool_choice = "required" is not supported!')
 
             # "auto" tools requires --enable-api-tools --enable-auto-tool-choice and --tool-parser
-            if request.tool_choice == 'auto':
-                assert(self.enable_auto_tools and self.tool_parser is not None,
-                       '"auto" tool choice requires --enable-auto-tool-choice and --tool-parser to be set')
-
-        except Exception as e:
-            logger.error('Error validating OpenAI tool configuration: %s', e)
-            return self.create_error_response(str(e))
-
+        if request.tool_choice == 'auto' and not (self.enable_auto_tools and self.tool_parser is not None):
+            return self.create_error_response(
+                  '"auto" tool choice requires --enable-auto-tool-choice and --tool-parser to be set')
 
         request_id = f"chat-{random_uuid()}"
         try:
@@ -236,7 +231,8 @@ class OpenAIServingChat(OpenAIServing):
                     request, raw_request, result_generator, request_id,
                     conversation, tokenizer)
 
-                assert isinstance(generator, ChatCompletionResponse)
+                if not isinstance(generator, ChatCompletionResponse):
+                    raise ValueError('Expected generator to be instance of ChatCompletionResponse')
                 return generator
 
             except ValueError as e:
