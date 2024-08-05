@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -23,7 +23,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_max_clip_image_tokens, input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, is_pp_missing_parameter, make_empty_intermediate_tensors_factory
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -158,6 +158,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                                                 config.text_config.vocab_size,
                                                 logit_scale)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -286,7 +287,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
-                                            None,
+                                            intermediate_tensors, 
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -336,6 +337,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                      shard_id) in stacked_params_mapping:
                     if weight_name not in name:
                         continue
+                    if is_pp_missing_parameter(name.replace(weight_name, param_name), self):
+                        continue
                     param = params_dict[name.replace(weight_name, param_name)]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
@@ -343,6 +346,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                 else:
                     use_default_weight_loading = True
             if use_default_weight_loading and name in params_dict:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

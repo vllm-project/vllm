@@ -2,7 +2,7 @@
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -10,7 +10,7 @@ from torch.nn import LayerNorm
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size, get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -29,6 +29,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA
+from .utils import make_layers, make_empty_intermediate_tensors_factory, is_pp_missing_parameter
 
 
 class GLMAttention(nn.Module):
@@ -243,6 +244,7 @@ class GLMTransformer(nn.Module):
         config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.post_layer_norm = config.post_layer_norm
@@ -251,10 +253,11 @@ class GLMTransformer(nn.Module):
         self.num_layers = config.num_layers
 
         # Transformer layers.
-        self.layers = nn.ModuleList([
-            GLMBlock(config, cache_config, quant_config)
-            for i in range(self.num_layers)
-        ])
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            self.num_layers,
+            lambda prefix: GLMBlock(config, cache_config, quant_config),
+            prefix=f"{prefix}.layers",
+        )
 
         if self.post_layer_norm:
             layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
@@ -269,17 +272,18 @@ class GLMTransformer(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        for i in range(self.num_layers):
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states = layer(
                 hidden_states=hidden_states,
                 position_ids=position_ids,
-                kv_cache=kv_caches[i],
+                kv_cache=kv_caches[i-self.start_layer],
                 attn_metadata=attn_metadata,
             )
-        # Final layer norm.
-        if self.post_layer_norm:
-            hidden_states = self.final_layernorm(hidden_states)
+        if get_pp_group().is_last_rank:
+            # Final layer norm.
+            if self.post_layer_norm:
+                hidden_states = self.final_layernorm(hidden_states)
 
         return hidden_states
 
@@ -305,6 +309,8 @@ class ChatGLMModel(nn.Module):
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
                                            config.hidden_size,
                                            quant_config=quant_config)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
     def forward(
         self,
@@ -312,8 +318,12 @@ class ChatGLMModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        inputs_embeds = self.embedding(input_ids)
+        intermediate_tensors: IntermediateTensors
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            inputs_embeds = self.embedding(input_ids)
+        else:
+            inputs_embeds = intermediate_tensors["hidden_states"]
 
         # Run encoder.
         hidden_states = self.encoder(
@@ -322,6 +332,9 @@ class ChatGLMModel(nn.Module):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         return hidden_states
 
 
@@ -359,6 +372,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
 
     def forward(
         self,
@@ -367,9 +381,9 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata)
+                                         attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -395,6 +409,8 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
                 name = name.replace(".word_embeddings", "")
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",

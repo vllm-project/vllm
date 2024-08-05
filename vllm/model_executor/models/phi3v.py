@@ -43,7 +43,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, is_pp_missing_parameter, make_empty_intermediate_tensors_factory
 
 logger = init_logger(__name__)
 
@@ -465,6 +465,7 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         if list(data.shape[1:]) != [2]:
@@ -585,6 +586,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                     continue
                 if weight_name not in name:
                     continue
+                if is_pp_missing_parameter(name.replace(weight_name, param_name), self):
+                    continue
                 param = params_dict[name.replace(weight_name, param_name)]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -594,6 +597,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if name in params_dict:
+                    if is_pp_missing_parameter(name, self):
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)

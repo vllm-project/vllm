@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, is_pp_missing_parameter, make_empty_intermediate_tensors_factory
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -558,7 +558,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[SamplerOutput, IntermediateTensors]:
         """Run forward pass for BLIP-2.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -607,6 +607,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
+                                            intermediate_tensors=intermediate_tensors,
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -656,6 +657,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                      shard_id) in stacked_params_mapping:
                     if weight_name not in name:
                         continue
+                    if is_pp_missing_parameter(name.replace(weight_name, param_name), self):
+                        continue
                     param = params_dict[name.replace(weight_name, param_name)]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
@@ -663,6 +666,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                 else:
                     use_default_weight_loading = True
             if use_default_weight_loading:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-NeoX model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -24,7 +24,7 @@ from transformers import GPTNeoXConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size, get_pp_group
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -40,6 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
+from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
 class GPTNeoXAttention(nn.Module):
 
@@ -191,6 +192,7 @@ class GPTNeoXModel(nn.Module):
         config: GPTNeoXConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -199,12 +201,14 @@ class GPTNeoXModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.layers = nn.ModuleList([
-            GPTNeoXLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: GPTNeoXLayer(config, cache_config, quant_config),
+            prefix=f"{prefix}.layers",
+        )
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
                                              eps=config.layer_norm_eps)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.hidden_size)
 
     def forward(
         self,
@@ -212,16 +216,22 @@ class GPTNeoXModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: IntermediateTensors
     ) -> torch.Tensor:
-        hidden_states = self.embed_in(input_ids)
-        for i in range(len(self.layers)):
+        if get_pp_group().is_first_rank:
+            hidden_states = self.embed_in(input_ids)
+        else:
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states = layer(
                 position_ids,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i-self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
 
@@ -245,6 +255,7 @@ class GPTNeoXForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.gpt_neox.make_empty_intermediate_tensors
 
     def forward(
         self,
@@ -253,9 +264,9 @@ class GPTNeoXForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
-                                      attn_metadata)
+                                      attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -282,6 +293,8 @@ class GPTNeoXForCausalLM(nn.Module):
                     or "rotary_emb.sin_cached" in name):
                 # Models trained using OpenRLHF may include
                 # these tensors in the checkpoint. Skip them.
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
 

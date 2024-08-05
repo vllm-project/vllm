@@ -28,7 +28,7 @@ from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_patch_grid_length, input_processor_for_clip)
 from .interfaces import SupportsVision
 from .llava import LlavaMultiModalProjector
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, is_pp_missing_parameter
 
 logger = init_logger(__name__)
 
@@ -245,6 +245,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                                                 config.text_config.vocab_size,
                                                 logit_scale)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.make_empty_intermediate_tensors_factory(["hidden_states, residuals"])
 
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
@@ -510,7 +511,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
-                                            None,
+                                            intermediate_tensors, 
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -560,6 +561,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                      shard_id) in stacked_params_mapping:
                     if weight_name not in name:
                         continue
+                    if is_pp_missing_parameter(name.replace(weight_name,
+                                                            param_name), self):
+                        continue
                     param = params_dict[name.replace(weight_name, param_name)]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
@@ -567,6 +571,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                 else:
                     use_default_weight_loading = True
             if use_default_weight_loading and name in params_dict:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -22,7 +22,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .interfaces import SupportsVision
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, is_pp_missing_parameter
 
 logger = init_logger(__name__)
 
@@ -146,6 +146,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -216,7 +217,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
-                **kwargs: object) -> SamplerOutput:
+                **kwargs: object) -> Union[SamplerOutput, IntermediateTensors]:
 
         parsed_image_input = self._parse_and_validate_image_input(**kwargs)
 
@@ -240,7 +241,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
-                                            None,
+                                            intermediate_tensors, 
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -292,6 +293,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
+                    if is_pp_missing_parameter(name, self):
+                        continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
@@ -308,6 +311,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                     use_default_weight_loading = True
 
             if use_default_weight_loading:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

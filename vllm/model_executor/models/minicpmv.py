@@ -61,6 +61,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from .idefics2_vision_model import Idefics2VisionTransformer
 
 logger = init_logger(__name__)
+from .utils import is_pp_missing_parameter, make_empty_intermediate_tensors_factory
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
@@ -514,6 +515,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
 
     def get_embedding(
         self,
@@ -675,6 +677,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                 for param_name, weight_name, shard_id in stacked_params_mapping:
                     if weight_name not in name:
                         continue
+                    if is_pp_missing_parameter(name.replace(weight_name, param_name), self):
+                        continue
                     param = params_dict[name.replace(weight_name, param_name)]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
@@ -682,6 +686,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                 else:
                     use_default_weight_loading = True
             if use_default_weight_loading:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

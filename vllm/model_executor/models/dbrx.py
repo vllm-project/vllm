@@ -1,5 +1,5 @@
 # coding=utf-8
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -8,7 +8,8 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+                              tensor_model_parallel_all_reduce,
+                              get_pp_group)
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
@@ -26,6 +27,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
+from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
 class DbrxRouter(nn.Module):
     """A Router implementation for DBRX that returns logits for each expert
@@ -315,22 +317,25 @@ class DbrxModel(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
         )
-        self.blocks = nn.ModuleList([
-            DbrxBlock(config, cache_config, quant_config)
-            for _ in range(config.n_layers)
-        ])
+        self.start_layer, self.end_layer, self.blocks = make_layers(
+            config.n_layers,
+            lambda prefix: DbrxBlock(config, cache_config, quant_config),
+            prefix=f"{prefix}.blocks",
+        )
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
             if hasattr(module, "bias") and isinstance(module.bias,
                                                       nn.Parameter):
                 # Remove the bias term in Linear and LayerNorm.
                 module.register_parameter("bias", None)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.d_model)
 
     def forward(
         self,
@@ -338,16 +343,23 @@ class DbrxModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        hidden_states = self.wte(input_ids)
-        for i in range(len(self.blocks)):
+        intermediate_tensors: IntermediateTensors
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            hidden_states = self.wte(input_ids)
+        else:
+            assert intermediate_tensors
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             block = self.blocks[i]
             hidden_states = block(
                 position_ids,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i-self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.norm_f(hidden_states)
         return hidden_states
 
@@ -375,6 +387,7 @@ class DbrxForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
 
     def forward(
         self,
@@ -383,9 +396,9 @@ class DbrxForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata)
+                                         attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -413,11 +426,15 @@ class DbrxForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, weight_name)
                 break
             else:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

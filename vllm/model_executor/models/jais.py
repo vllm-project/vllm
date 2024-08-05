@@ -20,7 +20,7 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -28,7 +28,8 @@ from torch import nn
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              get_pp_group)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -43,6 +44,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import JAISConfig
 
+from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
 class SwiGLUActivation(nn.Module):
 
@@ -216,6 +218,7 @@ class JAISModel(nn.Module):
         config: JAISConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -231,11 +234,11 @@ class JAISModel(nn.Module):
             self.embeddings_scale = config.embeddings_scale
         else:
             self.embeddings_scale = config.mup_embeddings_scale
-        self.h = nn.ModuleList([
-            JAISBlock(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self,start_layer, self.end_layer, self.h = make_layers(config.num_hidden_layers,
+                                                               lambda prefix: JAISBlock(config, cache_config, quant_config),
+                                                               prefix=f"{prefix}.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], config.n_embd)
 
     def forward(
         self,
@@ -243,20 +246,26 @@ class JAISModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        inputs_embeds = self.wte(input_ids)
-        if self.wpe is not None:
-            position_embeds = self.wpe(position_ids)
-            hidden_states = inputs_embeds + position_embeds
+        intermediate_tensors: IntermediateTensors
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            inputs_embeds = self.wte(input_ids)
+            if self.wpe is not None:
+                position_embeds = self.wpe(position_ids)
+                hidden_states = inputs_embeds + position_embeds
+            else:
+                hidden_states = inputs_embeds
+            hidden_states *= torch.tensor(float(self.embeddings_scale),
+                                        dtype=hidden_states.dtype)
         else:
-            hidden_states = inputs_embeds
-        hidden_states *= torch.tensor(float(self.embeddings_scale),
-                                      dtype=hidden_states.dtype)
+            hidden_states = intermediate_tensors["hidden_states"]
 
-        for i in range(len(self.h)):
+        for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
+            hidden_states = layer(hidden_states, kv_caches[i-self.start_layer], attn_metadata)
 
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
@@ -282,6 +291,7 @@ class JAISLMHeadModel(nn.Module):
         self.logits_processor = LogitsProcessor(vocab_size=config.vocab_size,
                                                 scale=self.output_logits_scale)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
 
     def forward(
         self,
@@ -290,9 +300,9 @@ class JAISLMHeadModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata)
+                                         attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -324,6 +334,8 @@ class JAISLMHeadModel(nn.Module):
                 continue
             if not name.startswith("transformer."):
                 name = "transformer." + name
+            if is_pp_missing_parameter(name, self):
+                continue
             param = params_dict[name]
             # The HF's GPT-2 implementation uses Conv1D instead of Linear.
             # Because of this, we need to transpose the weights.

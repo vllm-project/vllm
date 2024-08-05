@@ -41,7 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
-from .utils import is_pp_missing_parameter, make_layers
+from .utils import is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
 
 
 class GPT2Attention(nn.Module):
@@ -204,6 +204,7 @@ class GPT2Model(nn.Module):
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h")
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = self.make_empty_intermediate_tensors_factory(["hidden_states"], config.n_embd) 
 
     def forward(
         self,
@@ -252,6 +253,7 @@ class GPT2LMHeadModel(nn.Module):
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.transformer.make_empty_intermediate_tensors
 
     def forward(
         self,
@@ -260,7 +262,7 @@ class GPT2LMHeadModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors)
         return hidden_states
@@ -278,16 +280,6 @@ class GPT2LMHeadModel(nn.Module):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))

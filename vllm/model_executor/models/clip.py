@@ -1,6 +1,6 @@
 """Minimal implementation of CLIPVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
 from vllm.sequence import SequenceData
+from .utils import make_layers, make_empty_intermediate_tensors_factory, is_pp_missing_parameter
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:

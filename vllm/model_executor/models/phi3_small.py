@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -8,7 +8,8 @@ from transformers.configuration_utils import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              get_pp_group)
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -23,6 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
+from .utils import make_empty_intermediate_tensors_factory, make_layers, is_pp_missing_parameter
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
                                 loaded_weight: torch.Tensor):
@@ -301,20 +303,23 @@ class Phi3SmallModel(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
-        self.layers = nn.ModuleList([
-            Phi3SmallDecoderLayer(config, layer_idx, cache_config,
-                                  quant_config)
-            for layer_idx in range(config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: Phi3SmallDecoderLayer(config, int(prefix.split('.')[-1]), cache_config, quant_config),
+            prefix=f"{prefix}.layers"
+        )
 
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -327,20 +332,27 @@ class Phi3SmallModel(nn.Module):
         input_ids: torch.LongTensor,
         positions: Optional[torch.LongTensor],
         kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata = None,
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: IntermediateTensors,
     ):
-        hidden_states = self.embed_tokens(input_ids)
-        if (self.mup_embedding_multiplier is not None
-                and self.mup_embedding_multiplier > 0.0):
-            hidden_states = hidden_states * self.mup_embedding_multiplier
-        for i in range(len(self.layers)):
+        if get_pp_group().is_first_rank:
+            hidden_states = self.embed_tokens(input_ids)
+            if (self.mup_embedding_multiplier is not None
+                    and self.mup_embedding_multiplier > 0.0):
+                hidden_states = hidden_states * self.mup_embedding_multiplier
+        else:
+            assert intermediate_tensors
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states = layer(
                 positions,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i-self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
@@ -370,6 +382,8 @@ class Phi3SmallForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+
 
         # tokens in tiktoken but not used
         if hasattr(config, 'dummy_token_indices'):
@@ -414,12 +428,13 @@ class Phi3SmallForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         output_hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors,
         )
         output_hidden_states = output_hidden_states
         return output_hidden_states
@@ -441,6 +456,8 @@ class Phi3SmallForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
