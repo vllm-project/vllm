@@ -139,6 +139,9 @@ class Worker(LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
+    def share_model(self, shared_worker) -> None:
+        self.model_runner.share_model(shared_worker.model_runner.model)
+
     def save_sharded_state(
         self,
         path: str,

@@ -38,6 +38,8 @@ def create_cfg_worker(*args, **kwargs) -> "CFGWorker":
     return CFGWorker(
         root_worker=root_worker, 
         guidance_worker=guidance_worker,
+        is_driver_worker=kwargs["is_driver_worker"],
+        parallel_config=kwargs["parallel_config"],
     )
 
 
@@ -46,9 +48,14 @@ class CFGWorker(LoraNotSupportedWorkerBase):
         self,
         root_worker: WorkerBase,
         guidance_worker: WorkerBase,
+        is_driver_worker: bool,
+        parallel_config: ParallelConfig,
     ):
         self.root_worker = root_worker
         self.guidance_worker = guidance_worker
+        self.is_driver_worker = is_driver_worker
+        self.parallel_config = parallel_config
+        assert self.parallel_config.pipeline_parallel_size == 1
 
     def init_device(self):
         self.root_worker.init_device()
@@ -56,8 +63,7 @@ class CFGWorker(LoraNotSupportedWorkerBase):
 
     def load_model(self):
         self.root_worker.load_model()
-        # TODO(zhaoyinglia): guidance_worker shares weight with root_worker
-        self.guidance_worker.load_model()
+        self.guidance_worker.share_model(self.root_worker)
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         num_gpu_blocks, num_cpu_blocks = (
@@ -83,35 +89,59 @@ class CFGWorker(LoraNotSupportedWorkerBase):
         self.guidance_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
 
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
+
     @torch.inference_mode()
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
 
+        # prepare negative request with shallow copy
+        if execute_model_req is not None:
+            negative_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+            negative_excute_model_req = execute_model_req.clone(negative_seq_group_metadata_list)
+            for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+                negative_seq_group_metadata = copy.copy(seq_group_metadata)
+                negative_seq_data: Dict[int, SequenceData] = {}
+                for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                    negative_seq_data[seq_id] = copy.copy(seq_data)
+                    negative_seq_data[seq_id].prompt_token_ids = seq_data.negative_prompt_token_ids
+                    negative_seq_data[seq_id].negative_prompt_token_ids = []
+                    negative_seq_data[seq_id].output_token_ids = seq_data.output_token_ids[:]
+
+                negative_seq_group_metadata.seq_data = negative_seq_data
+                negative_seq_group_metadata_list.append(negative_seq_group_metadata)
+            negative_excute_model_req.seq_group_metadata_list = negative_seq_group_metadata_list
+        else:
+            negative_excute_model_req = None
+
+        if self.is_driver_worker:
+            if execute_model_req is None:
+                if self.do_metadata_broadcast:
+                    # This signals that there's no more requests to process for
+                    # now. All workers are running infinite loop with
+                    # broadcast_tensor_dict, and it stops the loop when the
+                    # driver broadcasts an empty input. Send an empty input to
+                    # notify all other workers to stop their execution loop.
+                    broadcast_tensor_dict({}, src=0)
+                return None
+
+            if self.do_metadata_broadcast:
+                broadcast_data = {"flag": 1}
+                broadcast_tensor_dict(broadcast_data, src=0)
+        else:
+            assert self.do_metadata_broadcast
+            broadcast_data = broadcast_tensor_dict(src=0)
+            if not broadcast_data:
+                return None
+
         # get root models's logits
         scores = self.root_worker.execute_model_part(execute_model_req)
-        # prepare negative request with shallow copy
-        negative_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        negative_excute_model_req = execute_model_req.clone(negative_seq_group_metadata_list)
-        for seq_group_metadata in execute_model_req.seq_group_metadata_list:
-            negative_seq_group_metadata = copy.copy(seq_group_metadata)
-            negative_seq_data: Dict[int, SequenceData] = {}
-            for seq_id, seq_data in seq_group_metadata.seq_data.items():
-                negative_seq_data[seq_id] = copy.copy(seq_data)
-                negative_seq_data[seq_id].prompt_token_ids = seq_data.negative_prompt_token_ids
-                negative_seq_data[seq_id].negative_prompt_token_ids = []
-                negative_seq_data[seq_id].output_token_ids = seq_data.output_token_ids[:]
-
-            negative_seq_group_metadata.seq_data = negative_seq_data
-            negative_seq_group_metadata_list.append(negative_seq_group_metadata)
-        negative_excute_model_req.seq_group_metadata_list = negative_seq_group_metadata_list
-
         # get unconditional logits
         unconditional_logits = self.guidance_worker.execute_model_part(negative_excute_model_req)
-
-        # do logist_processor
-        scores = self.root_worker.compute_logits(scores)
 
         # do classifier free guidance logist process
         for seq_group in self.root_worker.model_input.sampling_metadata.seq_groups:
@@ -124,8 +154,21 @@ class CFGWorker(LoraNotSupportedWorkerBase):
                 unconditional_logits_row = torch.nn.functional.log_softmax(unconditional_logits[logits_row_idx], dim=-1)
                 scores[logits_row_idx] = guidance_scale * (logits_row - unconditional_logits_row) + unconditional_logits_row
 
+        # print("scores:", scores.shape, scores)
+        # exit(0)
+
+        # do logist_processor
+        scores = self.root_worker.compute_logits(scores)
+        if not self.is_driver_worker:
+            return []
+
         # do sample
         output = self.root_worker.do_sample(scores)
+
+        if not get_pp_group().is_last_rank:
+            # output is IntermediateTensors
+            get_pp_group().send_tensor_dict(output.tensors)
+            return [None]
 
         # output is List[SamplerOutput]
         return output

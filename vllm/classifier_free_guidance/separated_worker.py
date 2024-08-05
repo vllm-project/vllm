@@ -44,16 +44,6 @@ class SeparatedWorker(Worker):
     ) -> Optional[List[SamplerOutput]]:
 
         if self.is_driver_worker:
-            if execute_model_req is None:
-                if self.do_metadata_broadcast:
-                    # This signals that there's no more requests to process for
-                    # now. All workers are running infinite loop with
-                    # broadcast_tensor_dict, and it stops the loop when the
-                    # driver broadcasts an empty input. Send an empty input to
-                    # notify all other workers to stop their execution loop.
-                    broadcast_tensor_dict({}, src=0)
-                return None
-
             worker_input: WorkerInput = self.prepare_worker_input(
                 execute_model_req=execute_model_req)
             self.model_input: ModelRunnerInputBase = (
@@ -72,9 +62,6 @@ class SeparatedWorker(Worker):
         else:
             assert self.do_metadata_broadcast
             broadcast_data = broadcast_tensor_dict(src=0)
-            if not broadcast_data:
-                return None
-
             num_steps = broadcast_data.pop("num_steps")
             worker_input = WorkerInput.from_broadcasted_tensor_dict(
                 broadcast_data)
@@ -101,16 +88,10 @@ class SeparatedWorker(Worker):
             num_steps
         )
 
-        logits = self.get_logits(hidden_or_intermediate_states)
-        # logits = self.compute_logits(logits, model_input)
-        # output = self.do_sample(logits)
-
-        if not self.is_driver_worker:
-            return []
-
+        # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
-            # output is IntermediateTensors
-            get_pp_group().send_tensor_dict(logits.tensors)
-            return [None]
+            return hidden_or_intermediate_states
+
+        logits = self.get_logits(hidden_or_intermediate_states)
 
         return logits

@@ -787,6 +787,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
+    def share_model(self, model: nn.Module) -> None:
+        self.model = model
+
     def save_sharded_state(
         self,
         path: str,
