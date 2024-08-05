@@ -420,6 +420,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("get_graph_buffer_ipc_meta(int fa) -> (Tensor, int[])");
   custom_ar.impl("get_graph_buffer_ipc_meta", torch::kCPU,
                  &get_graph_buffer_ipc_meta);
+  custom_ar.impl("get_graph_buffer_ipc_meta", torch::kMeta,
+                 &get_graph_buffer_ipc_meta_meta);
 
   custom_ar.def(
       "register_graph_buffers(int fa, str[] handles, "

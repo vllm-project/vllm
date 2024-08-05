@@ -296,6 +296,8 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<int64_t>& offsets);
 std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa);
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta_meta(
+    fptr_t _fa);
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
 #endif
