@@ -668,7 +668,8 @@ def make_tensor_with_pad(
 
 def async_numpy_to_tensor(x: npt.NDArray, device: Union[str, torch.device]):
     """
-    Make a tensor from a numpy array asynchronously. Use pinned memory if possible.
+    Make a tensor from a numpy array asynchronously. Use pinned memory
+    if possible.
     """
     t = torch.from_numpy(x)
     if is_pin_memory_available():
