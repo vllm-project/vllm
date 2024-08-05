@@ -260,6 +260,8 @@ class FlashAttentionMetadataBuilder(
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
                 block_table = block_tables[seq_id][-curr_sliding_window_block:]
+            elif block_table is not None:
+                block_table = block_tables[seq_id]
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
