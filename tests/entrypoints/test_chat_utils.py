@@ -80,7 +80,7 @@ def test_parse_assistant_message():
     assert conversation == [{'role': 'assistant', 'content': 'Hi there!'}]
 
 
-def test_parse_assistant_message_with_tools():
+def test_parse_assistant_message_with_tool_calls():
     tool_calls = [
         ChatCompletionMessageToolCallParam(
             id="call_1",
