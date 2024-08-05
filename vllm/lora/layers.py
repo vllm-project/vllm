@@ -1073,7 +1073,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
-        # TODO: Verify if this condition can be relaxed
+        # TODO: Verify if this condition can be  further relaxed
         if 32000 < self.base_layer.vocab_size > 257024:
             raise ValueError("When using LoRA, vocab size must be "
                              "32000 >= vocab_size <= 257024")
