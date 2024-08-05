@@ -301,6 +301,7 @@ class CLIPVisionModel(nn.Module):
             # post_layernorm is not needed in CLIPVisionModel
             if "vision_model.post_layernorm" in name:
                 continue
+            # omit layers when num_hidden_layers_override is set
             if "vision_model.encoder.layers." in name:
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:

@@ -636,6 +636,7 @@ class SiglipVisionModel(nn.Module):
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
+            # omit layers when num_hidden_layers_override is set
             if "vision_model.encoder.layers." in name:
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:
