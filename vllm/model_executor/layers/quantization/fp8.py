@@ -212,6 +212,7 @@ class Fp8LinearMethod(LinearMethodBase):
             prepare_fp8_layer_for_marlin(layer)
             # Activations not quantized for marlin.
             del layer.input_scale
+        
 
     def apply(self,
               layer: torch.nn.Module,
@@ -227,7 +228,13 @@ class Fp8LinearMethod(LinearMethodBase):
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
                 bias=bias)
-
+        
+        #if not torch.cuda.is_current_stream_capturing(): 
+        #    logger.info(f"nm_fp8_linear: \n cutlass: {self.cutlass_fp8_supported} "
+        #                f"\nweight: {layer.weight}, "
+        #                f"\nx: {x},"
+        #                f"\nweight.scale={layer.weight_scale}, "
+        #                f"\ninput_scale: {layer.input_scale}")
         return apply_fp8_linear(
             input=x,
             weight=layer.weight,

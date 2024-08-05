@@ -246,7 +246,6 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
     
-    print(f"a shape: {a.shape}, b.shape: {b.shape}, scale_a.shape: {scale_a.shape}, scale_b: {scale_b.shape}, out.shape: {out.shape}")
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out
