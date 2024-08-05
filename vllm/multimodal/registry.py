@@ -184,6 +184,11 @@ class MultiModalRegistry:
         Initialize the maximum number of multi-modal inputs for each modality
         that are allowed per prompt for a model class.
         """
+        if model_config in self._limits_by_model:
+            logger.warning(
+                "`mm_limits` has already been set for model=%s, and will "
+                "be overwritten by the new values.", model_config.model)
+
         if multimodal_config is None:
             limits_per_plugin = self._init_limits_per_plugin
         else:

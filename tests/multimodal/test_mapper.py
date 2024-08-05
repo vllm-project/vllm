@@ -3,13 +3,13 @@ import pytest
 from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
 from vllm.config import ModelConfig, MultiModalConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MultiModalRegistry
 from vllm.multimodal.utils import rescale_image_size
 
 
 @pytest.fixture
 def mm_registry():
-    return MULTIMODAL_REGISTRY
+    return MultiModalRegistry()
 
 
 @pytest.fixture
