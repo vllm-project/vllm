@@ -299,15 +299,15 @@ async def iterate_with_cancellation(
     """Convert async iterator into one that polls the provided function
     at least once per second to check for client cancellation.
     """
+
+    # Can use anext() in python >= 3.10
     awaits = [ensure_future(iterator.__anext__())]
     while True:
-        # Can use anext() in python >= 3.10
         done, pending = await asyncio.wait(awaits, timeout=1)
         if await is_cancelled():
-            if pending:
-                with contextlib.suppress(BaseException):
-                    awaits[0].cancel()
-                    await iterator.aclose()
+            with contextlib.suppress(BaseException):
+                awaits[0].cancel()
+                await iterator.aclose()
             raise asyncio.CancelledError("client cancelled")
         if done:
             try:
@@ -339,7 +339,7 @@ async def merge_async_iterators(
         for pair in enumerate(iterators)
     }
     try:
-        while True:
+        while awaits:
             done, pending = await asyncio.wait(awaits.keys(),
                                                return_when=FIRST_COMPLETED,
                                                timeout=1)
@@ -353,10 +353,7 @@ async def merge_async_iterators(
                     awaits[ensure_future(it.__anext__())] = pair
                     yield i, item
                 except StopAsyncIteration:
-                    if not awaits:
-                        assert not pending
-                        # we are done
-                        return
+                    pass
     finally:
         # Cancel any remaining iterators
         for f, (_, it) in awaits.items():
