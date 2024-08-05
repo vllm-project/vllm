@@ -377,8 +377,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # tasks concurrently in background threads.
                     #
                     # This can avoid deadlock if the driver task is
-                    # blocking on some out of band comm that is invalidated
-                    # by a Ray worker exception.
+                    # blocking on some out of band comm (e.g. torch.dist.init)
+                    # that is invalidated by a Ray worker exception.
                     #
                     # See: https://github.com/vllm-project/vllm/issues/3455
                     with futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -390,8 +390,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
                         for completed_future in futures.as_completed(
                             [driver_poll_thread, worker_poll_thread]):
-                            # Will raise exception if
-                            # underlying thread raises
+                            # Will raise exception if underlying thread raises
                             res = completed_future.result()
                             if not isinstance(res, list):
                                 driver_output = [res]
