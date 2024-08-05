@@ -299,7 +299,8 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   // Launch the CUTLASS GEMM kernel.
   typename Gemm::Op gemm_op;
   size_t workspace_size = gemm_op.get_workspace_size(args);
-  auto const workspace_options = torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
+  auto const workspace_options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
