@@ -913,6 +913,7 @@ class SpeculativeConfig:
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
+        disable_log_stats: bool,
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
@@ -1074,7 +1075,7 @@ class SpeculativeConfig:
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
                     target_parallel_config,
-                    speculative_draft_tensor_parallel_size))
+                    speculative_draft_tensor_parallel_size, draft_hf_config))
 
         if num_speculative_tokens is None:
             raise ValueError(
@@ -1101,7 +1102,8 @@ class SpeculativeConfig:
                 typical_acceptance_sampler_posterior_threshold,
             typical_acceptance_sampler_posterior_alpha=\
                 typical_acceptance_sampler_posterior_alpha,
-            disable_logprobs=disable_logprobs
+            disable_logprobs=disable_logprobs,
+            disable_log_stats=disable_log_stats,
         )
 
     @staticmethod
@@ -1142,15 +1144,23 @@ class SpeculativeConfig:
     @staticmethod
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int]
+        speculative_draft_tensor_parallel_size: Optional[int],
+        draft_hf_config: PretrainedConfig,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         if speculative_draft_tensor_parallel_size is None:
-            speculative_draft_tensor_parallel_size = \
-                  target_parallel_config.tensor_parallel_size
+            if draft_hf_config.model_type == "mlp_speculator":
+                speculative_draft_tensor_parallel_size = 1
+                if target_parallel_config.tensor_parallel_size > 1:
+                    logger.warning(
+                        "MLPSpeculator cannot currently be run with tp>1; "
+                        "setting speculative_draft_tensor_parallel_size=1")
+            else:
+                speculative_draft_tensor_parallel_size = \
+                    target_parallel_config.tensor_parallel_size
         elif speculative_draft_tensor_parallel_size != 1:
             # TODO(wooyeon): allow tp values larger than 1
             raise ValueError(
@@ -1187,6 +1197,7 @@ class SpeculativeConfig:
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
+        disable_log_stats: bool,
     ):
         """Create a SpeculativeConfig object.
 
@@ -1219,6 +1230,8 @@ class SpeculativeConfig:
                 sampling, target sampling, and after accepted tokens are
                 determined. If set to False, log probabilities will be
                 returned.
+            disable_log_stats: Whether to disable periodic printing of stage
+                times in speculative decoding.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
@@ -1233,6 +1246,7 @@ class SpeculativeConfig:
         self.typical_acceptance_sampler_posterior_alpha = \
             typical_acceptance_sampler_posterior_alpha
         self.disable_logprobs = disable_logprobs
+        self.disable_log_stats = disable_log_stats
 
         self._verify_args()
 
@@ -1302,7 +1316,7 @@ class LoRAConfig:
     long_lora_scaling_factors: Optional[Tuple[float]] = None
 
     def __post_init__(self):
-        # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
+        # TODO: Increase the range of rank
         possible_max_ranks = (8, 16, 32, 64)
         possible_lora_extra_vocab_size = (0, 256, 512)
         if self.max_lora_rank not in possible_max_ranks:

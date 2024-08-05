@@ -713,8 +713,8 @@ class GroupCoordinator:
              size: torch.Size,
              dtype: torch.dtype,
              src: Optional[int] = None) -> torch.Tensor:
-        """Receives a tensor from the src rank."""
-        """NOTE: `src` is the local rank of the destination rank."""
+        """Receives a tensor from the source rank."""
+        """NOTE: `src` is the local rank of the source rank."""
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 
