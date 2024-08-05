@@ -32,8 +32,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest, ErrorResponse,
+                                              LoadLoraAdapterRequest,
                                               TokenizeRequest,
-                                              TokenizeResponse)
+                                              TokenizeResponse,
+                                              UnloadLoraAdapterRequest)
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
 # yapf: enable
@@ -133,6 +135,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
 
 router = APIRouter()
+lora_adapter_router = APIRouter()
 
 
 def mount_metrics(app: fastapi.FastAPI):
@@ -225,9 +228,43 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
+# TODO(jiaxin.shan): protect endpoint and make it visible to operators only
+@lora_adapter_router.post("/v1/load_lora_adapter")
+async def load_lora_adapter(request: LoadLoraAdapterRequest):
+    response = await openai_serving_chat.load_lora_adapter(request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+
+    response = await openai_serving_completion.load_lora_adapter(request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+
+    return Response(status_code=200)
+
+
+@lora_adapter_router.post("/v1/unload_lora_adapter")
+async def unload_lora_adapter(request: UnloadLoraAdapterRequest):
+    response = await openai_serving_chat.unload_lora_adapter(request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+
+    response = await openai_serving_completion.unload_lora_adapter(request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+
+    return Response(status_code=200)
+
+
 def build_app(args):
     app = fastapi.FastAPI(lifespan=lifespan)
     app.include_router(router)
+    if args.enable_lora_router:
+        app.include_router(lora_adapter_router)
+
     app.root_path = args.root_path
 
     mount_metrics(app)
