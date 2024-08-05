@@ -375,6 +375,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 # distributed init
                 # (see: https://github.com/vllm-project/vllm/issues/3455)
                 if PLACE_DRIVER_RESULT_IN_RAY_OBJECT_STORE:
+                    ray.get([
+                        ray.put(
+                            self.driver_worker.execute_method(
+                                method, *driver_args, **driver_kwargs))
+                    ] + ray_worker_outputs)
+                else:
                     with concurrent.futures.ThreadPoolExecutor(
                             max_workers=2) as executor:
                         driver_poll_thread = executor.submit(
@@ -392,11 +398,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
                             else:
                                 worker_outputs = res
                         all_worker_outputs = driver_output + worker_outputs
-                else:
-                    ray.get([
-                        ray.put(self.driver_worker.execute_method, method, *
-                                driver_args, **driver_kwargs)
-                    ] + ray_worker_outputs)
             else:
                 assert self.driver_dummy_worker is not None
                 # Concurrently poll remote driver worker and remote ray workers
