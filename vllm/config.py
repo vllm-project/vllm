@@ -907,6 +907,7 @@ class SpeculativeConfig:
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
+        disable_log_stats: bool,
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
@@ -1095,7 +1096,8 @@ class SpeculativeConfig:
                 typical_acceptance_sampler_posterior_threshold,
             typical_acceptance_sampler_posterior_alpha=\
                 typical_acceptance_sampler_posterior_alpha,
-            disable_logprobs=disable_logprobs
+            disable_logprobs=disable_logprobs,
+            disable_log_stats=disable_log_stats,
         )
 
     @staticmethod
@@ -1189,6 +1191,7 @@ class SpeculativeConfig:
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
+        disable_log_stats: bool,
     ):
         """Create a SpeculativeConfig object.
 
@@ -1221,6 +1224,8 @@ class SpeculativeConfig:
                 sampling, target sampling, and after accepted tokens are
                 determined. If set to False, log probabilities will be
                 returned.
+            disable_log_stats: Whether to disable periodic printing of stage
+                times in speculative decoding.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
@@ -1235,6 +1240,7 @@ class SpeculativeConfig:
         self.typical_acceptance_sampler_posterior_alpha = \
             typical_acceptance_sampler_posterior_alpha
         self.disable_logprobs = disable_logprobs
+        self.disable_log_stats = disable_log_stats
 
         self._verify_args()
 
