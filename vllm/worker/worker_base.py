@@ -220,7 +220,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
-	start_time = time.time()
+        start_time = time.perf_counter()
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
@@ -275,7 +275,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input, self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None, intermediate_tensors,
             num_steps)
-        end_time = time.time()
+        end_time = time.perf_counter()
         if output is not None:
             for o in output:
                 o.model_execute_time = end_time - start_time

@@ -977,7 +977,7 @@ class Scheduler:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        scheduler_start_time = time.time()
+        scheduler_start_time = time.perf_counter()
         scheduler_outputs = self._schedule()
         now = time.time()
 
@@ -1050,7 +1050,7 @@ class Scheduler:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
 
-        scheduler_time = time.time() - scheduler_start_time
+        scheduler_time = time.perf_counter() - scheduler_start_time
         # Add this to scheduler time to all the sequences that are currently
         # running. This will help estimate if the scheduler is a significant
         # component in the e2e latency.
