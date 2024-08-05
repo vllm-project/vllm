@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Optional, Tuple, TypeVar, Union
+from typing import List, Optional, Tuple, TypeVar
 
 import torch
 from PIL import Image
@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from .base import MultiModalInputs, MultiModalPlugin
+from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
 
 logger = init_logger(__name__)
 
@@ -113,7 +113,7 @@ class ImagePlugin(MultiModalPlugin):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: Union[object, List[object]],
+        data: MultiModalData[object],
     ) -> MultiModalInputs:
         model_config = ctx.model_config
 

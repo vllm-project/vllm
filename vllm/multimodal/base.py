@@ -115,21 +115,29 @@ class MultiModalInputs(_MultiModalInputsBase):
                                batched_inputs)
 
 
+_T = TypeVar("_T")
+
+MultiModalData: TypeAlias = Union[_T, List[_T]]
+"""
+Either a single data instance, or a list of data instances.
+
+The number of data instances allowed per modality is restricted by
+`--limit-mm-per-prompt`.
+"""
+
+
 @final
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Modality types that are predefined by vLLM."""
 
-    image: Union[Image.Image, List[Image.Image]]
+    image: MultiModalData[Image.Image]
     """The input image(s)."""
 
 
 MultiModalDataDict = Union[MultiModalDataBuiltins,
-                           Mapping[str, Union[object, List[object]]]]
+                           Mapping[str, MultiModalData[object]]]
 """
 A dictionary containing an item for each modality type to input.
-
-If an item is a list, it is considered as multiple inputs for the purposes of
-`--limit-mm-per-prompt`.
 
 Note:
     This dictionary also accepts modality keys defined outside
@@ -138,7 +146,7 @@ Note:
     Read more on that :ref:`here <adding_multimodal_plugin>`.
 """
 
-MultiModalInputMapper = Callable[[InputContext, Union[object, List[object]]],
+MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
                                  MultiModalInputs]
 """
 Return a dictionary to be passed as keyword arguments to
@@ -186,7 +194,7 @@ class MultiModalPlugin(ABC):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: Union[object, List[object]],
+        data: MultiModalData[object],
     ) -> MultiModalInputs:
         """
         Return a dictionary to be passed as keyword arguments to
@@ -230,7 +238,7 @@ class MultiModalPlugin(ABC):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: Union[object, List[object]]) -> MultiModalInputs:
+                  data: MultiModalData[object]) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
