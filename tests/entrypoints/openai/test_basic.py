@@ -69,12 +69,3 @@ async def test_get_readiness_ok(client: openai.AsyncOpenAI):
     response = requests.get(base_url + "/ready")
 
     assert response.status_code == HTTPStatus.OK
-
-@pytest.mark.asyncio
-async def test_get_readiness_ok(client: openai.AsyncOpenAI):
-    """Test the technical route /readiness when the model is fully loaded"""
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/ready")
-
-    assert response.status_code == HTTPStatus.OK
