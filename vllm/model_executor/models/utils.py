@@ -17,6 +17,9 @@ from vllm.utils import is_pin_memory_available
 def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
     """
     Helper function to load weights for inner models.
+
+    See also:
+        :ref:`init_inner_model`
     """
     for name, loaded_weight in weights:
         name = name.split(".")
@@ -34,6 +37,10 @@ def init_inner_model(
     multimodal_config: Optional[MultiModalConfig] = None,
     scheduler_config: Optional[SchedulerConfig] = None,
 ) -> nn.Module:
+    """
+    Helper function to initialize an inner vLLM model based on the arguments
+    passed to the outer vLLM model.
+    """
     model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
 
     return build_model(
@@ -52,11 +59,12 @@ def merge_vision_embeddings(input_ids: torch.Tensor,
                             vision_embeddings: BatchedTensors,
                             image_token_id: int) -> torch.Tensor:
     """
-    Merge `vision_embeddings` into `inputs_embeds` by overwriting the positions
-    in `inputs_embeds` corresponding to placeholder image tokens in `input_ids`.
+    Merge ``vision_embeddings`` into ``inputs_embeds`` by overwriting the
+    positions in ``inputs_embeds`` corresponding to placeholder image tokens in
+    ``input_ids``.
 
     Note:
-        This updates `inputs_embeds` in place.
+        This updates ``inputs_embeds`` in place.
     """
     mask = (input_ids == image_token_id)
     num_expected_tokens = mask.sum()
