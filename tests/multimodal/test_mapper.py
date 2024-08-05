@@ -120,8 +120,6 @@ def test_mm_limits(image_assets, mm_registry, num_images, limit, is_valid):
 
     mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
 
-    ctx = nullcontext() if is_valid else pytest.raises(ValueError)
-
     image = image_assets[0].pil_image
     if num_images == 0:
         mm_inputs = {}
@@ -130,7 +128,7 @@ def test_mm_limits(image_assets, mm_registry, num_images, limit, is_valid):
     else:
         mm_inputs = {"image": [image] * num_images}
 
-    with ctx:
+    with nullcontext() if is_valid else pytest.raises(ValueError):
         mm_registry.map_input(model_config, mm_inputs)
 
 
