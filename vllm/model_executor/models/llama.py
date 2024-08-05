@@ -418,11 +418,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        input_embeds: Optional[torch.Tensor] = None
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors,
-                                  input_embeds)
+                                  attn_metadata, intermediate_tensors)
         return model_output
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -470,6 +468,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
+                continue
+            # With tie_word_embeddings, we can skip lm_head.weight
+            # The weight might appear unnecessarily in the files if the model is
+            # processed with quantization, LoRA, fine-tuning, etc.
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
             if scale_name := get_compressed_tensors_cache_scale(name):
                 # Loading kv cache scales for compressed-tensors quantization

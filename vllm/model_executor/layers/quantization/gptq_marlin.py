@@ -10,17 +10,24 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_gptq_marlin_linear, check_gptq_marlin_supported, marlin_is_k_full,
+    apply_gptq_marlin_linear, check_marlin_supported, marlin_is_k_full,
     marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx, replace_tensor,
-    verify_gptq_marlin_supported, verify_marlin_supports_shape)
+    verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
 
 class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
+
+    # (num_bits, is_sym) -> quant_type
+    TYPE_MAP = {
+        (4, True): scalar_types.uint4b8,
+        (8, True): scalar_types.uint8b128,
+    }
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
                  is_sym: bool, lm_head_quantized: bool) -> None:
@@ -29,20 +36,23 @@ class GPTQMarlinConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
-        self.weight_bits = weight_bits
-        self.pack_factor = 32 // self.weight_bits  # packed into int32
+        self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
-        self.is_sym = is_sym
         self.lm_head_quantized = lm_head_quantized
 
+        if (weight_bits, is_sym) not in self.TYPE_MAP:
+            raise ValueError("Unsupported quantization config: "
+                             f"bits={weight_bits}, sym={is_sym}")
+
+        self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
+
         # Verify supported on platform.
-        verify_gptq_marlin_supported(num_bits=self.weight_bits,
-                                     group_size=self.group_size,
-                                     is_sym=self.is_sym)
+        verify_marlin_supported(quant_type=self.quant_type,
+                                group_size=self.group_size)
 
     def __repr__(self) -> str:
-        return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
+        return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}, "
                 f"lm_head_quantized={self.lm_head_quantized})")
@@ -122,11 +132,12 @@ class GPTQMarlinConfig(QuantizationConfig):
                 or desc_act is None):
             return False
 
-        return check_gptq_marlin_supported(
-            num_bits=num_bits,
-            group_size=group_size,
-            is_sym=sym,
-            min_capability=cls.get_min_capability())
+        if (num_bits, sym) not in cls.TYPE_MAP:
+            return False
+
+        return check_marlin_supported(quant_type=cls.TYPE_MAP[(num_bits, sym)],
+                                      group_size=group_size,
+                                      min_capability=cls.get_min_capability())
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
@@ -293,7 +304,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             perm=layer.g_idx_sort_indices,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            num_bits=self.quant_config.weight_bits)
+            num_bits=self.quant_config.quant_type.size_bits)
         replace_tensor(layer, "qweight", marlin_qweight)
 
         # Permute scales from autogptq format to marlin format.
@@ -319,7 +330,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
-            num_bits=self.quant_config.weight_bits,
+            wtype=self.quant_config.quant_type,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
             is_k_full=layer.is_k_full,

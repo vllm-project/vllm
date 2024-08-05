@@ -3,7 +3,7 @@ import gc
 import os
 import sys
 from collections import UserList
-from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar, Union
 
 import pytest
 import torch
@@ -152,7 +152,6 @@ class HfRunner:
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
-        is_sparseml_model: bool = False,
     ) -> None:
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
@@ -169,9 +168,6 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
-            elif is_sparseml_model:
-                from sparseml.transformers import SparseAutoModelForCausalLM
-                auto_cls = SparseAutoModelForCausalLM
             else:
                 auto_cls = AutoModelForCausalLM
 
@@ -512,7 +508,8 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[Union[List[Image.Image],
+                               List[List[Image.Image]]]] = None,
         stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
