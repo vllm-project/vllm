@@ -4,8 +4,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
-                    Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -23,6 +23,7 @@ except ImportError:
     BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
@@ -40,7 +41,7 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -94,7 +95,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     prompt_adapter_mapping: Optional[PromptAdapterMapping] = None
     prompt_adapter_requests: Optional[Set[PromptAdapterRequest]] = None
-    multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
+    multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
@@ -578,9 +579,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 for inter_data in self.inter_data_list
             ])
             lora_mapping = LoRAMapping(
-                lora_index_mapping,
-                lora_prompt_mapping,
-            )
+                **dict(index_mapping=lora_index_mapping,
+                       prompt_mapping=lora_prompt_mapping,
+                       is_prefill=not self.decode_only))
 
         # Prompt adapter data.
         prompt_adapter_requests: Set[PromptAdapterRequest] = set()
@@ -608,8 +609,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             data.multi_modal_inputs for data in self.inter_data_list
             if data.multi_modal_inputs is not None
         ]
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.runner.device)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
@@ -786,6 +786,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "Using FP8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
+
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend="eager")
 
     def save_sharded_state(
         self,
@@ -1153,9 +1158,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
-                            [0] * batch_size,
-                            [0] * batch_size,
-                        )
+                            **dict(index_mapping=[0] * batch_size,
+                                   prompt_mapping=[0] * batch_size,
+                                   is_prefill=False))
                         self.set_active_loras(set(), lora_mapping)
 
                     if self.prompt_adapter_config:
@@ -1264,11 +1269,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     model_input.seq_lens,
-                                                     model_input.query_lens,
-                                                     self.device,
-                                                     self.pin_memory)
+        if get_pp_group().is_last_rank:
+            # Sampling metadata is only required for the final pp group
+            generators = self.get_generators(finished_requests_ids)
+            sampling_metadata = SamplingMetadata.prepare(
+                seq_group_metadata_list, model_input.seq_lens,
+                model_input.query_lens, self.device, self.pin_memory,
+                generators)
+        else:
+            sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
                      if seq_group_metadata_list else None)
         return dataclasses.replace(model_input,
@@ -1357,7 +1366,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            **multi_modal_kwargs,
+            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                         device=self.device),
             **seqlen_agnostic_kwargs)
 
         # Compute the logits in the last pipeline stage.

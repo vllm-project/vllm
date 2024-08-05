@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
 import torch
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
@@ -40,6 +41,9 @@ _PP_SUPPORTED_MODELS = [
     "GPT2LMHeadModel",
     "MixtralForCausalLM",
     "NemotronForCausalLM",
+    "Qwen2ForCausalLM",
+    "Qwen2MoeForCausalLM",
+    "QWenLMHeadModel",
 ]
 
 
@@ -197,13 +201,17 @@ class ModelConfig:
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is None:
-            # compress-tensors uses a "compression_config" key
+            # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
         return quant_cfg
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
         rocm_supported_quantization = ["gptq", "squeezellm"]
+        optimized_quantization_methods = [
+            "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
+            "fbgemm_fp8", "compressed_tensors", "compressed-tensors"
+        ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -242,9 +250,7 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if (self.quantization
-                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin",
-                            "awq_marlin", "fbgemm_fp8", "compressed_tensors")):
+            if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -724,7 +730,7 @@ class ParallelConfig:
                         backend)
 
         self._verify_args()
-        self.rank = 0
+        self.rank: int = 0
 
     @property
     def use_ray(self) -> bool:
@@ -850,6 +856,7 @@ class SchedulerConfig:
 
 
 class DeviceConfig:
+    device: Optional[torch.device]
 
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
@@ -1061,7 +1068,7 @@ class SpeculativeConfig:
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
                     target_parallel_config,
-                    speculative_draft_tensor_parallel_size))
+                    speculative_draft_tensor_parallel_size, draft_hf_config))
 
         if num_speculative_tokens is None:
             raise ValueError(
@@ -1129,15 +1136,23 @@ class SpeculativeConfig:
     @staticmethod
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int]
+        speculative_draft_tensor_parallel_size: Optional[int],
+        draft_hf_config: PretrainedConfig,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         if speculative_draft_tensor_parallel_size is None:
-            speculative_draft_tensor_parallel_size = \
-                  target_parallel_config.tensor_parallel_size
+            if draft_hf_config.model_type == "mlp_speculator":
+                speculative_draft_tensor_parallel_size = 1
+                if target_parallel_config.tensor_parallel_size > 1:
+                    logger.warning(
+                        "MLPSpeculator cannot currently be run with tp>1; "
+                        "setting speculative_draft_tensor_parallel_size=1")
+            else:
+                speculative_draft_tensor_parallel_size = \
+                    target_parallel_config.tensor_parallel_size
         elif speculative_draft_tensor_parallel_size != 1:
             # TODO(wooyeon): allow tp values larger than 1
             raise ValueError(
@@ -1289,7 +1304,7 @@ class LoRAConfig:
     long_lora_scaling_factors: Optional[Tuple[float]] = None
 
     def __post_init__(self):
-        # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
+        # TODO: Increase the range of rank
         possible_max_ranks = (8, 16, 32, 64)
         possible_lora_extra_vocab_size = (0, 256, 512)
         if self.max_lora_rank not in possible_max_ranks:
@@ -1535,15 +1550,21 @@ def _get_and_verify_max_len(
                     "Disabling sliding window is not supported for models "
                     "model_max_length in the config. Please raise an issue "
                     "so we can investigate.")
-            pass
         else:
-            raise ValueError(
+            msg = (
                 f"User-specified max_model_len ({max_model_len}) is greater "
-                "than the derived max_model_len "
-                f"({max_len_key}={derived_max_model_len} or model_max_length="
+                f"than the derived max_model_len ({max_len_key}="
+                f"{derived_max_model_len} or model_max_length="
                 f"{model_max_length} in model's config.json). This may lead "
-                "to incorrect model outputs or CUDA errors. Make sure the "
-                "value is correct and within the model context size.")
+                "to incorrect model outputs or CUDA errors.")
+            if envs.VLLM_ALLOW_LONG_MAX_MODEL_LEN:
+                logger.warning(
+                    "%s Make sure the value is correct and within the "
+                    "model context size.", msg)
+            else:
+                raise ValueError(
+                    f"{msg} To allow overriding this maximum, set "
+                    "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
     return int(max_model_len)
 
 

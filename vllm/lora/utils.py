@@ -23,6 +23,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
+                              ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
 # yapf: enable
@@ -38,6 +39,7 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     QKVParallelLinearWithLora,
     MergedQKVParallelLinearWithLora,
     RowParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLora,

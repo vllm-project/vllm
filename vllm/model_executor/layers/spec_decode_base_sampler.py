@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import List, Optional
+from typing import Dict, Optional
 
 import torch
 import torch.jit
@@ -237,6 +237,6 @@ class SpecDecodeStochasticBaseSampler(SpecDecodeBaseSampler):
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
-        generators: List[Optional[torch.Generator]],
+        seeded_seqs: Optional[Dict[int, torch.Generator]] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
