@@ -5,6 +5,7 @@ import random
 import time
 from typing import List, Optional, Tuple
 
+import numpy as np
 import torch
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -59,6 +60,32 @@ def sample_requests(
         filtered_dataset.append((prompt, prompt_len, output_len))
 
     return filtered_dataset
+
+
+def random_sample_requests(num_requests: int, fixed_input_len: int,
+                           fixed_output_len: int, range_ratio: float,
+                           tokenizer: PreTrainedTokenizerBase):
+    input_lens = np.random.randint(
+        int(fixed_input_len * range_ratio),
+        fixed_input_len + 1,
+        size=num_requests,
+    )
+
+    output_lens = np.random.randint(
+        int(fixed_output_len * range_ratio),
+        fixed_output_len + 1,
+        size=num_requests,
+    )
+
+    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_requests)
+    input_requests = []
+    for i in range(num_requests):
+        prompt = tokenizer.decode([(offsets[i] + i + j) % tokenizer.vocab_size
+                                   for j in range(input_lens[i])])
+        input_requests.append(
+            (prompt, int(input_lens[i]), int(output_lens[i])))
+
+    return input_requests
 
 
 def run_vllm(
@@ -215,10 +242,9 @@ def main(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
-        # Synthesize a prompt with the given input length.
-        prompt = "hi" * (args.input_len - 1)
-        requests = [(prompt, args.input_len, args.output_len)
-                    for _ in range(args.num_prompts)]
+        requests = random_sample_requests(args.num_prompts, args.input_len,
+                                          args.output_len,
+                                          args.random_range_ratio, tokenizer)
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)
@@ -280,6 +306,14 @@ if __name__ == "__main__":
                         default=None,
                         help="Output length for each request. Overrides the "
                         "output length from the dataset.")
+    parser.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help="Range of sampled ratio of input/output length, "
+        "used only for random sampling.",
+    )
+
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
