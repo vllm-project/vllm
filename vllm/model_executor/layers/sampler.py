@@ -609,6 +609,9 @@ def _sample_with_torch(
                     sampling_params = seq_group.sampling_params
                     max_best_of_in_batch = max(max_best_of_in_batch,
                                                sampling_params.best_of)
+            seq_groups_arg = (None if sampling_type == SamplingType.RANDOM else
+                              seq_groups)
+
             if flashinfer_top_k_top_p_sampling is not None:
                 multinomial_samples[
                     sampling_type] = _top_k_top_p_multinomial_with_flashinfer(
@@ -616,17 +619,13 @@ def _sample_with_torch(
                         sampling_tensors.top_ks[long_sample_indices],
                         sampling_tensors.top_ps[long_sample_indices],
                         max_best_of_in_batch,
-                        seq_groups
-                        if sampling_type == SamplingType.RANDOM_SEED else None,
+                        seq_groups_arg,
                     )
             else:
-                seeded_args = {} if sampling_type == SamplingType.RANDOM else {
-                    "seq_groups": seq_groups,
-                }
-
                 multinomial_samples[sampling_type] = _multinomial(
-                    probs[long_sample_indices], max_best_of_in_batch,
-                    **seeded_args)
+                    probs[long_sample_indices],
+                    max_best_of_in_batch,
+                    seq_groups=seq_groups_arg)
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
