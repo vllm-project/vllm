@@ -106,7 +106,7 @@ class OpenAIServingChat(OpenAIServing):
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
-            print('Error with model', error_check_ret)
+            logger.error('Error with model %s', error_check_ret)
             return error_check_ret
 
         try:
