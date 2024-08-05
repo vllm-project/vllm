@@ -1,5 +1,5 @@
 import functools
-from collections import defaultdict
+from collections import UserDict
 from typing import Dict, Mapping, Optional, Sequence
 
 from vllm.config import ModelConfig, MultiModalConfig
@@ -10,6 +10,21 @@ from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
 from .image import ImagePlugin
 
 logger = init_logger(__name__)
+
+
+class _MultiModalLimits(UserDict):
+    """
+    Wraps `_limits_by_model` for a more informative error message
+    when attempting to access a model that does not exist.
+    """
+
+    def __getitem__(self, key: ModelConfig) -> Dict[str, int]:
+        try:
+            return super().__getitem__(key)
+        except KeyError as exc:
+            msg = (f"Cannot find `mm_limits` for model={key.model}. Did you "
+                   "forget to call `init_mm_limits_per_prompt`?")
+            raise KeyError(msg) from exc
 
 
 class MultiModalRegistry:
@@ -27,12 +42,7 @@ class MultiModalRegistry:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
         self._init_limits_per_plugin = {k: 0 for k in self._plugins}
-
-        # NOTE: get_max_multimodal_tokens is only called for multi-modal models,
-        # but dummy_data_for_profiling is called for all models, which in turn
-        # invokes get_mm_limits_per_prompt.
-        self._limits_by_model: Dict[ModelConfig, Dict[str, int]] = defaultdict(
-            lambda: self._init_limits_per_plugin)
+        self._limits_by_model = _MultiModalLimits()
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
@@ -92,6 +102,9 @@ class MultiModalRegistry:
         via the input mapper registered for that model.
 
         See :meth:`MultiModalPlugin.map_input` for more details.
+
+        Note:
+            This should be called after :meth:`init_mm_limits_per_prompt`.
         """
         merged_dict: Dict[str, NestedTensors] = {}
 
@@ -146,16 +159,30 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
-    def get_max_multimodal_tokens(
-        self,
-        model_config: ModelConfig,
-        multimodal_config: Optional[MultiModalConfig],
-    ) -> int:
+    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
 
         See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
+
+        Note:
+            This should be called after :meth:`init_mm_limits_per_prompt`.
+        """
+        limits_per_plugin = self._limits_by_model[model_config]
+
+        return sum((limits_per_plugin[key] *
+                    plugin.get_max_multimodal_tokens(model_config))
+                   for key, plugin in self._plugins.items())
+
+    def init_mm_limits_per_prompt(
+        self,
+        model_config: ModelConfig,
+        multimodal_config: Optional[MultiModalConfig],
+    ) -> None:
+        """
+        Initialize the maximum number of multi-modal inputs for each modality
+        that are allowed per prompt for a model class.
         """
         if multimodal_config is None:
             limits_per_plugin = self._init_limits_per_plugin
@@ -179,10 +206,6 @@ class MultiModalRegistry:
 
         self._limits_by_model[model_config] = limits_per_plugin
 
-        return sum((limits_per_plugin[key] *
-                    plugin.get_max_multimodal_tokens(model_config))
-                   for key, plugin in self._plugins.items())
-
     def get_mm_limits_per_prompt(
         self,
         model_config: ModelConfig,
@@ -190,5 +213,8 @@ class MultiModalRegistry:
         """
         Get the maximum number of multi-modal inputs for each modality
         that are allowed per prompt for a model class.
+
+        Note:
+            This should be called after :meth:`init_mm_limits_per_prompt`.
         """
         return self._limits_by_model[model_config]

@@ -171,6 +171,10 @@ class InputRegistry:
 
         See also:
             :ref:`enabling_multimodal_inputs`
+
+        Note:
+            This should be called after
+            :meth:`~MultiModalRegistry.init_mm_limits_per_prompt`.
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture

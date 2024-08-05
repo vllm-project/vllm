@@ -2,14 +2,25 @@ import numpy as np
 import pytest
 from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, MultiModalConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import rescale_image_size
 
 
+@pytest.fixture
+def mm_registry():
+    return MULTIMODAL_REGISTRY
+
+
+@pytest.fixture
+def mm_config():
+    return MultiModalConfig(limit_per_prompt={"image": 1})
+
+
 @pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
-def test_clip_image_processor(image_assets, dtype, size_factor):
+def test_clip_image_processor(image_assets, mm_registry, mm_config, dtype,
+                              size_factor):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 
     hf_processor = CLIPImageProcessor.from_pretrained(MODEL_NAME)
@@ -24,6 +35,7 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
         dtype=dtype,
         revision=None,
     )
+    mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
 
     for asset in image_assets:
         image = rescale_image_size(asset.pil_image, size_factor)
@@ -32,7 +44,7 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
             image,
             return_tensors="pt",
         )
-        vllm_result = MULTIMODAL_REGISTRY.map_input(
+        vllm_result = mm_registry.map_input(
             model_config,
             {"image": image},
         )
@@ -48,7 +60,8 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
 
 @pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
-def test_llava_next_image_processor(image_assets, dtype, size_factor):
+def test_llava_next_image_processor(image_assets, mm_registry, mm_config,
+                                    dtype, size_factor):
     MODEL_NAME = "llava-hf/llava-v1.6-vicuna-7b-hf"
 
     hf_processor = LlavaNextImageProcessor.from_pretrained(MODEL_NAME)
@@ -63,6 +76,7 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
         dtype=dtype,
         revision=None,
     )
+    mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
 
     for asset in image_assets:
         image = rescale_image_size(asset.pil_image, size_factor)
@@ -71,7 +85,7 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
             image,
             return_tensors="pt",
         )
-        vllm_result = MULTIMODAL_REGISTRY.map_input(
+        vllm_result = mm_registry.map_input(
             model_config,
             {"image": image},
         )

@@ -884,10 +884,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
         model_config = self.model_config
+        mm_config = self.multimodal_config
+
+        mm_registry = MULTIMODAL_REGISTRY
+        mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
 
         if supports_vision(self.model):
-            max_mm_tokens = MULTIMODAL_REGISTRY \
-                .get_max_multimodal_tokens(model_config, self.multimodal_config)
+            max_mm_tokens = mm_registry.get_max_multimodal_tokens(model_config)
             max_num_seqs_orig = max_num_seqs
             max_num_seqs = min(max_num_seqs,
                                max_num_batched_tokens // max_mm_tokens)
@@ -906,8 +909,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             batch_size += seq_len
 
             seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
-                .dummy_data_for_profiling(model_config, seq_len,
-                                          MULTIMODAL_REGISTRY)
+                .dummy_data_for_profiling(model_config, seq_len, mm_registry)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
