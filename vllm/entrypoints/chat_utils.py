@@ -180,5 +180,5 @@ def parse_chat_message_content(
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
     return _parse_chat_message_content_parts(role,
-                                             cast(Iterable[Any], content),
+                                             cast(Iterable, content),
                                              model_config, tokenizer)
