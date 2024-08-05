@@ -184,7 +184,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
 
             seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
-                .dummy_data_for_profiling(model_config, seq_len)
+                .dummy_data_for_profiling(model_config, seq_len,
+                                          MULTIMODAL_REGISTRY)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),

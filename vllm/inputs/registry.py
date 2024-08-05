@@ -12,7 +12,7 @@ from .data import LLMInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, MultiModalConfig
-    from vllm.multimodal import MultiModalDataDict
+    from vllm.multimodal import MultiModalDataDict, MultiModalRegistry
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -146,6 +146,7 @@ class InputRegistry:
         self,
         model_config: "ModelConfig",
         seq_len: int,
+        mm_registry: "MultiModalRegistry",
     ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -157,12 +158,11 @@ class InputRegistry:
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
-        from vllm.multimodal import MULTIMODAL_REGISTRY
 
         model_cls, _ = get_model_architecture(model_config)
         dummy_factory = self._dummy_factories_by_model_type \
             .get(model_cls, self._default_dummy_data_factory)
-        mm_counts = MULTIMODAL_REGISTRY.get_mm_limits_per_prompt(model_config)
+        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
 
         seq_data, mm_data = dummy_factory(
             InputContext(model_config),
