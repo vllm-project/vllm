@@ -62,22 +62,11 @@ async def test_log_metrics(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-def test_get_liveness(client: openai.AsyncOpenAI):
-    """Test the technical route /liveness"""
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/liveness")
-
-    assert response.status_code == HTTPStatus.OK
-    assert response.json() == {"alive": "ok"}
-
-
-@pytest.mark.asyncio
-def test_get_readiness_ok(client: openai.AsyncOpenAI):
+async def test_get_readiness_ok(client: openai.AsyncOpenAI):
     """Test the technical route /readiness when the model is fully loaded"""
     base_url = str(client.base_url)[:-3].strip("/")
 
-    response = requests.get(base_url + "/readiness")
+    response = requests.get(base_url + "/ready")
 
     assert response.status_code == HTTPStatus.OK
     assert response.json() == {"ready": "ok"}

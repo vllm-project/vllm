@@ -91,20 +91,9 @@ async def health() -> Response:
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
 
-@router.get(
-    "/liveness",
-    response_model=LivenessResponse,
-    name="liveness",
-    tags=["technical"],
-)
-async def get_liveness() -> LivenessResponse:
-    """Liveness probe for k8s"""
-    liveness_msg = LivenessResponse(alive="ok")
-    return liveness_msg
-
 
 @router.get(
-    "/readiness",
+    "/ready",
     response_model=ReadinessResponse,
     name="readiness",
     tags=["technical"],
