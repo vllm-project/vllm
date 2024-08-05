@@ -23,8 +23,11 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
 from vllm.utils import async_numpy_to_tensor
 
 try:
-    from flashinfer.sampling import (top_k_top_p_sampling_from_probs as
-                                     flashinfer_top_k_top_p_sampling)
+    # yapf: disable
+    from flashinfer.sampling import (
+        top_k_top_p_sampling_from_probs as flashinfer_top_k_top_p_sampling)
+
+    # yapf: enable
 except ImportError:
     flashinfer_top_k_top_p_sampling = None
 
