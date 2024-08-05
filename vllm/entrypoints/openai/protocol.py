@@ -342,6 +342,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_tool_usage(cls, data):
 
+        # if "tool_choice" is not specified but tools are provided, default to "auto" tool_choice
+        if "tool_choice" not in data and "tools" in data:
+            data["tool_choice"] = "auto"
+
+        # if "tool_choice" is specified -- validation
         if "tool_choice" in data:
 
             # ensure that if "tool choice" is specified, tools are present
@@ -381,10 +386,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     return ValueError(
                         "The tool specified in `tool_choice` does not match any of the specified `tools`"
                     )
-
-        # per OpenAI spec, make sure that tool_choice defaults to "auto" when tools are specified
-        elif "tools" in data and "tool_choice" not in data:
-            data["tool_choice"] = "auto"
 
         # TODO validate tools
         return data
