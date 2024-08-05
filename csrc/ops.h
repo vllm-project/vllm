@@ -213,6 +213,14 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
                               torch::Tensor const& s_group,
                               torch::Tensor& workspace, int64_t size_m,
                               int64_t size_n, int64_t size_k);
+
+torch::Tensor marlin_qqq_gemm_meta(torch::Tensor const& a,
+                                   torch::Tensor const& b_q_weight,
+                                   torch::Tensor const& s_tok,
+                                   torch::Tensor const& s_ch,
+                                   torch::Tensor const& s_group,
+                                   torch::Tensor& workspace, int64_t size_m,
+                                   int64_t size_n, int64_t size_k);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

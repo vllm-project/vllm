@@ -216,8 +216,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fp8_marlin_gemm", torch::kMeta, &fp8_marlin_gemm_meta);
 
   // marlin_qqq_gemm for QQQ.
-  ops.def("marlin_qqq_gemm", &marlin_qqq_gemm);
+  ops.def(
+      "marlin_qqq_gemm(Tensor a, Tensor b_q_weight, "
+      "Tensor s_tok, Tensor s_ch, Tensor s_group, "
+      "Tensor! workspace, int size_m, int size_n, "
+      "int size_k) -> Tensor");
   ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
+  ops.impl("marlin_qqq_gemm", torch::kMeta, &marlin_qqq_gemm_meta);
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
@@ -238,7 +243,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Check if cutlass scaled_mm is supported for CUDA devices of the given
   // capability
-  ops.def("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
+  ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", torch::kCUDA,
            &cutlass_scaled_mm_supports_fp8);
   // Mamba selective scan kernel
@@ -368,12 +373,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
   // Cuda utils
 
   // Gets the specified device attribute.
-  cuda_utils.def("get_device_attribute", &get_device_attribute);
+  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
   cuda_utils.impl("get_device_attribute", torch::kCUDA, &get_device_attribute);
 
   // Gets the maximum shared memory per block device attribute.
-  cuda_utils.def("get_max_shared_memory_per_block_device_attribute",
-                 &get_max_shared_memory_per_block_device_attribute);
+  cuda_utils.def(
+      "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
   cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
                   torch::kCUDA,
                   &get_max_shared_memory_per_block_device_attribute);
@@ -382,10 +387,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
 #ifndef USE_ROCM
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
-  custom_ar.def("init_custom_ar", &init_custom_ar);
+  custom_ar.def(
+      "init_custom_ar(Tensor meta, Tensor rank_data, "
+      "str[] handles, int[] offsets, int rank, "
+      "bool full_nvlink) -> int");
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
 
-  custom_ar.def("should_custom_ar", &should_custom_ar);
+  custom_ar.def(
+      "should_custom_ar(Tensor inp, int max_size, int world_size, "
+      "bool full_nvlink) -> bool");
   custom_ar.impl("should_custom_ar", torch::kCUDA, &should_custom_ar);
 
   custom_ar.def("all_reduce_reg(int fa, Tensor inp, Tensor! out) -> ()");
@@ -396,20 +406,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
       "()");
   custom_ar.impl("all_reduce_unreg", torch::kCUDA, &all_reduce_unreg);
 
-  custom_ar.def("dispose", &dispose);
+  custom_ar.def("dispose(int fa) -> ()");
   custom_ar.impl("dispose", torch::kCPU, &dispose);
 
-  custom_ar.def("meta_size", &meta_size);
+  custom_ar.def("meta_size() -> int");
   custom_ar.impl("meta_size", torch::kCPU, &meta_size);
 
-  custom_ar.def("register_buffer", &register_buffer);
+  custom_ar.def(
+      "register_buffer(int fa, Tensor t, str[] handles, "
+      "int[] offsets) -> ()");
   custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
 
-  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
+  custom_ar.def("get_graph_buffer_ipc_meta(int fa) -> (Tensor, int[])");
   custom_ar.impl("get_graph_buffer_ipc_meta", torch::kCPU,
                  &get_graph_buffer_ipc_meta);
 
-  custom_ar.def("register_graph_buffers", &register_graph_buffers);
+  custom_ar.def(
+      "register_graph_buffers(int fa, str[] handles, "
+      "int[][] offsets) -> ()");
   custom_ar.impl("register_graph_buffers", torch::kCPU,
                  &register_graph_buffers);
 }
