@@ -323,10 +323,13 @@ class LlamaModel(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: LlamaDecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+            lambda prefix, first_layer, last_layer: LlamaDecoderLayer(
+                config=config,
+                first_layer=first_layer,
+                last_layer=last_layer,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix),
             prefix=f"{prefix}.layers")
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

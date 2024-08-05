@@ -146,9 +146,6 @@ def make_layers(
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
 
-    import pdb
-    pdb.set_trace()
-
     # Determine if layer_fn accepts first/last args by inspecting its signature
     sig = inspect.signature(layer_fn)
     has_firstlast_args = ('first_layer'
@@ -157,12 +154,12 @@ def make_layers(
 
     def make_one_layer(idx, start_layer, end_layer):
         if has_firstlast_args:
-            return maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
-        else:
             return maybe_offload_to_cpu(
                 layer_fn(prefix=f"{prefix}.{idx}",
                          first_layer=(idx == start_layer),
                          last_layer=(idx == end_layer - 1)))
+        else:
+            return maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
 
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)] + [
