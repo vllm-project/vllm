@@ -92,7 +92,6 @@ async def health() -> Response:
 
 @router.get(
     "/ready",
-    response_model=Response,
     name="readiness",
     tags=["technical"],
 )
@@ -103,6 +102,8 @@ async def get_readiness() -> Response:
 
     if model_weights > 0:
         return Response(status_code=200)
+    else:
+        return Response(status_code=500)
 
 
 @router.post("/tokenize")
