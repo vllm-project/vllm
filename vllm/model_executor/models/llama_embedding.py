@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -8,7 +8,9 @@ from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import PoolerOutput
+from vllm.sequence import IntermediateTensors, PoolerOutput
+
+from .utils import is_pp_missing_parameter
 
 
 class LlamaEmbeddingModel(nn.Module):
@@ -29,6 +31,8 @@ class LlamaEmbeddingModel(nn.Module):
         super().__init__()
         self.model = LlamaModel(**kwargs)
         self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -36,10 +40,12 @@ class LlamaEmbeddingModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         return self.model.forward(input_ids, positions, kv_caches,
-                                  attn_metadata, inputs_embeds)
+                                  attn_metadata, intermediate_tensors,
+                                  inputs_embeds)
 
     def pooler(
         self,
@@ -73,6 +79,8 @@ class LlamaEmbeddingModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -80,6 +88,8 @@ class LlamaEmbeddingModel(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
