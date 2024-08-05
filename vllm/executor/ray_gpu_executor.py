@@ -241,7 +241,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
         # must run driver in background thread if len(workers) > 0 to avoid
-        # NCCL init deadlock (https://github.com/vllm-project/vllm/pull/7159)
+        # distributed init deadlock.
+        # (https://github.com/vllm-project/vllm/pull/7159)
         self._run_workers("init_device", run_driver_in_background_thread=True)
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
@@ -373,14 +374,15 @@ class RayGPUExecutor(DistributedGPUExecutor):
             if not use_dummy_driver:
                 # Driver task will run in this python process
                 if run_driver_in_background_thread and ray_worker_outputs:
-                    # If ray worker tasks exist, poll driver and worker
-                    # tasks concurrently in background threads.
+                    # Poll driver and worker tasks concurrently in background
+                    # threads.
                     #
                     # This can avoid deadlock if the driver task is
                     # blocking on some out of band comm (e.g. torch.dist.init)
                     # that is invalidated by a Ray worker exception.
                     #
                     # See: https://github.com/vllm-project/vllm/issues/3455
+
                     with futures.ThreadPoolExecutor(max_workers=2) as executor:
                         driver_poll_thread = executor.submit(
                             self.driver_worker.execute_method, method,
