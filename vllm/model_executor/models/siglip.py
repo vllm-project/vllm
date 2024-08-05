@@ -613,10 +613,6 @@ class SiglipVisionTransformer(nn.Module):
         attn_metadata: AttentionMetadata,
         interpolate_pos_encoding: Optional[bool] = True,
     ) -> Tuple:
-        r"""
-        Returns:
-
-        """
         hidden_states = self.embeddings(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
