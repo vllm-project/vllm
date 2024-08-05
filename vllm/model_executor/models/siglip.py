@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 from torch import nn
 from transformers import SiglipConfig, SiglipVisionConfig
+from transformers.models.siglip.modeling_siglip import SiglipAttention
 from vllm_flash_attn import flash_attn_func
 from xformers.ops import memory_efficient_attention
 
@@ -216,7 +217,8 @@ class SiglipVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class SiglipAttention(nn.Module):
+# TODO(ChristopherCho): Implement TP version of Attention
+class SiglipTPAttention(nn.Module):
 
     def __init__(
         self,
@@ -337,7 +339,7 @@ class SiglipAttention(nn.Module):
 
 # TODO(ChristopherCho): flash_attn_func is not working properly.
 #                       It constantly throws a CUDA error.
-class SiglipFlashAttention2(SiglipAttention):
+class SiglipFlashAttention2(SiglipTPAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -362,7 +364,7 @@ class SiglipFlashAttention2(SiglipAttention):
             q,
             k,
             v,
-            dropout_p=0.0,
+            dropout_p=self.dropout,
             causal=False,
         )
 
@@ -372,7 +374,7 @@ class SiglipFlashAttention2(SiglipAttention):
         return attn_output
 
 
-class SiglipSdpaAttention(SiglipAttention):
+class SiglipSdpaAttention(SiglipTPAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -389,7 +391,7 @@ class SiglipSdpaAttention(SiglipAttention):
                    self.head_dim).transpose(1, 2)
 
         attn_output = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, dropout_p=0.0, is_causal=False, scale=self.scale)
+            q, k, v, dropout_p=self.dropout, is_causal=False, scale=self.scale)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(batch_size, q_len, self.embed_dim)
@@ -397,7 +399,7 @@ class SiglipSdpaAttention(SiglipAttention):
         return attn_output
 
 
-class SiglipxFormersAttention(SiglipAttention):
+class SiglipxFormersAttention(SiglipTPAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -421,7 +423,7 @@ class SiglipxFormersAttention(SiglipAttention):
 
 
 SIGLIP_ATTENTION_CLASSES = {
-    "eager": SiglipAttention,
+    "eager": SiglipTPAttention,
     "flash_attention_2": SiglipFlashAttention2,
     "sdpa": SiglipSdpaAttention,
     "xformers": SiglipxFormersAttention,
@@ -471,11 +473,14 @@ class SiglipEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
 
-        self.self_attn = SIGLIP_ATTENTION_CLASSES[config._attn_implementation](
-            config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-        )
+        self.self_attn = SiglipAttention(config)
+        # TODO(ChristopherCho): Implement TP version of Attention
+        # self.self_attn = \
+        #     SIGLIP_ATTENTION_CLASSES[config._attn_implementation](
+        #         config,
+        #         cache_config=cache_config,
+        #         quant_config=quant_config,
+        #     )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -494,11 +499,13 @@ class SiglipEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-        )
+        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
+        # TODO(ChristopherCho): Implement TP version of Attention
+        # hidden_states = self.self_attn(
+        #     hidden_states=hidden_states,
+        #     kv_caches=kv_caches,
+        #     attn_metadata=attn_metadata,
+        # )
         hidden_states = residual + hidden_states
 
         residual = hidden_states
