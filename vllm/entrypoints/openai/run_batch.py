@@ -1,6 +1,6 @@
 import asyncio
 from io import StringIO
-from typing import Awaitable, List
+from typing import Awaitable, Callable, List
 
 import aiohttp
 
@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
@@ -85,58 +86,27 @@ async def write_file(path_or_url: str, data: str) -> None:
             f.write(data)
 
 
-async def run_request_chat(chat_serving: OpenAIServingChat,
+async def run_request(serving_engine_func: Callable,
                            request: BatchRequestInput) -> BatchRequestOutput:
-    chat_request = request.body
-    chat_response = await chat_serving.create_chat_completion(chat_request)
+    request_body = request.body
+    response = await serving_engine_func(request_body)
 
-    if isinstance(chat_response, ChatCompletionResponse):
+    if isinstance(response, ChatCompletionResponse) or isinstance(response, EmbeddingResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
             response=BatchResponseData(
-                body=chat_response, request_id=f"vllm-batch-{random_uuid()}"),
+                body=response, request_id=f"vllm-batch-{random_uuid()}"),
             error=None,
         )
-    elif isinstance(chat_response, ErrorResponse):
+    elif isinstance(response, ErrorResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
             response=BatchResponseData(
-                status_code=chat_response.code,
+                status_code=response.code,
                 request_id=f"vllm-batch-{random_uuid()}"),
-            error=chat_response,
-        )
-    else:
-        raise ValueError("Request must not be sent in stream mode")
-
-    return batch_output
-
-
-async def run_request_embedding(
-        embedding_serving: OpenAIServingEmbedding,
-        request: BatchRequestInput) -> BatchRequestOutput:
-    embedding_request = request.body
-    embedding_response = await embedding_serving.create_embedding(
-        embedding_request)
-
-    if isinstance(embedding_response, EmbeddingResponse):
-        batch_output = BatchRequestOutput(
-            id=f"vllm-{random_uuid()}",
-            custom_id=request.custom_id,
-            response=BatchResponseData(
-                body=embedding_response,
-                request_id=f"vllm-batch-{random_uuid()}"),
-            error=None,
-        )
-    elif isinstance(embedding_response, ErrorResponse):
-        batch_output = BatchRequestOutput(
-            id=f"vllm-{random_uuid()}",
-            custom_id=request.custom_id,
-            response=BatchResponseData(
-                status_code=embedding_response.code,
-                request_id=f"vllm-batch-{random_uuid()}"),
-            error=embedding_response,
+            error=response,
         )
     else:
         raise ValueError("Request must not be sent in stream mode")
@@ -188,7 +158,7 @@ async def main(args):
                 request_logger=request_logger,
                 chat_template=None,
             )
-            response_futures.append(run_request_chat(serving_chat, request))
+            response_futures.append(run_request(serving_chat.create_chat_completion, request))
         elif request.url == "/v1/embeddings":
             serving_embedding = serving_embedding or OpenAIServingEmbedding(
                 engine,
@@ -197,7 +167,7 @@ async def main(args):
                 request_logger=request_logger,
             )
             response_futures.append(
-                run_request_embedding(serving_embedding, request))
+                run_request(serving_embedding.create_embedding, request))
         else:
             raise ValueError("Only /v1/chat/completions and /v1/embeddings are"
                              "supported in the batch endpoint.")
