@@ -92,12 +92,14 @@ def get_tokenizer(
     if "truncation_side" not in kwargs:
         kwargs["truncation_side"] = "left"
 
+    # Separate model folder from file path for GGUF models
     is_gguf = Path(tokenizer_name).is_file() and Path(
         tokenizer_name).suffix == ".gguf"
+    if is_gguf:
+        kwargs["gguf_file"] = Path(tokenizer_name).name
+        tokenizer_name = Path(tokenizer_name).parent
+
     try:
-        if is_gguf:
-            kwargs["gguf_file"] = Path(tokenizer_name).name
-            tokenizer_name = Path(tokenizer_name).parent
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
             *args,

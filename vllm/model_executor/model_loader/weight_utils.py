@@ -122,9 +122,11 @@ def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
 
     quant_cls = get_quantization_config(model_config.quantization)
+
     # GGUF doesn't have config file
     if model_config.quantization == "gguf":
         return quant_cls.from_config({})
+
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)

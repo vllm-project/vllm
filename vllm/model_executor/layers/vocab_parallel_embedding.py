@@ -8,7 +8,6 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
 from vllm.model_executor.utils import set_weight_attrs
@@ -430,9 +429,6 @@ class ParallelLMHead(VocabParallelEmbedding):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
                          org_num_embeddings, padding_size, quant_config,
                          prefix)
-
-        if isinstance(self.linear_method, UnquantizedEmbeddingMethod):
-            self.linear_method = UnquantizedLinearMethod()
 
         if bias:
             self.bias = Parameter(

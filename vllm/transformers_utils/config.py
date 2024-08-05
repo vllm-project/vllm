@@ -39,24 +39,29 @@ for name, cls in _CONFIG_REGISTRY.items():
         AutoConfig.register(name, cls)
 
 
-def get_config(model: Union[str, Path],
-               trust_remote_code: bool,
-               revision: Optional[str] = None,
-               code_revision: Optional[str] = None,
-               rope_scaling: Optional[dict] = None,
-               rope_theta: Optional[float] = None) -> PretrainedConfig:
+def get_config(
+    model: Union[str, Path],
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+    code_revision: Optional[str] = None,
+    rope_scaling: Optional[dict] = None,
+    rope_theta: Optional[float] = None,
+    **kwargs,
+) -> PretrainedConfig:
+
+    # Separate model folder from file path for GGUF models
     is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
-    gguf_file = None
     if is_gguf:
-        gguf_file = Path(model).name
+        kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
+
     try:
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
             revision=revision,
             code_revision=code_revision,
-            gguf_file=gguf_file)
+            **kwargs)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
@@ -74,11 +79,14 @@ def get_config(model: Union[str, Path],
                                               revision=revision,
                                               code_revision=code_revision)
 
-    if config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES and is_gguf:
+    # Special architecture mapping check for GGUF models
+    if is_gguf:
+        if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+            raise RuntimeError(
+                f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
-    elif config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES and is_gguf:
-        raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
+
     for key, value in [("rope_scaling", rope_scaling),
                        ("rope_theta", rope_theta)]:
         if value is not None:
