@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad, TensorCache
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
@@ -178,20 +178,29 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.seq_lens_tensor is not None
 
+        slot_mapping = self.slot_mapping
+        seq_lens_tensor = self.seq_lens_tensor
+        block_tables = self.block_tables
+        if self.num_prefills > 0:
+            assert self.num_prefill_tokens > 0
+            slot_mapping = slot_mapping[self.num_prefill_tokens:]
+            seq_lens_tensor = seq_lens_tensor[self.num_prefills:]
+            block_tables = block_tables[self.num_prefills:]
+
         self._cached_decode_metadata = FlashAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
-            slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            slot_mapping=slot_mapping,
             seq_lens=None,
-            seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+            seq_lens_tensor=seq_lens_tensor,
             max_query_len=None,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             query_start_loc=None,
             seq_start_loc=None,
             context_lens_tensor=None,
-            block_tables=self.block_tables[self.num_prefills:],
+            block_tables=block_tables,
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
@@ -199,6 +208,8 @@ class FlashAttentionMetadata(AttentionMetadata):
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
+
+    tensor_cache: TensorCache = TensorCache()
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.slot_mapping: List[int] = []
@@ -300,17 +311,29 @@ class FlashAttentionMetadataBuilder(
         num_decode_tokens = self.num_decode_tokens
 
         if use_captured_graph:
-            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
+            if cuda_graph_pad_size:
+                self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+                self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size
 
-            # The shape of graph_block_tables is
-            # [max batch size, max context len // block size].
-            input_block_tables = self.runner.graph_block_tables[:batch_size]
-            for i, block_table in enumerate(self.block_tables):
-                if block_table:
-                    input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device=device)
+            block_tables_tensor_cached, block_tables_list_cached = \
+                self.tensor_cache.get_tensor(
+                "block_tables")
+            if (block_tables_list_cached is not None
+                    and block_tables_list_cached == self.block_tables):
+                block_tables = block_tables_tensor_cached
+            else:
+                # The shape of graph_block_tables is
+                # [max batch size, max context len // block size].
+                input_block_tables = self.runner.graph_block_tables[:
+                                                                    batch_size]
+                for i, block_table in enumerate(self.block_tables):
+                    if block_table:
+                        input_block_tables[i, :len(block_table)] = block_table
+
+                block_tables = torch.tensor(input_block_tables, device=device)
+                self.tensor_cache.cache_tensor("block_tables", block_tables,
+                                               self.block_tables)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -320,33 +343,85 @@ class FlashAttentionMetadataBuilder(
             )
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
-        context_lens_tensor = torch.tensor(self.context_lens,
+        if self.num_prefills == 0:
+            # Optimize for decode only case
+            context_lens_tensor = self.tensor_cache.get_dummy_tensor()
+
+            (seq_lens_tensor_cached,
+             seq_lens_list_cached) = self.tensor_cache.get_tensor("seq_lens")
+            if seq_lens_list_cached is not None and len(
+                    seq_lens_list_cached) == len(seq_lens) and all(
+                        (new - old) == 1 or (new - old) == 0
+                        for new, old in zip(seq_lens, seq_lens_list_cached)):
+                seq_lens_tensor = seq_lens_tensor_cached
+                torch.Tensor.add_(seq_lens_tensor, 1)
+                if cuda_graph_pad_size:
+                    seq_lens_tensor[-cuda_graph_pad_size:] = 1
+
+                self.tensor_cache.update_vals("seq_lens", seq_lens)
+
+            else:
+                seq_lens_tensor = torch.tensor(seq_lens,
+                                               dtype=torch.int,
+                                               device=device)
+                self.tensor_cache.cache_tensor("seq_lens", seq_lens_tensor,
+                                               seq_lens)
+
+            query_lens_tensor = self.tensor_cache.get_dummy_tensor()
+            query_start_loc = self.tensor_cache.get_dummy_tensor()
+            seq_start_loc = self.tensor_cache.get_dummy_tensor()
+
+            slot_mapping_tensor_cached, slot_mapping_list_cached = \
+                self.tensor_cache.get_tensor(
+                "slot_mapping")
+            if slot_mapping_list_cached is not None and len(
+                    slot_mapping_list_cached) == len(
+                        self.slot_mapping) and all(
+                            (new - old) == 1 or (new - old) == 0
+                            for new, old in zip(self.slot_mapping,
+                                                slot_mapping_list_cached)):
+                slot_mapping_tensor = slot_mapping_tensor_cached
+                torch.Tensor.add_(slot_mapping_tensor, 1)
+                if cuda_graph_pad_size:
+                    slot_mapping_tensor[-cuda_graph_pad_size:] = PAD_SLOT_ID
+                self.tensor_cache.update_vals("slot_mapping",
+                                              self.slot_mapping)
+
+            else:
+                slot_mapping_tensor = torch.tensor(self.slot_mapping,
+                                                   dtype=torch.long,
+                                                   device=device)
+                self.tensor_cache.cache_tensor("slot_mapping",
+                                               slot_mapping_tensor,
+                                               self.slot_mapping)
+        else:
+            context_lens_tensor = torch.tensor(self.context_lens,
+                                               dtype=torch.int,
+                                               device=device)
+            seq_lens_tensor = torch.tensor(seq_lens,
                                            dtype=torch.int,
                                            device=device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=device)
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                    dtype=torch.int32,
-                                    device=device)
-        torch.cumsum(seq_lens_tensor,
-                     dim=0,
-                     dtype=seq_start_loc.dtype,
-                     out=seq_start_loc[1:])
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
+            query_lens_tensor = torch.tensor(query_lens,
+                                             dtype=torch.long,
+                                             device=device)
+            query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+                                          dtype=torch.int32,
+                                          device=device)
+            seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
+                                        dtype=torch.int32,
+                                        device=device)
+            torch.cumsum(seq_lens_tensor,
+                         dim=0,
+                         dtype=seq_start_loc.dtype,
+                         out=seq_start_loc[1:])
+            torch.cumsum(query_lens_tensor,
+                         dim=0,
+                         dtype=query_start_loc.dtype,
+                         out=query_start_loc[1:])
 
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
+            slot_mapping_tensor = torch.tensor(self.slot_mapping,
+                                               dtype=torch.long,
+                                               device=device)
 
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,

@@ -52,7 +52,7 @@ from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, flatten_2d_lists,
                         get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available)
+                        is_pin_memory_available, TensorCache)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -171,6 +171,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
 
 class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     """Build ModelInputForGPU from SequenceGroupMetadata."""
+
+    tensor_cache: TensorCache = TensorCache()
 
     # Note: ideally we would be using a dataclass(kw_only=True)
     # here, so that this can be subclassed easily,
@@ -552,9 +554,29 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.runner.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.runner.device)
+
+        (input_positions_tensor_cached, input_positions_list_cached) = \
+            self.tensor_cache.get_tensor("input_positions")
+
+        if input_positions_list_cached is not None and len(
+                input_positions) == len(input_positions_list_cached) and all(
+                    (new - old) == 1 or (new - old) == 0 for new, old in zip(
+                        input_positions, input_positions_list_cached)):
+            input_positions_tensor = input_positions_tensor_cached
+            with torch.inference_mode():
+                torch.Tensor.add_(input_positions_tensor, 1)
+                if cuda_graph_pad_size:
+                    input_positions_tensor[-cuda_graph_pad_size:] = 0
+
+            self.tensor_cache.update_vals("input_positions", input_positions)
+        else:
+            input_positions_tensor = torch.tensor(input_positions,
+                                                  dtype=torch.long,
+                                                  device=self.runner.device)
+
+            self.tensor_cache.cache_tensor("input_positions",
+                                           input_positions_tensor,
+                                           input_positions)
 
         # Sequence and query lengths.
         seq_lens.extend([1] * cuda_graph_pad_size)

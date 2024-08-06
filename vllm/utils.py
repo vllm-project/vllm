@@ -177,6 +177,33 @@ class LRUCache(Generic[T]):
         self.cache.clear()
 
 
+class TensorCache:
+    """Used to cache pytorch tensors for reuse by successive iterations of 
+    the scheduler/prepare_inputs
+    """
+
+    def __init__(self):
+        self._dummy_tensor: torch.Tensor = torch.empty(0)
+        self._tensors: Dict[str, List] = {}
+
+    def get_dummy_tensor(self):
+        return self._dummy_tensor
+
+    def get_tensor(self, name) -> Optional[List]:
+        if name not in self._tensors:
+            return [None, None]
+
+        return self._tensors[name]
+
+    def cache_tensor(self, name: str, tensor_vals: torch.Tensor,
+                     vals: Any) -> None:
+        self._tensors[name] = [tensor_vals, vals]
+
+    def update_vals(self, name: str, vals: Any) -> None:
+        assert name in self._tensors
+        self._tensors[name][1] = vals
+
+
 def is_hip() -> bool:
     return torch.version.hip is not None
 

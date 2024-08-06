@@ -9,7 +9,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData, SequenceGroupMetadata
 from vllm.triton_utils.sample import get_num_triton_sampler_splits
 from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
-                        make_tensor_with_pad, maybe_expand_dim)
+                        make_tensor_with_pad, maybe_expand_dim, TensorCache)
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
@@ -97,6 +97,8 @@ class SamplingMetadata:
             
     """
 
+    tensor_cache: TensorCache = TensorCache()
+
     def __init__(
         self,
         seq_groups: List[SequenceGroupToSample],
@@ -129,23 +131,51 @@ class SamplingMetadata:
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
                                 device, generators)
-        selected_token_indices = async_tensor_h2d(selected_token_indices,
-                                                  dtype=torch.long,
-                                                  target_device=device,
-                                                  pin_memory=pin_memory)
-        categorized_sample_indices = {
-            t: maybe_expand_dim(
-                async_tensor_h2d(seq_ids,
-                                 dtype=torch.int,
-                                 target_device=device,
-                                 pin_memory=pin_memory), 2, 2)
-            for t, seq_ids in categorized_sample_indices.items()
-        }
+
+        (selected_token_indices_tensor_cached,
+         selected_token_indices_list_cached
+         ) = SamplingMetadata.tensor_cache.get_tensor("selected_token_indices")
+        if (selected_token_indices_list_cached is not None and
+                selected_token_indices_list_cached == selected_token_indices):
+            selected_token_indices_tensor = selected_token_indices_tensor_cached
+        else:
+            selected_token_indices_tensor = async_tensor_h2d(
+                selected_token_indices,
+                dtype=torch.long,
+                target_device=device,
+                pin_memory=pin_memory)
+            SamplingMetadata.tensor_cache.cache_tensor(
+                "selected_token_indices", selected_token_indices_tensor,
+                selected_token_indices)
+
+        (categorized_sample_indices_tensor_dict_cached,
+         categorized_sample_indices_dict_cached
+         ) = SamplingMetadata.tensor_cache.get_tensor(
+             "categorized_sample_indices")
+
+        if (categorized_sample_indices_dict_cached is not None
+                and categorized_sample_indices_dict_cached
+                == categorized_sample_indices):
+            categorized_sample_indices_tensor_dict = \
+                categorized_sample_indices_tensor_dict_cached
+        else:
+            categorized_sample_indices_tensor_dict = {
+                t: maybe_expand_dim(
+                    async_tensor_h2d(seq_ids,
+                                     dtype=torch.int,
+                                     target_device=device,
+                                     pin_memory=pin_memory), 2, 2)
+                for t, seq_ids in categorized_sample_indices.items()
+            }
+            SamplingMetadata.tensor_cache.cache_tensor(
+                "categorized_sample_indices",
+                categorized_sample_indices_tensor_dict,
+                categorized_sample_indices)
 
         sampling_metadata = SamplingMetadata(
             seq_groups=seq_groups,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
+            selected_token_indices=selected_token_indices_tensor,
+            categorized_sample_indices=categorized_sample_indices_tensor_dict,
             num_prompts=num_prompts,
         )
         return sampling_metadata
