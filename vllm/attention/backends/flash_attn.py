@@ -101,7 +101,6 @@ def flash_attn_with_kvcache(
         block_table=block_table,
         softmax_scale=softmax_scale,
         causal=causal,
-        softcap=softcap,
         alibi_slopes=alibi_slopes,
         softcap=softcap,
     )
@@ -680,9 +679,8 @@ class FlashAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
-                    block_table=None,
                     softcap=self.logits_soft_cap,
+                    alibi_slopes=self.alibi_slopes,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
