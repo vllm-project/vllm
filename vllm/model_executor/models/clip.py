@@ -150,7 +150,7 @@ class CLIPVisionEmbeddings(nn.Module):
 
         return embeddings
 
-
+# TODO(ChristopherCho): Clip attention is not fully tested yet.
 class CLIPAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -198,13 +198,11 @@ class CLIPAttention(nn.Module):
     ):
         """Input shape: Batch x Time x Channel"""
 
-        bsz, tgt_len, embed_dim = hidden_states.size()
+        bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
-
-        query_states = query_states * self.scale
 
         query_states = query_states.view(bsz, tgt_len,
                                          self.num_heads_per_partition,
