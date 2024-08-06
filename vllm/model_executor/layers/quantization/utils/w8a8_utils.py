@@ -5,12 +5,18 @@ from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform, rocm
+from vllm.platforms import current_platform
+from vllm.utils import is_hip
 
+# scaled_mm in pytorch on rocm has a bug that requires always
+# providing scaling factor for result. This value is created 
+# as gloabal value to avoid multiple tensor allocations, and
+# can be removed once pytorch fixes the bug.
+scale_ret = torch.ones((1)).cuda() if is_hip() else None
 
 def cutlass_fp8_supported() -> bool:
     # cutlass is not supported on Rocm
-    if isinstance(current_platform, rocm.RocmPlatform):
+    if is_hip():
         return False
     capability = current_platform.get_device_capability()
     capability = capability[0] * 10 + capability[1]
@@ -155,10 +161,11 @@ def apply_fp8_linear(
                                       out_dtype=input.dtype,
                                       scale_a=x_scale,
                                       scale_b=weight_scale,
+                                      scale_result=scale_ret,
                                       bias=bias)
             # Since in torch 2.5, scaled_mm only returns single value
-            # This should be removed when vllm-nivida also moves to 2.5
-            if isinstance(current_platform, rocm.RocmPlatform):
+            # This should be removed when vllm-nvidia also moves to 2.5
+            if is_hip():
                 return torch.narrow(output, 0, 0, input.shape[0])
             return torch.narrow(output[0], 0, 0, input.shape[0])
 

@@ -21,8 +21,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     create_per_tensor_scale_param, cutlass_fp8_supported,
     per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform, rocm
-from vllm.utils import print_warning_once
+from vllm.platforms import current_platform
+from vllm.utils import print_warning_once, is_hip
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -182,10 +182,14 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
-            # If rocm, use float8_e4m3fnuz
-            if isinstance(current_platform, rocm.RocmPlatform):
+            # If rocm, use float8_e4m3fnuz.
+            if is_hip():
+                # The bits pattern 10000000(-128) represents zero in e4m3fn
+                # but NaN in e4m3fnuz. So here we set it to 0.
+                # https://onnx.ai/onnx/technical/float8.html
                 weight_as_int8 = layer.weight.view(torch.int8)
-                weight_as_int8[weight_as_int8 == -128] = 0
+                ROCM_FP8_NAN_AS_INT = -128
+                weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
                 layer.weight = Parameter(layer.weight.view(
                     torch.float8_e4m3fnuz),
                                          requires_grad=False)
@@ -215,8 +219,12 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.input_scale = None
 
-            # If rocm, adjust the scaling factor
-            if isinstance(current_platform, rocm.RocmPlatform):
+            # If rocm, adjust the scaling factor.
+            # For the same bits representation, e4m3fnuz value is half of
+            # the e4m3fn value, so we should double the scaling factor to
+            # get the same dequantized value.
+            # https://onnx.ai/onnx/technical/float8.html
+            if is_hip():
                 layer.weight_scale = Parameter(layer.weight_scale * 2,
                                                requires_grad=False)
                 if layer.input_scale is not None:
