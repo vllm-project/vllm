@@ -9,7 +9,6 @@ from vllm.sampling_params import SamplingParams
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 VLLM_RPC_HEALTHY_STR = "HEALTHY"
-VLLM_RPC_PATH = "ipc:///tmp/vllm_rpc_path"
 
 
 @dataclass
