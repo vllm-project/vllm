@@ -6,8 +6,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  fused_experts)
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -410,7 +409,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
               topk_weights: torch.Tensor, topk_ids: torch.Tensor,
               **kwargs) -> torch.Tensor:
-
+        from vllm.model_executor.layers.fused_moe import fused_experts
         return fused_experts(x,
                              layer.w13_weight,
                              layer.w2_weight,
