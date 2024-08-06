@@ -92,13 +92,112 @@ class TokensPrompt(TypedDict):
     """
 
 
-PromptInputs = Union[str, TextPrompt, TokensPrompt]
+SingletonPromptInputs = Union[str, TextPrompt, TokensPrompt]
 """
-The inputs to the LLM, which can take one of the following forms:
+Set of possible schemas for a single LLM input:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+
+Note that "singleton" is as opposed to a data structure
+which encapsulates multiple prompts, i.e. of the sort
+which may be utilized for encoder/decoder models when
+the user desires to express both the encoder & decoder
+prompts explicitly, i.e. ExplicitEncoderDecoderPrompt
+
+A prompt of type SingletonPromptInputs may be employed
+as (1) input to a decoder-only model, (2) input to
+the encoder of an encoder/decoder model, in the scenario
+where the decoder-prompt is not specified explicitly, or
+(3) as a member of a larger data structure encapsulating
+more than one prompt, i.e. ExplicitEncoderDecoderPrompt
 """
+
+
+class ExplicitEncoderDecoderPrompt(TypedDict):
+    """Represents an encoder/decoder model input prompt,
+    comprising an explicit encoder prompt and a 
+    decoder prompt.
+
+    The encoder and decoder prompts, respectively,
+    may formatted according to any of the
+    SingletonPromptInputs schemas, and are not
+    required to have the same schema.
+
+    Only the encoder prompt may have multi-modal data.
+
+    Note that an ExplicitEncoderDecoderPrompt may not
+    be used as an input to a decoder-only model,
+    and that the `encoder_prompt` and `decoder_prompt`
+    fields of this data structure may not themselves
+    must be SingletonPromptInputs instances.
+    """
+
+    encoder_prompt: SingletonPromptInputs
+
+    decoder_prompt: SingletonPromptInputs
+
+
+PromptInputs = Union[SingletonPromptInputs, ExplicitEncoderDecoderPrompt]
+"""
+Set of possible schemas for an LLM input, including
+both decoder-only and encoder/decoder input types:
+
+- A text prompt (:class:`str` or :class:`TextPrompt`)
+- A tokenized prompt (:class:`TokensPrompt`)
+- A single data structure containing both an encoder and a decoder prompt
+  (:class:`ExplicitEncoderDecoderPrompt`)
+"""
+
+
+def _has_required_keys(
+    d: dict,
+    required_keys: set,
+) -> bool:
+    return required_keys.issubset(d.keys())
+
+
+def get_prompt_type(prompt: Optional[PromptInputs]) -> Optional[str]:
+    """
+    Get the type-name of the prompt argument instance, given that
+    isinstance() cannot apply to TypedDict subclasses directly.
+    If the prompt is None, return 'None' as the type name.
+
+    Arguments:
+
+    * prompt: LLM input prompt or None
+
+    Returns:
+
+    * String representation of prompt type
+    """
+
+    if prompt is None:
+        return 'None'
+
+    required_keys_dict = {
+        'TextPrompt': {'prompt'},
+        'TokensPrompt': {'prompt_token_ids'},
+        'ExplicitEncoderDecoder': {'encoder_prompt', 'decoder_prompt'},
+    }
+
+    if isinstance(prompt, dict):
+        for (ptype, required_keys) in required_keys_dict.items():
+            # Ignore type checking in the conditional below because type
+            # checker does not understand that is_dict(prompt) narrows
+            # down the possible types
+            if _has_required_keys(
+                    prompt,  # type: ignore
+                    required_keys):
+                return ptype
+
+        raise ValueError(f"Invalid prompt {prompt}, valid types are "
+                         "required_keys_dict={required_keys_dict}")
+
+    if isinstance(prompt, str):
+        return "str"
+
+    raise ValueError(f"Invalid prompt {prompt}")
 
 
 class LLMInputs(TypedDict):
@@ -114,8 +213,29 @@ class LLMInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
+    encoder_prompt_token_ids: NotRequired[List[int]]
+    """The token IDs of the encoder prompt."""
+
+    encoder_prompt: NotRequired[Optional[str]]
+    """
+    The original encoder prompt text corresponding to the token IDs, if
+    available.
+    """
+
     multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
+
+
+def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs) -> bool:
+    """
+    Return True if the LLMInputs instance has the correct configuration
+    for encoder/decoder.
+    """
+
+    # True if encoder prompt token ids field exists &
+    # is not None
+    return ('encoder_prompt_token_ids' in inputs
+            and inputs['encoder_prompt_token_ids'] is not None)
