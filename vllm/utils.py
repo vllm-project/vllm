@@ -11,7 +11,6 @@ import tempfile
 import threading
 import uuid
 import warnings
-from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
