@@ -65,7 +65,6 @@ logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
-    "llm.model": "llm",
 }
 
 
@@ -483,6 +482,21 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
+class LLMWrapper(nn.Module):
+    """
+    To align with the key names of LoRA trained with PEFT, we need to add an 
+    additional layer to the llm's implementation.
+    """
+
+    def __init__(self, llm: nn.Module, name: str) -> None:
+        super().__init__()
+        self.model_name = name
+        setattr(self, name, llm)
+
+    def forward(self, *args, **kwargs) -> Any:
+        return getattr(self, self.model_name)(*args, **kwargs)
+
+
 class MiniCPMVBaseModel(nn.Module, SupportsVision):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
@@ -521,7 +535,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
+        vlm_embedding: torch.Tensor = self.get_llm_embedding(input_ids)
         if hasattr(self.config, "scale_emb"):
             vlm_embedding *= self.config.scale_emb
 
@@ -710,6 +724,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
         raise NotImplementedError
@@ -736,9 +753,11 @@ class MiniCPMV2(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        return MiniCPMModel(config,
-                            cache_config=cache_config,
-                            quant_config=quant_config)
+
+        return LLMWrapper(MiniCPMModel(config,
+                                       cache_config=cache_config,
+                                       quant_config=quant_config),
+                          name="model")
 
     def init_vision_module(self) -> nn.Module:
         # TODO :refactor this vision model
@@ -763,6 +782,9 @@ class MiniCPMV2(MiniCPMVBaseModel):
             model.blocks = model.blocks[:-1]
 
         return model
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_tokens(input_ids)
 
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
@@ -798,6 +820,9 @@ class MiniCPMV2(MiniCPMVBaseModel):
                                                     num_prefix_tokens:]
             res.append(self.resampler(vision_embedding, tgt_size))
         return torch.vstack(res)
+
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.llm.embed_tokens(input_ids)
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
@@ -847,9 +872,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        return LlamaModel(config,
-                          cache_config=cache_config,
-                          quant_config=quant_config)
+        return LLMWrapper(LlamaModel(config,
+                                     cache_config=cache_config,
+                                     quant_config=quant_config),
+                          name="model")
 
     def init_vision_module(self) -> nn.Module:
         model = Idefics2VisionTransformer(self.config.vision_config)
@@ -877,6 +903,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                     patch_attention_mask=patch_attn_mask)
         vision_embedding = self.resampler(vision_embedding, tgt_sizes)
         return vision_embedding
+
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.llm.model.embed_tokens(input_ids)
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
@@ -957,7 +986,6 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
                 num_heads=embed_dim // 128,
                 kv_dim=vision_dim,
             )
-
         return resampler
 
     def get_vision_embedding(
@@ -972,6 +1000,9 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
             tgt_sizes=tgt_sizes,
         ).last_hidden_state
         return vision_embedding
+
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.llm.embed_tokens(input_ids)
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
@@ -1020,9 +1051,9 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
     which is not conducive to the current integration logic of LoRA and
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """
+    # Ensure that the LoRA support check passes when the class is not
+    # initialized,but set all these attributes to empty
     packed_modules_mapping = {}
-
-    # LoRA specific attributes
     supported_lora_modules = []
     embedding_modules = {}
     embedding_padding_modules = []
