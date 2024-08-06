@@ -28,13 +28,7 @@ def get_model_architecture(
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 
-    for arch in architectures:
-        model_cls = ModelRegistry.load_model_cls(arch)
-        if model_cls is not None:
-            return (model_cls, arch)
-    raise ValueError(
-        f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {ModelRegistry.get_supported_archs()}")
+    return ModelRegistry.resolve_model_cls(architectures)
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
