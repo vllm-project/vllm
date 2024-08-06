@@ -3,8 +3,6 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 
 from typing_extensions import NotRequired
 
-from .utils import has_required_keys
-
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
 
@@ -152,7 +150,14 @@ both decoder-only and encoder/decoder input types:
 """
 
 
-def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
+def _has_required_keys(
+    d: dict,
+    required_keys: set,
+) -> bool:
+    return required_keys.issubset(d.keys())
+
+
+def get_prompt_type(prompt: Optional[PromptInputs]) -> Optional[str]:
     """
     Get the type-name of the prompt argument instance, given that
     isinstance() cannot apply to TypedDict subclasses directly.
@@ -177,13 +182,13 @@ def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
     }
 
     if isinstance(prompt, dict):
-        for ptype in required_keys_dict:
+        for (ptype,required_keys) in required_keys_dict.items():
             # Ignore type checking in the conditional below because type
             # checker does not understand that is_dict(prompt) narrows
             # down the possible types
-            if has_required_keys(
+            if _has_required_keys(
                     prompt,  # type: ignore
-                    required_keys_dict[ptype]):
+                    required_keys):
                 return ptype
 
         raise ValueError(f"Invalid prompt {prompt}, valid types are "
