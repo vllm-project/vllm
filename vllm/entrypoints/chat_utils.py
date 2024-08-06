@@ -1,7 +1,7 @@
 import codecs
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Awaitable, Iterable, List, Optional, cast, Any, Union
+from typing import Awaitable, Iterable, List, Optional, cast, Union
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -12,7 +12,6 @@ from openai.types.chat import ChatCompletionContentPartTextParam
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
 from transformers import PreTrainedTokenizer
-from typing_extensions import Required, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -146,9 +145,8 @@ def parse_chat_message_content(
     content = message.get("content")
     tool_call_id = message.get('content')
     tool_calls = message.get('tool_calls')
-    name = message.get(
-        'name', ''
-    )  # no longer used by OpenAI, was formerly. used for tool calls by some models still
+    # no longer used by OpenAI, but some models still use it for tool calls.
+    name = message.get('name', '')
 
     # empty case
     if content is None and tool_calls is None:
