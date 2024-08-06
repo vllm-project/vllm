@@ -3,7 +3,6 @@ from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -41,7 +40,7 @@ class SequenceGroupToSample:
     # prefill is enabled.
     query_len: Optional[int]
     # A random number generator for sampling.
-    generator: Optional[np.random.Generator]
+    generator: Optional[torch.Generator]
     # True if the sequence group is in prefill stage. False if it is in a
     # decode stage.
     is_prompt: bool
@@ -214,19 +213,19 @@ def _prepare_seq_groups(
         seq_ids = list(seq_group_metadata.seq_data.keys())
         sampling_params = seq_group_metadata.sampling_params
         is_prompt = seq_group_metadata.is_prompt
-        generator: Optional[np.random.Generator] = None
+        generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
         prompt_logprob_indices: List[int] = []
         sample_indices: List[int] = []
         do_sample = seq_group_metadata.do_sample
+        seed = sampling_params.seed
 
         if seq_group_metadata.is_prompt:
-            if sampling_params.seed is not None:
-                generator = np.random.default_rng(seed=sampling_params.seed)
-                if generators is not None:
-                    generators[seq_group_metadata.request_id] = generator
+            if seed is not None and generators is not None:
+                generator = torch.Generator(device=device).manual_seed(seed)
+                generators[seq_group_metadata.request_id] = generator
 
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
@@ -243,7 +242,7 @@ def _prepare_seq_groups(
             prompt_logprob_len = 0
             sample_len = len(seq_ids) if do_sample else 0
 
-            if sampling_params.seed is not None and generators is not None:
+            if seed is not None and generators is not None:
                 generator = generators.get(seq_group_metadata.request_id)
 
         # Update indices to select from the model output.

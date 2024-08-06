@@ -181,9 +181,7 @@ steps:
   #mirror_hardwares: [amd]
   commands:
     - pytest -v -s samplers
-    # Test for flashinfer samplers
-    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
-    - pytest -v -s samplers
+    - VLLM_NO_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test
   mirror_hardwares: [amd]

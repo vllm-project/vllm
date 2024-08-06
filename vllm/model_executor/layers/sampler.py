@@ -1,10 +1,10 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
 import warnings
+from importlib.util import find_spec
 from math import inf
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -13,6 +13,7 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.model_executor.layers.ops.sample import sample as sample_triton
 
+import vllm.envs as envs
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
@@ -20,15 +21,14 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceOutput)
-from vllm.utils import async_numpy_to_tensor
 
-try:
+if not envs.VLLM_NO_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: disable
     from flashinfer.sampling import (
         top_k_top_p_sampling_from_probs as flashinfer_top_k_top_p_sampling)
 
     # yapf: enable
-except ImportError:
+else:
     flashinfer_top_k_top_p_sampling = None
 
 # (num_token_ids, num_parent_ids) per sequence group.
@@ -489,20 +489,18 @@ def _multinomial(
 ) -> torch.Tensor:
     if num_samples > 1 and not is_fallback:
         probs = probs.repeat_interleave(num_samples, dim=0)
+    q = torch.empty_like(probs)
     if seq_groups is None:
-        q = torch.empty_like(probs)
         q.exponential_()
     else:
-        q_ = np.empty(probs.shape)
         sample_idx = 0
         for seq_group in seq_groups:
             seq_ids = seq_group.seq_ids
             stride = len(seq_ids) * num_samples
             assert seq_group.generator is not None
-            q_[sample_idx:sample_idx + stride] = \
-                seq_group.generator.exponential(size=(stride, q_.shape[1]))
+            q[sample_idx:sample_idx +
+              stride].exponential_(generator=seq_group.generator)
             sample_idx += stride
-        q = async_numpy_to_tensor(q_, probs.device)
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
@@ -515,23 +513,19 @@ def _top_k_top_p_multinomial_with_flashinfer(
         top_ks = top_ks.repeat_interleave(num_samples)
         top_ps = top_ps.repeat_interleave(num_samples)
     batch_size = probs.shape[0]
+    uniform_samples = torch.empty((max_top_k_round, batch_size),
+                                  device=probs.device)
     if seq_groups is None:
-        uniform_samples = torch.rand((max_top_k_round, batch_size),
-                                     device=probs.device)
+        uniform_samples.random_()
     else:
-        uniform_samples_cpu = np.empty((max_top_k_round, batch_size),
-                                       dtype=np.float32)
         sample_idx = 0
         for seq_group in seq_groups:
             seq_ids = seq_group.seq_ids
             stride = len(seq_ids) * num_samples
             assert seq_group.generator is not None
-            uniform_samples_cpu[:, sample_idx:sample_idx + stride] = \
-                seq_group.generator.random((max_top_k_round, stride),
-                                           dtype=np.float32)
+            uniform_samples[:, sample_idx:sample_idx +
+                            stride].random_(generator=seq_group.generator)
             sample_idx += stride
-        uniform_samples = async_numpy_to_tensor(uniform_samples_cpu,
-                                                probs.device)
     batch_next_token_ids, success = flashinfer_top_k_top_p_sampling(
         probs,
         uniform_samples,
