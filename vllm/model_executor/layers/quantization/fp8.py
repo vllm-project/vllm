@@ -174,6 +174,14 @@ class Fp8LinearMethod(LinearMethodBase):
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
 
+            # If using marlin (w8a16), kernel uses channelwise weights,
+            # so extend the weight scales to be channelwise.
+            if self.use_marlin:
+                assert weight_scale.numel() == 1 
+                weight_scale = convert_to_channelwise(
+                    weight_scale.expand(len(layer.logical_widths)),
+                    layer.logical_widths)
+
             # Update the layer with the new values.
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
