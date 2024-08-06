@@ -751,9 +751,8 @@ if triton.__version__ >= "2.1.0":
 
         if (k_cache.dtype == torch.uint8
                 or v_cache.dtype == torch.uint8 and kv_cache_dtype == "auto"):
-            raise ValueError(
-                "Auto unsupported for FP8 KV Cache prefill kernel:",
-                kv_cache_dtype)
+            raise ValueError("kv_cache_dtype='auto' unsupported for\
+                FP8 KV Cache prefill kernel")
 
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
