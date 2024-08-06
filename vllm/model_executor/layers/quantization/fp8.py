@@ -182,6 +182,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
+            # If rocm, use float8_e4m3fnuz
             if isinstance(current_platform, RocmPlatform):
                 weight_as_int8 = layer.weight.view(torch.int8)
                 weight_as_int8[weight_as_int8 == -128] = 0
@@ -213,6 +214,7 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.input_scale = None
 
+            # If rocm, adjust the scaling factor
             if isinstance(current_platform, RocmPlatform):
                 layer.weight_scale = Parameter(layer.weight_scale * 2, 
                                                requires_grad=False)
