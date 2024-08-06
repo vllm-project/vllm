@@ -223,6 +223,14 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
             input_height=height,
             input_width=width,
         )
+    elif isinstance(image_data, list):
+            width, height = image_data[0].size
+
+            image_feature_size = get_llava_next_image_feature_size(
+                hf_config,
+                input_height=height,
+                input_width=width,
+            )
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
