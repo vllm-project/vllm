@@ -43,7 +43,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, filter_weights
 
 logger = init_logger(__name__)
 
@@ -68,6 +68,23 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      num_hidden_layers=24,
                                                      patch_size=14,
                                                      projection_dim=768)
+
+
+def _init_img_processor(hf_config: PretrainedConfig):
+    clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
+    layer_idx = hf_config.img_processor.get('layer_idx', -2)
+
+    # Initialize the CLIP only up to the required feature layer
+    if layer_idx < 0:
+        num_hidden_layers = clip_config.num_hidden_layers + \
+            layer_idx + 1
+    else:
+        num_hidden_layers = layer_idx + 1
+
+    img_processor = CLIPVisionModel(
+        clip_config, num_hidden_layers_override=num_hidden_layers)
+
+    return img_processor
 
 
 class Phi3ImageEmbeddingBase(nn.Module):
@@ -107,18 +124,8 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
 
-        clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
-        self.layer_idx = config.img_processor.get('layer_idx', -2)
+        self.img_processor = _init_img_processor(config)
 
-        # Initialize the CLIP only up to the required feature layer
-        if self.layer_idx < 0:
-            num_hidden_layers = clip_config.num_hidden_layers + \
-                self.layer_idx + 1
-        else:
-            num_hidden_layers = self.layer_idx + 1
-
-        self.img_processor = CLIPVisionModel(
-            clip_config, num_hidden_layers_override=num_hidden_layers)
         image_dim_out = config.img_processor['image_dim_out']
         self.num_img_tokens = config.img_processor['num_img_tokens']
 
@@ -572,19 +579,16 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            # post_layernorm is not needed in CLIPVisionModel
-            if "vision_model.post_layernorm" in name:
-                continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                # We only do sharding for language model
-                # and not vision model for now.
-                if "vision_embed_tokens" in name and self.vision_embed_tokens:
-                    continue
                 if weight_name not in name:
                     continue
+                
+                if "vision_embed_tokens.img_processor" in name:
+                    continue
+                
                 param = params_dict[name.replace(weight_name, param_name)]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -598,3 +602,6 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+
+        vision_weights = filter_weights(weights, "vision_embed_tokens")
+        self.vision_embed_tokens.img_processor.load_weights(vision_weights)
