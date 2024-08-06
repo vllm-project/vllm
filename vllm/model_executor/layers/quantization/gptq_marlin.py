@@ -40,6 +40,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         self.dynamic = dynamic
         self.weight_bits = weight_bits
+        self.is_sym = is_sym
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
@@ -66,9 +67,13 @@ class GPTQMarlinConfig(QuantizationConfig):
                     self.desc_act = dym.get("bits", self.desc_act)
                     self.is_sym = dym.get("sym", self.is_sym)
                     break
-        if bits != self.weight_bits:
-            self.weight_bits = bits
-            self.pack_factor = 32 // self.weight_bits  # packed into int32
+
+        self.pack_factor = 32 // bits  # packed into int32
+        if (bits, self.is_sym) not in self.TYPE_MAP:
+            raise ValueError("Unsupported quantization config: "
+                             f"bits={bits}, sym={self.is_sym}")
+
+        self.quant_type = self.TYPE_MAP[(bits, self.is_sym)]
 
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
