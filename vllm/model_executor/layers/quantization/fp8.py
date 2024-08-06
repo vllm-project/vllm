@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once, is_hip
+from vllm.utils import is_hip, print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
