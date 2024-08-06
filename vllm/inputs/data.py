@@ -229,7 +229,7 @@ class LLMInputs(TypedDict):
     """
 
 
-def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs, ) -> bool:
+def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs) -> bool:
     """
     Return True if the LLMInputs instance has the correct configuration
     for encoder/decoder.

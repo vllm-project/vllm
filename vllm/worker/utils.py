@@ -7,7 +7,7 @@ from vllm.worker.model_runner import GPUModelRunnerBase
 
 
 def assert_enc_dec_mr_supported_scenario(
-    enc_dec_mr: GPUModelRunnerBase, ) -> None:
+    enc_dec_mr: GPUModelRunnerBase) -> None:
     '''
     Asserted that the provided encoder/decoder model runner instance reflects
     a supported scenario.
