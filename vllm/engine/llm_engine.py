@@ -718,19 +718,13 @@ class LLMEngine:
         * prompt
         * prompt_token_ids
         '''
-
         prompt_token_ids = None
-
         ptype = (get_prompt_type(inputs) if ptype is None else ptype)
 
         if inputs is None:
-
             prompt = None
-
         elif ptype == 'str':
-
             prompt = inputs
-
             prompt_token_ids = self._tokenize_prompt(
                 prompt,
                 request_id=request_id,
@@ -960,15 +954,14 @@ class LLMEngine:
                     request_id=request_id,
                 ))
 
-        else:
-            # Decoder-only operation
-            return self.input_processor(
-                self._process_decoder_only_prompt(
-                    inputs,
-                    request_id=request_id,
-                    lora_request=lora_request,
-                    prompt_adapter_request=prompt_adapter_request,
-                ))
+        # Decoder-only operation
+        return self.input_processor(
+            self._process_decoder_only_prompt(
+                inputs,
+                request_id=request_id,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+            ))
 
     def add_request(
         self,

@@ -188,7 +188,7 @@ def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
 
         raise ValueError(f"Invalid prompt {prompt}, valid types are "
                          "required_keys_dict={required_keys_dict}")
-    elif is_str(prompt):
+    if is_str(prompt):
         return "str"
 
     raise ValueError(f"Invalid prompt {prompt}")
