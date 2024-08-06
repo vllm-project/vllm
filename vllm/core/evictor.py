@@ -1,7 +1,7 @@
-import heapq
 import enum
+import heapq
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 
 class EvictionPolicy(enum.Enum):
@@ -88,12 +88,13 @@ class LRUEvictor(Evictor):
             raise ValueError("No usable cache memory left")
 
         while self.priority_queue:
-            # Lazy deletion algorithm is applied by checking blocks in the free table.
-            last_accessed, _, content_hash, block_id = heapq.heappop(self.priority_queue)
-            if block_id in self.free_table:
-                if self.free_table[block_id].last_accessed == last_accessed:
-                    self.free_table.pop(block_id)
-                    return block_id, content_hash
+            # Lazy deletion algorithm is applied.
+            last_accessed, _, content_hash, block_id = heapq.heappop(
+                self.priority_queue)
+            if (block_id in self.free_table and
+                    self.free_table[block_id].last_accessed == last_accessed):
+                self.free_table.pop(block_id)
+                return block_id, content_hash
 
         raise ValueError("No usable cache memory left")
 
@@ -102,7 +103,9 @@ class LRUEvictor(Evictor):
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
                                                   last_accessed)
-        heapq.heappush(self.priority_queue, (last_accessed, -num_hashed_tokens, content_hash, block_id))
+        heapq.heappush(
+            self.priority_queue,
+            (last_accessed, -num_hashed_tokens, content_hash, block_id))
         self._cleanup_if_necessary()
 
     def update(self, block_id: int, last_accessed: float):
@@ -113,10 +116,14 @@ class LRUEvictor(Evictor):
             self._cleanup()
 
     def _cleanup(self):
-        new_priority_queue = []
-        for last_accessed, neg_num_hashed_tokens, content_hash, block_id in self.priority_queue:
-            if block_id in self.free_table and self.free_table[block_id].last_accessed == last_accessed:
-                heapq.heappush(new_priority_queue, (last_accessed, neg_num_hashed_tokens, content_hash, block_id))
+        new_priority_queue: List[Tuple[int, int, int, int]] = []
+        for last_accessed, neg_num_hashed_tokens, content_hash, block_id in (
+                self.priority_queue):
+            if (block_id in self.free_table and
+                    self.free_table[block_id].last_accessed == last_accessed):
+                heapq.heappush(new_priority_queue,
+                               (last_accessed, neg_num_hashed_tokens,
+                                content_hash, block_id))
         self.priority_queue = new_priority_queue
 
     def remove(self, block_id: int):
