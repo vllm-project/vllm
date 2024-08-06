@@ -76,15 +76,9 @@ class FluteConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FluteConfig":
-        import flute
-
         num_bits = cls.get_from_keys(config, ["num_bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         num_sms_packed = cls.get_from_keys(config, ["num_sms"])
-        if num_sms_packed != flute.NUM_SMS:
-            warnings.warn(
-                f"SMs mismatch: the model was quantized with "
-                f"{num_sms_packed}, but running with {flute.NUM_SMS} SMs.")
 
         return cls(
             num_bits=num_bits,
