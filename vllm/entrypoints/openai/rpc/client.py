@@ -18,6 +18,9 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
+# Time to wait before checking it the server process is alive.
+SERVER_START_TIMEOUT = 1000
+
 
 class AsyncEngineRPCClient:
 
@@ -85,14 +88,19 @@ class AsyncEngineRPCClient:
 
         return data
 
-    async def _send_one_way_rpc_request(self, request: RPC_REQUEST_TYPE,
-                                        error_message: str):
+    async def _send_one_way_rpc_request(self,
+                                        request: RPC_REQUEST_TYPE,
+                                        error_message: str,
+                                        timeout: int = 0):
         """Send one-way RPC request to trigger an action."""
         with self.socket() as socket:
             # Ping RPC Server with request.
             await socket.send(cloudpickle.dumps(request))
 
             # Await acknowledgement from RPCServer.
+            if timeout > 0 and await socket.poll(timeout) == 0:
+                raise TimeoutError(f"server didn't reply within {timeout} ms")
+
             response = cloudpickle.loads(await socket.recv())
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
@@ -117,7 +125,8 @@ class AsyncEngineRPCClient:
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
-            error_message="Unable to start RPC Server.")
+            error_message="Unable to start RPC Server.",
+            timeout=SERVER_START_TIMEOUT)
 
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
