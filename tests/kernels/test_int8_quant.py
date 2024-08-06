@@ -134,4 +134,3 @@ def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     torch.ops._C.static_scaled_int8_quant(out2, x, scale_argument,
                                           azp_argument)
     assert torch.allclose(out1, out2, atol=1)  # atol for rounding
-
