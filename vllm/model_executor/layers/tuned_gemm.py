@@ -8,6 +8,8 @@ from hipbsolidxgemm import hipb_create_extension, hipb_mm
 from rocsolidxgemm import rocb_create_extension, rocb_mm
 
 from vllm import _custom_C
+from vllm.envs import VLLM_USE_ROCM_SKINNY_GEMM
+from vllm.utils import is_hip
 
 
 class TunedGemm:
@@ -25,6 +27,9 @@ class TunedGemm:
         self.create_ds()
         self.cu_count = torch.cuda.get_device_properties(
             device='cuda').multi_processor_count
+
+        self.use_skinny = is_hip() and VLLM_USE_ROCM_SKINNY_GEMM and \
+            "gfx1" not in torch.cuda.get_device_properties('cuda').gcnArchName
 
         if (self.save_gemm == 1):
             self.tuned_df = pd.DataFrame(columns=['M', 'N', 'K'])
@@ -52,6 +57,8 @@ class TunedGemm:
         return self.solids.get((m, n, k), (0, 0))
 
     def apply_skinny(self, m, n, k, inp_view, weights):
+        if not self.use_skinny:
+            return None
         if inp_view.dtype != torch.float16 or k % 8 != 0:
             return None
         if m > 8 and n <= 4:

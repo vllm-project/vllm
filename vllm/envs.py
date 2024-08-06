@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
+    VLLM_USE_ROCM_SKINNY_GEMM: bool = True
+    VLLM_USE_ROCM_CUSTOM_PAGED_ATTN: bool = True
     RANK: int = 0
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -137,6 +139,16 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
+
+    # small gemms custom implementation for MI3* cards
+    "VLLM_USE_ROCM_SKINNY_GEMM":
+    lambda: (os.getenv("VLLM_USE_ROCM_SKINNY_GEMM", "True").lower() in
+             ("true", "1")),
+
+    # custom paged attention implemented for MI3* cards
+    "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
+             ("true", "1") != "0"),
 
     # rank of the process in the distributed setting, used to determine
     # the driver worker
