@@ -1,5 +1,8 @@
 import asyncio
 import os
+import signal
+import threading
+import weakref
 from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -59,6 +62,29 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
+
+        # Set up signal handlers to shutdown the executor cleanly
+        # sometimes gc does not work well
+
+        # Use weakref to avoid holding a reference to self
+        ref = weakref.ref(self)
+
+        def shutdown(signum, frame):
+            logger.info("Received signal %s, shutting down executor", signum)
+            if executor := ref():
+                executor.shutdown()
+
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, shutdown)
+            signal.signal(signal.SIGTERM, shutdown)
+
+    def shutdown(self) -> None:
+        if hasattr(self, "forward_dag") and self.forward_dag is not None:
+            self.forward_dag.teardown()
+            import ray
+            for worker in self.workers:
+                ray.kill(worker)
+            self.forward_dag = None
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
@@ -446,11 +472,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
 
     def __del__(self):
-        if self.forward_dag is not None:
-            self.forward_dag.teardown()
-            import ray
-            for worker in self.workers:
-                ray.kill(worker)
+        logger.info("In __del__, shutting down executor")
+        self.shutdown()
 
 
 class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
@@ -523,8 +546,5 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         return await asyncio.gather(*coros)
 
     def __del__(self):
-        if self.forward_dag is not None:
-            self.forward_dag.teardown()
-            import ray
-            for worker in self.workers:
-                ray.kill(worker)
+        logger.info("In __del__, shutting down executor")
+        self.shutdown()
