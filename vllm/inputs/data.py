@@ -3,7 +3,7 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 
 from typing_extensions import NotRequired
 
-from .utils import has_required_keys, is_dict, is_str
+from .utils import has_required_keys
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
@@ -171,12 +171,12 @@ def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
         return 'None'
 
     required_keys_dict = {
-        'TextPrompt': ['prompt'],
-        'TokensPrompt': ['prompt_token_ids'],
-        'ExplicitEncoderDecoder': ['encoder_prompt', 'decoder_prompt'],
+        'TextPrompt': {'prompt'},
+        'TokensPrompt': {'prompt_token_ids'},
+        'ExplicitEncoderDecoder': {'encoder_prompt', 'decoder_prompt'},
     }
 
-    if is_dict(prompt):
+    if isinstance(prompt, dict):
         for ptype in required_keys_dict:
             # Ignore type checking in the conditional below because type
             # checker does not understand that is_dict(prompt) narrows
@@ -188,7 +188,8 @@ def get_prompt_type(prompt: Optional[PromptInputs], ) -> Optional[str]:
 
         raise ValueError(f"Invalid prompt {prompt}, valid types are "
                          "required_keys_dict={required_keys_dict}")
-    if is_str(prompt):
+
+    if isinstance(prompt, str):
         return "str"
 
     raise ValueError(f"Invalid prompt {prompt}")
@@ -229,10 +230,7 @@ def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs, ) -> bool:
     for encoder/decoder.
     """
 
-    if ('encoder_prompt_token_ids' in inputs
-            and inputs['encoder_prompt_token_ids'] is not None):
-        # Encoder prompt token ids field exists &
-        # is not None
-        return True
-
-    return False
+    # True if encoder prompt token ids field exists &
+    # is not None
+    return ('encoder_prompt_token_ids' in inputs
+            and inputs['encoder_prompt_token_ids'] is not None)
