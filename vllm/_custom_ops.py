@@ -404,6 +404,38 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                         workspace, size_m, size_n, size_k)
 
 
+# gguf
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int):
+    return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
+
+
+def ggml_mul_mat_vec(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec(W, X, quant_type, row)
+
+
+def ggml_mul_mat_vec_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
+
+
+def ggml_mul_mat_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
+
+
 # moe
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
