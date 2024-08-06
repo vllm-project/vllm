@@ -27,32 +27,32 @@ torch.library.define("vllm::flash_attn_varlen_func",
                       "Tensor cu_seqlens_k, "
                       "int max_seqlen_q, "
                       "int max_seqlen_k, "
-                      "float softmax_scale, "
-                      "bool causal, "
-                      "(int, int) window_size, "
-                      "float[]? alibi_slopes, "
-                      "Tensor? block_table, "
-                      "float? softcap"
+                      "float? softmax_scale = None, "
+                      "bool causal = False, "
+                      "int[2] window_size = -1, "
+                      "float softcap = 0.0, "
+                      "float[]? alibi_slopes = None, "
+                      "Tensor? block_table = None"
                       ") -> Tensor"))
 
 
 @torch.library.impl("vllm::flash_attn_varlen_func", "cuda")
 def _flash_attn_varlen_func(
-    out_shape,
-    q,
-    k,
-    v,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlen_q,
-    max_seqlen_k,
-    softmax_scale,
-    causal,
-    window_size,
-    alibi_slopes,
-    block_table,
-    softcap,
-):
+    out_shape: List[int],
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    softcap: float = 0.0,
+    alibi_slopes: Optional[List[float]] = None,
+    block_table: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     return flash_attn_varlen_func(
         q=q,
         k=k,
@@ -72,53 +72,52 @@ def _flash_attn_varlen_func(
 
 @torch.library.register_fake("vllm::flash_attn_varlen_func")
 def _flash_attn_varlen_func_fake(
-    out_shape,
-    q,
-    k,
-    v,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlen_q,
-    max_seqlen_k,
-    softmax_scale,
-    causal,
-    window_size,
-    alibi_slopes,
-    block_table,
-    softcap,
-):
+    out_shape: List[int],
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    softcap: float = 0.0,
+    alibi_slopes: Optional[List[float]] = None,
+    block_table: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     return torch.empty(out_shape,
                        dtype=q.dtype,
                        layout=q.layout,
                        device=q.device)
 
 
-torch.library.define("vllm::flash_attn_with_kvcache", ("(int[] out_shape, "
-                                                       "Tensor q, "
-                                                       "Tensor k, "
-                                                       "Tensor v, "
-                                                       "Tensor block_table, "
-                                                       "Tensor cache_seqlens, "
-                                                       "float softmax_scale, "
-                                                       "bool causal, "
-                                                       "float[]? alibi_slopes, "
-                                                       "float? softcap"
-                                                       ") -> Tensor"))
+torch.library.define("vllm::flash_attn_with_kvcache",
+                     ("(int[] out_shape, "
+                      "Tensor q, "
+                      "Tensor k_cache, "
+                      "Tensor v_cache, "
+                      "Tensor? cache_seqlens = None, "
+                      "Tensor? block_table = None, "
+                      "float? softmax_scale = None, "
+                      "bool causal = False, "
+                      "float[]? alibi_slopes = None"
+                      ") -> Tensor"))
 
 
 @torch.library.impl("vllm::flash_attn_with_kvcache", "cuda")
 def _flash_attn_with_kvcache(
-    out_shape,
-    decode_query,
-    key_cache,
-    value_cache,
-    block_table,
-    cache_seqlens,
-    softmax_scale,
-    causal,
-    alibi_slopes,
-    softcap,
-):
+    out_shape: List[int],
+    decode_query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    alibi_slopes: Optional[List[int]] = None,
+) -> torch.Tensor:
     return flash_attn_with_kvcache(
         decode_query,
         key_cache,
@@ -127,24 +126,22 @@ def _flash_attn_with_kvcache(
         block_table=block_table,
         softmax_scale=softmax_scale,
         causal=causal,
-        softcap=softcap,
         alibi_slopes=alibi_slopes,
     )
 
 
 @torch.library.register_fake("vllm::flash_attn_with_kvcache")
 def _flash_attn_with_kvcache_fake(
-    out_shape,
-    decode_query,
-    key_cache,
-    value_cache,
-    block_table,
-    cache_seqlens,
-    softmax_scale,
-    causal,
-    alibi_slopes,
-    softcap,
-):
+    out_shape: List[int],
+    decode_query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    alibi_slopes: Optional[List[int]] = None,
+) -> torch.Tensor:
     return torch.empty(out_shape,
                        dtype=decode_query.dtype,
                        layout=decode_query.layout,
@@ -657,9 +654,8 @@ class FlashAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
-                    block_table=None,
                     softcap=self.logits_soft_cap,
+                    alibi_slopes=self.alibi_slopes,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
@@ -680,6 +676,7 @@ class FlashAttentionImpl(AttentionImpl):
                         softmax_scale=self.scale,
                         causal=True,
                         window_size=(-1, -1),
+                        softcap=self.logits_soft_cap,
                         alibi_slopes=self.alibi_slopes,
                         block_table=prefill_meta.block_tables,
                     ))
@@ -693,29 +690,12 @@ class FlashAttentionImpl(AttentionImpl):
                     decode_query.unsqueeze(1),
                     key_cache,
                     value_cache,
-                    block_table=decode_meta.block_tables,
                     cache_seqlens=decode_meta.seq_lens_tensor,
+                    block_table=decode_meta.block_tables,
                     softmax_scale=self.scale,
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
-                    softcap=self.logits_soft_cap,
                 ).squeeze(1)
-
-        if decode_meta := attn_metadata.decode_metadata:
-            # Decoding run.
-            output_shape = output[num_prefill_tokens:].size()
-            output[num_prefill_tokens:] = torch.ops.vllm.flash_attn_with_kvcache(
-                output_shape,
-                decode_query.unsqueeze(1),
-                key_cache,
-                value_cache,
-                block_table=decode_meta.block_tables,
-                cache_seqlens=decode_meta.seq_lens_tensor,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                softcap=0.0,
-            ).squeeze(1)
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

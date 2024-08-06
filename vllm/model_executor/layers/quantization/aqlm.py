@@ -288,10 +288,8 @@ class AQLMLinearMethod(LinearMethodBase):
             codebooks,
             {
                 # metadata indicates fixed size concatenated along dim 0
-                "is_metadata":
-                True,
-                "output_partition_sizes":
-                output_partition_sizes.copy()
+                "is_metadata": True,
+                "output_partition_sizes": output_partition_sizes.copy()
             },
         )
 
