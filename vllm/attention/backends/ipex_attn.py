@@ -167,7 +167,16 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = 1
+        # x = 1
+        # num_blocks = kv_cache.shape[1]
+
+        # key_cache = kv_cache[0]
+        # key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+        #                            -1, x)
+        # value_cache = kv_cache[1]
+        # value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        # return key_cache, value_cache
+        x = 16 // kv_cache.element_size()
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]
@@ -214,16 +223,16 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         if kv_cache is not None:
             key_cache, value_cache = self.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
-            # ipex_ops.reshape_and_cache(
-            #     key,
-            #     value,
-            #     key_cache,
-            #     value_cache,
-            #     attn_metadata.slot_mapping.flatten(),
-            #     self.kv_cache_dtype,
-            #     k_scale,
-            #     v_scale,
-            # )
+            ipex_ops.reshape_and_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping.flatten(),
+                self.kv_cache_dtype,
+                k_scale,
+                v_scale,
+            )
 
         if attn_metadata.is_prompt:
             assert attn_metadata.seq_lens is not None
