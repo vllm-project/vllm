@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     create_per_tensor_scale_param, cutlass_fp8_supported,
     per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform, RocmPlatform
+from vllm.platforms import RocmPlatform, current_platform
 from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
