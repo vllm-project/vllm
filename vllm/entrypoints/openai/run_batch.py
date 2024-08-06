@@ -87,8 +87,7 @@ async def write_file(path_or_url: str, data: str) -> None:
 
 async def run_request(serving_engine_func: Callable,
                       request: BatchRequestInput) -> BatchRequestOutput:
-    request_body = request.body
-    response = await serving_engine_func(request_body)
+    response = await serving_engine_func(request.body)
 
     if isinstance(response, (ChatCompletionResponse, EmbeddingResponse)):
         batch_output = BatchRequestOutput(
