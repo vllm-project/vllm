@@ -226,6 +226,13 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             workspace, b_q_type, size_m,
                                             size_n, size_k)
 
+@torch.library.register_fake("_C::gptq_marlin_24_gemm")
+def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
+                              b_meta: torch.Tensor, b_scales: torch.Tensor,
+                              workspace: torch.Tensor, b_q_type: ScalarType,
+                              size_m: int, size_n: int, size_k: int) -> torch.Tensor:
+    return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
+
 
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
