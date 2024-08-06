@@ -151,23 +151,23 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
 torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight, int64_t size_k,
                                      int64_t size_n, int64_t num_bits);
 
-torch::Tensor ggml_dequantize(torch::Tensor W, int8_t type, int64_t m,
+torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
 
-torch::Tensor ggml_dequantize_meta(torch::Tensor W, int8_t type, int64_t m,
-                              int64_t n);
+torch::Tensor ggml_dequantize_meta(torch::Tensor W, int64_t type, int64_t m,
+                                   int64_t n);
 
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X, int8_t type,
-                                  int64_t row);
+torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
+                                  int64_t type, int64_t row);
 
-torch::Tensor ggml_mul_mat_vec_a8_meta(torch::Tensor W, torch::Tensor X, int8_t type,
-                                  int64_t row);
+torch::Tensor ggml_mul_mat_vec_a8_meta(torch::Tensor W, torch::Tensor X,
+                                       int64_t type, int64_t row);
 
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int8_t type,
+torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
-torch::Tensor ggml_mul_mat_a8_meta(torch::Tensor W, torch::Tensor X, int8_t type,
-                              int64_t row);
+torch::Tensor ggml_mul_mat_a8_meta(torch::Tensor W, torch::Tensor X,
+                                   int64_t type, int64_t row);
 
 torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                               torch::Tensor& b_scales, torch::Tensor& workspace,
