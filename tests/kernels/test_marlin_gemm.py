@@ -120,6 +120,11 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
         size_n,
         quant_type.size_bits,
     )
+
+    torch.library.opcheck(
+        torch.ops._C.gptq_marlin_repack,
+        (q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits))
+
     torch.cuda.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
@@ -172,6 +177,9 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
         size_n,
         quant_type.size_bits,
     )
+
+    torch.library.opcheck(torch.ops._C.awq_marlin_repack,
+                          (q_w_awq, size_k, size_n, quant_type.size_bits))
     torch.cuda.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
@@ -240,6 +248,14 @@ def test_gptq_marlin_gemm(
         has_zp=False,
         use_fp32_reduce=use_fp32_reduce,
     )
+
+    torch.library.opcheck(
+        torch.ops._C.gptq_marlin_gemm,
+        (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
+         workspace.scratch, quant_type, a_input.shape[0], b_weight.shape[1],
+         a_input.shape[1], is_k_full, False, use_fp32_reduce),
+    )
+
     output_ref = torch.matmul(a_input, w_ref)
 
     torch.cuda.synchronize()
@@ -290,6 +306,12 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size,
         b_weight.shape[1],
         a_input.shape[1],
     )
+
+    torch.library.opcheck(
+        torch.ops._C.gptq_marlin_24_gemm,
+        (a_input, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s,
+         workspace_24.scratch, quant_type, a_input.shape[0], b_weight.shape[1],
+         a_input.shape[1]))
 
     torch.cuda.synchronize()
 
@@ -364,6 +386,11 @@ def test_fp8_marlin_gemm(
         size_k=a_input.shape[1],
     )
     output_ref = torch.matmul(a_input, b_weight)
+
+    torch.library.opcheck(
+        torch.ops._C.fp8_marlin_gemm,
+        (a_input, marlin_qweight, marlin_scales, workspace.scratch, num_bits,
+         a_input.shape[0], b_weight.shape[1], a_input.shape[1]))
 
     torch.cuda.synchronize()
 
@@ -491,6 +518,12 @@ def test_marlin_qqq_gemm(
         a_input.shape[1],
     )
     output_ref = torch.matmul(q_a.half() * s_a.half(), w_ref)
+
+    torch.library.opcheck(
+        torch.ops._C.marlin_qqq_gemm,
+        (q_a, marlin_qqq_q_w, s_a, marlin_qqq_s_channel, marlin_qqq_s_group,
+         workspace.scratch, a_input.shape[0], b_weight.shape[1],
+         a_input.shape[1]))
 
     torch.cuda.synchronize()
 
