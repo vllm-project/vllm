@@ -1,7 +1,6 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-import warnings
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.linear import (
@@ -228,10 +227,17 @@ class FluteLinearMethod(LinearMethodBase):
         layer.flute_output_size = output_size
         layer.flute_output_partition_sizes = output_partition_sizes
         layer.flute_input_size_per_partition = input_size_per_partition
-        layer.flute_is_K_partitioned = (input_size_per_partition != input_size)
-        layer.flute_is_N_partitioned = (sum(output_partition_sizes) != output_size)
+        layer.flute_is_K_partitioned = (
+            input_size_per_partition != input_size)
+        layer.flute_is_N_partitioned = (
+            sum(output_partition_sizes) != output_size)
 
-    def _maybe_tensor_all_gather(self, tensor: torch.Tensor, shard_dim: Optional[int]) -> torch.Tensor:
+    def _maybe_tensor_all_gather(
+        self,
+        tensor: torch.Tensor,
+        shard_dim: Optional[int],
+    ) -> torch.Tensor:
+
         if shard_dim is None:
             return tensor
 
@@ -257,7 +263,12 @@ class FluteLinearMethod(LinearMethodBase):
         else:
             return tensor_gathered
 
-    def _maybe_tensor_shard(self, tensor: torch.Tensor, shard_dim: Optional[int]) -> torch.Tensor:
+    def _maybe_tensor_shard(
+        self,
+        tensor: torch.Tensor,
+        shard_dim: Optional[int],
+    ) -> torch.Tensor:
+
         if shard_dim is None:
             return tensor
 
@@ -276,16 +287,21 @@ class FluteLinearMethod(LinearMethodBase):
         # the weights packing are possibly shape-specialized, but as vLLM
         # potentially fuses parameters and/or partitions the weights (TP),
         # we need to potentially re-pack the weights.
-        if (not hasattr(layer, "needs_repacking") or not layer.needs_repacking):
+        if ((not hasattr(layer, "needs_repacking") or
+             not layer.needs_repacking)):
             return
 
-        if (layer.flute_is_K_partitioned is False) and (layer.flute_is_N_partitioned is False):
+        if ((layer.flute_is_K_partitioned is False) and
+            (layer.flute_is_N_partitioned is False)):
             shard_dim = None
-        if (layer.flute_is_K_partitioned is True ) and (layer.flute_is_N_partitioned is False):
+        if ((layer.flute_is_K_partitioned is True ) and
+            (layer.flute_is_N_partitioned is False)):
             shard_dim = 1
-        if (layer.flute_is_K_partitioned is False) and (layer.flute_is_N_partitioned is True ):
+        if ((layer.flute_is_K_partitioned is False) and
+            (layer.flute_is_N_partitioned is True )):
             shard_dim = 0
-        if (layer.flute_is_K_partitioned is True ) and (layer.flute_is_N_partitioned is True ):
+        if ((layer.flute_is_K_partitioned is True ) and
+            (layer.flute_is_N_partitioned is True )):
             raise NotImplementedError
 
         # split the combined tensors into individual tensors
@@ -298,7 +314,7 @@ class FluteLinearMethod(LinearMethodBase):
 
         Qs_unpacked = []
         for Q, S in zip(Qs, Ss):
-            # when the tensors are sharded, we need to gather them before unpacking
+            # when the tensors are sharded, gather them before unpacking
             Q_gathered = self._maybe_tensor_all_gather(Q, shard_dim=shard_dim)
             S_gathered = self._maybe_tensor_all_gather(S, shard_dim=shard_dim)
 
