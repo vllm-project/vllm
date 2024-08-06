@@ -549,8 +549,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             batch_size = graph_batch_size
 
         # Tokens and positions.
-        input_tokens.extend([0] * cuda_graph_pad_size)
-        input_positions.extend([0] * cuda_graph_pad_size)
+        if cuda_graph_pad_size:
+            input_tokens.extend([0] * cuda_graph_pad_size)
+            input_positions.extend([0] * cuda_graph_pad_size)
+        
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.runner.device)
