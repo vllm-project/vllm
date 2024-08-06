@@ -9,7 +9,7 @@ from typing import Optional, Set
 
 import fastapi
 import uvicorn
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -97,13 +97,13 @@ async def health() -> Response:
 )
 async def get_readiness() -> Response:
     """Readiness probe for k8s"""
-    d_worker = openai_serving_chat.engine.engine.model_executor.driver_worker
-    model_weights = d_worker.model_runner.model_memory_usage
+    try :
+        d_worker = openai_serving_chat.engine.engine.model_executor.driver_worker
+        model_weights = d_worker.model_runner.model_memory_usage
 
-    if model_weights > 0:
-        return Response(status_code=200)
-    else:
-        return Response(status_code=500)
+        if model_weights > 0:
+            return Response(status_code=200)
+    except: HTTPException(status_code=500, detail="Model not loaded yet")
 
 
 @router.post("/tokenize")
