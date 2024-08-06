@@ -156,7 +156,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "__torch__.torch.classes._core_C.ScalarType b_q_type, "
       "int size_m, int size_n, int size_k) -> Tensor");
   ops.impl("gptq_marlin_24_gemm", torch::kCUDA, &gptq_marlin_24_gemm);
-  //ops.impl("gptq_marlin_24_gemm", torch::kMeta, &gptq_marlin_24_gemm_meta);
+  // ops.impl("gptq_marlin_24_gemm", torch::kMeta, &gptq_marlin_24_gemm_meta);
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
   ops.def("machete_supported_schedules", &machete::supported_schedules);
