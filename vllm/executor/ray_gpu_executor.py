@@ -144,6 +144,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # Create the workers.
         driver_ip = get_ip()
         logger.info("driver_ip: %s", driver_ip)
+        logger.info("placement_group: %s", placement_group)
         worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
