@@ -38,9 +38,6 @@ IMG_CONTEXT = '<IMG_CONTEXT>'
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-MAX_IMAGE_FEATURE_SIZE_WIDTH = 3000
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = 500
-
 
 class InternVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -260,10 +257,17 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
                                         add_special_tokens=False)[0],
         image_feature_size_override=image_feature_size,
     )
+
+    image_size = vision_config.image_size
+    min_num = hf_config.min_dynamic_patch
+    max_num = hf_config.max_dynamic_patch
+    max_image_width = max_num * image_size
+    max_image_height = min_num * image_size
+
     mm_data = dummy_image_for_clip(
         vision_config,
-        image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-        image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        image_width_override=max_image_width,
+        image_height_override=max_image_height,
     )
 
     return seq_data, mm_data
