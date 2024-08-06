@@ -10,7 +10,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
+from xformers import ops as xops
 
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -18,8 +20,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from xformers import ops as xops
 
 NORM2FN = {
     'rms_norm': RMSNorm,
@@ -85,7 +85,7 @@ class InternAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
-        self, 
+        self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -120,7 +120,7 @@ class InternAttention(nn.Module):
             self.embed_dim,
             quant_config=quant_config,
         )
-        
+
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
@@ -128,18 +128,17 @@ class InternAttention(nn.Module):
         B, N, C = x.shape
         qkv, _ = self.qkv_proj(x)
         q, k, v = qkv.chunk(3, dim=-1)
-        
+
         q = q.view(B, N, self.num_heads_per_partition, self.head_dim)
         k = k.view(B, N, self.num_heads_per_partition, self.head_dim)
         v = v.view(B, N, self.num_heads_per_partition, self.head_dim)
-        
+
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
-            q = self.q_norm.forward_native(
-                q.flatten(-2, -1)
-            ).view(B_, N_, H_, D_)
-            k = self.k_norm.forward_native(k.flatten(
-                -2, -1)).view(B_, N_, H_, D_)
+            q = self.q_norm.forward_native(q.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
+            k = self.k_norm.forward_native(k.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
 
         x = xops.memory_efficient_attention_forward(
             q,
