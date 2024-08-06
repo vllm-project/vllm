@@ -604,6 +604,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     query,
                     key,
                     value,
+                    self.kv_cache_dtype,
                     key_cache,
                     value_cache,
                     prefill_meta.block_tables,
