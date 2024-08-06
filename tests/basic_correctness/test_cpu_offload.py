@@ -29,7 +29,8 @@ def test_cpu_offload_gptq():
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
                          ["--cpu-offload-gb", "1"])
     # Test GPTQ
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", ["--quantization", "gptq"],
+    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
+                         ["--quantization", "gptq"],
                          ["--quantization", "gptq", "--cpu-offload-gb", "1"])
 
 
@@ -40,7 +41,8 @@ def test_cpu_offload_awq():
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
                          ["--cpu-offload-gb", "1"])
     # Test AWQ
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", ["--quantization", "awq"],
+    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ",
+                         ["--quantization", "awq"],
                          ["--quantization", "awq", "--cpu-offload-gb", "1"])
 
 
