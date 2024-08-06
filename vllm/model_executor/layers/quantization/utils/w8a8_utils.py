@@ -158,7 +158,7 @@ def apply_fp8_linear(
                                       bias=bias)
             # Since in torch 2.5, scaled_mm only returns single value
             # This should be removed when vllm-nivida also moves to 2.5
-            if isinstance(current_platform, RocmPlatform):
+            if isinstance(current_platform, rocm.RocmPlatform):
                 return torch.narrow(output, 0, 0, input.shape[0])
             return torch.narrow(output[0], 0, 0, input.shape[0])
 
