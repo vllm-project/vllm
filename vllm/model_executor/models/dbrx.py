@@ -362,6 +362,9 @@ class DbrxForCausalLM(nn.Module):
     ):
         super().__init__()
         self.config = config
+        if config.tie_word_embeddings:
+            raise ValueError(
+                "tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
         self.unpadded_vocab_size = config.vocab_size
         self.transformer = DbrxModel(config, cache_config, quant_config)
