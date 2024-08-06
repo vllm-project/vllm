@@ -1,7 +1,7 @@
-import heapq
 import enum
+import heapq
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, List, Tuple
 
 from vllm.block import PhysicalTokenBlock
 
@@ -60,7 +60,7 @@ class LRUEvictor(Evictor):
     """
 
     def __init__(self):
-        self.free_table: Dict[int, PhysicalTokenBlock] = {} # hash
+        self.free_table: Dict[int, PhysicalTokenBlock] = {}
         self.priority_queue = []
 
     def __contains__(self, block_hash: int) -> bool:
@@ -71,19 +71,22 @@ class LRUEvictor(Evictor):
             raise ValueError("No usable cache memory left")
 
         while self.priority_queue:
-            # Lazy deletion algorithm is applied by checking blocks in the free table.
+            # Lazy deletion algorithm is applied.
             last_accessed, _, block_hash = heapq.heappop(self.priority_queue)
-            if block_hash in self.free_table:
-                if self.free_table[block_hash].last_accessed == last_accessed:
-                    evicted_block = self.free_table.pop(block_hash)
-                    evicted_block.computed = False
-                    return evicted_block
+            if (block_hash in self.free_table
+                    and self.free_table[block_hash].last_accessed
+                    == last_accessed):
+                evicted_block = self.free_table.pop(block_hash)
+                evicted_block.computed = False
+                return evicted_block
 
         raise ValueError("No usable cache memory left")
 
     def add(self, block: PhysicalTokenBlock):
         self.free_table[block.block_hash] = block
-        heapq.heappush(self.priority_queue, (block.last_accessed, -block.num_hashed_tokens, block.block_hash))
+        heapq.heappush(
+            self.priority_queue,
+            (block.last_accessed, -block.num_hashed_tokens, block.block_hash))
         self._cleanup_if_necessary()
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
@@ -98,10 +101,15 @@ class LRUEvictor(Evictor):
             self._cleanup()
 
     def _cleanup(self):
-        new_priority_queue = []
-        for last_accessed, neg_num_hashed_tokens, block_hash in self.priority_queue:
-            if block_hash in self.free_table and self.free_table[block_hash].last_accessed == last_accessed:
-                heapq.heappush(new_priority_queue, (last_accessed, neg_num_hashed_tokens, block_hash))
+        new_priority_queue: List[Tuple[int, int, int]] = []
+        for last_accessed, neg_num_hashed_tokens, block_hash in (
+                self.priority_queue):
+            if (block_hash in self.free_table
+                    and self.free_table[block_hash].last_accessed
+                    == last_accessed):
+                heapq.heappush(
+                    new_priority_queue,
+                    (last_accessed, neg_num_hashed_tokens, block_hash))
         self.priority_queue = new_priority_queue
 
     @property
