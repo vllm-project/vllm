@@ -705,7 +705,7 @@ def test_expand_execute_model_request_sync_with_expand_hidden_states():
     seq_with_bonus_token_in_last_step = [1, 3, 8, 10, 13, 15]
 
     seq_group_metadata_list, _, _ = create_batch(batch_size, k)
-    
+
     execute_model_request = ExecuteModelRequest(
         seq_group_metadata_list,
         previous_hidden_states=HiddenStates(
