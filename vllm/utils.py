@@ -872,7 +872,7 @@ def is_list_of(
         return False
 
     if check == "first":
-        return isinstance(value[0], typ)
+        return len(value) == 0 or isinstance(value[0], typ)
     elif check == "all":
         return all(isinstance(v, typ) for v in value)
 
