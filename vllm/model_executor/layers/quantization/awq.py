@@ -4,8 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  fused_experts_awq)
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -287,7 +286,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
               topk_weights: torch.Tensor, topk_ids: torch.Tensor,
               **kwargs) -> torch.Tensor:
-
+        from vllm.model_executor.layers.fused_moe.fused_moe_awq import (
+            fused_experts_awq)
         return fused_experts_awq(hidden_states=x,
                                  w1=layer.w13_qweight,
                                  w2=layer.w2_qweight,
