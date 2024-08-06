@@ -420,7 +420,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
+@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 256512])
 @pytest.mark.parametrize("stage", STAGES)
 def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
                                   stage) -> None:
