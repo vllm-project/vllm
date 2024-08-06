@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Dict, List, Type, TypeVar, Union
 import torch
 
 from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
@@ -165,15 +165,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
 
-        logits_soft_cap = getattr(self.runner.model_config.hf_config,
-                                  "attn_logit_softcapping", None)
-        if logits_soft_cap is not None:
-            raise ValueError(
-                "Please use Flashinfer backend for models with logits_soft_cap "
-                "(i.e., Gemma-2). Otherwise, the output might be wrong. "
-                "Set Flashinfer backend by "
-                "export VLLM_ATTENTION_BACKEND=FLASHINFER.")
-
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
@@ -190,7 +181,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device=device)
+            block_tables = torch.from_numpy(input_block_tables).to(
+                device, non_blocking=True)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -200,15 +192,15 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             )
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
-        context_lens_tensor = torch.tensor(self.context_lens,
-                                           dtype=torch.int,
-                                           device=device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
+        assert device is not None
+        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
+                                               device, self.runner.pin_memory)
+        seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
+                                           self.runner.pin_memory)
+        query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
+                                             self.runner.pin_memory)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -223,10 +215,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
-
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,

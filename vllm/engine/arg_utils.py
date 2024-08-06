@@ -632,9 +632,9 @@ class EngineArgs:
             '--preemption-mode',
             type=str,
             default=None,
-            help='If \'recompute\', the engine performs preemption by block '
-            'swapping; If \'swap\', the engine performs preemption by block '
-            'swapping.')
+            help='If \'recompute\', the engine performs preemption by '
+            'recomputing; If \'swap\', the engine performs preemption by '
+            'block swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -672,6 +672,9 @@ class EngineArgs:
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
+        # gguf file needs a specific model loader and doesn't use hf_repo
+        if self.model.endswith(".gguf"):
+            self.quantization = self.load_format = "gguf"
 
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
@@ -754,10 +757,14 @@ class EngineArgs:
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
                 use_spec_decode = self.speculative_model is not None
+                has_seqlen_agnostic_layers = (
+                    model_config.contains_seqlen_agnostic_layers(
+                        parallel_config))
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and not self.enable_prefix_caching):
+                        and not self.enable_prefix_caching
+                        and not has_seqlen_agnostic_layers):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -788,6 +795,7 @@ class EngineArgs:
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
+            disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
             draft_token_acceptance_method=\

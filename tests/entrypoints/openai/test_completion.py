@@ -87,15 +87,13 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
     ]
 
 
-@pytest.fixture(scope="module")
-def server(default_server_args):
+@pytest.fixture(scope="module",
+                params=["", "--disable-frontend-multiprocessing"])
+def client(default_server_args, request):
+    if request.param:
+        default_server_args.append(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
-
-
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+        yield remote_server.get_async_client()
 
 
 @pytest.mark.asyncio
@@ -539,6 +537,28 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
                     for token in response_tokens},
     )
     assert first_response != completion.choices[0].text
+
+
+@pytest.mark.asyncio
+async def test_allowed_token_ids(client: openai.AsyncOpenAI):
+    prompt = "Hello, my name is"
+    max_tokens = 1
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+    # Test exclusive selection
+    allowed_ids = [21555, 21557, 21558]
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        seed=42,
+        extra_body=dict(allowed_token_ids=allowed_ids),
+        logprobs=1,
+    )
+    response_tokens = completion.choices[0].logprobs.tokens
+    assert len(response_tokens) == 1
+    assert tokenizer.convert_tokens_to_ids(response_tokens)[0] in allowed_ids
 
 
 @pytest.mark.asyncio
