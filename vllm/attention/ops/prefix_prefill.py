@@ -735,6 +735,8 @@ if triton.__version__ >= "2.1.0":
         if q.dtype is torch.float32:
             BLOCK = BLOCK // 2
 
+        # Conversion of FP8 Tensor from uint8 storage to
+        # appropriate torch.dtype for interpretation by Triton
         if "fp8" in kv_cache_dtype:
             assert (k_cache.dtype == torch.uint8)
             assert (v_cache.dtype == torch.uint8)
