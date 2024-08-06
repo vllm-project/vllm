@@ -646,22 +646,16 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
-            if "vision" in name:
-                if self.vision_model is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
-                    use_default_weight_loading = True
+            for (param_name, weight_name,
+                    shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
             else:
-                for (param_name, weight_name,
-                     shard_id) in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    param = params_dict[name.replace(weight_name, param_name)]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
-                    use_default_weight_loading = True
+                use_default_weight_loading = True
             if use_default_weight_loading:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
