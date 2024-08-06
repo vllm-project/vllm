@@ -128,6 +128,14 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b_scales,
                        c10::optional<torch::Tensor> const& bias);
 
+void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
+                           torch::Tensor const& b,
+                           torch::Tensor const& a_scales,
+                           torch::Tensor const& b_scales,
+                           torch::Tensor const& azp_adj,
+                           c10::optional<torch::Tensor> const& azp,
+                           c10::optional<torch::Tensor> const& bias);
+
 torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
                               torch::Tensor const& b_q_weight,
                               torch::Tensor const& s_tok,
