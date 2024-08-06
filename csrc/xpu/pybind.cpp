@@ -1,4 +1,4 @@
-#include "cache.h"
+// #include "cache.h"
 #include "xpu_ops.h"
 #include <torch/extension.h>
 

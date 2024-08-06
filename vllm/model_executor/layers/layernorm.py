@@ -83,6 +83,7 @@ class RMSNorm(CustomOp):
             )
             return x, residual
         out = torch.empty_like(x)
+        # import vllm._C.ops
         ops.rms_norm(
             out,
             x,
