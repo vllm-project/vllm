@@ -255,7 +255,7 @@ class CLIPEncoderLayer(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
-        self.self_attn = CLIPAttention(config)
+        self.self_attn = CLIPAttention(config, quant_config=quant_config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(config, quant_config=quant_config)

@@ -316,8 +316,7 @@ class SiglipEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
 
-        # TODO(ChristopherCho): use TP'ed Attention block
-        self.self_attn = SiglipAttention(config)
+        self.self_attn = SiglipAttention(config, quant_config=quant_config)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
