@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.abstract import AttentionMetadata, AttentionType
+from vllm.attention import AttentionMetadata, AttentionType
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.quantization.base_config import (

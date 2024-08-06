@@ -121,12 +121,21 @@ class LLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
         cpu_offload_gb: float = 0,
-        enforce_eager: bool = False,
+        enforce_eager: Optional[bool] = None,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
+        '''
+        LLM constructor.
+
+        Note: if enforce_eager is unset (enforce_eager is None)
+        it defaults to False for decoder-only models and True
+        for encoder/decoder models, since encoder/decoder models
+        do not currently support CUDAGraph.
+        '''
+
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
         removed_vision_keys = ("image_token_id", "image_feature_size",
@@ -297,8 +306,8 @@ class LLM:
         """
         if self.llm_engine.model_config.embedding_mode:
             raise ValueError(
-                "LLM.generate() is only supported for generation models "
-                "(XForCausalLM).")
+                "LLM.generate() is only supported for (conditional) generation "
+                "models (XForCausalLM, XForConditionalGeneration).")
 
         if prompt_token_ids is not None:
             inputs = self._convert_v1_inputs(
@@ -631,3 +640,9 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def _is_encoder_decoder_model(self):
+        return self.llm_engine.is_encoder_decoder_model()
+
+    def _is_embedding_model(self):
+        return self.llm_engine.is_embedding_model()
