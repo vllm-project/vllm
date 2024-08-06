@@ -761,6 +761,7 @@ class EngineArgs:
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
                         and not self.enable_prefix_caching
+                        and self.kv_cache_dtype != "auto"
                         and not has_seqlen_agnostic_layers):
                     self.enable_chunked_prefill = True
                     logger.warning(
