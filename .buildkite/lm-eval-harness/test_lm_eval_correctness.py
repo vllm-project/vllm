@@ -23,9 +23,15 @@ TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 
 
 def launch_lm_eval(eval_config):
+    try:
+        trust_remote_code = eval_config['trust_remote_code']
+    except:
+        trust_remote_code = False
+
     model_args = f"pretrained={eval_config['model_name']}," \
                  f"tensor_parallel_size={TP_SIZE}," \
-                 f"add_bos_token=true"
+                 f"add_bos_token=true," \
+                 f"trust_remote_code={trust_remote_code}"
 
     results = lm_eval.simple_evaluate(
         model="vllm",
