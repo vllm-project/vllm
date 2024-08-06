@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FUSED_LAYER_NAME_MAPPING)
 
 
+# https://github.com/neuralmagic/compressed-tensors/blob/main/src/compressed_tensors/config/base.py
 class CompressionFormat(Enum):
     dense = "dense"
     sparse_bitmask = "sparse-bitmask"
@@ -19,6 +20,7 @@ class CompressionFormat(Enum):
     marlin_24 = "marlin-24"
 
 
+# https://github.com/neuralmagic/compressed-tensors/blob/main/src/compressed_tensors/quantization/quant_args.py
 class QuantizationType(str, Enum):
     """
     Enum storing quantization type options
@@ -28,6 +30,7 @@ class QuantizationType(str, Enum):
     FLOAT = "float"
 
 
+# https://github.com/neuralmagic/compressed-tensors/blob/main/src/compressed_tensors/quantization/quant_args.py
 class QuantizationStrategy(str, Enum):
     """
     Enum storing quantization strategy options
@@ -40,6 +43,7 @@ class QuantizationStrategy(str, Enum):
     TOKEN = "token"
 
 
+# https://github.com/neuralmagic/compressed-tensors/blob/main/src/compressed_tensors/quantization/quant_args.py
 class QuantizationArgs(BaseModel):
     """
     User facing arguments used to define a quantization config 
