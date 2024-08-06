@@ -246,8 +246,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Check if cutlass scaled_mm is supported for CUDA devices of the given
   // capability
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
-  ops.impl("cutlass_scaled_mm_supports_fp8", torch::kCUDA,
-           &cutlass_scaled_mm_supports_fp8);
+  ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
+
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"
@@ -376,13 +376,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
 
   // Gets the specified device attribute.
   cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
-  cuda_utils.impl("get_device_attribute", torch::kCUDA, &get_device_attribute);
+  cuda_utils.impl("get_device_attribute", &get_device_attribute);
 
   // Gets the maximum shared memory per block device attribute.
   cuda_utils.def(
       "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
   cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
-                  torch::kCUDA,
                   &get_max_shared_memory_per_block_device_attribute);
 }
 
@@ -409,10 +408,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("all_reduce_unreg", torch::kCUDA, &all_reduce_unreg);
 
   custom_ar.def("dispose(int fa) -> ()");
-  custom_ar.impl("dispose", torch::kCPU, &dispose);
+  custom_ar.impl("dispose", &dispose);
 
   custom_ar.def("meta_size() -> int");
-  custom_ar.impl("meta_size", torch::kCPU, &meta_size);
+  custom_ar.impl("meta_size", &meta_size);
 
   custom_ar.def(
       "register_buffer(int fa, Tensor t, str[] handles, "
@@ -420,16 +419,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
 
   custom_ar.def("get_graph_buffer_ipc_meta(int fa) -> (Tensor, int[])");
-  custom_ar.impl("get_graph_buffer_ipc_meta", torch::kCPU,
-                 &get_graph_buffer_ipc_meta);
+  custom_ar.impl("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
   custom_ar.impl("get_graph_buffer_ipc_meta", torch::kMeta,
                  &get_graph_buffer_ipc_meta_meta);
 
   custom_ar.def(
       "register_graph_buffers(int fa, str[] handles, "
       "int[][] offsets) -> ()");
-  custom_ar.impl("register_graph_buffers", torch::kCPU,
-                 &register_graph_buffers);
+  custom_ar.impl("register_graph_buffers", &register_graph_buffers);
 }
 #endif
 
