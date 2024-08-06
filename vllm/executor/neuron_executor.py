@@ -14,8 +14,8 @@ class NeuronExecutor(ExecutorBase):
     uses_ray: bool = False
 
     def _init_executor(self) -> None:
-        assert (self.lora_config is
-                None), "LoRA is not supported for Neuron backend."
+        assert (self.lora_config
+                is None), "LoRA is not supported for Neuron backend."
         assert (not self.speculative_config
                 ), "Speculative decoding not yet supported for Neuron backend."
 
@@ -100,9 +100,8 @@ class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
-        output = await make_async(
-            self.driver_worker.execute_model
-        )(execute_model_req=execute_model_req, )
+        output = await make_async(self.driver_worker.execute_model
+                                  )(execute_model_req=execute_model_req, )
         return output
 
     async def check_health_async(self) -> None:
