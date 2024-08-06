@@ -566,7 +566,7 @@ if triton.__version__ >= "2.1.0":
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
             k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
             if k_scale != 1.0:
-                k  = (k * k_scale).to(q.dtype)
+                k = (k * k_scale).to(q.dtype)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
