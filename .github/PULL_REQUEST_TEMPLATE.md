@@ -43,7 +43,7 @@ FIX #xxxx (*link existing issues this PR will resolve*)
 <p>Each custom kernel needs a schema and one or more implementations to be registered with PyTorch.</p>
 <ul>
     <li>Make sure custom ops are registered following PyTorch guidelines: <a href="https://pytorch.org/tutorials/advanced/cpp_custom_ops.html#cpp-custom-ops-tutorial">Custom C++ and CUDA Operators</a> and <a href="https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU">The Custom Operators Manual</a></li>
-    <li>Custom operations that return <code>Tensors</code> require meta-functions.  See above documents for a description of meta-functions.</li>
+    <li>Custom operations that return <code>Tensors</code> require meta-functions. Meta-functions should be implemented and registered in python so that dynamic dims can be handled automatically. See above documents for a description of meta-functions.</li>
     <li>Use <a href="https://pytorch.org/docs/stable/library.html#torch.library.opcheck"><code>torch.libary.opcheck()</code></a> to test the function registration and meta-function for any registered ops.  See <code>tests/kernels</code> for examples.</li>
     <li>When changing the C++ signature of an existing op, the schema must be updated to reflect the changes.</li>
 </ul>
