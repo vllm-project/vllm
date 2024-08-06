@@ -1,7 +1,9 @@
 from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
-                    TypedDict, Union, cast, overload)
+                    TypedDict, Union, overload)
 
 from typing_extensions import NotRequired
+
+from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
@@ -41,25 +43,23 @@ def parse_and_batch_prompt(
         if len(prompt) == 0:
             raise ValueError("please provide at least one prompt")
 
-        if isinstance(prompt[0], str):
+        if is_list_of(prompt, str):
             # case 2: array of strings
             return [
-                ParsedText(content=elem, is_tokens=False)
-                for elem in cast(List[str], prompt)
+                ParsedText(content=elem, is_tokens=False) for elem in prompt
             ]
-        if isinstance(prompt[0], int):
+        if is_list_of(prompt, int):
             # case 3: array of tokens
-            elem = cast(List[int], prompt)
-            return [ParsedTokens(content=elem, is_tokens=True)]
-        if isinstance(prompt[0], list):
+            return [ParsedTokens(content=prompt, is_tokens=True)]
+        if is_list_of(prompt, list):
             if len(prompt[0]) == 0:
                 raise ValueError("please provide at least one prompt")
 
-            if isinstance(prompt[0][0], int):
+            if is_list_of(prompt[0], int):
                 # case 4: array of token arrays
                 return [
                     ParsedTokens(content=elem, is_tokens=True)
-                    for elem in cast(List[List[int]], prompt)
+                    for elem in prompt
                 ]
 
     raise ValueError("prompt must be a string, array of strings, "
