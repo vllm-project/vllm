@@ -333,7 +333,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and data.get('tool_choice', 'none') not in ("none", "auto"):
+        if guide_count > 1 and data.get('tool_choice',
+                                        'none') not in ("none", "auto"):
             raise ValueError(
                 "You can only either use guided decoding or tools, not both.")
         return data
@@ -758,7 +759,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
-    tool_calls: Optional[List[DeltaToolCall]] = Field(default_factory=list)
+    tool_calls: List[DeltaToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):

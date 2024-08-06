@@ -164,20 +164,28 @@ class ToolParser:
 
 class MistralToolParser(ToolParser):
     """
-    Tool call parser for Mistral 7B Instruct v0.3, intended for use with the examples/tool_chat_template_mistral.jinja
-    template. There are server IMPORTANT CAVEATS for this parser:
-        - The chat template is NOT official and does not work well if you try to get the model to call 2+ tools at once.
-            Stick to only one tool call per generation, as the chat template is not reliable with > 1 and the model
+    Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
+    examples/tool_chat_template_mistral.jinja template. There are several
+    IMPORTANT CAVEATS for this parser:
+        - The chat template is NOT official and does not work well if you try to
+         get the model to call 2+ tools at once without temperature=0.
+            Stick to only one tool call per generation, or set temp to 0
+            as the chat template is not reliable with > 1 and the model
             Will lose coherence.
-        - Mistral's tool call format, that this translates into an OpenAI format, uses SINGLE QUOTES which cannot be
-            parsed to JSON. To enable JSON parsing and serialization, we find-and-replace these with DOUBLE QUOTES. To
-            prevent tool call corruption / deserialization failure, ensure that your tool calls and in particular your
-            ARGUMENTS never contain single or double quotes except as JSON control characters.
+        - Mistral's tool call format, that this translates into an OpenAI
+            format, uses SINGLE QUOTES which cannot be parsed to JSON. To enable
+            JSON parsing and serialization, we find-and-replace these with
+            DOUBLE QUOTES. To prevent tool call corruption / deserialization
+            failure, ensure that your tool calls and in particular your
+            ARGUMENTS never contain single or double quotes except as JSON
+            control characters.
 
-    Used when --enable-api-tools --enable-auto-tool-choice --tool-call-parser mistral are all set
+    Used when --enable-api-tools --enable-auto-tool-choice --tool-call-parser
+    mistral are all set
     """
 
-    # the bot_token is the token indicating tool call(s) follow. Tokens before this token will be parsed as content; and
+    # the bot_token is the token indicating tool call(s) follow. Tokens before
+    # this token will be parsed as content; and
     # if not present, the entire response will be parsed as text content.
     bot_token: str = '[TOOL_CALLS]'  # string literal
     bot_token_id: int = 5  # token ID thereof from the models' tokenizer
@@ -186,8 +194,9 @@ class MistralToolParser(ToolParser):
     @staticmethod
     def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
         """
-        Extract the tool calls from a complete model response. Requires find-and-replacing single quotes with double
-        quotes for JSON parsing, make sure your tool call arguments don't ever include quotes!
+        Extract the tool calls from a complete model response. Requires
+        find-and-replacing single quotes with double quotes for JSON parsing,
+        make sure your tool call arguments don't ever include quotes!
         """
 
         logger.debug(
@@ -201,14 +210,16 @@ class MistralToolParser(ToolParser):
         else:
             try:
 
-                # this will throw an exception if we can't find the tool call properly
+                # this will throw an exception if we can't find the tool call
+                # properly
                 raw_tool_call = MistralToolParser.tool_call_regex.findall(
                     model_output.replace(MistralToolParser.bot_token,
                                          '')  # remove BOT token
                     .replace("'", '"')  # replace string quotes
                 )[0]
 
-                # load the JSON, and then use it to build the Function and Tool Call
+                # load the JSON, and then use it to build the Function and
+                # Tool Call
                 function_call_arr = json.loads(raw_tool_call)
                 tool_calls: List[ToolCall] = [
                     ToolCall(
@@ -242,7 +253,8 @@ class MistralToolParser(ToolParser):
                                            AutoTokenizer]] = None):
         super().__init__(tokenizer)
 
-        # initialize properties used for state when parsing tool calls in streaming mode
+        # initialize properties used for state when parsing tool calls in
+        # streaming mode
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
@@ -260,34 +272,42 @@ class MistralToolParser(ToolParser):
         delta_token_ids: List[int],
     ) -> Union[DeltaMessage, None]:
 
-        # if the tool call token is not in the tokens generated so far, append output to contents since it's not a tool
+        # if the tool call token is not in the tokens generated so far, append
+        # output to contents since it's not a tool
         if self.bot_token_id not in current_token_ids:
             return DeltaMessage(content=delta_text)
 
-        # if the tool call token ID IS in the tokens generated so far, that means we're parsing as tool calls now
+        # if the tool call token ID IS in the tokens generated so far, that
+        # means we're parsing as tool calls now
         else:
 
-            # handle if we detected the BOT token which means the start of tool calling
+            # handle if we detected the BOT token which means the start of tool
+            # calling
             if self.bot_token_id in delta_token_ids:
-                # if it's the only token, return None, so we don't send a chat completion any don't send a control token
+                # if it's the only token, return None, so we don't send a chat
+                # completion any don't send a control token
                 if len(delta_token_ids) == 1:
                     return None
 
-            # bit mask flags for partial JSON parsing. If the name hasn't been sent yet, don't allow sending
-            # an incomplete string since OpenAI only ever (as far as I have seen) allows sending the entire tool/
-            # function name at once.
-            flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+            # bit mask flags for partial JSON parsing. If the name hasn't been
+            # sent yet, don't allow sending
+            # an incomplete string since OpenAI only ever (as far as I have
+            # seen) allows sending the entire tool/ function name at once.
+            flags = Allow.ALL if self.current_tool_name_sent \
+                else Allow.ALL & ~Allow.STR
             try:
 
-                # replace BOT token with empty string, and convert single quotes to double to allow parsing as JSON
-                # since mistral uses single quotes instead of double for tool calls
+                # replace BOT token with empty string, and convert single quotes
+                # to double to allow parsing as JSON since mistral uses single
+                # quotes instead of double for tool calls
                 tool_call_message_portion = current_text.split(
                     self.bot_token)[1]
                 parsable_arr = tool_call_message_portion.replace('\'', '"')
 
-                #logger.debug('parsing: %s', parsable_arr)
+                # logger.debug('parsing: %s', parsable_arr)
 
-                # tool calls are generated in an array, so do partial JSON parsing on the entire array
+                # tool calls are generated in an array, so do partial JSON
+                # parsing on the entire array
                 tool_call_arr: List[Dict] = partial_json_parser.loads(
                     parsable_arr, flags)
 
@@ -336,12 +356,14 @@ class MistralToolParser(ToolParser):
                     # logger.debug('update to tool %d', self.current_tool_id)
                     pass
 
-                # if there is NOTHING in the array, e.g. if only the open bracket was streamed yet
+                # if there is NOTHING in the array, e.g. if only the open
+                # bracket was streamed yet
                 else:
-                    #logger.debug('No tool call detected yet!')
+                    # logger.debug('No tool call detected yet!')
                     return None
 
-                # if the current tool initial data incl. the id, type=function and idx not sent, send that
+                # if the current tool initial data incl. the id, type=function
+                # and idx not sent, send that
                 if not self.current_tool_initial_sent:
                     logger.debug('Sending InitialDeltaToolCall')
                     self.current_tool_initial_sent = True
@@ -351,13 +373,14 @@ class MistralToolParser(ToolParser):
                                 exclude_none=True)
                     ])
 
-                # if the current tool name hasn't been sent, send if available - otherwise no chunks
+                # if the current tool name hasn't been sent, send if available
+                # - otherwise no chunks
                 elif not self.current_tool_name_sent:
                     function_name = current_tool_call.get('name')
                     if function_name:
                         logger.debug(
-                            f'Sending DeltaToolCall with function name {function_name}!'
-                        )
+                            f'Sending DeltaToolCall with function name '
+                            f'{function_name}!')
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
@@ -368,7 +391,8 @@ class MistralToolParser(ToolParser):
                     else:
                         delta = None
 
-                # now we know we're on the same tool call and we're streaming arguments
+                # now we know we're on the same tool call and we're streaming
+                # arguments
                 else:
 
                     prev_arguments = self.prev_tool_call_arr[
@@ -382,8 +406,8 @@ class MistralToolParser(ToolParser):
                         delta = None
                     elif not cur_arguments and prev_arguments:
                         logger.error(
-                            'INVARIANT - impossible to have arguments reset mid-arguments'
-                        )
+                            'INVARIANT - impossible to have arguments reset '
+                            'mid-arguments')
                         delta = None
                     elif cur_arguments and not prev_arguments:
                         cur_arguments_json = json.dumps(cur_arguments)
@@ -393,9 +417,8 @@ class MistralToolParser(ToolParser):
                                                              cur_arguments_json
                                                              .index(new_text) +
                                                              len(new_text)]
-                        logger.debug(
-                            f'First tokens in arguments received: {arguments_delta}'
-                        )
+                        logger.debug(f'First tokens in arguments received: '
+                                     f'{arguments_delta}')
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
@@ -409,8 +432,8 @@ class MistralToolParser(ToolParser):
                         cur_args_json = json.dumps(cur_arguments)
                         prev_args_json = json.dumps(prev_arguments)
                         logger.debug(
-                            f'Searching for diff between \n{cur_args_json}\n{prev_args_json}'
-                        )
+                            f'Searching for diff between \n{cur_args_json}\n'
+                            f'{prev_args_json}')
                         argument_diff = extract_intermediate_diff(
                             cur_args_json, prev_args_json)
                         logger.debug(f'got arguments diff: {argument_diff}')
@@ -423,11 +446,13 @@ class MistralToolParser(ToolParser):
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
                     else:
-                        # try parsing it with regular JSON - if it works we're at the end, and we need to send the
-                        #   difference between tokens streamed so far and the valid JSON
+                        # try parsing it with regular JSON - if it works we're
+                        # at the end, and we need to send the difference between
+                        # tokens streamed so far and the valid JSON
                         delta = None
 
-                # check to see if the name is defined and has been sent. if so, stream the name - otherwise keep waiting
+                # check to see if the name is defined and has been sent. if so,
+                # stream the name - otherwise keep waiting
                 # finish by setting old and returning None as base case
                 self.prev_tool_call_arr = tool_call_arr
                 return delta
@@ -436,8 +461,8 @@ class MistralToolParser(ToolParser):
                 logger.error(
                     f'Error trying to handle streaming tool call: {e}')
                 logger.debug(
-                    'Skipping chunk as a result of tool streaming extraction error'
-                )
+                    'Skipping chunk as a result of tool streaming extraction '
+                    'error')
                 return None
 
 
@@ -445,7 +470,8 @@ class Hermes2ProToolParser(ToolParser):
     tool_call_start_token: str = '<tool_call>'
     tool_call_end_token: str = '</tool_call>'
 
-    # regex to match between <tool_call> and </tool_call> OR between <tool_call> and EOS (happens sometimes :))
+    # regex to match between <tool_call> and </tool_call> OR between <tool_call>
+    # and EOS (happens sometimes :))
     tool_call_regex = re.compile(
         r'<tool_call>(.*?)</tool_call>|<tool_call>(.*)', re.DOTALL)
     scratch_pad_regex = re.compile(r'<scratch_pad>(.*?)</scratch_pad>',
@@ -463,12 +489,15 @@ class Hermes2ProToolParser(ToolParser):
         else:
 
             try:
-                # there are two possible captures - between tags, or between a tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and the other is None
-                function_call_tuples = Hermes2ProToolParser.tool_call_regex.findall(
-                    model_output)
+                # there are two possible captures - between tags, or between a
+                # tag and end-of-string so the result of
+                # findall is an array of tuples where one is a function call and
+                # the other is None
+                function_call_tuples = (
+                    Hermes2ProToolParser.tool_call_regex.findall(model_output))
 
-                # load the JSON, and then use it to build the Function and Tool Call
+                # load the JSON, and then use it to build the Function and
+                # Tool Call
                 raw_function_calls = [
                     json.loads(match[0] if match[0] else match[1])
                     for match in function_call_tuples
@@ -503,7 +532,7 @@ class Hermes2ProToolParser(ToolParser):
                                            PreTrainedTokenizerFast,
                                            AutoTokenizer]] = None):
         super().__init__(tokenizer)
-        self.current_tool_name_sent: bool = False  # reset each time we encounter a new tool in the array
+        self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent = False
@@ -513,16 +542,16 @@ class Hermes2ProToolParser(ToolParser):
 
         if not self.model_tokenizer:
             raise ValueError(
-                'The model tokenizer must be passed to the ToolParser constructor during construction.'
-            )
+                'The model tokenizer must be passed to the ToolParser '
+                'constructor during construction.')
         self.tool_call_start_token_id: int = self.model_tokenizer.vocab[
             '<tool_call>']
         self.tool_call_end_token_id: int = self.model_tokenizer.vocab[
             '</tool_call>']
         if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
             raise RuntimeError(
-                'Hermes 2 Pro Tool parser could not locate tool call start/end tokens in the tokenizer!'
-            )
+                'Hermes 2 Pro Tool parser could not locate tool call start/end '
+                'tokens in the tokenizer!')
 
     def extract_tool_calls_streaming(
             self, previous_text: str, current_text: str, delta_text: str,
@@ -539,7 +568,8 @@ class Hermes2ProToolParser(ToolParser):
         else:
             try:
 
-                # figure out where we are in the parsing by counting tool call start & end tags
+                # figure out where we are in the parsing by counting tool call
+                # start & end tags
                 prev_tool_start_count = previous_token_ids.count(
                     self.tool_call_start_token_id)
                 prev_tool_end_count = previous_token_ids.count(
@@ -550,19 +580,24 @@ class Hermes2ProToolParser(ToolParser):
                     self.tool_call_end_token_id)
 
                 # a cheap case - we're generating text, NOT tool calls.
-                if cur_tool_start_count == cur_tool_end_count and prev_tool_end_count == cur_tool_end_count:
+                if (cur_tool_start_count == cur_tool_end_count
+                        and prev_tool_end_count == cur_tool_end_count):
                     logger.debug(
                         'Generating text content! skipping tool parsing.')
                     return DeltaMessage(content=delta_text)
 
-                # most of the time, we're going in here - we need to do partial JSON parsing and build stuff.
+                # most of the time, we're going in here - we need to do partial
+                # JSON parsing and build stuff.
                 else:
-                    # flags for partial JSON parting. exported constants from "Allow" are handled via BIT MASK
-                    # generally, we don't allow sending an incomplete function name. so we don't allow
-                    flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+                    # flags for partial JSON parting. exported constants from
+                    # "Allow" are handled via BIT MASK
+                    flags = Allow.ALL if self.current_tool_name_sent \
+                        else Allow.ALL & ~Allow.STR
 
-                    # if a new tool call is being started. unusual since normally the first "cheap case" will be hit.
-                    if cur_tool_start_count > cur_tool_end_count and cur_tool_start_count > prev_tool_start_count:
+                    # if a new tool call is being started. unusual since
+                    # normally the first "cheap case" will be hit.
+                    if (cur_tool_start_count > cur_tool_end_count
+                            and cur_tool_start_count > prev_tool_start_count):
                         if len(delta_token_ids) > 1:
                             tool_call_portion = current_text.split(
                                 self.tool_call_start_token)[-1]
@@ -580,14 +615,17 @@ class Hermes2ProToolParser(ToolParser):
                         logger.debug(
                             f'Starting on a new tool {self.current_tool_id}')
 
-                    # if an existing tool call is being updated - the most common case!
-                    elif cur_tool_start_count > cur_tool_end_count and cur_tool_start_count == prev_tool_start_count:
+                    # if an existing tool call is being updated - the most
+                    # common case!
+                    elif (cur_tool_start_count > cur_tool_end_count
+                          and cur_tool_start_count == prev_tool_start_count):
                         tool_call_portion = current_text.split(
                             self.tool_call_start_token)[-1]
                         text_portion = None
 
                     # if the current tool call is being closed
-                    elif cur_tool_start_count == cur_tool_end_count and cur_tool_end_count > prev_tool_end_count:
+                    elif (cur_tool_start_count == cur_tool_end_count
+                          and cur_tool_end_count > prev_tool_end_count):
                         logger.debug('Closing the current tool call!')
                         diff = self.prev_tool_call_arr[
                             self.current_tool_id].get('arguments')
@@ -596,8 +634,8 @@ class Hermes2ProToolParser(ToolParser):
                                 self.streamed_args_for_tool[
                                     self.current_tool_id], '')
                             logger.debug(
-                                f'Finishing tool and found diff that wasn\'t streamed yet: {diff}'
-                            )
+                                f'Finishing tool and found diff that had not '
+                                f'been streamed yet: {diff}')
                             return DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=self.current_tool_id,
                                               function=DeltaFunctionCall(
@@ -607,8 +645,8 @@ class Hermes2ProToolParser(ToolParser):
 
                     else:
                         logger.error(
-                            'INVARIANT - invalid state trying to parse tool calls (wtf?)'
-                        )
+                            'INVARIANT - invalid state trying to parse tool '
+                            'calls (wtf?)')
                         delta = None
                         return delta
 
@@ -618,7 +656,8 @@ class Hermes2ProToolParser(ToolParser):
                         flags) if tool_call_portion else None
                     logger.debug(f'Parsed tool call {current_tool_call}')
 
-                    # make sure to send the initial message first if we haven't already - with the tool ID
+                    # make sure to send the initial message first if we haven't
+                    # already - with the tool ID
                     if not self.current_tool_initial_sent:
                         logger.debug('Sending InitialDeltaToolCall')
                         self.current_tool_initial_sent = True
@@ -628,14 +667,15 @@ class Hermes2ProToolParser(ToolParser):
                                     exclude_none=True)
                         ])
 
-                    # after that, make sure we send the function name before any arguments
+                    # after that, make sure we send the function name before
+                    # any arguments
                     elif not self.current_tool_name_sent:
                         function_name: Union[
                             str, None] = current_tool_call.get('name')
                         if function_name:
                             logger.debug(
-                                f'Sending DeltaToolCall with function name {function_name}!'
-                            )
+                                f'Sending DeltaToolCall with function name '
+                                f'{function_name}!')
                             self.current_tool_name_sent = True
                             return DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=self.current_tool_id,
@@ -648,7 +688,8 @@ class Hermes2ProToolParser(ToolParser):
                     else:
                         # if there is no tool calls
                         if tool_call_portion is None:
-                            # if there's text but not tool calls, send that - otherwise None to skip chunk
+                            # if there's text but not tool calls, send that -
+                            # otherwise None to skip chunk
                             delta = DeltaMessage(
                                 content=delta_text
                             ) if text_portion is not None else None
@@ -656,13 +697,12 @@ class Hermes2ProToolParser(ToolParser):
                         else:
                             # now we have the portion to parse as tool call.
                             if text_portion is not None:
-                                logger.debug(
-                                    f'Also, will send text portion {text_portion}'
-                                )
+                                logger.debug(f'Also, will send text portion '
+                                             f'{text_portion}')
 
                             logger.debug(
-                                f'Trying to parse current tool call with ID {self.current_tool_id}'
-                            )
+                                f'Trying to parse current tool call with ID '
+                                f'{self.current_tool_id}')
                             if len(self.prev_tool_call_arr
                                    ) <= self.current_tool_id:
                                 self.prev_tool_call_arr.append({})
@@ -676,23 +716,22 @@ class Hermes2ProToolParser(ToolParser):
                             )  # arguments, if any, in current dict
 
                             logger.debug(
-                                f'Diffing old arguments {prev_arguments} against new ones {cur_arguments}'
-                            )
+                                f'Diffing old arguments {prev_arguments} '
+                                f'against new ones {cur_arguments}')
                             if not cur_arguments and not prev_arguments:
                                 logger.debug(
-                                    f'Skipping text {delta_text} - no arguments!'
+                                    f'Skipping text {delta_text} - no arguments'
                                 )
                                 delta = None
                             elif not cur_arguments and prev_arguments:
                                 logger.error(
-                                    'INVARIANT - impossible to have arguments reset mid-call'
-                                )
+                                    'INVARIANT - impossible to have arguments '
+                                    'reset mid-call')
                                 delta = None
                             elif cur_arguments and not prev_arguments:
                                 cur_arguments_json = json.dumps(cur_arguments)
-                                logger.debug(
-                                    f'Finding {delta_text} in {cur_arguments_json}'
-                                )
+                                logger.debug(f'Finding {delta_text} in '
+                                             f'{cur_arguments_json}')
                                 arguments_delta = cur_arguments_json[:
                                                                      cur_arguments_json
                                                                      .index(
@@ -701,8 +740,8 @@ class Hermes2ProToolParser(ToolParser):
                                                                      len(delta_text
                                                                          )]
                                 logger.debug(
-                                    f'First tokens in arguments received: {arguments_delta}'
-                                )
+                                    f'First tokens in arguments received:'
+                                    f' {arguments_delta}')
                                 delta = DeltaMessage(tool_calls=[
                                     DeltaToolCall(index=self.current_tool_id,
                                                   function=DeltaFunctionCall(
@@ -717,8 +756,8 @@ class Hermes2ProToolParser(ToolParser):
                                 cur_args_json = json.dumps(cur_arguments)
                                 prev_args_json = json.dumps(prev_arguments)
                                 logger.debug(
-                                    f"Searching for diff between \n{cur_args_json}\n{prev_args_json}"
-                                )
+                                    f"Searching for diff between "
+                                    f"\n{cur_args_json}\n{prev_args_json}")
                                 argument_diff = extract_intermediate_diff(
                                     cur_args_json, prev_args_json)
                                 logger.debug(
@@ -735,7 +774,8 @@ class Hermes2ProToolParser(ToolParser):
                             else:
                                 delta = None
 
-                            # handle saving the state for the current tool into the "prev" list for use in diffing for
+                            # handle saving the state for the current tool into
+                            # the "prev" list for use in diffing for
                             # the next iteration
                             if self.current_tool_id == len(
                                     self.prev_tool_call_arr) - 1:
@@ -746,13 +786,13 @@ class Hermes2ProToolParser(ToolParser):
                                     current_tool_call)
 
                             # TODO REPLACE ME WITH TOOL CALL
-                            #delta = DeltaMessage(content=delta_text)
+                            # delta = DeltaMessage(content=delta_text)
                         return delta
 
             except Exception as e:
                 logger.error(
                     f'Error trying to handle streaming tool call: {e}')
                 logger.debug(
-                    'Skipping chunk as a result of tool streaming extraction error'
-                )
+                    'Skipping chunk as a result of tool streaming extraction '
+                    'error')
                 return None  # do not stream a delta. skip this token ID.
