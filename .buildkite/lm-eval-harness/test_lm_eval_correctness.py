@@ -25,7 +25,7 @@ TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 def launch_lm_eval(eval_config):
     try:
         trust_remote_code = eval_config['trust_remote_code']
-    except Exception
+    except Exception:
         trust_remote_code = False
 
     model_args = f"pretrained={eval_config['model_name']}," \
