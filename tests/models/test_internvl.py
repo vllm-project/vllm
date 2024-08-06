@@ -50,7 +50,9 @@ class InternVLProcessor:
         self.image_size = self.vision_config.image_size
 
     def __call__(self, text: str, images: Image, **kwargs):
-        pixel_values = image_to_pixel_values(images, self.image_size, self.min_num, self.max_num, self.use_thumbnail).to(self.dtype)
+        pixel_values = image_to_pixel_values(images, self.image_size,
+                                             self.min_num, self.max_num,
+                                             self.use_thumbnail).to(self.dtype)
         num_patches_list = [pixel_values.shape[0]]
         for num_patches in num_patches_list:
             context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
