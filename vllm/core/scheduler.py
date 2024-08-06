@@ -980,8 +980,9 @@ class Scheduler:
                 # Encoder associated with SequenceGroup
                 encoder_seq_data = seq_group.get_encoder_seq().data
                 # Block table for cross-attention
-                # Also managed at SequenceGroup leve
-                cross_block_table = self.block_manager.get_cross_block_table(seq_group)
+                # Also managed at SequenceGroup level
+                cross_block_table = self.block_manager.get_cross_block_table(
+                    seq_group)
             else:
                 encoder_seq_data = None
                 cross_block_table = None
