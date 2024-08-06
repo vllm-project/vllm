@@ -262,6 +262,13 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 #                           return_softmax=False,
                 #                           gen_=None)
 
+                query = query.unsqueeze(0)
+                key = key.unsqueeze(0)
+                value = value.unsqueeze(0)
+                query = query.movedim(1, query.dim() - 2)
+                key = key.movedim(1, key.dim() - 2)
+                value = value.movedim(1, value.dim() - 2)
+
                 mask = _make_attention_mask(attn_metadata.attn_bias,
                                             attn_metadata.seq_lens,
                                             sum(attn_metadata.seq_lens),

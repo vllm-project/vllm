@@ -78,11 +78,12 @@ class ipex_ops:
         ).view(num_kv_heads,
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v1(out, query.contiguous(),
+        import vllm._C.ops
+        vllm._C.ops.paged_attention_v1(out, query.contiguous(),
                                      key_cache.view_as(value_cache),
-                                     value_cache, head_mapping, scale,
+                                     value_cache, num_kv_heads, scale,
                                      block_tables, context_lens, block_size,
-                                     max_context_len, alibi_slopes)
+                                     max_context_len, alibi_slopes, kv_cache_dtype, k_scale)
 
     def paged_attention_v2(
         out: torch.Tensor,
@@ -119,12 +120,14 @@ class ipex_ops:
         ).view(num_kv_heads,
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v2(out, exp_sum, max_logits, tmp_out,
+        import vllm._C.ops
+        vllm._C.ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out,
                                      query.contiguous(),
                                      key_cache.view_as(value_cache),
                                      value_cache, head_mapping, block_tables,
                                      context_lens, scale, block_size,
-                                     max_context_len, alibi_slopes)
+                                     max_context_len, alibi_slopes,
+                                     kv_cache_dtype, k_scale)
 
     def rotary_embedding(
         positions: torch.Tensor,  # [batch_size, seq_len]
