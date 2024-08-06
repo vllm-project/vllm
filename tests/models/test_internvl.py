@@ -30,8 +30,9 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 models = [
     snapshot_download("OpenGVLab/InternVL2-1B"),
     snapshot_download("OpenGVLab/InternVL2-2B"),
-    snapshot_download("OpenGVLab/InternVL2-4B"),
-    snapshot_download("OpenGVLab/InternVL2-26B"),
+    # Broken due to outdated implementation of Phi-3
+    # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
+    # snapshot_download("OpenGVLab/InternVL2-4B"),
 ]
 
 
