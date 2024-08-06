@@ -228,15 +228,16 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 try:
-    torch.ops._C.gptq_marlin_24_gemm
+    torch.ops._C.gptq_marlin_24_gemm  # noqa B018
+
     @torch.library.register_fake("_C::gptq_marlin_24_gemm")
     def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_meta: torch.Tensor, b_scales: torch.Tensor,
-                                  workspace: torch.Tensor, b_q_type: ScalarType,
-                                  size_m: int, size_n: int,
-                                  size_k: int) -> torch.Tensor:
+                                  workspace: torch.Tensor,
+                                  b_q_type: ScalarType, size_m: int,
+                                  size_n: int, size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-except:
+except Exception:
     pass
 
 
