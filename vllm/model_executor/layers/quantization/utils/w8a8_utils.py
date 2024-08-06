@@ -7,6 +7,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform, RocmPlatform
 
+
 def cutlass_fp8_supported() -> bool:
     # cutlass is not suppported on Rocm
     if isinstance(current_platform, RocmPlatform):
@@ -150,11 +151,11 @@ def apply_fp8_linear(
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
             output = torch._scaled_mm(qinput,
-                                         weight,
-                                         out_dtype=input.dtype,
-                                         scale_a=x_scale,
-                                         scale_b=weight_scale,
-                                         bias=bias)
+                                      weight,
+                                      out_dtype=input.dtype,
+                                      scale_a=x_scale,
+                                      scale_b=weight_scale,
+                                      bias=bias)
             # Since in torch 2.5, scaled_mm only returns single value
             # This should be removed when vllm-nivida also moves to 2.5
             if isinstance(current_platform, RocmPlatform):

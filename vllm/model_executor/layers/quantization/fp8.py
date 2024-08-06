@@ -186,7 +186,8 @@ class Fp8LinearMethod(LinearMethodBase):
             if isinstance(current_platform, RocmPlatform):
                 weight_as_int8 = layer.weight.view(torch.int8)
                 weight_as_int8[weight_as_int8 == -128] = 0
-                layer.weight = Parameter(layer.weight.view(torch.float8_e4m3fnuz), 
+                layer.weight = Parameter(layer.weight.view(
+                    torch.float8_e4m3fnuz),
                                          requires_grad=False)
             # If using marlin (w8a16), kernel uses channelwise weights,
             # so extend the weight scales to be channelwise.
@@ -216,7 +217,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # If rocm, adjust the scaling factor
             if isinstance(current_platform, RocmPlatform):
-                layer.weight_scale = Parameter(layer.weight_scale * 2, 
+                layer.weight_scale = Parameter(layer.weight_scale * 2,
                                                requires_grad=False)
                 if layer.input_scale is not None:
                     layer.input_scale = Parameter(layer.input_scale * 2,
