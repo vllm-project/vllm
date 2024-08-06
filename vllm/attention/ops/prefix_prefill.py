@@ -119,13 +119,20 @@ if triton.__version__ >= "2.1.0":
                 cur_kv_head * stride_v_cache_h +
                 offs_d[None, :] * stride_v_cache_d +
                 (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
-            k = tl.load(K_cache + off_k,
-                        mask=dim_mask[:, None] &
-                        ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
-                        other=0.0)  # [D,N]
-            k = k.to(q.dtype)
+            k_cache = tl.load(
+                K_cache + off_k,
+                mask=dim_mask[:, None] &
+                ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
+                other=0.0)  # [D,N]
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if k_cache.dtype.is_fp8() or k_cache.dtype.is_uint8():
+                k = k_cache.to(q.dtype)
+            else:
+                k = k_cache
             if k_scale != 1.0:
                 k *= k_scale
+
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
             qk += tl.dot(q, k)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
@@ -169,7 +176,12 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)  # [N,D]
-            v = v.to(p.dtype)
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if v_cache.dtype.is_fp8() or v_cache.dtype.is_uint8():
+                v = v_cache.to(q.dtype)
+            else:
+                v = v_cache
             if v_scale != 1.0:
                 v *= v_scale
 
@@ -197,7 +209,12 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_query_len),
                         other=0.0)
-            k = k.to(q.dtype)
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if k_cache.dtype.is_fp8() or k_cache.dtype.is_uint8():
+                k = k_cache.to(q.dtype)
+            else:
+                k = k_cache
             if k_scale != 1.0:
                 k *= k_scale
 
@@ -229,12 +246,17 @@ if triton.__version__ >= "2.1.0":
             acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
-            v = tl.load(v_ptrs +
-                        (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                        mask=dim_mask[None, :] &
-                        ((start_n + offs_n[:, None]) < cur_batch_query_len),
-                        other=0.0)
-            v = v.to(p.dtype)
+            v_cache = tl.load(
+                v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                mask=dim_mask[None, :] &
+                ((start_n + offs_n[:, None]) < cur_batch_query_len),
+                other=0.0)
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if v_cache.dtype.is_fp8() or v_cache.dtype.is_uint8():
+                v = v_cache.to(q.dtype)
+            else:
+                v = v_cache
             if v_scale != 1.0:
                 v *= v_scale
 
@@ -549,13 +571,20 @@ if triton.__version__ >= "2.1.0":
                 cur_kv_head * stride_v_cache_h +
                 offs_d[None, :] * stride_v_cache_d +
                 (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
-            k = tl.load(K_cache + off_k,
-                        mask=dim_mask[:, None] &
-                        ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
-                        other=0.0)  # [D,N]
-            k = k.to(q.dtype)
+            k_cache = tl.load(
+                K_cache + off_k,
+                mask=dim_mask[:, None] &
+                ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
+                other=0.0)  # [D,N]
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if k_cache.dtype.is_fp8() or k_cache.dtype.is_uint8():
+                k = k_cache.to(q.dtype)
+            else:
+                k = k_cache
             if k_scale != 1.0:
                 k *= k_scale
+
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
@@ -591,9 +620,15 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)
-            v = v.to(p.dtype)
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if v_cache.dtype.is_fp8() or v_cache.dtype.is_uint8():
+                v = v_cache.to(q.dtype)
+            else:
+                v = v_cache
             if v_scale != 1.0:
                 v *= v_scale
+
             acc += tl.dot(p, v, allow_tf32=False)
             # update m_i and l_i
             l_i = l_i_new
@@ -621,15 +656,21 @@ if triton.__version__ >= "2.1.0":
         for start_n in range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
             start_n = tl.multiple_of(start_n, BLOCK_N)
             # -- compute qk ----
-            k = tl.load(k_ptrs +
-                        (cur_batch_in_all_start_index + start_n) * stride_kbs,
-                        mask=dim_mask[:, None] &
-                        ((start_n + offs_n[None, :]) <
-                         cur_batch_seq_len - cur_batch_ctx_len),
-                        other=0.0)
-            k = k.to(q.dtype)
+            k_cache = tl.load(
+                k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+                mask=dim_mask[:, None] &
+                ((start_n + offs_n[None, :]) <
+                 cur_batch_seq_len - cur_batch_ctx_len),
+                other=0.0)
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if k_cache.dtype.is_fp8() or k_cache.dtype.is_uint8():
+                k = k_cache.to(q.dtype)
+            else:
+                k = k_cache
             if k_scale != 1.0:
                 k *= k_scale
+
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k, allow_tf32=False)
             qk *= sm_scale
@@ -661,15 +702,21 @@ if triton.__version__ >= "2.1.0":
             # acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
-            v = tl.load(v_ptrs +
-                        (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                        mask=dim_mask[None, :] &
-                        ((start_n + offs_n[:, None]) <
-                         cur_batch_seq_len - cur_batch_ctx_len),
-                        other=0.0)
-            v = v.to(p.dtype)
+            v_cache = tl.load(
+                v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                mask=dim_mask[None, :] &
+                ((start_n + offs_n[:, None]) <
+                 cur_batch_seq_len - cur_batch_ctx_len),
+                other=0.0)
+
+            # Only convert if mixed tl.dot is unsupported (e.g. 8-bit types)
+            if v_cache.dtype.is_fp8() or v_cache.dtype.is_uint8():
+                v = v_cache.to(q.dtype)
+            else:
+                v = v_cache
             if v_scale != 1.0:
                 v *= v_scale
+
             acc += tl.dot(p, v, allow_tf32=False)
             # update m_i and l_i
             l_i = l_i_new
