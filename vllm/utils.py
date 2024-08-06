@@ -700,6 +700,24 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+# `collections` helpers
+def is_list_of(
+    value: object,
+    typ: Type[T],
+    *,
+    check: Literal["first", "all"] = "first",
+) -> TypeGuard[List[T]]:
+    if not isinstance(value, list):
+        return False
+
+    if check == "first":
+        return len(value) == 0 or isinstance(value[0], typ)
+    elif check == "all":
+        return all(isinstance(v, typ) for v in value)
+
+    assert_never(check)
+
+
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
                  Tuple["JSONTree[T]", ...], T]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
@@ -830,25 +848,9 @@ def enable_trace_function_call_for_thread() -> None:
         enable_trace_function_call(log_path)
 
 
+# `functools` helpers
 def identity(value: T) -> T:
     return value
-
-
-def is_list_of(
-    value: object,
-    typ: Type[T],
-    *,
-    check: Literal["first", "all"] = "first",
-) -> TypeGuard[List[T]]:
-    if not isinstance(value, list):
-        return False
-
-    if check == "first":
-        return len(value) == 0 or isinstance(value[0], typ)
-    elif check == "all":
-        return all(isinstance(v, typ) for v in value)
-
-    assert_never(check)
 
 
 F = TypeVar('F', bound=Callable[..., Any])
