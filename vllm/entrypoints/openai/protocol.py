@@ -1,7 +1,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Dict, List, Literal, Optional, Union, Type, final
+from typing import Any, Dict, List, Literal, Optional, Union, final
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -167,8 +167,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     tools: Optional[List[ChatCompletionToolsParam]] = None
     tool_choice: Optional[Union[Union[Literal["none"], Literal["auto"]],
                                 ChatCompletionNamedToolChoiceParam]] = "none"
-    parallel_tool_calls: Optional[
-        bool] = False  # NOTE this will be ignored by VLLM as the behavior is determined by the model
+
+    # NOTE this will be ignored by VLLM -- the model determines the behavior
+    parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
@@ -346,7 +347,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_tool_usage(cls, data):
 
-        # if "tool_choice" is not specified but tools are provided, default to "auto" tool_choice
+        # if "tool_choice" is not specified but tools are provided,
+        # default to "auto" tool_choice
         if "tool_choice" not in data and "tools" in data:
             data["tool_choice"] = "auto"
 
@@ -358,38 +360,38 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError(
                     "When using `tool_choice`, `tools` must be set.")
 
-            # make sure that tool choice is either a named tool OR that it's set to "auto"
+            # make sure that tool choice is either a named tool
+            # OR that it's set to "auto"
             if data["tool_choice"] != "auto" and not isinstance(
                     data["tool_choice"], dict):
                 raise ValueError(
-                    "`tool_choice` must either be a named tool or \"auto\". `tool_choice=\"none\" is not supported."
-                )
+                    "`tool_choice` must either be a named tool or \"auto\". "
+                    "`tool_choice=\"none\" is not supported.")
 
-            # ensure that if "tool_choice" is specified as an object, it matches a valid tool
+            # ensure that if "tool_choice" is specified as an object,
+            # it matches a valid tool
             if isinstance(data["tool_choice"], dict):
                 valid_tool = False
                 specified_function = data["tool_choice"]["function"]
                 if not specified_function:
                     return ValueError(
                         'Incorrectly formatted `tool_choice`. Should be like '
-                        +
-                        '`{"type": "function", "function": {"name": "my_function"}}`'
-                    )
+                        '`{"type": "function",'
+                        ' "function": {"name": "my_function"}}`')
                 specified_function_name = specified_function["name"]
                 if not specified_function_name:
                     return ValueError(
                         'Incorrectly formatted `tool_choice`. Should be like '
-                        +
-                        '`{"type": "function", "function": {"name": "my_function"}}`'
-                    )
+                        '`{"type": "function", '
+                        '"function": {"name": "my_function"}}`')
                 for tool in data['tools']:
                     if tool["function"]["name"] == specified_function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
                     return ValueError(
-                        "The tool specified in `tool_choice` does not match any of the specified `tools`"
-                    )
+                        "The tool specified in `tool_choice` does not match any"
+                        " of the specified `tools`")
 
         # TODO validate tools
         return data
@@ -465,7 +467,7 @@ class CompletionRequest(OpenAIBaseModel):
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
-        description=("If specified, the output will follow the JSON schema."),
+        description="If specified, the output will follow the JSON schema.",
     )
     guided_regex: Optional[str] = Field(
         default=None,
@@ -865,3 +867,4 @@ class DetokenizeRequest(OpenAIBaseModel):
 
 class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
+ser
