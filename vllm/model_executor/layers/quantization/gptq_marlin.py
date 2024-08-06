@@ -251,7 +251,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 scales_and_zp_size,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
-                device="meta",
             ),
             requires_grad=False,
         )
