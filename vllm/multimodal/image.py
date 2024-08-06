@@ -71,13 +71,9 @@ def repeat_and_pad_image_tokens(
                 "Please follow the prompt format that is "
                 "documented on HuggingFace which does not involve "
                 "repeating %s tokens.", image_token_str)
-        elif image_token_count > 1:
-            logger.warning("Multiple image input is not supported yet, "
-                           "so any extra image tokens will be treated "
-                           "as plain text.")
 
         # The image tokens are removed to be consistent with HuggingFace
-        new_prompt = prompt.replace(image_token_str, replacement_str, 1)
+        new_prompt = prompt.replace(image_token_str, replacement_str)
 
     new_token_ids: List[int] = []
     for i, token in enumerate(prompt_token_ids):
@@ -89,10 +85,6 @@ def repeat_and_pad_image_tokens(
                 pad_token_right=pad_token_right,
             )
             new_token_ids.extend(replacement_ids)
-
-            # No need to further scan the list since we only replace once
-            new_token_ids.extend(prompt_token_ids[i + 1:])
-            break
         else:
             new_token_ids.append(token)
 
