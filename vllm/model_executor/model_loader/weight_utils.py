@@ -6,9 +6,10 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
 
 import filelock
+import gguf
 import huggingface_hub.constants
 import numpy as np
 import torch
@@ -22,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
@@ -120,6 +122,11 @@ def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
 
     quant_cls = get_quantization_config(model_config.quantization)
+
+    # GGUF doesn't have config file
+    if model_config.quantization == "gguf":
+        return quant_cls.from_config({})
+
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
@@ -408,6 +415,45 @@ def pt_weights_iterator(
         torch.cuda.empty_cache()
 
 
+def get_gguf_extra_tensor_names(
+        gguf_file: str, gguf_to_hf_name_map: Dict[str, str]) -> List[str]:
+    reader = gguf.GGUFReader(gguf_file)
+    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
+    exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
+    extra_keys = expected_gguf_keys - exact_gguf_keys
+    return [gguf_to_hf_name_map[key] for key in extra_keys]
+
+
+def gguf_quant_weights_iterator(
+    gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """
+    Iterate over the quant weights in the model gguf files and convert
+    them to torch tensors
+    """
+
+    reader = gguf.GGUFReader(gguf_file)
+
+    for tensor in reader.tensors:
+        weight_type = tensor.tensor_type
+        name = gguf_to_hf_name_map[tensor.name]
+
+        if weight_type.name != "F32":
+            weight_type_name = name.replace("weight", "qweight_type")
+            weight_type = torch.tensor(weight_type)
+            yield weight_type_name, weight_type
+
+    for tensor in reader.tensors:
+        weight = tensor.data
+        weight_type = tensor.tensor_type
+        name = gguf_to_hf_name_map[tensor.name]
+
+        if weight_type.name != "F32":
+            name = name.replace("weight", "qweight")
+        param = torch.tensor(weight)
+        yield name, param
+
+
 def kv_cache_scales_loader(
         filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
         model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
@@ -490,6 +536,11 @@ def initialize_dummy_weights(
     """
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
+            if current_platform.is_tpu():
+                # XLA device does not support torch.Generator()
+                param.uniform_(low, high)
+                continue
+
             generator = torch.Generator(device=param.data.device)
             generator.manual_seed(seed)
             if torch.finfo(param.data.dtype).bits < 16:

@@ -21,7 +21,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.utils import get_kv_cache_torch_dtype, make_tensor_with_pad
+from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
+                        make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
@@ -116,8 +117,6 @@ class FlashInferMetadata(AttentionMetadata):
     # The data type of the paged kv cache
     data_type: torch.dtype = None
     device: torch.device = torch.device("cuda")
-    # Only used by gemma2 model
-    logits_soft_cap: Optional[float] = None
 
     def __post_init__(self):
         # Refer to
@@ -135,13 +134,20 @@ class FlashInferMetadata(AttentionMetadata):
                 return
 
             assert self.prefill_wrapper is not None
+            assert self.query_start_loc is not None
             assert self.paged_kv_indices is not None
             assert self.paged_kv_indptr is not None
             assert self.paged_kv_last_page_len is not None
-            self.paged_kv_indices = self.paged_kv_indices.to(self.device)
-            self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+            batch_size = self.query_start_loc.shape[0] - 1
+            assert batch_size >= 0
+            # The prefill stage does not read kv cache.
+            # Both paged_kv_indices and paged_kv_last_page_len are empty.
+            # paged_kv_indptr is a zero tensor with size batch_size + 1.
+            self.paged_kv_indptr = torch.zeros(batch_size + 1,
+                                               device=self.device)
             self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
                 self.device)
+            self.paged_kv_indices = self.paged_kv_indices.to(self.device)
             self.prefill_wrapper.end_forward()
             self.prefill_wrapper.begin_forward(
                 self.query_start_loc, self.paged_kv_indptr,
@@ -351,7 +357,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device=device)
+            block_tables = torch.from_numpy(input_block_tables).to(
+                device, non_blocking=True)
 
             last_paged_kv_indptr = self.paged_kv_indptr[-1]
             self.paged_kv_indptr.extend([last_paged_kv_indptr] *
@@ -366,12 +373,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
+        assert device is not None
+        seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
+                                           self.runner.pin_memory)
+        query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
+                                             self.runner.pin_memory)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -386,13 +394,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
-
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
-
-        logits_soft_cap = getattr(self.runner.model_config.hf_config,
-                                  "attn_logit_softcapping", None)
 
         if len(self.paged_kv_indptr) > 0:
             paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
@@ -430,8 +431,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             query_start_loc=query_start_loc,
             device=device,
             data_type=kv_cache_dtype,
-            use_cuda_graph=use_captured_graph,
-            logits_soft_cap=logits_soft_cap)
+            use_cuda_graph=use_captured_graph)
 
 
 class FlashInferImpl(AttentionImpl):
@@ -446,6 +446,7 @@ class FlashInferImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -458,6 +459,7 @@ class FlashInferImpl(AttentionImpl):
             raise ValueError("Sliding window is not supported in FlashInfer.")
         self.sliding_window = (-1, -1)
         self.kv_cache_dtype = kv_cache_dtype
+        self.logits_soft_cap = logits_soft_cap
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -532,7 +534,7 @@ class FlashInferImpl(AttentionImpl):
                 output = prefill_meta.prefill_wrapper.forward(
                     query,
                     kv_cache,
-                    logits_soft_cap=attn_metadata.logits_soft_cap,
+                    logits_soft_cap=self.logits_soft_cap,
                     causal=True)
         else:
             assert attn_metadata.decode_metadata is not None
@@ -541,5 +543,5 @@ class FlashInferImpl(AttentionImpl):
                 query,
                 kv_cache,
                 sm_scale=self.scale,
-                logits_soft_cap=attn_metadata.logits_soft_cap)
+                logits_soft_cap=self.logits_soft_cap)
         return output.view(num_tokens, hidden_size)
