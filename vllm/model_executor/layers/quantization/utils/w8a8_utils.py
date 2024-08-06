@@ -9,10 +9,11 @@ from vllm.platforms import current_platform
 from vllm.utils import is_hip
 
 # scaled_mm in pytorch on rocm has a bug that requires always
-# providing scaling factor for result. This value is created 
-# as gloabal value to avoid multiple tensor allocations, and
+# providing scaling factor for result. This value is created
+# as global value to avoid multiple tensor allocations, and
 # can be removed once pytorch fixes the bug.
 scale_ret = torch.ones((1)).cuda() if is_hip() else None
+
 
 def cutlass_fp8_supported() -> bool:
     # cutlass is not supported on Rocm
