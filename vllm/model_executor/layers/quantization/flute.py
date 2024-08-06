@@ -120,7 +120,7 @@ class FluteLinearMethod(LinearMethodBase):
                                   "install flute>=0.0.6.")
         except ImportError as err:
             raise ImportError("Please install flute>=0.0.6 via "
-                              "`pip install flute>=0.0.6` to use "
+                              "`pip install flute-kernel>=0.0.6` to use "
                               "flute quantizer.") from err
 
         self.quant_config = quant_config
@@ -275,6 +275,7 @@ class FluteLinearMethod(LinearMethodBase):
         return tensor_shard
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
         import flute
         import flute.utils
 
