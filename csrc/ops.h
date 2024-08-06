@@ -179,8 +179,8 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
 torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
-torch::Tensor ggml_mul_mat_a8_meta(torch::Tensor W, torch::Tensor X, int8_t type,
-                              int64_t row);
+torch::Tensor ggml_mul_mat_a8_meta(torch::Tensor W, torch::Tensor X,
+                                   int64_t type, int64_t row);
 
 torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                               torch::Tensor& b_scales, torch::Tensor& workspace,

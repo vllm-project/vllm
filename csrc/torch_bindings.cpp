@@ -198,16 +198,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("awq_marlin_repack", torch::kMeta, &awq_marlin_repack_meta);
 
   // Dequantization for GGML.
-  ops.def("ggml_dequantize", &ggml_dequantize);
+  ops.def("ggml_dequantize(Tensor W, int type, int m, int n) -> Tensor");
   ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
+  ops.impl("ggml_dequantize", torch::kMeta, &ggml_dequantize_meta);
 
   // mmvq kernel for GGML.
-  ops.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8);
+  ops.def(
+      "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, int row) "
+      "-> Tensor");
   ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
+  ops.impl("ggml_mul_mat_vec_a8", torch::kMeta, &ggml_mul_mat_vec_a8_meta);
 
   // mmq kernel for GGML.
-  ops.def("ggml_mul_mat_a8", &ggml_mul_mat_a8);
+  ops.def("ggml_mul_mat_a8(Tensor W, Tensor X, int type, int row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
+  ops.impl("ggml_mul_mat_a8", torch::kMeta, &ggml_mul_mat_a8_meta);
 
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def(
