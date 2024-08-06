@@ -391,9 +391,6 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 
 def get_open_zmq_ipc_path() -> str:
     base_rpc_path = envs.VLLM_RPC_BASE_PATH
-    if base_rpc_path is None:
-        base_rpc_path = "/tmp"
-
     return f"ipc://{base_rpc_path}/{uuid4()}"
 
 
