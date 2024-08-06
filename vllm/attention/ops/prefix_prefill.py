@@ -18,6 +18,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
+        k_scale,
+        v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -121,7 +123,9 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                         other=0.0)  # [D,N]
-
+            k = k.to(q.dtype)
+            if k_scale != 1.0:
+                k *= k_scale
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
             qk += tl.dot(q, k)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
@@ -165,8 +169,10 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)  # [N,D]
+            v = v.to(p.dtype)
+            if v_scale != 1.0:
+                v *= v_scale
 
-            p = p.to(v.dtype)
             acc += tl.dot(p, v)
             # # update m_i and l_i
             l_i = l_i_new
@@ -225,8 +231,10 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_query_len),
                         other=0.0)
+            v = v.to(p.dtype)
+            if v_scale != 1.0:
+                v *= v_scale
 
-            p = p.to(v.dtype)
             acc += tl.dot(p, v)
             # update m_i and l_i
             l_i = l_i_new
@@ -336,7 +344,6 @@ if triton.__version__ >= "2.1.0":
             k = tl.load(K_cache + off_k,
                         mask=(start_n + offs_n[None, :]) < cur_batch_ctx_len,
                         other=0.0)
-
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
@@ -442,6 +449,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
+        k_scale,
+        v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -541,7 +550,9 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                         other=0.0)  # [D,N]
-
+            k = k.to(q.dtype)
+            if k_scale != 1.0:
+                k *= k_scale
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
@@ -682,6 +693,8 @@ if triton.__version__ >= "2.1.0":
                               b_seq_len,
                               b_ctx_len,
                               max_input_len,
+                              k_scale: float = 1.0,
+                              v_scale: float = 1.0,
                               alibi_slopes=None,
                               sliding_window=None):
 
@@ -719,6 +732,8 @@ if triton.__version__ >= "2.1.0":
                 v_cache,
                 b_loc,
                 sm_scale,
+                k_scale,
+                v_scale,
                 b_start_loc,
                 b_seq_len,
                 b_ctx_len,
@@ -770,6 +785,8 @@ if triton.__version__ >= "2.1.0":
             v_cache,
             b_loc,
             sm_scale,
+            k_scale,
+            v_scale,
             b_start_loc,
             b_seq_len,
             b_ctx_len,
