@@ -147,6 +147,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "input_embeds": self.input_embeds,
+            "input_embeds_masks": self.input_embeds_masks,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,

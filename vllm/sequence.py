@@ -492,7 +492,7 @@ class SequenceGroup:
     def prompt_embeds(self) -> Optional[torch.Tensor]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return self._first_seq.prompt_embeds
+        return self.seqs[0].prompt_embeds
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":

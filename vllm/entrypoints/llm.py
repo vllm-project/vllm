@@ -87,7 +87,7 @@ class LLM:
         disable_custom_all_reduce: See ParallelConfig
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
-    
+
     Note:
         This class is intended to be used for offline inference. For online
         serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
@@ -277,13 +277,13 @@ class LLM:
         Args:
             inputs: A list of inputs to generate completions for.
             sampling_params: The sampling parameters for text generation. If
-                None, we use the default sampling parameters. 
-                When it is a single value, it is applied to every prompt. 
-                When it is a list, the list must have the same length as the 
+                None, we use the default sampling parameters.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for 
+            prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
 
         Returns:
@@ -434,7 +434,7 @@ class LLM:
                 use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for 
+            prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
 
         Returns:
