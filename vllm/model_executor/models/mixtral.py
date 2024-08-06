@@ -187,9 +187,11 @@ class MixtralMoE(nn.Module):
                 self.w13_weight = nn.Parameter(F.pad(self.w13_weight.data,
                                                      (0, 128), "constant", 0),
                                                requires_grad=False)
+                torch.cuda.empty_cache()
                 self.w2_weight = nn.Parameter(F.pad(self.w2_weight.data,
                                                     (0, 128), "constant", 0),
                                               requires_grad=False)
+                torch.cuda.empty_cache()
             return
 
         # If checkpoint is fp16, quantize here.
