@@ -224,7 +224,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStorage;
   float const block_absmax_val_maybe =
-      BlockReduce(reduceStorage).Reduce(absmax_val, cub::Max{});
+      BlockReduce(reduceStorage).Reduce(absmax_val, cub::Max{}, blockDim.x);
   __shared__ float token_scale;
   if (tid == 0) {
     if (scale_ub) {

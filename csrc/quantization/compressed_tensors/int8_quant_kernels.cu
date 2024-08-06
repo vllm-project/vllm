@@ -65,7 +65,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStorage;
   float const block_absmax_val_maybe =
-      BlockReduce(reduceStorage).Reduce(absmax_val, cub::Max{});
+      BlockReduce(reduceStorage).Reduce(absmax_val, cub::Max{}, blockDim.x);
   __shared__ float block_absmax_val;
   if (tid == 0) {
     block_absmax_val = block_absmax_val_maybe;
