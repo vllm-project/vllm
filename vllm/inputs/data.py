@@ -182,7 +182,7 @@ def get_prompt_type(prompt: Optional[PromptInputs]) -> Optional[str]:
     }
 
     if isinstance(prompt, dict):
-        for (ptype,required_keys) in required_keys_dict.items():
+        for (ptype, required_keys) in required_keys_dict.items():
             # Ignore type checking in the conditional below because type
             # checker does not understand that is_dict(prompt) narrows
             # down the possible types
