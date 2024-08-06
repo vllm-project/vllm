@@ -171,7 +171,7 @@ class BlipAttention(nn.Module):
                 f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
-        self.dropout = nn.Dropout(config.attention_dropout)
+        self.dropout = config.attention_dropout
 
         self.qkv = QKVParallelLinear(
             self.embed_dim,
@@ -217,7 +217,7 @@ class BlipAttention(nn.Module):
                                                       p=self.dropout,
                                                       scale=self.scale)
         out = out.reshape(bsz, tgt_len, self.embed_dim).contiguous()
-        attn_output, _ = self.out_proj(out)
+        attn_output, _ = self.projection(out)
 
         return attn_output
 
