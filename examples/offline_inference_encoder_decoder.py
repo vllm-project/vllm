@@ -26,8 +26,8 @@ tokenizer = llm.llm_engine.get_tokenizer_group()
 # - Helpers for building prompts
 text_prompt_raw = "Hello, my name is"
 text_prompt = TextPrompt(prompt="The president of the United States is")
-tokens_prompt = TokensPrompt(
-    prompt_token_ids=tokenizer.encode(prompt="The capital of France is"))
+tokens_prompt = TokensPrompt(prompt_token_ids=tokenizer.encode(
+    prompt="The capital of France is"))
 # - Pass a single prompt to encoder/decoder model
 #   (implicitly encoder input prompt);
 #   decoder input prompt is assumed to be None
