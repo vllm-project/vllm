@@ -9,7 +9,7 @@ from vllm.platforms import current_platform, RocmPlatform
 
 
 def cutlass_fp8_supported() -> bool:
-    # cutlass is not suppported on Rocm
+    # cutlass is not supported on Rocm
     if isinstance(current_platform, RocmPlatform):
         return False
     capability = current_platform.get_device_capability()
@@ -142,7 +142,7 @@ def apply_fp8_linear(
         qinput, x_scale = ops.scaled_fp8_quant(
             input,
             input_scale,
-            num_token_padding=17,
+            num_token_padding=0,
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         per_tensor_weights = (weight_scale.numel() == 1)
