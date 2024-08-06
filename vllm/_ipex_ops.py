@@ -134,64 +134,72 @@ class ipex_ops:
         cos_sin_cache: torch.Tensor,  # [cos_sin_dim, rot_dim]
         is_neox: bool,
     ) -> None:
-        if positions.dim() == 1:
-            positions = positions.unsqueeze(0)
-            query = query.unsqueeze(0)
-            key = key.unsqueeze(0)
+        import vllm._C.ops
+        vllm._C.ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache, is_neox)
+        # if positions.dim() == 1:
+        #     positions = positions.unsqueeze(0)
+        #     query = query.unsqueeze(0)
+        #     key = key.unsqueeze(0)
 
-        rotary_dim = cos_sin_cache.size(1)
-        query = query.view(*query.shape[:-1], -1, head_size)
-        key = key.view(*key.shape[:-1], -1, head_size)
+        # rotary_dim = cos_sin_cache.size(1)
+        # query = query.view(*query.shape[:-1], -1, head_size)
+        # key = key.view(*key.shape[:-1], -1, head_size)
 
-        query_rot = query[..., :rotary_dim]
-        key_rot = key[..., :rotary_dim]
+        # query_rot = query[..., :rotary_dim]
+        # key_rot = key[..., :rotary_dim]
 
-        cos_sin = cos_sin_cache[positions.long()]
-        cos, sin = cos_sin.chunk(2, dim=-1)
+        # cos_sin = cos_sin_cache[positions.long()]
+        # cos, sin = cos_sin.chunk(2, dim=-1)
 
-        if is_neox:
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
-        else:
-            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
-            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
-        ipex.llm.functional.rotary_embedding(query_rot, key_rot, sin, cos,
-                                             rotary_dim, is_neox, positions)
+        # if is_neox:
+        #     cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+        #     sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        # else:
+        #     cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        #     sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        
+        # import vllm._C.ops
+        # vllm._C.ops.rotary_embedding(query_rot, key_rot, sin, cos,
+        #                                      rotary_dim, is_neox, positions)
 
-    def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                                 key: torch.Tensor, head_size: int,
-                                 cos_sin_cache: torch.Tensor, is_neox: bool,
-                                 rot_dim: int,
-                                 cos_sin_cache_offsets: torch.Tensor) -> None:
-        if positions.dim() == 1:
-            positions = positions.unsqueeze(0)
-            query = query.unsqueeze(0)
-            key = key.unsqueeze(0)
-        cos_sin_cache_offsets = cos_sin_cache_offsets.view_as(positions)
-        rotary_dim = cos_sin_cache.size(1)
-        query = query.view(*query.shape[:-1], -1, head_size)
-        key = key.view(*key.shape[:-1], -1, head_size)
+    # def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
+    #                              key: torch.Tensor, head_size: int,
+    #                              cos_sin_cache: torch.Tensor, is_neox: bool,
+    #                              rot_dim: int,
+    #                              cos_sin_cache_offsets: torch.Tensor) -> None:
+        
+        # if positions.dim() == 1:
+        #     positions = positions.unsqueeze(0)
+        #     query = query.unsqueeze(0)
+        #     key = key.unsqueeze(0)
+        # cos_sin_cache_offsets = cos_sin_cache_offsets.view_as(positions)
+        # rotary_dim = cos_sin_cache.size(1)
+        # query = query.view(*query.shape[:-1], -1, head_size)
+        # key = key.view(*key.shape[:-1], -1, head_size)
 
-        query_rot = query[..., :rotary_dim]
-        key_rot = key[..., :rotary_dim]
+        # query_rot = query[..., :rotary_dim]
+        # key_rot = key[..., :rotary_dim]
 
-        cos_sin = cos_sin_cache[torch.add(positions,
-                                          cos_sin_cache_offsets).long()]
-        cos, sin = cos_sin.chunk(2, dim=-1)
+        # cos_sin = cos_sin_cache[torch.add(positions,
+        #                                   cos_sin_cache_offsets).long()]
+        # cos, sin = cos_sin.chunk(2, dim=-1)
 
-        if is_neox:
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
-        else:
-            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
-            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        # if is_neox:
+        #     cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+        #     sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        # else:
+        #     cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        #     sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
 
-        ipex.llm.functional.rotary_embedding(query_rot, key_rot, sin, cos,
-                                             rotary_dim, is_neox, positions)
+        # import vllm._C.ops
+        # vllm._C.ops.rotary_embedding(query_rot, key_rot, sin, cos,
+        #                                      rotary_dim, is_neox, positions)
 
     def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
                  epsilon: float) -> None:
-        tmp = ipex.llm.functional.rms_norm(input, weight, epsilon)
+        from intel_extension_for_pytorch.llm.modules.mha_fusion import RMSNorm
+        ipex_rms_norm = RMSNorm(weight, epsilon)
+        tmp = ipex_rms_norm.apply(input, weight, epsilon)
         out.copy_(tmp)
 
     def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
@@ -216,11 +224,32 @@ class ipex_ops:
         return_softmax: bool,
         gen_: torch.Generator,
     ) -> None:
-        ipex.llm.functional.varlen_attention(query, key, value, out, seqlen_q,
-                                             seqlen_k, max_seqlen_q,
-                                             max_seqlen_k, pdropout,
-                                             softmax_scale, zero_tensors,
-                                             is_causal, return_softmax, gen_)
+        from intel_extension_for_pytorch.llm.modules.mha_fusion import VarlenAttention
+        cur_varlen_aten = VarlenAttention()
+        import pdb
+        pdb.set_trace()
+        cur_varlen_aten.forward(
+            query=query,
+            key=key,
+            value=value,
+            out=out,
+            seqlen_q=seqlen_q,
+            seqlen_k=seqlen_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            pdropout=pdropout,
+            softmax_scale=softmax_scale,
+            zero_tensors=zero_tensors,
+            is_causal=is_causal,
+            return_softmax=return_softmax,
+            gen_=gen_,
+        )
+
+        # ipex.llm.functional.varlen_attention(query, key, value, out, seqlen_q,
+        #                                      seqlen_k, max_seqlen_q,
+        #                                      max_seqlen_k, pdropout,
+        #                                      softmax_scale, zero_tensors,
+        #                                      is_causal, return_softmax, gen_)
 
     def reshape_and_cache(
         key: torch.Tensor,

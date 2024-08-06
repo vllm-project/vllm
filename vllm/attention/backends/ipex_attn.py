@@ -93,6 +93,30 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self
 
 
+from torch.nn.functional import scaled_dot_product_attention
+
+def _make_attention_mask(
+    att_bias: List[torch.Tensor],
+    seq_lens: List[int],
+    prompt_token_num: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    assert att_bias[0].dim() == 3
+    assert len(att_bias) == len(seq_lens)
+    head_size, _, _ = att_bias[0].size()
+    mask = torch.empty(head_size,
+                       prompt_token_num,
+                       prompt_token_num,
+                       dtype=dtype)
+    mask.fill_(-torch.inf)
+    start = 0
+    for prompt_len, sub_mask in zip(seq_lens, att_bias):
+        end = start + prompt_len
+        mask[:, start:end, start:end] = sub_mask
+        start += prompt_len
+    return mask
+
+
 class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 
     def __init__(
@@ -186,16 +210,16 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         if kv_cache is not None:
             key_cache, value_cache = self.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
-            ipex_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping.flatten(),
-                self.kv_cache_dtype,
-                k_scale,
-                v_scale,
-            )
+            # ipex_ops.reshape_and_cache(
+            #     key,
+            #     value,
+            #     key_cache,
+            #     value_cache,
+            #     attn_metadata.slot_mapping.flatten(),
+            #     self.kv_cache_dtype,
+            #     k_scale,
+            #     v_scale,
+            # )
 
         if attn_metadata.is_prompt:
             assert attn_metadata.seq_lens is not None
@@ -219,24 +243,39 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                             attn_metadata.seq_lens, None, dtype=query.dtype)
                     attn_metadata.attn_bias = att_masks
 
-                output = torch.empty(
-                    (num_tokens, self.num_heads, self.head_size),
-                    dtype=query.dtype,
-                    device=query.device)
-                ipex_ops.varlen_attention(query,
-                                          key,
-                                          value,
-                                          output,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.max_seqlen,
-                                          attn_metadata.max_seqlen,
-                                          pdropout=0.0,
-                                          softmax_scale=self.scale,
-                                          zero_tensors=False,
-                                          is_causal=True,
-                                          return_softmax=False,
-                                          gen_=None)
+                # output = torch.empty(
+                #     (num_tokens, self.num_heads, self.head_size),
+                #     dtype=query.dtype,
+                #     device=query.device)
+                # ipex_ops.varlen_attention(query,
+                #                           key,
+                #                           value,
+                #                           output,
+                #                           attn_metadata.seqlen_q,
+                #                           attn_metadata.seqlen_q,
+                #                           attn_metadata.max_seqlen,
+                #                           attn_metadata.max_seqlen,
+                #                           pdropout=0.0,
+                #                           softmax_scale=self.scale,
+                #                           zero_tensors=False,
+                #                           is_causal=True,
+                #                           return_softmax=False,
+                #                           gen_=None)
+
+                mask = _make_attention_mask(attn_metadata.attn_bias,
+                                            attn_metadata.seq_lens,
+                                            sum(attn_metadata.seq_lens),
+                                            query.dtype).to(query.device)
+                out = scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=self.scale).movedim(query.dim() - 2,
+                                                1).contiguous()
+                output = out.view_as(query).to(query.dtype)
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
