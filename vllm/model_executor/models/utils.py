@@ -16,10 +16,10 @@ from vllm.utils import is_pin_memory_available
 
 def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
     """
-    Helper function to load weights for inner models.
+    Helper function to load weights for inner vLLM models.
 
     See also:
-        :ref:`init_inner_model`
+        :ref:`init_vllm_registered_model`
     """
     for name, loaded_weight in weights:
         name = name.split(".")
@@ -28,7 +28,7 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
             yield name, loaded_weight
 
 
-def init_inner_model(
+def init_vllm_registered_model(
     hf_config: PretrainedConfig,
     cache_config: Optional[CacheConfig],
     quant_config: Optional[QuantizationConfig],
@@ -38,8 +38,8 @@ def init_inner_model(
     scheduler_config: Optional[SchedulerConfig] = None,
 ) -> nn.Module:
     """
-    Helper function to initialize an inner vLLM model based on the arguments
-    passed to the outer vLLM model.
+    Helper function to initialize an inner model registered to vLLM,
+    based on the arguments passed to the outer vLLM model.
     """
     model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
 

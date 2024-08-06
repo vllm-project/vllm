@@ -23,7 +23,8 @@ from .interfaces import SupportsVision
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
-from .utils import filter_weights, init_inner_model, merge_vision_embeddings
+from .utils import (filter_weights, init_vllm_registered_model,
+                    merge_vision_embeddings)
 
 
 # TODO(xwjiang): Run benchmark and decide if TP.
@@ -190,8 +191,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
-        self.language_model = init_inner_model(config.text_config,
-                                               cache_config, quant_config)
+        self.language_model = init_vllm_registered_model(
+            config.text_config, cache_config, quant_config)
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size

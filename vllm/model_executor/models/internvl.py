@@ -28,7 +28,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsVision
-from .utils import filter_weights, init_inner_model, merge_vision_embeddings
+from .utils import (filter_weights, init_vllm_registered_model,
+                    merge_vision_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -282,8 +283,8 @@ class InternVLChatModel(nn.Module, SupportsVision):
         self.vision_model = InternVisionModel(
             config.vision_config, num_hidden_layers_override=num_hidden_layers)
 
-        self.language_model = init_inner_model(config.text_config,
-                                               cache_config, quant_config)
+        self.language_model = init_vllm_registered_model(
+            config.text_config, cache_config, quant_config)
 
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size

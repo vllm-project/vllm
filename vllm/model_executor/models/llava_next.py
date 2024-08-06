@@ -28,7 +28,8 @@ from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import filter_weights, init_inner_model, merge_vision_embeddings
+from .utils import (filter_weights, init_vllm_registered_model,
+                    merge_vision_embeddings)
 
 logger = init_logger(__name__)
 
@@ -283,8 +284,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
-        self.language_model = init_inner_model(config.text_config,
-                                               cache_config, quant_config)
+        self.language_model = init_vllm_registered_model(
+            config.text_config, cache_config, quant_config)
 
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
