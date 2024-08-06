@@ -3,7 +3,6 @@ import functools
 from typing import List, Optional, Tuple, Union
 
 import torch
-import torch.version
 
 from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
