@@ -18,8 +18,6 @@
 #include "cute/atom/mma_atom.hpp"
 #include "cutlass/numeric_types.h"
 
-#include "cutlass/util/device_memory.h"
-
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
@@ -70,18 +68,13 @@ struct ScaledEpilogueBase {
 
   template <typename T>
   using ColOrScalarLoad = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
       Stride<Int<1>, Int<0>, Int<0>>>;
 
   template <typename T>
-  using RowDescriptor =
-      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
-          EpilogueDescriptor, T>;
-
-  template <typename T>
   using RowOrScalarLoad = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      RowDescriptor<T>::Stages, typename EpilogueDescriptor::TileShape,
-      typename RowDescriptor<T>::Element, Stride<Int<0>, Int<1>, Int<0>>>;
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<0>, Int<1>, Int<0>>>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
@@ -92,7 +85,7 @@ struct ScaledEpilogueBase {
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      RowDescriptor<T>::Stages, typename EpilogueDescriptor::TileShape, T,
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
       Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // This utility function constructs the arguments for the load descriptors
@@ -431,12 +424,12 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   int64_t ldb = b.stride(1);
   int64_t ldc = out.stride(0);
 
-  using StrideA = Stride<int64_t, Int<1>, Int<0>>;
-  using StrideB = Stride<int64_t, Int<1>, Int<0>>;
+  using StrideA = Stride<int64_t, Int<1>, int64_t>;
+  using StrideB = Stride<int64_t, Int<1>, int64_t>;
   using StrideC = typename Gemm::StrideC;
 
-  StrideA a_stride{lda, Int<1>{}, Int<0>{}};
-  StrideB b_stride{ldb, Int<1>{}, Int<0>{}};
+  StrideA a_stride{lda, Int<1>{}, 0};
+  StrideB b_stride{ldb, Int<1>{}, 0};
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
 
   using GemmKernel = typename Gemm::GemmKernel;
@@ -462,11 +455,13 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(gemm_op.can_implement(args));
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
-  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+  auto const workspace_options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
+  auto workspace = torch::empty(workspace_size, workspace_options);
 
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
 
-  cutlass::Status status = gemm_op.run(args, workspace.get(), stream);
+  cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
   CUTLASS_CHECK(status);
 }
 

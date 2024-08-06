@@ -9,7 +9,7 @@ Requirements
 ------------
 
 * OS: Linux
-* Python: 3.8 -- 3.11
+* Python: 3.8 -- 3.12
 * GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
 Install with pip
@@ -48,7 +48,7 @@ You can install vLLM using pip:
 
     .. code-block:: console
 
-        $ export VLLM_VERSION=0.5.2 # vLLM's main branch version is currently set to latest released tag
+        $ export VLLM_VERSION=0.5.4 # vLLM's main branch version is currently set to latest released tag
         $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
         $ # You can also access a specific commit
         $ # export VLLM_COMMIT=...
