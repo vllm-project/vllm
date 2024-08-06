@@ -541,8 +541,14 @@ class LLMEngine:
                            "model config is not available.")
             return None
 
-        return getattr(self.model_config.hf_config, 'decoder_start_token_id',
-                       None)
+        dec_start_token_id = getattr(self.model_config.hf_config,
+                                     'decoder_start_token_id', None)
+        if dec_start_token_id is None:
+            logger.warning("Falling back on <BOS> for decoder start token id "
+                           "because decoder start token id is not available.")
+            dec_start_token_id = self._get_bos_token_id()
+
+        return dec_start_token_id
 
     def _add_processed_request(
         self,
@@ -948,20 +954,21 @@ class LLMEngine:
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-            return self.input_processor(
-                self._process_encoder_decoder_prompt(
-                    inputs,
-                    request_id=request_id,
-                ))
 
-        # Decoder-only operation
-        return self.input_processor(
-            self._process_decoder_only_prompt(
+            model_inputs = self._process_encoder_decoder_prompt(
+                inputs,
+                request_id=request_id,
+            )
+        else:
+            # Decoder-only operation
+            model_inputs = self._process_decoder_only_prompt(
                 inputs,
                 request_id=request_id,
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
-            ))
+            )
+
+        return self.input_processor(model_inputs)
 
     def add_request(
         self,
