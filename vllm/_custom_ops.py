@@ -15,8 +15,7 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
-    # ruff: noqa: F401
-    import vllm._moe_C
+    import vllm._moe_C  # noqa: F401
 
 
 def hint_on_error(fn):
@@ -224,15 +223,16 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 try:
-    torch.ops._C.gptq_marlin_24_gemm
+    torch.ops._C.gptq_marlin_24_gemm  # noqa B018
+
     @torch.library.register_fake("_C::gptq_marlin_24_gemm")
     def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_meta: torch.Tensor, b_scales: torch.Tensor,
-                                  workspace: torch.Tensor, b_q_type: ScalarType,
-                                  size_m: int, size_n: int,
-                                  size_k: int) -> torch.Tensor:
+                                  workspace: torch.Tensor,
+                                  b_q_type: ScalarType, size_m: int,
+                                  size_n: int, size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-except:
+except Exception:
     pass
 
 
