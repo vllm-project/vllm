@@ -219,10 +219,11 @@ class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
 
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+        callback_fn = None
     ) -> List[SamplerOutput]:
         if not self.tp_driver_workers:
-            return await self.driver_exec_model(execute_model_req)
+            return await self.driver_exec_model(execute_model_req, callback_fn)
 
         if self.pp_locks is None:
             # This locks each pipeline parallel stage so multiple virtual
@@ -237,7 +238,7 @@ class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
         tasks = [
             asyncio.create_task(
                 _run_task_with_lock(self.driver_exec_model, self.pp_locks[0],
-                                    execute_model_req))
+                                    execute_model_req, callback_fn))
         ]
         for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
                                                 start=1):
@@ -245,7 +246,7 @@ class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
                 asyncio.create_task(
                     _run_task_with_lock(driver_worker.execute_method_async,
                                         self.pp_locks[pp_rank],
-                                        "execute_model", execute_model_req)))
+                                        "execute_model", execute_model_req, callback_fn)))
         results = await asyncio.gather(*tasks)
 
         # Only the last PP stage has the final results.

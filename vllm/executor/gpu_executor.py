@@ -155,7 +155,8 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
+        callback_fn=None
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = await make_async(self.driver_worker.execute_model
-                                  )(execute_model_req=execute_model_req, )
+                                  )(execute_model_req=execute_model_req, callback_fn=callback_fn)
         return output

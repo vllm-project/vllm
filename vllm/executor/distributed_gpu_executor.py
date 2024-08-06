@@ -166,14 +166,15 @@ class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest,
+            callback_fn=None) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(
                 self._start_worker_execution_loop())
 
         # Only the driver worker returns the sampling results.
-        return await self._driver_execute_model_async(execute_model_req)
+        return await self._driver_execute_model_async(execute_model_req, callback_fn)
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         if self.parallel_worker_tasks is None:
@@ -189,7 +190,8 @@ class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
     @abstractmethod
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+        callback_fn=None
     ) -> List[SamplerOutput]:
         """Execute the model asynchronously in the driver worker.
 

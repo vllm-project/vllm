@@ -26,6 +26,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.sequence import SequenceGroupMetadata
+from vllm import utils
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -236,12 +237,6 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        request_outputs = None
-        if (self.previous_output) and (len(self.previous_output) > 0):
-            request_outputs = self._process_model_outputs(
-                self.previous_output, self.previous_scheduler_outputs.scheduled_seq_groups,
-                self.previous_scheduler_outputs.ignored_seq_groups, self.previous_seq_group_metadata_list)
-
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
 
@@ -259,9 +254,12 @@ class _AsyncLLMEngine(LLMEngine):
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
             output = await self.model_executor.execute_model_async(
-                execute_model_req)
+                execute_model_req, callback_fn=self._process_model_outputs)
         else:
             output = []
+            
+        # hack to avoid callback function for first step
+        utils.flag_for_callback_fn = True
         self.previous_output = output
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list
@@ -274,12 +272,12 @@ class _AsyncLLMEngine(LLMEngine):
         #         output, scheduler_outputs.scheduled_seq_groups,
         #         scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
         # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+        # self.do_log_stats(scheduler_outputs, output)
 
         # Tracing
-        self.do_tracing(scheduler_outputs)
+        # self.do_tracing(scheduler_outputs)
 
-        return request_outputs
+        return self.request_outputs
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Stop the remote worker execution loop."""
