@@ -734,10 +734,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
-            # assert not supports_vision(
-            #     self.model
-            # ), "To be tested: vision language model with LoRA settings."
-
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
