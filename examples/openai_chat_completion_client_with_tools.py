@@ -32,7 +32,8 @@ tools = [{
                     "type":
                     "string",
                     "description":
-                    "the two-letter abbreviation for the state that the city is in, e.g. 'CA' which would mean 'California'"
+                    "the two-letter abbreviation for the state that the city is"
+                    " in, e.g. 'CA' which would mean 'California'"
                 },
                 "unit": {
                     "type": "string",
@@ -55,7 +56,7 @@ messages = [{
     "role":
     "user",
     "content":
-    "Can you tell me what the temperate will be in Dallas and San Francisco, in fahrenheit?"
+    "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
 }]
 
 chat_completion = client.chat.completions.create(messages=messages,
@@ -87,19 +88,17 @@ for chunk in chunks:
         if chunk.choices[0].delta.tool_calls[0].index != tool_call_idx:
             if tool_call_idx >= 0:
                 print(
-                    f'streamed tool call arguments: {arguments[tool_call_idx]}\n\n'
+                    f'streamed tool call arguments: {arguments[tool_call_idx]}'
                 )
             tool_call_idx = chunk.choices[0].delta.tool_calls[0].index
             arguments.append('')
         if chunk.choices[0].delta.tool_calls[0].id:
-            print(
-                f'streamed tool call id: {chunk.choices[0].delta.tool_calls[0].id}'
-            )
+            print(f'streamed tool call id: '
+                  f'{chunk.choices[0].delta.tool_calls[0].id}')
         if chunk.choices[0].delta.tool_calls[0].function:
             if chunk.choices[0].delta.tool_calls[0].function.name:
-                print(
-                    f'streamed tool call name: {chunk.choices[0].delta.tool_calls[0].function.name}'
-                )
+                print(f'streamed tool call name: '
+                      f'{chunk.choices[0].delta.tool_calls[0].function.name}')
             if chunk.choices[0].delta.tool_calls[0].function.arguments:
                 arguments[tool_call_idx] += chunk.choices[0].delta.tool_calls[
                     0].function.arguments
@@ -117,7 +116,8 @@ messages.append({
 
 # Now, simulate a tool call
 def get_current_weather(city: str, state: str, unit: 'str'):
-    return "The weather in Dallas, Texas is 85 degrees fahrenheit. It is partly cloudly, with highs in the 90's."
+    return ("The weather in Dallas, Texas is 85 degrees fahrenheit. It is "
+            "partly cloudly, with highs in the 90's.")
 
 
 available_tools = {"get_current_weather": get_current_weather}
