@@ -21,6 +21,7 @@ from vllm.lora.punica import PunicaWrapper
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
@@ -260,6 +261,99 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return type(source_layer) is VocabParallelEmbedding
+
+
+class ReplicatedLinearWithLoRA(BaseLayerWithLoRA):
+
+    def __init__(self, base_layer: ReplicatedLinear) -> None:
+        super().__init__()
+        self.base_layer = base_layer
+        self.input_size = self.base_layer.input_size
+        self.output_size = self.base_layer.output_size
+        self.device = _get_lora_device(self.base_layer)
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
+        self.lora_config = lora_config
+        lora_a_output_size = lora_config.max_lora_rank
+        self.lora_a_stacked = torch.zeros(
+            max_loras,
+            1,
+            lora_a_output_size,
+            self.input_size,
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.lora_b_stacked = torch.zeros(
+            max_loras,
+            1,
+            self.output_size,
+            lora_config.max_lora_rank,
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+
+    def reset_lora(self, index: int):
+        self.lora_a_stacked[index] = 0
+        self.lora_b_stacked[index] = 0
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+    ):
+        self.reset_lora(index)
+
+        self.lora_a_stacked[index,
+                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+                                lora_a.T, non_blocking=True)
+        self.lora_b_stacked[index,
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
+
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+        self.punica_wrapper.add_lora(output, x, self.lora_a_stacked,
+                                     self.lora_b_stacked, 1.0)
+        return output
+
+    def forward(self, input_):
+        """Forward of ReplicatedLinearWithLoRA
+
+        Args:
+            input_: Tensor whose last dimension is `input_size`.
+
+        Returns:
+            - output
+            - bias
+        """
+        bias = (self.base_layer.bias
+                if not self.base_layer.skip_bias_add else None)
+
+        # Matrix multiply.
+        output = self.apply(input_, bias)
+
+        output_bias = (self.base_layer.bias
+                       if self.base_layer.skip_bias_add else None)
+        return output, output_bias
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return type(source_layer) is ReplicatedLinear
 
 
 class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
@@ -979,10 +1073,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
-        # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
-        if 32000 < self.base_layer.vocab_size > 128512:
+        # TODO: Verify if this condition can be further relaxed
+        if 32000 < self.base_layer.vocab_size > 257024:
             raise ValueError("When using LoRA, vocab size must be "
-                             "32000 >= vocab_size <= 128512")
+                             "32000 >= vocab_size <= 257024")
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,

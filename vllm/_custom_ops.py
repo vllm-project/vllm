@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -220,10 +221,10 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 # marlin_24
 def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
-                        workspace: torch.Tensor, num_bits: int, size_m: int,
-                        size_n: int, size_k: int) -> torch.Tensor:
+                        workspace: torch.Tensor, b_q_type: ScalarType,
+                        size_m: int, size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
-                                            workspace, num_bits, size_m,
+                                            workspace, b_q_type, size_m,
                                             size_n, size_k)
 
 
@@ -279,14 +280,22 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
-def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                     b_scales: torch.Tensor, b_zeros: torch.Tensor,
-                     g_idx: torch.Tensor, perm: torch.Tensor,
-                     workspace: torch.Tensor, num_bits: int, size_m: int,
-                     size_n: int, size_k: int, is_k_full: bool, has_zp: bool,
-                     use_fp32_reduce: bool) -> torch.Tensor:
+def gptq_marlin_gemm(a: torch.Tensor,
+                     b_q_weight: torch.Tensor,
+                     b_scales: torch.Tensor,
+                     b_zeros: torch.Tensor,
+                     g_idx: torch.Tensor,
+                     perm: torch.Tensor,
+                     workspace: torch.Tensor,
+                     b_q_type: ScalarType,
+                     size_m: int,
+                     size_n: int,
+                     size_k: int,
+                     is_k_full: bool,
+                     has_zp: bool = False,
+                     use_fp32_reduce: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
-                                         g_idx, perm, workspace, num_bits,
+                                         g_idx, perm, workspace, b_q_type,
                                          size_m, size_n, size_k, is_k_full,
                                          has_zp, use_fp32_reduce)
 
@@ -393,6 +402,38 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                     size_m: int, size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
                                         workspace, size_m, size_n, size_k)
+
+
+# gguf
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int):
+    return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
+
+
+def ggml_mul_mat_vec(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec(W, X, quant_type, row)
+
+
+def ggml_mul_mat_vec_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
+
+
+def ggml_mul_mat_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
 # moe
