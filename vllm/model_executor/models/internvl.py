@@ -18,7 +18,6 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -29,7 +28,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import (filter_weights, init_vllm_registered_model,
+                    merge_vision_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -283,10 +283,8 @@ class InternVLChatModel(nn.Module, SupportsVision):
         self.vision_model = InternVisionModel(
             config.vision_config, num_hidden_layers_override=num_hidden_layers)
 
-        llm_class = ModelRegistry.load_model_cls(
-            config.text_config.architectures[0])
-        self.language_model = llm_class(config.text_config, cache_config,
-                                        quant_config)
+        self.language_model = init_vllm_registered_model(
+            config.text_config, cache_config, quant_config)
 
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
@@ -415,24 +413,16 @@ class InternVLChatModel(nn.Module, SupportsVision):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def _filter_weights(self, weights: Iterable[Tuple[str, torch.Tensor]],
-                        prefix: str):
-        for name, loaded_weight in weights:
-            name = name.split(".")
-            if prefix == name.pop(0):
-                name = ".".join(name)
-                yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
         vit_weights, mlp_weights, llm_weights = itertools.tee(weights, 3)
 
         # load vision encoder
-        vit_weights = self._filter_weights(vit_weights, "vision_model")
+        vit_weights = filter_weights(vit_weights, "vision_model")
         self.vision_model.load_weights(vit_weights)
 
         # load mlp projector
-        mlp_weights = self._filter_weights(mlp_weights, "mlp1")
+        mlp_weights = filter_weights(mlp_weights, "mlp1")
         mlp_params_dict = dict(self.mlp1.named_parameters())
         for name, loaded_weight in mlp_weights:
             param = mlp_params_dict[name]
@@ -441,5 +431,5 @@ class InternVLChatModel(nn.Module, SupportsVision):
             weight_loader(param, loaded_weight)
 
         # load llm backbone
-        llm_weights = self._filter_weights(llm_weights, "language_model")
+        llm_weights = filter_weights(llm_weights, "language_model")
         self.language_model.load_weights(llm_weights)

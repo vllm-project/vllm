@@ -1,10 +1,11 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
@@ -18,9 +19,11 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "USER: <image>\nWhat is the season?\nASSISTANT:",
 })
 
-IMAGE_TOKEN_ID = 32000
-
-models = ["llava-hf/llava-1.5-7b-hf"]
+models = [
+    "llava-hf/llava-1.5-7b-hf",
+    # TODO: Get this model to produce meaningful output in vLLM
+    # "TIGER-Lab/Mantis-8B-siglip-llama3",
+]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -29,12 +32,15 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
+    config = AutoConfig.from_pretrained(model)
+    image_token_id = config.image_token_index
+
     tokenizer = AutoTokenizer.from_pretrained(model)
     eos_token_id = tokenizer.eos_token_id
 
     hf_output_ids = [
         token_id for idx, token_id in enumerate(output_ids)
-        if token_id != IMAGE_TOKEN_ID or output_ids[idx - 1] != IMAGE_TOKEN_ID
+        if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
 
     assert output_str[0] == " "
@@ -67,6 +73,17 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    # NOTE: For local use; this isn't tested in CI yet (see TODO above)
+    if model.startswith("TIGER-Lab/Mantis"):
+        from mantis.models.mllava import MLlavaProcessor
+
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        mantis_processor = MLlavaProcessor.from_pretrained(
+            model, torch_dtype=torch_dtype)
+        assert isinstance(mantis_processor, MLlavaProcessor)
+    else:
+        mantis_processor = None
+
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -94,6 +111,15 @@ def run_test(
         ]
 
     with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
+        if mantis_processor is not None:
+
+            def process(*args, **kwargs):
+                output = mantis_processor(*args, **kwargs)
+                output["pixel_values"] = output["pixel_values"].to(torch_dtype)
+                return output
+
+            hf_model.processor = process
+
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
