@@ -27,7 +27,7 @@ class _Backend(enum.Enum):
     IPEX = enum.auto()
 
 
-def backend_name_to_enum(backend_name: str, ) -> _Backend:
+def backend_name_to_enum(backend_name: str) -> _Backend:
     assert backend_name is not None
 
     backend_members = _Backend.__members__
@@ -64,7 +64,7 @@ def get_env_variable_attn_backend() -> Optional[_Backend]:
 forced_attn_backend: Optional[_Backend] = None
 
 
-def global_force_attn_backend(attn_backend: Optional[_Backend], ) -> None:
+def global_force_attn_backend(attn_backend: Optional[_Backend]) -> None:
     '''
     Force all attention operations to use a specified backend.
 
@@ -264,7 +264,7 @@ def which_attn_to_use(
 
 @contextmanager
 def global_force_attn_backend_context_manager(
-    attn_backend: _Backend, ) -> Generator[None, None, None]:
+        attn_backend: _Backend) -> Generator[None, None, None]:
     '''
     Globally force a vLLM attention backend override within a
     context manager, reverting the global attention backend
