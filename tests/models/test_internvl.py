@@ -31,7 +31,7 @@ models = [
     snapshot_download("OpenGVLab/InternVL2-1B"),
     snapshot_download("OpenGVLab/InternVL2-2B"),
     snapshot_download("OpenGVLab/InternVL2-4B"),
-    snapshot_download("OpenGVLab/InternVL2-28B"),
+    snapshot_download("OpenGVLab/InternVL2-26B"),
 ]
 
 
