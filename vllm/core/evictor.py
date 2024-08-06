@@ -1,6 +1,7 @@
+import heapq
 import enum
 from abc import ABC, abstractmethod
-from typing import OrderedDict, Tuple
+from typing import Dict, Tuple
 
 
 class EvictionPolicy(enum.Enum):
@@ -76,7 +77,8 @@ class LRUEvictor(Evictor):
     """
 
     def __init__(self):
-        self.free_table: OrderedDict[int, BlockMetaData] = OrderedDict()
+        self.free_table: Dict[int, BlockMetaData] = {}
+        self.priority_queue = []
 
     def __contains__(self, block_id: int) -> bool:
         return block_id in self.free_table
@@ -85,33 +87,37 @@ class LRUEvictor(Evictor):
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
 
-        evicted_block, evicted_block_id = None, None
-        # The blocks with the lowest timestamps should be placed consecutively
-        # at the start of OrderedDict. Loop through all these blocks to
-        # find the one with maximum number of hashed tokens.
-        for _id, block in self.free_table.items():
-            if evicted_block is None:
-                evicted_block, evicted_block_id = block, _id
-                continue
-            if evicted_block.last_accessed < block.last_accessed:
-                break
-            if evicted_block.num_hashed_tokens < block.num_hashed_tokens:
-                evicted_block, evicted_block_id = block, _id
+        while self.priority_queue:
+            # Lazy deletion algorithm is applied by checking blocks in the free table.
+            last_accessed, _, content_hash, block_id = heapq.heappop(self.priority_queue)
+            if block_id in self.free_table:
+                if self.free_table[block_id].last_accessed == last_accessed:
+                    self.free_table.pop(block_id)
+                    return block_id, content_hash
 
-        assert evicted_block is not None
-        assert evicted_block_id is not None
-        self.free_table.pop(evicted_block_id)
-
-        return evicted_block_id, evicted_block.content_hash
+        raise ValueError("No usable cache memory left")
 
     def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
             last_accessed: float):
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
                                                   last_accessed)
+        heapq.heappush(self.priority_queue, (last_accessed, -num_hashed_tokens, content_hash, block_id))
+        self._cleanup_if_necessary()
 
     def update(self, block_id: int, last_accessed: float):
         self.free_table[block_id].last_accessed = last_accessed
+
+    def _cleanup_if_necessary(self):
+        if len(self.priority_queue) > 50 * len(self.free_table):
+            self._cleanup()
+
+    def _cleanup(self):
+        new_priority_queue = []
+        for last_accessed, neg_num_hashed_tokens, content_hash, block_id in self.priority_queue:
+            if block_id in self.free_table and self.free_table[block_id].last_accessed == last_accessed:
+                heapq.heappush(new_priority_queue, (last_accessed, neg_num_hashed_tokens, content_hash, block_id))
+        self.priority_queue = new_priority_queue
 
     def remove(self, block_id: int):
         if block_id not in self.free_table:
