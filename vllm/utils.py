@@ -1130,7 +1130,7 @@ def is_embedding_model_config(model_config) -> bool:
     Extract the embedding model flag from the ModelConfig instance.
     Return False if model_config is None.
     '''
-    return False if model_config is None else \
+    return model_config is not None and \
                 model_config.embedding_mode
 
 
