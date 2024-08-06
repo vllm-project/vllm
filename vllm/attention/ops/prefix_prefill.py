@@ -197,6 +197,9 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_query_len),
                         other=0.0)
+            k = k.to(q.dtype)
+            if k_scale != 1.0:
+                k *= k_scale
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -588,8 +591,9 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)
-
-            p = p.to(v.dtype)
+            v = v.to(p.dtype)
+            if v_scale != 1.0:
+                v *= v_scale
             acc += tl.dot(p, v, allow_tf32=False)
             # update m_i and l_i
             l_i = l_i_new
@@ -623,7 +627,9 @@ if triton.__version__ >= "2.1.0":
                         ((start_n + offs_n[None, :]) <
                          cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
-
+            k = k.to(q.dtype)
+            if k_scale != 1.0:
+                k *= k_scale
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k, allow_tf32=False)
             qk *= sm_scale
@@ -661,8 +667,9 @@ if triton.__version__ >= "2.1.0":
                         ((start_n + offs_n[:, None]) <
                          cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
-
-            p = p.to(v.dtype)
+            v = v.to(p.dtype)
+            if v_scale != 1.0:
+                v *= v_scale
             acc += tl.dot(p, v, allow_tf32=False)
             # update m_i and l_i
             l_i = l_i_new
