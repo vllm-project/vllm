@@ -5,12 +5,12 @@ from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import RocmPlatform, current_platform
+from vllm.platforms import current_platform, rocm
 
 
 def cutlass_fp8_supported() -> bool:
     # cutlass is not supported on Rocm
-    if isinstance(current_platform, RocmPlatform):
+    if isinstance(current_platform, rocm.RocmPlatform):
         return False
     capability = current_platform.get_device_capability()
     capability = capability[0] * 10 + capability[1]

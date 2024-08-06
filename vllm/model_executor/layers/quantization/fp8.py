@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     create_per_tensor_scale_param, cutlass_fp8_supported,
     per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import RocmPlatform, current_platform
+from vllm.platforms import current_platform, rocm
 from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -183,7 +183,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # shards in a fused module
         else:
             # If rocm, use float8_e4m3fnuz
-            if isinstance(current_platform, RocmPlatform):
+            if isinstance(current_platform, rocm.RocmPlatform):
                 weight_as_int8 = layer.weight.view(torch.int8)
                 weight_as_int8[weight_as_int8 == -128] = 0
                 layer.weight = Parameter(layer.weight.view(
@@ -216,7 +216,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.input_scale = None
 
             # If rocm, adjust the scaling factor
-            if isinstance(current_platform, RocmPlatform):
+            if isinstance(current_platform, rocm.RocmPlatform):
                 layer.weight_scale = Parameter(layer.weight_scale * 2,
                                                requires_grad=False)
                 if layer.input_scale is not None:
