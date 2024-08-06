@@ -135,10 +135,15 @@ class SequenceData:
         self._stage: SequenceStage = SequenceStage.PREFILL
 
         self._update_cached_all_tokens()
+        self._update_cached_all_negative_tokens()
 
     def _update_cached_all_tokens(self):
         self._cached_all_token_ids: List[int] = (self._prompt_token_ids +
                                                  self._output_token_ids)
+
+    def _update_cached_all_negative_tokens(self):
+        self._cached_all_negative_token_ids: List[int] = (self._negative_prompt_token_ids +
+                                                          self._output_token_ids)
 
     @property
     def prompt_token_ids(self) -> Tuple[int, ...]:
@@ -158,6 +163,7 @@ class SequenceData:
     def negative_prompt_token_ids(self, new_negative_prompt_token_ids) -> None:
         self._negative_prompt_token_ids = list(new_negative_prompt_token_ids)
         self._negative_prompt_token_ids_tuple = tuple(new_negative_prompt_token_ids)
+        self._update_cached_all_negative_tokens()
 
     @property
     def output_token_ids(self) -> Tuple[int, ...]:
@@ -167,10 +173,12 @@ class SequenceData:
     def output_token_ids(self, new_output_token_ids) -> None:
         self._output_token_ids = list(new_output_token_ids)
         self._update_cached_all_tokens()
+        self._update_cached_all_negative_tokens()
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
         self._cached_all_token_ids.append(token_id)
+        self._cached_all_negative_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
@@ -184,6 +192,9 @@ class SequenceData:
 
     def get_token_ids(self) -> List[int]:
         return self._cached_all_token_ids
+
+    def get_negative_token_ids(self) -> List[int]:
+        return self._cached_all_negative_token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int
@@ -367,6 +378,9 @@ class Sequence:
 
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
+
+    def get_negative_token_ids(self) -> List[int]:
+        return self.data.get_negative_token_ids()
 
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_prompt_token_ids()

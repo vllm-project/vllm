@@ -968,7 +968,7 @@ class Scheduler:
 
         return self.block_manager.can_append_slots(
             seq_group=seq_group,
-            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
+            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill, seq_group),
         )
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
@@ -1087,7 +1087,7 @@ class Scheduler:
                 the new source and destination block indices for the appended
                 slots.
         """
-        num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
+        num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False, seq_group=seq_group)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             cows = self.block_manager.append_slots(seq, num_lookahead_slots)
@@ -1199,7 +1199,7 @@ class Scheduler:
             passed_delay = True
         return passed_delay
 
-    def _get_num_lookahead_slots(self, is_prefill: bool) -> int:
+    def _get_num_lookahead_slots(self, is_prefill: bool, seq_group: SequenceGroup=None) -> int:
         """The number of slots to allocate per sequence per step, beyond known
         token ids. Speculative decoding uses these slots to store KV activations
         of tokens which may or may not be accepted.
@@ -1209,6 +1209,16 @@ class Scheduler:
         """
         if is_prefill:
             return 0
+
+        num_lookahead_slots = 0
+        if seq_group is not None:
+            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                if len(seq.get_negative_token_ids()) > len(seq.get_token_ids()):
+                    addtional_length = len(seq.get_negative_token_ids()) - len(seq.get_token_ids())
+                    num_lookahead_slots = max(num_lookahead_slots, addtional_length)
+
+        if num_lookahead_slots > 0:
+            return num_lookahead_slots
 
         return self.scheduler_config.num_lookahead_slots
 

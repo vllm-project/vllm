@@ -112,6 +112,9 @@ class CFGWorker(LoraNotSupportedWorkerBase):
                     negative_seq_data[seq_id].negative_prompt_token_ids = []
                     negative_seq_data[seq_id].output_token_ids = seq_data.output_token_ids[:]
 
+                if negative_seq_group_metadata.is_prompt:
+                    negative_seq_group_metadata._token_chunk_size = list(negative_seq_data.values())[0].get_len()
+
                 negative_seq_group_metadata.seq_data = negative_seq_data
                 negative_seq_group_metadata_list.append(negative_seq_group_metadata)
             negative_excute_model_req.seq_group_metadata_list = negative_seq_group_metadata_list
