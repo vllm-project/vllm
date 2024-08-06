@@ -152,7 +152,7 @@ class HasInnerState(Protocol):
     """
         A flag that indicates this model has inner state.
         Models that has inner state usually need access to the scheduler_config
-        for max_num_seqs ,etc... (Currently only used by Jamba)
+        for max_num_seqs ,etc... (Currently used by Jamba and Mamba)
     """
 
     def __init__(self,

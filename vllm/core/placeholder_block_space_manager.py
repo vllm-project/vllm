@@ -4,9 +4,10 @@ from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
 
 
-class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
-    """An embedding version of BlockSpaceManager for use in environments
-    with embedding models where block management is not required.
+class PlaceholderBlockSpaceManager(BlockSpaceManager):
+    """A version of BlockSpaceManager for use in environments
+    where block management is not required. 
+    For example: embedding models or attention-free models like Mamba.
 
     This class provides the same interface as BlockSpaceManager, but its
     methods perform no actions or return simple values like True in specific
@@ -37,7 +38,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         seq: Sequence,
         num_lookahead_slots: int,
     ) -> List[Tuple[int, int]]:
-        return None  # type: ignore
+        return []
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass
