@@ -73,6 +73,7 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    # NOTE: For local use; this isn't tested in CI yet (see TODO above)
     if model.startswith("TIGER-Lab/Mantis"):
         from mantis.models.mllava import MLlavaProcessor
 
