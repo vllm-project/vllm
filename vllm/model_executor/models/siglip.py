@@ -253,20 +253,22 @@ class SiglipAttention(nn.Module):
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
 
-        query_states = query_states.view(batch_size, q_len, self.num_heads_per_partition,
+        query_states = query_states.view(batch_size, q_len,
+                                         self.num_heads_per_partition,
                                          self.head_dim)
-        key_states = key_states.view(batch_size, q_len, self.num_heads_per_partition,
+        key_states = key_states.view(batch_size, q_len,
+                                     self.num_heads_per_partition,
                                      self.head_dim)
-        value_states = value_states.view(batch_size, q_len, self.num_heads_per_partition,
+        value_states = value_states.view(batch_size, q_len,
+                                         self.num_heads_per_partition,
                                          self.head_dim)
 
         out = xops.memory_efficient_attention_forward(query_states,
-                                                              key_states,
-                                                              value_states,
-                                                              p=self.dropout,
-                                                              scale=self.scale)
-        out = out.reshape(batch_size, q_len,
-                                          self.embed_dim).contiguous()
+                                                      key_states,
+                                                      value_states,
+                                                      p=self.dropout,
+                                                      scale=self.scale)
+        out = out.reshape(batch_size, q_len, self.embed_dim).contiguous()
         attn_output, _ = self.out_proj(out)
 
         return attn_output

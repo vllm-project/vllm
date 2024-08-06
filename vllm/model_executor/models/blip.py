@@ -6,8 +6,10 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
+from xformers import ops as xops
 
 from vllm.config import ModelConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -17,8 +19,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
 from vllm.sequence import SequenceData
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from xformers import ops as xops
 
 
 def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -157,7 +157,7 @@ class BlipAttention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: BlipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -167,9 +167,9 @@ class BlipAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
-            )
+                "embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
         self.dropout = nn.Dropout(config.attention_dropout)
 
@@ -184,12 +184,13 @@ class BlipAttention(nn.Module):
             self.embed_dim,
             quant_config=quant_config,
         )
-        
+
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return tensor.view(bsz, seq_len, self.num_heads,
+                           self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
@@ -210,13 +211,11 @@ class BlipAttention(nn.Module):
                                          self.num_heads_per_partition,
                                          self.head_dim)
 
-        out = xops.memory_efficient_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            p=self.dropout,
-            scale=self.scale
-        )
+        out = xops.memory_efficient_attention_forward(query_states,
+                                                      key_states,
+                                                      value_states,
+                                                      p=self.dropout,
+                                                      scale=self.scale)
         out = out.reshape(bsz, tgt_len, self.embed_dim).contiguous()
         attn_output, _ = self.out_proj(out)
 
