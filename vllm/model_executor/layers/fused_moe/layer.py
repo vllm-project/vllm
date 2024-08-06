@@ -8,9 +8,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
-                                                            fused_topk,
-                                                            grouped_topk)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -71,6 +68,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def forward_cuda(self, layer: torch.nn.Module, x: torch.Tensor,
                      topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                      **kwargs) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.fused_moe import (
+            fused_experts)
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
@@ -261,6 +260,9 @@ class FusedMoE(torch.nn.Module):
 
     def _select_experts(self, hidden_states: torch.Tensor,
                         router_logits: torch.Tensor):
+        from vllm.model_executor.layers.fused_moe.fused_moe import (
+            fused_topk, grouped_topk)
+
         # DeekSeekv2 uses grouped_top_k
         if self.use_grouped_topk:
             assert self.topk_group is not None
