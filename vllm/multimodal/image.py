@@ -115,7 +115,7 @@ class ImagePlugin(MultiModalPlugin):
         model_config = ctx.model_config
 
         # Raw image
-        if isinstance(data, Image.Image):
+        if isinstance(data, (Image.Image, list)):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "

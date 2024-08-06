@@ -21,7 +21,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.utils import get_kv_cache_torch_dtype, make_tensor_with_pad
+from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
+                        make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
@@ -356,7 +357,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device=device)
+            block_tables = torch.from_numpy(input_block_tables).to(
+                device, non_blocking=True)
 
             last_paged_kv_indptr = self.paged_kv_indptr[-1]
             self.paged_kv_indptr.extend([last_paged_kv_indptr] *
@@ -371,12 +373,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
+        assert device is not None
+        seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
+                                           self.runner.pin_memory)
+        query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
+                                             self.runner.pin_memory)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -391,10 +394,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
-
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
 
         if len(self.paged_kv_indptr) > 0:
             paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
