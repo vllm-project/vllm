@@ -5,6 +5,8 @@ from typing import Dict, List, Tuple
 
 from vllm.block import PhysicalTokenBlock
 
+CLEANUP_THRESHOLD = 50
+
 
 class EvictionPolicy(enum.Enum):
     """Enum for eviction policy used by make_evictor to instantiate the correct
@@ -97,7 +99,7 @@ class LRUEvictor(Evictor):
         return block
 
     def _cleanup_if_necessary(self):
-        if len(self.priority_queue) > 50 * len(self.free_table):
+        if len(self.priority_queue) > CLEANUP_THRESHOLD * len(self.free_table):
             self._cleanup()
 
     def _cleanup(self):
