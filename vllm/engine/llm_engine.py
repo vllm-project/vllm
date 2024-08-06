@@ -43,11 +43,11 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
+from vllm import utils
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
-
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     config = try_get_generation_config(
@@ -351,6 +351,13 @@ class LLMEngine:
                     self.get_tokenizer_for_seq,
                 ),
             ))
+
+        # Async output processing pointers
+        # TO DO: move it to asyncllmengine
+        self.previous_output = None
+        self.previous_scheduler_outputs = None
+        self.previous_seq_group_metadata_list = None
+        self.request_outputs = None
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -797,11 +804,7 @@ class LLMEngine:
         return
 
     def _process_model_outputs(
-        self,
-        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
-        scheduled_seq_groups: List[ScheduledSequenceGroup],
-        ignored_seq_groups: List[SequenceGroup],
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        self
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
@@ -809,6 +812,11 @@ class LLMEngine:
         """
 
         now = time.time()
+
+        scheduled_seq_groups = self.previous_scheduler_outputs.scheduled_seq_groups
+        ignored_seq_groups = self.previous_scheduler_outputs.ignored_seq_groups
+        output = self.previous_output
+        seq_group_metadata_list = self.previous_seq_group_metadata_list
 
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].
@@ -820,8 +828,8 @@ class LLMEngine:
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
-            seq_group.update_num_computed_tokens(
-                scheduled_seq_group.token_chunk_size)
+            # seq_group.update_num_computed_tokens(
+            #     scheduled_seq_group.token_chunk_size)
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue
@@ -830,9 +838,9 @@ class LLMEngine:
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
 
-        # Free the finished sequence groups.
-        for scheduler in self.scheduler:
-            scheduler.free_finished_seq_groups()
+        # # Free the finished sequence groups.
+        # for scheduler in self.scheduler:
+        #     scheduler.free_finished_seq_groups()
 
         # Create the outputs.
         request_outputs: List[Union[RequestOutput,
@@ -845,7 +853,31 @@ class LLMEngine:
         for seq_group in ignored_seq_groups:
             request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
-        return request_outputs
+        self.request_outputs = request_outputs
+        return
+
+    def _advance_to_next_step(
+        self,
+        output: List[SamplerOutput],
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+        """Given model output from a single run, append the tokens to the
+        sequences. This is normally done outside of the worker, but it is
+        required if the worker is to perform async forward passes to next step.
+        """
+        for seq_group_metadata, sequence_group_outputs in zip(
+                seq_group_metadata_list, output):
+            seq_group_metadata.is_prompt = False
+
+            for seq_output in sequence_group_outputs.samples:
+                # NOTE: Beam search is not supported, so we can assume that
+                # parent_seq_id == seq_id.
+                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
+
+                token_id = seq_output.output_token
+                token_logprob = seq_output.logprobs[token_id]
+
+                seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
+                seq.append_token_id(token_id, token_logprob.logprob)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -917,19 +949,25 @@ class LLMEngine:
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
-                execute_model_req=execute_model_req)
+                execute_model_req=execute_model_req, callback_fn=self._process_model_outputs)
         else:
             output = []
 
-        request_outputs = self._process_model_outputs(
-            output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+        # hack to avoid callback function for first step
+        utils.flag_for_callback_fn = True
+        self.previous_output = output
+        self.previous_scheduler_outputs = scheduler_outputs
+        self.previous_seq_group_metadata_list = seq_group_metadata_list
+
+        # HACK: only supports single step
+        if len(output) > 0:
+            self._advance_to_next_step(output[0], seq_group_metadata_list)
 
         # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+        # self.do_log_stats(scheduler_outputs, output)
 
         # Tracing
-        self.do_tracing(scheduler_outputs)
+        # self.do_tracing(scheduler_outputs)
 
         if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are
@@ -939,7 +977,7 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
-        return request_outputs
+        return self.request_outputs
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
         if logger_name in self.stat_loggers:

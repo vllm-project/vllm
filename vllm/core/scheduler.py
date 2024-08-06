@@ -947,6 +947,11 @@ class Scheduler:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
+        
+        # Free finished sequence groups if any
+        # This was in output processor before.
+        self.free_finished_seq_groups()
+
         scheduler_outputs = self._schedule()
         now = time.time()
 
@@ -1036,6 +1041,9 @@ class Scheduler:
                 # This list will be used to update the Mamba cache in the
                 # next step.
                 self._finished_requests_ids.append(seq_group.request_id)
+                # Free finished seqs
+                for seq in seq_group.get_seqs():
+                    self.free_seq(seq)
             else:
                 remaining.append(seq_group)
         self.running = remaining

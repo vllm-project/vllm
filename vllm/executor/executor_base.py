@@ -75,7 +75,8 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def execute_model(
-        self, execute_model_req: ExecuteModelRequest
+        self, execute_model_req: ExecuteModelRequest,
+        callback_fn = None
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences."""
         raise NotImplementedError

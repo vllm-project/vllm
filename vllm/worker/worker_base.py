@@ -215,7 +215,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+        callback_fn = None
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
@@ -273,7 +274,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         output = self.model_runner.execute_model(
             model_input, self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None, intermediate_tensors,
-            num_steps)
+            num_steps, callback_fn)
 
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors

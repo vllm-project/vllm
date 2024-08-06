@@ -65,7 +65,8 @@ class DistributedGPUExecutor(GPUExecutor):
 
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest,
+            callback_fn = None) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
@@ -73,7 +74,7 @@ class DistributedGPUExecutor(GPUExecutor):
                 **self.extra_execute_model_run_workers_kwargs)
 
         # Only the driver worker returns the sampling results.
-        driver_outputs = self._driver_execute_model(execute_model_req)
+        driver_outputs = self._driver_execute_model(execute_model_req, callback_fn)
         assert driver_outputs is not None
         return driver_outputs
 
