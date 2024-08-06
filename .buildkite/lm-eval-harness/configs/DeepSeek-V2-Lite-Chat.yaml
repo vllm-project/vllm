@@ -9,3 +9,4 @@ tasks:
     value: 0.664
 limit: 1000
 num_fewshot: 5
+trust_remote_code: True
