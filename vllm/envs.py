@@ -142,8 +142,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv('VLLM_PORT', '0'))
     if 'VLLM_PORT' in os.environ else None,
 
-    # path used when ipc used when the frontend api server is running in 
-    # multi-processing mode, to communicate with the backend engine process over ZMQ.
+    # path used for ipc when the frontend api server is running in
+    # multi-processing mode to communicate with the backend engine process.
     'VLLM_RPC_BASE_PATH':
     lambda: os.getenv('VLLM_RPC_BASE_PATH', '/tmp'),
 

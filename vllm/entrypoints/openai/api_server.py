@@ -108,7 +108,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
     else:
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
-        logger.info(f"Multiprocessing frontend to use {rpc_path} for RPC Path.")
+        logger.info("Multiprocessing frontend to use %s for RPC Path.",
+                    rpc_path)
 
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
         rpc_server_process = Process(target=run_rpc_server,
