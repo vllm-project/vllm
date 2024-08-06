@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig)
 from vllm.model_executor.layers.quantization.fbgemm_fp8 import FBGEMMFp8Config
+from vllm.model_executor.layers.quantization.flute import FluteConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.gguf import GGUFConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
@@ -22,7 +23,6 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
-from vllm.model_executor.layers.quantization.flute import FluteConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,

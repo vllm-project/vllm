@@ -3,14 +3,10 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.linear import (
-    LinearBase,
-    LinearMethodBase,
-    set_weight_attrs)
-from vllm.distributed import (
-    divide,
-    get_tp_group,
-    tensor_model_parallel_all_gather)
+from vllm.distributed import (divide, get_tp_group,
+                              tensor_model_parallel_all_gather)
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
@@ -79,10 +75,9 @@ class FluteConfig(QuantizationConfig):
         group_size = cls.get_from_keys(config, ["group_size"])
         num_sms_packed = cls.get_from_keys(config, ["num_sms"])
 
-        return cls(
-            num_bits=num_bits,
-            group_size=group_size,
-            num_sms_packed=num_sms_packed)
+        return cls(num_bits=num_bits,
+                   group_size=group_size,
+                   num_sms_packed=num_sms_packed)
 
     def get_quant_method(
         self,
@@ -182,7 +177,7 @@ class FluteLinearMethod(LinearMethodBase):
 
         tables = Parameter(
             torch.arange(
-                2 ** self.quant_config.num_bits,
+                2**self.quant_config.num_bits,
                 dtype=params_dtype,
                 device=device,
             ),
@@ -227,10 +222,9 @@ class FluteLinearMethod(LinearMethodBase):
         layer.flute_output_size = output_size
         layer.flute_output_partition_sizes = output_partition_sizes
         layer.flute_input_size_per_partition = input_size_per_partition
-        layer.flute_is_K_partitioned = (
-            input_size_per_partition != input_size)
-        layer.flute_is_N_partitioned = (
-            sum(output_partition_sizes) != output_size)
+        layer.flute_is_K_partitioned = (input_size_per_partition != input_size)
+        layer.flute_is_N_partitioned = (sum(output_partition_sizes) !=
+                                        output_size)
 
     def _maybe_tensor_all_gather(
         self,
@@ -251,9 +245,8 @@ class FluteLinearMethod(LinearMethodBase):
             tensor_dtype = None
             tensor_casted = tensor
 
-        tensor_gathered = tensor_model_parallel_all_gather(
-            tensor_casted,
-            dim=shard_dim)
+        tensor_gathered = tensor_model_parallel_all_gather(tensor_casted,
+                                                           dim=shard_dim)
 
         if tensor_dtype is not None:
             tensor_gathered_casted = tensor_gathered.to(dtype=tensor_dtype)
@@ -287,21 +280,21 @@ class FluteLinearMethod(LinearMethodBase):
         # the weights packing are possibly shape-specialized, but as vLLM
         # potentially fuses parameters and/or partitions the weights (TP),
         # we need to potentially re-pack the weights.
-        if ((not hasattr(layer, "needs_repacking") or
-             not layer.needs_repacking)):
+        if ((not hasattr(layer, "needs_repacking")
+             or not layer.needs_repacking)):
             return
 
-        if ((layer.flute_is_K_partitioned is False) and
-            (layer.flute_is_N_partitioned is False)):
+        if ((layer.flute_is_K_partitioned is False)
+                and (layer.flute_is_N_partitioned is False)):
             shard_dim = None
-        if ((layer.flute_is_K_partitioned is True ) and
-            (layer.flute_is_N_partitioned is False)):
+        if ((layer.flute_is_K_partitioned is True)
+                and (layer.flute_is_N_partitioned is False)):
             shard_dim = 1
-        if ((layer.flute_is_K_partitioned is False) and
-            (layer.flute_is_N_partitioned is True )):
+        if ((layer.flute_is_K_partitioned is False)
+                and (layer.flute_is_N_partitioned is True)):
             shard_dim = 0
-        if ((layer.flute_is_K_partitioned is True ) and
-            (layer.flute_is_N_partitioned is True )):
+        if ((layer.flute_is_K_partitioned is True)
+                and (layer.flute_is_N_partitioned is True)):
             raise NotImplementedError
 
         # split the combined tensors into individual tensors
@@ -329,9 +322,8 @@ class FluteLinearMethod(LinearMethodBase):
 
             # re-shard
             Qs_unpacked.append(
-                self._maybe_tensor_shard(
-                    Q_gathered_unpacked,
-                    shard_dim=shard_dim))
+                self._maybe_tensor_shard(Q_gathered_unpacked,
+                                         shard_dim=shard_dim))
 
         # reconstruct the unpacked tensor
         Q_unpacked = torch.cat(Qs_unpacked, dim=0)
@@ -343,13 +335,11 @@ class FluteLinearMethod(LinearMethodBase):
             group_size=layer.group_size).to(device=layer.weight.device)
 
         if not all([
-            Q_repacked.shape == layer.weight.shape,
-            Q_repacked.dtype == layer.weight.dtype,
-            Q_repacked.device == layer.weight.device]):
+                Q_repacked.shape == layer.weight.shape, Q_repacked.dtype
+                == layer.weight.dtype, Q_repacked.device == layer.weight.device
+        ]):
             raise ValueError
-        layer.weight = Parameter(
-            Q_repacked,
-            requires_grad=False)
+        layer.weight = Parameter(Q_repacked, requires_grad=False)
 
     def apply(
         self,
