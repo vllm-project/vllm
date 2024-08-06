@@ -44,6 +44,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -573,7 +574,9 @@ class LLMEngine:
             inputs = {"prompt": inputs}
 
         prompt_embeds = inputs.get("prompt_embeds")
-        model_runner = self.model_executor.driver_worker.model_runner
+        driver_worker = self.model_executor.driver_worker
+        model_runner = driver_worker.worker.model_runner if isinstance(
+            driver_worker, WorkerWrapperBase) else driver_worker.model_runner
         if prompt_embeds is not None:
             if not model_runner.model_supports_input_embeds:
                 raise ValueError(
