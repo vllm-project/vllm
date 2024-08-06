@@ -24,6 +24,7 @@ __all__ = [
     "TextPrompt",
     "TokensPrompt",
     "SamplingParams",
+    "SpecDecodeParams",
     "RequestOutput",
     "CompletionOutput",
     "EmbeddingOutput",
