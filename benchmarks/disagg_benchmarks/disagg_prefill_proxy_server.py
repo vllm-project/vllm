@@ -1,7 +1,6 @@
 from quart import Quart, request, Response, jsonify, make_response
 import aiohttp
 import sys
-import httpx
 import traceback
 import os
 
@@ -14,15 +13,17 @@ async def forward_request(url, data):
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
-        async with session.post(url=url, json=data,
-                                headers=headers) as response:
+        async with session.post(url=url, json=data, headers=headers) as response:
             if response.status == 200:
-                async for chunk_bytes in response.content:
-                    yield chunk_bytes
-    
+                if response.headers.get('Transfer-Encoding') == 'chunked':
+                    async for chunk_bytes in response.content.iter_chunked(1024):
+                        yield chunk_bytes
+                else:
+                    content = await response.read()
+                    yield content
+
 @app.route('/v1/completions', methods=['POST'])
 async def handle_request():
-    
     try:
         original_request_data = await request.get_json()
 
@@ -30,7 +31,7 @@ async def handle_request():
         prefill_request['max_tokens'] = 1
 
         # finish prefill
-        async for data in forward_request('http://localhost:8100/v1/completions', prefill_request):
+        async for _ in forward_request('http://localhost:8100/v1/completions', prefill_request):
             continue
 
         print(f"Request {prefill_request} prefill done. proceeding to decode.")
