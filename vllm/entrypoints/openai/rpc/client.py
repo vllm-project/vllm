@@ -19,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 # Time to wait before checking it the server process is alive.
-SERVER_START_TIMEOUT = 1000
+SERVER_START_TIMEOUT_MS = 1000
 
 
 class AsyncEngineRPCClient:
@@ -128,7 +128,7 @@ class AsyncEngineRPCClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server.",
-            timeout=SERVER_START_TIMEOUT)
+            timeout=SERVER_START_TIMEOUT_MS)
 
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
