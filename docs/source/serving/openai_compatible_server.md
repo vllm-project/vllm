@@ -130,12 +130,12 @@ well-defined failure modes._ As such, it must be explicitly enabled when desired
 
 To enable this feature, you must set the following flags:
 * `--enable-api-tools` -- **mandatory** for Auto tool choice. tells vLLM that you want to enable tool templating and extraction.
-* `--enable-auto-toolchoice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its' own tool scalls when it 
+* `--enable-auto-toolchoice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate. 
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
 that contain previously generated tool calls.This argument can be set to `tool_use` if your model has a tool use chat 
 template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
-from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here]()
+from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json)
 * `--tool-parser` -- select the tool parser to use - currently either `hermes` or `mistral`. 
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template! 
