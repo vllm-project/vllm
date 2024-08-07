@@ -5,7 +5,7 @@
 #include <torch/all.h>
 
 // clang-format off
-// The cutlass inlcude order matters (annoyingly)
+// The cutlass include order matters (annoyingly)
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
@@ -31,7 +31,7 @@ using namespace cute;
 // NOTE This kernel computes D = alpha * A * B + beta * C by computing
 //   D^t = alpha * B^t * A^t + beta * C^t, this is because the wgmma
 //   instructions only support sourcing from registers for the left-hand
-//   operand, we want to upconvert/decompress the quantized oprand in
+//   operand, we want to upconvert/decompress the quantized operand in
 //   register. Since the primary use case we want to support is Y = XW^t where
 //   W is quantized, in this situation or right-hand operand is quantized so
 //   we compute the transpose to move it to the left-hand side.
