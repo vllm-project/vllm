@@ -9,7 +9,7 @@ from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import get_open_port
 
-from ...utils import RemoteOpenAIServer, VLLM_PATH
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
