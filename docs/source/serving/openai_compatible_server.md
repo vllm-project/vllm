@@ -156,12 +156,9 @@ Recommended flags: `--tool-parser hermes --chat-template examples/tool_chat_temp
 #### Mistral Models
 Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3`
+* Possibly mistral-large and mixtral? These have not been tested at the time of this writing.
 
-There are several known issues with tool-calling in Mistral models:
-* Attempting to generate > 1 tool call at a time usually results in a parser failure, since the model generates the calls
-in an unpredictable format due to the aforementioned chat template issue. **This can be mitigated by setting the 
-`temperature` to `0` in the OpenAI-style API call** - do this, and tool calls (including parallel ones) are **far** more 
-consistent
+There is a several known with tool-calling in Mistral models:
 * Mistral function-calling / tool use generates calls with _single_ quotes `'` instead of double quotes `"`. As a 
 result, tool call generations can't be handled as JSON by the parser automatically without using `eval`, which would 
 present security issues for vLLM users. As a result, to support Mistral tool calls, we find-and-replace single-quotes 
