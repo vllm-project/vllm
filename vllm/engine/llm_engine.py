@@ -47,8 +47,7 @@ from vllm.transformers_utils.tokenizer_group import (
     AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import (Counter, is_embedding_model_config,
-                        is_encoder_decoder_model_config)
+from vllm.utils import Counter
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -1563,7 +1562,7 @@ class LLMEngine:
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
 
     def is_encoder_decoder_model(self):
-        return is_encoder_decoder_model_config(self.model_config)
+        return self.model_config.is_encoder_decoder_model
 
     def is_embedding_model(self):
-        return is_embedding_model_config(self.model_config)
+        return self.model_config.is_embedding_model

@@ -1142,23 +1142,3 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
-
-
-def is_encoder_decoder_model_config(model_config) -> bool:
-    '''
-    Extract the HF encoder/decoder model flag from the ModelConfig instance.
-    Return False if model_config is None.
-    '''
-    return model_config is not None and \
-                getattr(model_config.hf_config,
-                        "is_encoder_decoder",
-                        False)
-
-
-def is_embedding_model_config(model_config) -> bool:
-    '''
-    Extract the embedding model flag from the ModelConfig instance.
-    Return False if model_config is None.
-    '''
-    return model_config is not None and \
-                model_config.embedding_mode
