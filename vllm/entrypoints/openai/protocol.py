@@ -358,8 +358,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and data.get('tool_choice',
-                                        'none') not in ("none", "auto"):
+        if guide_count > 1 and data.get("tool_choice",
+                                        "none") not in ("none", "auto"):
             raise ValueError(
                 "You can only either use guided decoding or tools, not both.")
         return data
@@ -396,16 +396,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 specified_function = data["tool_choice"]["function"]
                 if not specified_function:
                     return ValueError(
-                        'Incorrectly formatted `tool_choice`. Should be like '
-                        '`{"type": "function",'
-                        ' "function": {"name": "my_function"}}`')
+                        "Incorrectly formatted `tool_choice`. Should be like "
+                        "`{\"type\": \"function\","
+                        " \"function\": {\"name\": \"my_function\"}}`")
                 specified_function_name = specified_function["name"]
                 if not specified_function_name:
                     return ValueError(
-                        'Incorrectly formatted `tool_choice`. Should be like '
-                        '`{"type": "function", '
-                        '"function": {"name": "my_function"}}`')
-                for tool in data['tools']:
+                        "Incorrectly formatted `tool_choice`. Should be like "
+                        "`{\"type\": \"function\", "
+                        "\"function\": {\"name\": \"my_function\"}}`")
+                for tool in data["tools"]:
                     if tool["function"]["name"] == specified_function_name:
                         valid_tool = True
                         break
@@ -766,7 +766,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[str] = Field(
-        default='stop')  # per OpenAI spec this is the default
+        default="stop")  # per OpenAI spec this is the default
     stop_reason: Optional[Union[int,
                                 str]] = None  # ??? Not part of the OpenAI spec
 
