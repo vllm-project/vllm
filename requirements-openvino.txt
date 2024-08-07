@@ -1,34 +1,7 @@
 # Common dependencies
-# -r requirements-common.txt
-# TODO: remove temporary copy of all common dependencies once Optimum Intel will support Transformers >= 4.43.2
-cmake >= 3.21
-ninja  # For faster builds.
-psutil
-sentencepiece  # Required for LLaMA tokenizer.
-numpy < 2.0.0
-requests
-tqdm
-py-cpuinfo
-transformers < 4.43
-tokenizers >= 0.19.1  # Required for Llama 3.
-fastapi
-aiohttp
-openai
-uvicorn[standard]
-pydantic >= 2.0  # Required for OpenAI server.
-pillow  # Required for image processing
-prometheus_client >= 0.18.0
-prometheus-fastapi-instrumentator >= 7.0.0
-tiktoken >= 0.6.0  # Required for DBRX tokenizer
-lm-format-enforcer == 0.10.3
-outlines >= 0.0.43, < 0.1 # Requires torch >= 2.1.0
-typing_extensions
-filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
-pyzmq
-gguf == 0.9.1
+-r requirements-common.txt
 
 # OpenVINO dependencies
 torch >= 2.1.2
-openvino ~= 2024.3.0.dev
-openvino-tokenizers[transformers] ~= 2024.3.0.0.dev
-optimum-intel[openvino] >= 1.18.1
+openvino ~= 2024.3.0
+optimum-intel[openvino] >= 1.18.2
