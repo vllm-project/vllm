@@ -5,11 +5,47 @@
 # https://github.com/vllm-project/buildkite-ci/blob/main/scripts/test-template-aws.j2 
 # to generate the final pipeline yaml file.
 
+# Documentation
+# label(str): the name of the test. emoji allowed.
+# fast_check(bool): whether to run this on each commit on fastcheck pipeline.
+# fast_check_only(bool): run this test on fastcheck pipeline only
+# command(str): the single command to run for tests. incompatible with commands.
+# commands(list): the list of commands to run for test. incompatbile with command.
+# mirror_hardwares(list): the list of hardwares to run the test on as well. currently only supports [amd]
+# gpu(str): override the GPU selection for the test. default is on L4 GPUs. currently only supports a100
+# num_gpus(int): override the number of GPUs for the test. default to 1 GPU. currently support 2,4.
+# num_nodes(int): whether to simulate multi-node setup by launch multiple containers on one host, 
+#     in this case, commands must be specified. the first command runs on first host, the second
+#     command runs on the second host.
+# working_dir(str): specify the place where command should execute, default to /vllm-workspace/tests
+# source_file_dependencies(list): the list of prefix to opt-in the test for, if empty, the test will always run.
+
+# When adding a test
+# - If the test belong to an existing group, add it there
+# - If the test is short, add to any existing step
+# - If the test takes more than 10min, then it is okay to create a new step. 
+#   Note that all steps execute in parallel. 
 
 steps:
-- label: Async Engine, Inputs, Utils, Worker Test
+##### fast check tests  #####
+
+- label: Documentation Build # 2min
+  working_dir: "/vllm-workspace/test_docs/docs"
   fast_check: true
-  fast_check_only: true
+  no_gpu: True
+  commands:
+  - pip install -r requirements-docs.txt
+  - SPHINXOPTS=\"-W\" make html
+
+- label: Async Engine, Inputs, Utils, Worker Test # 15min
+  fast_check: true
+  source_file_dependencies:
+  - vllm/
+  - tests/async_engine
+  - tests/test_inputs
+  - tests/multimodal
+  - tests/test_utils
+  - tests/worker
   commands:
   - pytest -v -s async_engine # Async Engine
   - pytest -v -s test_inputs.py
@@ -17,31 +53,12 @@ steps:
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
 
-- label: Metrics, Tracing Test
-  fast_check: true
-  fast_check_only: true
-  commands:
-  - pytest -v -s metrics # Metrics
-  - "pip install \
-      opentelemetry-sdk \
-      opentelemetry-api \
-      opentelemetry-exporter-otlp \
-      opentelemetry-semantic-conventions-ai" # Tracing
-  - pytest -v -s tracing
-
-- label: Regression Test
+- label: Basic Correctness Test # 30min
   mirror_hardwares: [amd]
   fast_check: true
-  command: pytest -v -s test_regression.py
-  working_dir: "/vllm-workspace/tests" # optional
-
-- label: AsyncEngine Test
-  #mirror_hardwares: [amd]
-  command: pytest -v -s async_engine
-
-- label: Basic Correctness Test
-  mirror_hardwares: [amd]
-  fast_check: true
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness
   commands:
   # This flashinfer installation will fail on AMD ROCm, so it is set as optional.
   - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl || true
@@ -50,25 +67,212 @@ steps:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-
-- label: Core Test
+  
+- label: Core Test # 10min
   mirror_hardwares: [amd]
   fast_check: true
+  source_file_dependencies:
+  - vllm/core
+  - vllm/distributed
+  - tests/core
   commands:
   - pytest -v -s core
 
-- label: Distributed Comm Ops Test
-  #mirror_hardwares: [amd]
+- label: Entrypoints Test # 20min
+  fast_check: true
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/entrypoints
+  - tests/entrypoints
+  commands:
+  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/openai
+
+- label: Distributed Tests (4 GPUs) # 10min
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  fast_check: true
+  source_file_dependencies:
+  - vllm/
+  - tests/distributed
+  - tests/spec_decode/e2e/test_integration_dist_tp4
+  commands:
+  - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
+
+##### fast check tests  #####
+#####  1 GPU test  #####
+
+- label: Metrics, Tracing Test # 10min
+  source_file_dependencies:
+  - vllm/
+  - tests/metrics
+  - tests/tracing
+  commands:
+  - pytest -v -s metrics 
+  - "pip install \
+      opentelemetry-sdk \
+      opentelemetry-api \
+      opentelemetry-exporter-otlp \
+      opentelemetry-semantic-conventions-ai"
+  - pytest -v -s tracing
+
+- label: Regression Test # 5min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/test_regression
+  command: pytest -v -s test_regression.py
+  working_dir: "/vllm-workspace/tests" # optional
+
+- label: Engine Test # 10min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/engine
+  - tests/tokenization
+  commands:
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  # OOM in the CI unless we run this separately
+  - pytest -v -s tokenization
+
+- label: Examples Test # 12min
+  working_dir: "/vllm-workspace/examples"
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/entrypoints
+  - examples/
+  commands:
+    - pip install awscli tensorizer # for llava example and tensorizer test
+    - python3 offline_inference.py
+    - python3 cpu_offload.py
+    - python3 offline_inference_with_prefix.py
+    - python3 llm_engine_example.py
+    - python3 offline_inference_vision_language.py
+    - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 offline_inference_encoder_decoder.py
+
+- label: Models Test # 1hr10min
+  source_file_dependencies:
+  - vllm/
+  - tests/models
+  commands:
+    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
+    - pytest -v -s models -m \"not vlm\"
+
+- label: Vision Language Models Test # 42min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  commands:
+    - pytest -v -s models -m vlm
+
+- label: Prefix Caching Test # 7min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/prefix_caching
+  commands:
+    - pytest -v -s prefix_caching
+
+- label: Samplers Test # 18min
+  source_file_dependencies:
+  - vllm/model_executor/layers
+  - vllm/sampling_metadata.py
+  - tests/samplers
+  command: pytest -v -s samplers
+
+- label: LogitsProcessor Test # 5min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/model_executor/layers
+  - tests/test_logits_processor
+  command: pytest -v -s test_logits_processor.py
+
+- label: Speculative decoding tests # 22min
+  source_file_dependencies:
+  - vllm/spec_decode
+  - tests/spec_decode
+  commands:
+    # See https://github.com/vllm-project/vllm/issues/5152
+    - export VLLM_ATTENTION_BACKEND=XFORMERS
+    - pytest -v -s spec_decode
+
+- label: LoRA Test %N # 30min each
+  source_file_dependencies:
+  - vllm/lora
+  - csrc/punica
+  - tests/lora
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
+  parallelism: 4
+
+- label: Kernels Test %N # 30min each
+  source_file_dependencies:
+  - csrc/
+  - vllm/attention
+  - tests/kernels
+  commands:
+    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
+    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
+
+- label: Tensorizer Test # 11min
+  soft_fail: true
+  source_file_dependencies:
+  - vllm/model_executor/model_loader
+  - tests/tensorizer_loader
+  commands:
+    - apt-get install -y curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s tensorizer_loader
+
+- label: Benchmarks # 9min
+  working_dir: "/vllm-workspace/.buildkite"
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - benchmarks/
+  commands:
+  - pip install aiohttp
+  - bash run-benchmarks.sh
+
+- label: Quantization Test # 15min
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/quantization
+  command: pytest -v -s quantization
+
+- label: LM Eval Small Models # 53min
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pip install lm-eval
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
+
+#####  1 GPU test  #####
+#####  multi gpus test  #####
+
+- label: Distributed Comm Ops Test # 7min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  source_file_dependencies:
+  - vllm/distributed
+  - tests/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
-- label: 2 Node Tests (4 GPUs in total)
+- label: 2 Node Tests (4 GPUs in total) # 16min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
+  source_file_dependencies:
+  - vllm/
+  - tests/distributed/test_same_node
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
@@ -76,212 +280,69 @@ steps:
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
 
-- label: Distributed Tests (2 GPUs)
+- label: Distributed Tests (2 GPUs) # 28min
   mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  source_file_dependencies:
+  - vllm/
+  - tests/distributed
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray VLLM_USE_RAY_SPMD_WORKER=1 VLLM_USE_RAY_COMPILED_DAG=1 pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray VLLM_USE_RAY_SPMD_WORKER=1 VLLM_USE_RAY_COMPILED_DAG=1 pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_multimodal_broadcast.py
-  - TEST_DIST_MODEL=llava-hf/llava-v1.6-mistral-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_multimodal_broadcast.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_multimodal_broadcast.py
-  - TEST_DIST_MODEL=llava-hf/llava-v1.6-mistral-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_multimodal_broadcast.py
+  - TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py
+  - pytest -v -s distributed/test_basic_distributed_correctness_enc_dec.py
+  - pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - pytest -v -s distributed/test_multimodal_broadcast.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
-- label: Distributed Tests (4 GPUs)
-  #mirror_hardwares: [amd]
+- label: Pipeline Parallelism Test # 23min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
-  fast_check: true
-  commands:
-  - pytest -v -s distributed/test_pynccl.py
-  # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
-  # See https://github.com/vllm-project/vllm/pull/5473#issuecomment-2166601837 for context.
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray VLLM_USE_RAY_SPMD_WORKER=1 VLLM_USE_RAY_COMPILED_DAG=1 pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
-  - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
-
-- label: Pipeline Parallelism Test
-  working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  source_file_dependencies:
+  - vllm/
+  - tests/distributed/test_pipeline_parallel
   commands:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
-- label: Engine Test
-  mirror_hardwares: [amd]
+- label: LoRA Long Context (Distributed) # 11min
+  # This test runs llama 13B, so it is required to run on 4 GPUs.
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/lora
+  - csrc/punica
+  - tests/lora/test_long_context
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
-  # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
-
-- label: Entrypoints Test
-  fast_check: true
-  mirror_hardwares: [amd]
-
-  commands:
-  - pytest -v -s entrypoints/llm
-  - pytest -v -s entrypoints/openai
-
-- label: Examples Test
-  working_dir: "/vllm-workspace/examples"
-  mirror_hardwares: [amd]
-  commands:
-    # install tensorizer for tensorize_vllm_model.py
-    - pip install awscli tensorizer
-    - python3 offline_inference.py
-    - python3 cpu_offload.py
-    - python3 offline_inference_with_prefix.py
-    - python3 llm_engine_example.py
-    - python3 offline_inference_vision_language.py
-    - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
-
-- label: Inputs Test
-  #mirror_hardwares: [amd]
-  commands:
-    - pytest -v -s test_inputs.py
-    - pytest -v -s multimodal
-
-# - label: Kernels Test %N
-#   #mirror_hardwares: [amd]
-#   commands:
-#     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.8/flashinfer-0.0.8+cu121torch2.3-cp310-cp310-linux_x86_64.whl
-#     - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-#   parallelism: 4
-
-- label: Models Test
-  #mirror_hardwares: [amd]
-  commands:
-    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
-    - pytest -v -s models -m \"not vlm\"
-
-- label: Vision Language Models Test
-  mirror_hardwares: [amd]
-  commands:
-    - pytest -v -s models -m vlm
-
-- label: Prefix Caching Test
-  mirror_hardwares: [amd]
-  commands:
-    - pytest -v -s prefix_caching
-
-- label: Samplers Test
-  #mirror_hardwares: [amd]
-  command: pytest -v -s samplers
-
-- label: LogitsProcessor Test
-  mirror_hardwares: [amd]
-  command: pytest -v -s test_logits_processor.py
-
-- label: Utils Test
-  commands:
-    - pytest -v -s test_utils.py
-    - pytest -v -s test_embedded_commit.py
-
-- label: Worker Test
-  mirror_hardwares: [amd]
-  command: pytest -v -s worker
-
-- label: Speculative decoding tests
-  #mirror_hardwares: [amd]
-  commands:
-    # See https://github.com/vllm-project/vllm/issues/5152
-    - export VLLM_ATTENTION_BACKEND=XFORMERS
-    - pytest -v -s spec_decode
-
-# - label: LoRA Test %N
-#   #mirror_hardwares: [amd]
-#   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
-#   parallelism: 4
-
-# - label: LoRA Long Context (Distributed)
-#   #mirror_hardwares: [amd]
-#   num_gpus: 4
-#   # This test runs llama 13B, so it is required to run on 4 GPUs.
-#   commands:
-#     # FIXIT: find out which code initialize cuda before running the test
-#     # before the fix, we need to use spawn to test it
-#     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#     - pytest -v -s -x lora/test_long_context.py
-
-- label: Tensorizer Test
-  #mirror_hardwares: [amd]
-  fast_check: true
-  commands:
-    - apt-get install -y curl libsodium23
+    # FIXIT: find out which code initialize cuda before running the test
+    # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s tensorizer_loader
+    - pytest -v -s -x lora/test_long_context.py
 
-- label: Metrics Test
-  mirror_hardwares: [amd]
-  command: pytest -v -s metrics
+##### multi gpus test #####
+##### A100 test #####
 
-- label: Quantization Test
-  #mirror_hardwares: [amd]
-  command: pytest -v -s quantization
-
-- label: Tracing Test
-  commands: 
-    - "pip install \
-        opentelemetry-sdk \
-        opentelemetry-api \
-        opentelemetry-exporter-otlp \
-        opentelemetry-semantic-conventions-ai"
-    - pytest -v -s tracing
-
-- label: Benchmarks
-  working_dir: "/vllm-workspace/.buildkite"
-  mirror_hardwares: [amd]
-  commands:
-  - pip install aiohttp
-  - bash run-benchmarks.sh
-
-- label: LM Eval Small Models
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - pip install lm-eval
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-small.txt -t 1
-
-- label: LM Eval Large Models
+- label: Distributed Tests (A100) # optional
   gpu: a100
   num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - pip install lm-eval
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-large.txt -t 4
-
-- label: Documentation Build
-  working_dir: "/vllm-workspace/test_docs/docs"
-  fast_check: true
-  no_gpu: True
-  commands:
-  - pip install -r requirements-docs.txt
-  - SPHINXOPTS=\"-W\" make html
-
-- label: Distributed Tests (A100)
-  gpu: a100
-  num_gpus: 4
+  source_file_dependencies:
+  - vllm/
   commands: 
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
-  - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
-  - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=meta-llama/Meta-Llama-3-8B DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TARGET_TEST_SUITE=A100 pytest -v -s distributed/test_basic_distributed_correctness.py
   - pytest -v -s -x lora/test_mixtral.py
+
+- label: LM Eval Large Models # optional
+  gpu: a100
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pip install lm-eval
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-large.txt -t 4

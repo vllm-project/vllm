@@ -1,7 +1,7 @@
 import codecs
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Awaitable, Iterable, List, Optional, Union, cast
+from typing import Awaitable, Iterable, List, Optional, Tuple, Union, cast
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -25,8 +25,7 @@ logger = init_logger(__name__)
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
-    mm_futures: List[Awaitable[MultiModalDataDict]] = field(
-        default_factory=list)
+    mm_futures: List[Awaitable[MultiModalDataDict]]
 
 
 def load_chat_template(chat_template: Optional[str]) -> Optional[str]:
@@ -134,7 +133,7 @@ def _parse_chat_message_content_parts(
     return ChatMessageParseResult(messages=messages, mm_futures=mm_futures)
 
 
-def parse_chat_message_content(
+def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     model_config: ModelConfig,
     tokenizer: PreTrainedTokenizer,
@@ -177,3 +176,21 @@ def parse_chat_message_content(
 
     return _parse_chat_message_content_parts(role, cast(Iterable, content),
                                              model_config, tokenizer)
+
+
+def parse_chat_messages(
+    messages: List[ChatCompletionMessageParam],
+    model_config: ModelConfig,
+    tokenizer: PreTrainedTokenizer,
+) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalDataDict]]]:
+    conversation: List[ConversationMessage] = []
+    mm_futures: List[Awaitable[MultiModalDataDict]] = []
+
+    for msg in messages:
+        parse_result = _parse_chat_message_content(msg, model_config,
+                                                   tokenizer)
+
+        conversation.extend(parse_result.messages)
+        mm_futures.extend(parse_result.mm_futures)
+
+    return conversation, mm_futures

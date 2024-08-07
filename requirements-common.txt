@@ -23,3 +23,4 @@ typing_extensions
 filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
 partial-json-parser # used for parsing partial JSON outputs
 pyzmq
+gguf == 0.9.1

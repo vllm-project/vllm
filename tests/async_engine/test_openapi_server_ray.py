@@ -1,7 +1,8 @@
+import os
+import pathlib
+
 import openai  # use the official client for correctness check
 import pytest
-import pathlib
-import os
 
 from ..utils import RemoteOpenAIServer
 
@@ -10,6 +11,7 @@ MODEL_NAME = "facebook/opt-125m"
 
 chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
     __file__))).parent.parent / "examples/template_chatml.jinja"
+
 
 @pytest.fixture(scope="module")
 def server():

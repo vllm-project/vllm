@@ -65,6 +65,7 @@ DEFAULT_CONDA_PATTERNS = {
     "optree",
     "nccl",
     "transformers",
+    "zmq",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -77,6 +78,7 @@ DEFAULT_PIP_PATTERNS = {
     "onnx",
     "nccl",
     "transformers",
+    "zmq",
 }
 
 
