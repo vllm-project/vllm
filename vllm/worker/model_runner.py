@@ -1392,7 +1392,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        if (self.observability_config.collect_model_forward_time
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time
                 and output is not None):
             model_forward_end.synchronize()
             model_forward_time = model_forward_start.elapsed_time(
