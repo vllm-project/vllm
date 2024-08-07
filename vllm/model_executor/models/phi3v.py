@@ -43,7 +43,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import filter_weights, merge_vision_embeddings
+from .utils import merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -575,6 +575,10 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
+
+        # TODO(ChristopherCho): This is a temporary fix to load
+        #     the vision weights with CLIPVisionModel.load_weights()
+        vision_weights = []
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -594,6 +598,9 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                if "vision_embed_tokens.img_processor" in name:
+                    vision_weights.append((name, loaded_weight))
+                    continue
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -603,5 +610,6 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
 
-        vision_weights = filter_weights(weights, "vision_embed_tokens")
+        vision_weights = [(n.replace("vision_embed_tokens.img_processor.",
+                                     ""), w) for n, w in vision_weights]
         self.vision_embed_tokens.img_processor.load_weights(vision_weights)
