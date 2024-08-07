@@ -38,7 +38,7 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.utils import iterate_with_cancellation, random_uuid
 
-env = Environment(loader=FileSystemLoader('./'),
+env = Environment(loader=FileSystemLoader("./"),
                   autoescape=select_autoescape())
 
 logger = init_logger(__name__)
@@ -75,19 +75,19 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_auto_tools: bool = enable_auto_tools or False
         if self.enable_auto_tools:
             logger.info(
-                '"Auto" tool choice has been enabled please note that while'
-                ' the parallel_tool_calls client option is preset for '
-                'compatibility reasons, it will be ignored.')
+                "\"auto\" tool choice has been enabled please note that while"
+                " the parallel_tool_calls client option is preset for "
+                "compatibility reasons, it will be ignored.")
 
         self.tool_parser: Optional[Type[ToolParser]] = None
         if self.enable_auto_tools:
-            if tool_parser == 'mistral':
+            if tool_parser == "mistral":
                 self.tool_parser = MistralToolParser
-            elif tool_parser == 'hermes':
+            elif tool_parser == "hermes":
                 self.tool_parser = Hermes2ProToolParser
             else:
                 raise TypeError(
-                    'Error: --enable-auto-tool-choice requires --tool-parser')
+                    "Error: --enable-auto-tool-choice requires --tool-parser")
 
     async def create_chat_completion(
         self,
@@ -104,7 +104,7 @@ class OpenAIServingChat(OpenAIServing):
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
-            logger.error('Error with model %s', error_check_ret)
+            logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
         try:
@@ -153,16 +153,16 @@ class OpenAIServingChat(OpenAIServing):
 
         # validation for OpenAI tools
         # tool_choice = "required" is not supported
-        if request.tool_choice == 'required':
+        if request.tool_choice == "required":
             return self.create_error_response(
-                'tool_choice = "required" is not supported!')
+                "tool_choice = \"required\" is not supported!")
 
             # "auto" tools requires --enable-auto-tool-choice and --tool-parser
-        if request.tool_choice == 'auto' and not (
+        if request.tool_choice == "auto" and not (
                 self.enable_auto_tools and self.tool_parser is not None):
             return self.create_error_response(
-                '"auto" tool choice requires '
-                '--enable-auto-tool-choice and --tool-parser to be set')
+                "\"auto\" tool choice requires "
+                "--enable-auto-tool-choice and --tool-parser to be set")
 
         request_id = f"chat-{random_uuid()}"
         try:
@@ -303,7 +303,7 @@ class OpenAIServingChat(OpenAIServing):
                         if conversation and conversation[-1].get(
                                 "content") and conversation[-1].get(
                                     "role") == role:
-                            last_msg_content = conversation[-1]["content"] or ''
+                            last_msg_content = conversation[-1]["content"] or ""
 
                         if last_msg_content:
                             for i in range(num_choices):
@@ -378,7 +378,7 @@ class OpenAIServingChat(OpenAIServing):
                     # handle streaming deltas for tools with tool_choice
                     elif (request.tools and tool_parser
                           and (request.tool_choice is None
-                               or request.tool_choice == 'auto')
+                               or request.tool_choice == "auto")
                           and self.enable_auto_tools):
 
                         delta_message = (
@@ -450,19 +450,19 @@ class OpenAIServingChat(OpenAIServing):
                                 and delta_message.tool_calls[0]
                                 and delta_message.tool_calls[0].function and
                             (delta_message.tool_calls[0].function.arguments
-                             == '' or
+                             == "" or
                              delta_message.tool_calls[0].function.arguments and
-                             (output.finish_reason == 'stop'
-                              or output.finish_reason == 'tool_calls'))
+                             (output.finish_reason == "stop"
+                              or output.finish_reason == "tool_calls"))
                                 and tool_parser
-                                and request.tool_choice == 'auto'):
+                                and request.tool_choice == "auto"):
                             expected_call = json.dumps(
                                 tool_parser.prev_tool_call_arr[index].get(
-                                    'arguments', {}))
+                                    "arguments", {}))
                             actual_call = tool_parser.streamed_args_for_tool[
                                 index]
                             remaining_call = expected_call.replace(
-                                actual_call, '', 1)
+                                actual_call, "", 1)
                             delta_message = DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=index,
                                               function=DeltaFunctionCall(
@@ -478,7 +478,7 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason=output.finish_reason
                             if not (tool_parser
                                     and len(tool_parser.prev_tool_call_arr))
-                            else 'tool_calls',
+                            else "tool_calls",
                             stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
@@ -527,7 +527,7 @@ class OpenAIServingChat(OpenAIServing):
 
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            logger.error('error in chat completion stream generator: %s', e)
+            logger.error("error in chat completion stream generator: %s", e)
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
@@ -625,17 +625,17 @@ class OpenAIServingChat(OpenAIServing):
             # undetermined case that is still important to handle
             else:
                 logger.error(
-                    'Error in chat_completion_full_generator - cannot determine'
-                    ' if tools should be extracted. Returning a standard chat '
-                    'completion.')
+                    "Error in chat_completion_full_generator - cannot determine"
+                    " if tools should be extracted. Returning a standard chat "
+                    "completion.")
                 message = ChatMessage(role=role, content=output.text)
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason='tool_calls' if tools_called else
-                output.finish_reason if output.finish_reason else 'stop',
+                finish_reason="tool_calls" if tools_called else
+                output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason)
             choices.append(choice_data)
 
@@ -643,11 +643,11 @@ class OpenAIServingChat(OpenAIServing):
             last_msg_content = ""
             if conversation and conversation[-1].get(
                     "content") and conversation[-1].get("role") == role:
-                last_msg_content = conversation[-1]["content"] or ''
+                last_msg_content = conversation[-1]["content"] or ""
 
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content
-                                                   or '')
+                                                   or "")
                 choice.message.content = full_message
 
         num_prompt_tokens = len(final_res.prompt_token_ids)
