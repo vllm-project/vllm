@@ -64,7 +64,9 @@ class AsyncEngineRPCClient:
             socket.connect(self.path)
             yield socket
         finally:
-            socket.close()
+            # linger == 0 means discard unsent messages
+            # when the socket is closed
+            socket.close(linger=0)
 
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
@@ -91,14 +93,14 @@ class AsyncEngineRPCClient:
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
                                         error_message: str,
-                                        timeout: int = 0):
+                                        timeout: Optional[int] = None):
         """Send one-way RPC request to trigger an action."""
         with self.socket() as socket:
             # Ping RPC Server with request.
             await socket.send(cloudpickle.dumps(request))
 
             # Await acknowledgement from RPCServer.
-            if timeout > 0 and await socket.poll(timeout) == 0:
+            if timeout is not None and await socket.poll(timeout=timeout) == 0:
                 raise TimeoutError(f"server didn't reply within {timeout} ms")
 
             response = cloudpickle.loads(await socket.recv())
