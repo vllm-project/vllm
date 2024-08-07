@@ -1,10 +1,11 @@
+import os
+import pathlib
 import sys
 import time
 
 import torch
 from openai import OpenAI, OpenAIError
-import os
-import pathlib
+
 from vllm import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -12,6 +13,7 @@ from vllm.utils import get_open_port
 
 chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
     __file__))).parent.parent / "examples/template_chatml.jinja"
+
 
 class MyOPTForCausalLM(OPTForCausalLM):
 
