@@ -2,6 +2,7 @@ import asyncio
 import os
 import socket
 import sys
+from functools import partial
 from typing import (TYPE_CHECKING, Any, AsyncIterator, Awaitable, Protocol,
                     Tuple, TypeVar)
 
@@ -37,11 +38,11 @@ async def test_merge_async_iterators():
                 yield f"item from iterator {idx}"
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
-            pass
+            print(f"iterator {idx} cancelled")
 
     iterators = [mock_async_iterator(i) for i in range(3)]
     merged_iterator: AsyncIterator[Tuple[int, str]] = merge_async_iterators(
-        *iterators)
+        *iterators, is_cancelled=partial(asyncio.sleep, 0, result=False))
 
     async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
         async for idx, output in generator:
