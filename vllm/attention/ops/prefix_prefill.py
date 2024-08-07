@@ -18,8 +18,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
-        k_scale,
-        v_scale,
+        fp8_k_scale,
+        fp8_v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -124,10 +124,10 @@ if triton.__version__ >= "2.1.0":
                              ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                              other=0.0)  # [D,N]
 
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
-            if k_scale != 1.0:
-                k = (k * k_scale).to(k.dtype)
+            if k_load.dtype.is_fp8():
+                k = (k_load.to(tl.float32) * fp8_k_scale).to(q.dtype)
+            else:
+                k = k_load
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
             qk += tl.dot(q, k)
@@ -172,13 +172,12 @@ if triton.__version__ >= "2.1.0":
                              mask=dim_mask[None, :] &
                              ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                              other=0.0)  # [N,D]
-
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(p.dtype) if v_load.dtype.is_fp8() else v_load
-            if v_scale != 1.0:
-                v = (v * v_scale).to(v.dtype)
-
+            if v_load.dtype.is_fp8():
+                v = (v_load.to(tl.float32) * fp8_v_scale).to(q.dtype)
+            else:
+                v = v_load
             p = p.to(v.dtype)
+
             acc += tl.dot(p, v)
             # # update m_i and l_i
             l_i = l_i_new
@@ -198,16 +197,11 @@ if triton.__version__ >= "2.1.0":
         for start_n in range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
             start_n = tl.multiple_of(start_n, BLOCK_N)
             # -- compute qk ----
-            k_load = tl.load(
-                k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-                mask=dim_mask[:, None] &
-                ((start_n + offs_n[None, :]) < cur_batch_query_len),
-                other=0.0)
-
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
-            if k_scale != 1.0:
-                k = (k * k_scale).to(k.dtype)
+            k = tl.load(k_ptrs +
+                        (cur_batch_in_all_start_index + start_n) * stride_kbs,
+                        mask=dim_mask[:, None] &
+                        ((start_n + offs_n[None, :]) < cur_batch_query_len),
+                        other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -237,18 +231,13 @@ if triton.__version__ >= "2.1.0":
             acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
-            v_load = tl.load(
-                v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                mask=dim_mask[None, :] &
-                ((start_n + offs_n[:, None]) < cur_batch_query_len),
-                other=0.0)
-
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(p.dtype) if v_load.dtype.is_fp8() else v_load
-            if v_scale != 1.0:
-                v = (v * v_scale).to(v.dtype)
-
+            v = tl.load(v_ptrs +
+                        (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                        mask=dim_mask[None, :] &
+                        ((start_n + offs_n[:, None]) < cur_batch_query_len),
+                        other=0.0)
             p = p.to(v.dtype)
+
             acc += tl.dot(p, v)
             # update m_i and l_i
             l_i = l_i_new
@@ -463,8 +452,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
-        k_scale,
-        v_scale,
+        fp8_k_scale,
+        fp8_v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -565,10 +554,10 @@ if triton.__version__ >= "2.1.0":
                              ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                              other=0.0)  # [D,N]
 
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
-            if k_scale != 1.0:
-                k = (k * k_scale).to(k.dtype)
+            if k_load.dtype.is_fp8():
+                k = (k_load.to(tl.float32) * fp8_k_scale).to(q.dtype)
+            else:
+                k = k_load
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -605,13 +594,12 @@ if triton.__version__ >= "2.1.0":
                              mask=dim_mask[None, :] &
                              ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                              other=0.0)
-
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(p.dtype) if v_load.dtype.is_fp8() else v_load
-            if v_scale != 1.0:
-                v = (v * v_scale).to(v.dtype)
-
+            if v_load.dtype.is_fp8():
+                v = (v_load.to(tl.float32) * fp8_v_scale).to(q.dtype)
+            else:
+                v = v_load
             p = p.to(v.dtype)
+
             acc += tl.dot(p, v, allow_tf32=False)
             # update m_i and l_i
             l_i = l_i_new
@@ -639,17 +627,12 @@ if triton.__version__ >= "2.1.0":
         for start_n in range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
             start_n = tl.multiple_of(start_n, BLOCK_N)
             # -- compute qk ----
-            k_load = tl.load(
-                k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-                mask=dim_mask[:, None] &
-                ((start_n + offs_n[None, :]) <
-                 cur_batch_seq_len - cur_batch_ctx_len),
-                other=0.0)
-
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
-            if k_scale != 1.0:
-                k = (k * k_scale).to(k.dtype)
+            k = tl.load(k_ptrs +
+                        (cur_batch_in_all_start_index + start_n) * stride_kbs,
+                        mask=dim_mask[:, None] &
+                        ((start_n + offs_n[None, :]) <
+                         cur_batch_seq_len - cur_batch_ctx_len),
+                        other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k, allow_tf32=False)
@@ -682,18 +665,12 @@ if triton.__version__ >= "2.1.0":
             # acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
-            v_load = tl.load(
-                v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                mask=dim_mask[None, :] &
-                ((start_n + offs_n[:, None]) <
-                 cur_batch_seq_len - cur_batch_ctx_len),
-                other=0.0)
-
-            # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(q.dtype) if v_load.dtype.is_fp8() else v_load
-            if v_scale != 1.0:
-                v = (v * v_scale).to(v.dtype)
-
+            v = tl.load(v_ptrs +
+                        (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                        mask=dim_mask[None, :] &
+                        ((start_n + offs_n[:, None]) <
+                         cur_batch_seq_len - cur_batch_ctx_len),
+                        other=0.0)
             p = p.to(v.dtype)
 
             acc += tl.dot(p, v, allow_tf32=False)
@@ -727,8 +704,8 @@ if triton.__version__ >= "2.1.0":
                               b_seq_len,
                               b_ctx_len,
                               max_input_len,
-                              k_scale: float = 1.0,
-                              v_scale: float = 1.0,
+                              fp8_k_scale: float = 1.0,
+                              fp8_v_scale: float = 1.0,
                               alibi_slopes=None,
                               sliding_window=None):
 
@@ -756,8 +733,6 @@ if triton.__version__ >= "2.1.0":
             k_cache = k_cache.view(target_dtype)
             v_cache = v_cache.view(target_dtype)
 
-            print("USING", kv_cache_dtype, k_cache, v_cache)
-
         if (k_cache.dtype == torch.uint8
                 or v_cache.dtype == torch.uint8 and kv_cache_dtype == "auto"):
             raise ValueError("kv_cache_dtype='auto' unsupported for\
@@ -779,7 +754,9 @@ if triton.__version__ >= "2.1.0":
         if sliding_window is None or sliding_window <= 0:
             sliding_window = 0
 
-        num_warps = 8 if Lk <= 64 else 8
+        print("LK", Lk, k_cache.shape)
+
+        num_warps = 8 if Lk <= 64 else 4
         if alibi_slopes is not None:
             _fwd_kernel_alibi[grid](
                 q,
@@ -789,8 +766,8 @@ if triton.__version__ >= "2.1.0":
                 v_cache,
                 b_loc,
                 sm_scale,
-                k_scale,
-                v_scale,
+                fp8_k_scale,
+                fp8_v_scale,
                 b_start_loc,
                 b_seq_len,
                 b_ctx_len,
@@ -842,8 +819,8 @@ if triton.__version__ >= "2.1.0":
             v_cache,
             b_loc,
             sm_scale,
-            k_scale,
-            v_scale,
+            fp8_k_scale,
+            fp8_v_scale,
             b_start_loc,
             b_seq_len,
             b_ctx_len,

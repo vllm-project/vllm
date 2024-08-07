@@ -162,7 +162,8 @@ def which_attn_to_use(
 ) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case.
-    selected_backend = _Backend.FLASH_ATTN
+    selected_backend = _Backend.XFORMERS
+    # selected_backend = _Backend.FLASH_ATTN
 
     # Check whether a particular choice of backend was
     # previously forced.
