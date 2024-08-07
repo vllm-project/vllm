@@ -1,8 +1,7 @@
 import asyncio
 import base64
 import time
-from typing import (AsyncGenerator, AsyncIterator, List, Literal, Optional,
-                    Tuple, Union, cast)
+from typing import AsyncGenerator, List, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -149,9 +148,8 @@ class OpenAIServingEmbedding(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator: AsyncIterator[Tuple[
-            int, EmbeddingRequestOutput]] = merge_async_iterators(
-                *generators, is_cancelled=raw_request.is_disconnected)
+        result_generator = merge_async_iterators(
+            *generators, is_cancelled=raw_request.is_disconnected)
 
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
