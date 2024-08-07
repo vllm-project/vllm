@@ -21,8 +21,8 @@ from vllm.config import TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
-from vllm.inputs import (TextPrompt, to_enc_dec_tuple_list,
-                         zip_enc_dec_prompt_lists)
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
+                         to_enc_dec_tuple_list, zip_enc_dec_prompt_lists)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
@@ -125,9 +125,8 @@ def example_prompts() -> List[str]:
 
 
 @pytest.fixture
-def example_encoder_decoder_prompts() \
-    -> Dict[DecoderPromptType,
-            Tuple[List[str], List[Optional[str]]]]:
+def example_encoder_decoder_prompts(
+) -> Dict[DecoderPromptType, List[ExplicitEncoderDecoderPrompt]]:
     '''
     Returns an encoder prompt list and a decoder prompt list, wherein each pair
     of same-index entries in both lists corresponds to an (encoder prompt,
@@ -444,7 +443,7 @@ class HfRunner:
 
     def generate_encoder_decoder_greedy_logprobs_limit(
         self,
-        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt],
         max_tokens: int,
         num_logprobs: int,
         **kwargs: Any,
@@ -608,7 +607,7 @@ class VllmRunner:
 
     def generate_encoder_decoder_w_logprobs(
         self,
-        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt],
         sampling_params: SamplingParams,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         '''
@@ -653,7 +652,7 @@ class VllmRunner:
 
     def generate_encoder_decoder_greedy_logprobs(
         self,
-        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt],
         max_tokens: int,
         num_logprobs: int,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:

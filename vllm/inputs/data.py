@@ -150,7 +150,7 @@ def zip_enc_dec_prompt_lists(
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: List[ExplicitEncoderDecoderPrompt],
-) -> List[Tuple[PromptInputs, PromptInputs]]:
+) -> List[Tuple[SingletonPromptInputs, SingletonPromptInputs]]:
     return [(enc_dec_prompt['encoder_prompt'],
              enc_dec_prompt['decoder_prompt'])
             for enc_dec_prompt in enc_dec_prompts]
