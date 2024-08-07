@@ -93,7 +93,6 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         tokenizer,
         conversation=mock_request.messages,
         chat_template=mock_request.chat_template or template_content,
-        tokenize=False,
         add_generation_prompt=mock_request.add_generation_prompt,
     )
 
