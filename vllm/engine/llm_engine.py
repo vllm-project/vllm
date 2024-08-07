@@ -829,12 +829,6 @@ class LLMEngine:
             # encoder/decoder prompt is not explicit
             extracted_decoder_prompt = None
 
-        # Invoke helper function to obtain encoder
-        # prompt and prompt token ids, either from
-        # singleton encoder prompt or from the
-        # encoder sub-prompt of an explicit
-        # encoder/decode scenario 2), special
-        # processing is applied to the returned decoder token ids
         (
             encoder_prompt,
             encoder_prompt_token_ids,
@@ -844,11 +838,6 @@ class LLMEngine:
             request_id=request_id,
         )
 
-        # Invoke helper method to obtain
-        # decoder prompt and prompt token ids.
-        #
-        # Helper method will also apply special
-        # preprocessing unique to decoder prompts.
         if extracted_decoder_prompt is None:
             decoder_prompt_token_ids = encoder_prompt_token_ids
             decoder_prompt = encoder_prompt
