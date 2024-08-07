@@ -330,12 +330,7 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
         "1", prompt_length=(num_gpu_blocks - 1) * block_size - 1)
     prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)
-    # # Emulate a forward pass by appending a single token.
-    # # The block manager then knows how many unprocessed
-    # # tokens will be written in the next forward pass.
-    # token_id = 0
     prompt.status = SequenceStatus.RUNNING
-    # prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
 
     # Swap seq group from GPU -> CPU.
     gpu_blocks = block_manager.get_block_table(prompt)
