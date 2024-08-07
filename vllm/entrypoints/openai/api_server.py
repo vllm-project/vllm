@@ -55,7 +55,7 @@ openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
 
-logger = init_logger('vllm.entrypoints.openai.api_server')
+logger = init_logger("vllm.entrypoints.openai.api_server")
 
 _running_tasks: Set[asyncio.Task] = set()
 
@@ -142,7 +142,7 @@ def mount_metrics(app: FastAPI):
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app())
     # Workaround for 307 Redirect for /metrics
-    metrics_route.path_regex = re.compile('^/metrics(?P<path>.*)$')
+    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
     app.routes.append(metrics_route)
 
 
