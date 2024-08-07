@@ -711,6 +711,7 @@ if triton.__version__ >= "2.1.0":
 
         cap = current_platform.get_device_capability()
         BLOCK = 128 if cap[0] >= 8 else 64
+        NUM_WARPS = 8
 
         # need to reduce num. blocks when using fp32
         # due to increased use of GPU shared memory
@@ -754,9 +755,6 @@ if triton.__version__ >= "2.1.0":
         if sliding_window is None or sliding_window <= 0:
             sliding_window = 0
 
-        print("LK", Lk, k_cache.shape)
-
-        num_warps = 8 if Lk <= 64 else 4
         if alibi_slopes is not None:
             _fwd_kernel_alibi[grid](
                 q,
@@ -806,7 +804,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 BLOCK_N=BLOCK,
-                num_warps=num_warps,
+                num_warps=NUM_WARPS,
                 num_stages=1,
             )
             return
@@ -858,7 +856,7 @@ if triton.__version__ >= "2.1.0":
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             SLIDING_WINDOW=sliding_window,
-            num_warps=num_warps,
+            num_warps=NUM_WARPS,
             num_stages=1,
         )
         return
