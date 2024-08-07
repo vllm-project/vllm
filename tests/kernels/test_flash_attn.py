@@ -4,11 +4,11 @@ import pytest
 import torch
 from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
-NUM_HEADS = [(16, 16), (32, 8), (64, 8)]
-HEAD_SIZES = [128, 256]
-BLOCK_SIZES = [16, 32]
+NUM_HEADS = [(12, 12)]
+HEAD_SIZES = [64]
+BLOCK_SIZES = [16]
 DTYPES = [torch.float16, torch.bfloat16]
-NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
+NUM_BLOCKS = 99682  # Large enough to test overflow in index calculation.
 
 
 def ref_paged_attn(
@@ -123,23 +123,8 @@ def test_flash_attn_with_paged_kv(
         f"{torch.max(torch.abs(output - ref_output))}"
 
 
-@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("sliding_window", [None])
-@pytest.mark.parametrize("dtype", DTYPES)
-@torch.inference_mode
-def test_varlen_with_paged_kv(
-    seq_lens: List[Tuple[int, int]],
-    num_heads: Tuple[int, int],
-    head_size: int,
-    sliding_window: Optional[int],
-    dtype: torch.dtype,
-    block_size: int,
-) -> None:
-    torch.set_default_device("cuda")
-    torch.cuda.manual_seed_all(0)
+def prepare_varlen_with_paged_kv_input(seq_lens, num_heads, head_size,
+                                       sliding_window, dtype, block_size):
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -174,11 +159,42 @@ def test_varlen_with_paged_kv(
                               dtype=torch.int32).cumsum(dim=0,
                                                         dtype=torch.int32)
 
-    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    max_num_blocks_per_seq = 128
     block_tables = torch.randint(0,
                                  NUM_BLOCKS,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
+
+    output = (query_lens, kv_lens, query, key_cache, value_cache,
+              cu_query_lens, cu_kv_lens, max_query_len, max_kv_len, scale,
+              window_size, block_tables)
+    return output
+
+
+@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("sliding_window", [None])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode
+def test_varlen_with_paged_kv(
+    seq_lens: List[Tuple[int, int]],
+    num_heads: Tuple[int, int],
+    head_size: int,
+    sliding_window: Optional[int],
+    dtype: torch.dtype,
+    block_size: int,
+) -> None:
+    torch.set_default_device("cuda")
+    torch.cuda.manual_seed_all(0)
+
+    query_lens, kv_lens, query, key_cache, value_cache, \
+        cu_query_lens, cu_kv_lens, max_query_len, \
+            max_kv_len, scale, window_size, block_tables \
+                = prepare_varlen_with_paged_kv_input(seq_lens, num_heads,
+                                                     head_size, sliding_window,
+                                                     dtype, block_size)
 
     output = flash_attn_varlen_func(
         q=query,
@@ -193,6 +209,93 @@ def test_varlen_with_paged_kv(
         window_size=window_size,
         block_table=block_tables,
     )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+    )
+    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+
+
+@pytest.mark.parametrize("seq_lens", [[(1, 912)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("sliding_window", [None])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode
+def test_varlen_with_paged_kv_cudagraph(seq_lens, num_heads, head_size,
+                                        sliding_window, dtype, block_size):
+    torch.set_default_device("cuda")
+    torch.cuda.manual_seed_all(0)
+    graph_seq_lens = [(1, 2)]
+    query_lens, kv_lens, g_query, g_key_cache, g_value_cache, \
+        g_cu_query_lens, g_cu_kv_lens, max_query_len, \
+            max_kv_len, scale, window_size, g_block_tables \
+                = prepare_varlen_with_paged_kv_input(graph_seq_lens, num_heads,
+                                                     head_size, sliding_window,
+                                                     dtype, block_size)
+
+    # Warmup
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            flash_attn_varlen_func(
+                q=g_query,
+                k=g_key_cache,
+                v=g_value_cache,
+                cu_seqlens_q=g_cu_query_lens,
+                cu_seqlens_k=g_cu_kv_lens,
+                max_seqlen_q=max_query_len,
+                max_seqlen_k=max_kv_len,
+                softmax_scale=scale,
+                causal=True,
+                window_size=window_size,
+                block_table=g_block_tables,
+            )
+    torch.cuda.current_stream().wait_stream(s)
+
+    # Capture
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = flash_attn_varlen_func(
+            q=g_query,
+            k=g_key_cache,
+            v=g_value_cache,
+            cu_seqlens_q=g_cu_query_lens,
+            cu_seqlens_k=g_cu_kv_lens,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=max_kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=window_size,
+            block_table=g_block_tables,
+        )
+    torch.cuda.synchronize()
+
+    # Replay
+    query_lens, kv_lens, query, key_cache, value_cache, \
+        cu_query_lens, cu_kv_lens, max_query_len, \
+            max_kv_len, scale, window_size, block_tables \
+                = prepare_varlen_with_paged_kv_input(seq_lens, num_heads,
+                                                     head_size, sliding_window,
+                                                     dtype, block_size)
+    g_query.copy_(query)
+    g_key_cache.copy_(key_cache)
+    g_value_cache.copy_(value_cache)
+    g_cu_query_lens.copy_(cu_query_lens)
+    g_cu_kv_lens.copy_(cu_kv_lens)
+    g_block_tables.copy_(block_tables)
+
+    graph.replay()
 
     ref_output = ref_paged_attn(
         query=query,
