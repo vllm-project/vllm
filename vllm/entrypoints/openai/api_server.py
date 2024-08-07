@@ -89,7 +89,8 @@ async def lifespan(app: FastAPI):
 
 
 @asynccontextmanager
-async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
+async def build_async_engine_client(
+        args: Namespace) -> AsyncIterator[AsyncEngineClient]:
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
@@ -118,8 +119,11 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
         rpc_server_process.start()
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
-        async_engine_client = AsyncEngineRPCClient(port)
-        await async_engine_client.setup()
+        # NOTE: Actually, this is not true yet. We still need to support
+        # embedding models via RPC (see TODO above)
+        rpc_client = AsyncEngineRPCClient(port)
+        async_engine_client = rpc_client  # type: ignore
+        await rpc_client.setup()
 
         try:
             yield async_engine_client
@@ -128,7 +132,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             rpc_server_process.terminate()
 
             # Close all open connections to the backend
-            async_engine_client.close()
+            rpc_client.close()
 
             # Wait for server process to join
             rpc_server_process.join()
