@@ -43,7 +43,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, filter_weights
+from .utils import filter_weights, merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -585,10 +585,10 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                
+
                 if "vision_embed_tokens.img_processor" in name:
                     continue
-                
+
                 param = params_dict[name.replace(weight_name, param_name)]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)

@@ -278,8 +278,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
-            for (param_name, shard_name,
-                    shard_id) in stacked_params_mapping:
+            for (param_name, shard_name, shard_id) in stacked_params_mapping:
                 if shard_name not in name:
                     continue
                 name = name.replace(shard_name, param_name)

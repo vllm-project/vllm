@@ -7,7 +7,7 @@ from typing import Iterable, Optional, Tuple
 import torch
 from PIL import Image
 from torch import nn
-from transformers import SiglipVisionConfig, SiglipVisionConfig
+from transformers import SiglipVisionConfig
 from xformers import ops as xops
 
 from vllm.config import ModelConfig
