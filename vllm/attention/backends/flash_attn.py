@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
-from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+from vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
+from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -18,15 +19,8 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
-flash_attn_varlen_func = torch.library.custom_op(
-    "vllm::flash_attn_varlen_func",
-    fn=flash_attn_varlen_func,
-    mutates_args="unknown")
 
-
-@flash_attn_varlen_func.register_fake
-def _(
-    out_shape: List[int],
+def flash_attn_varlen_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -36,26 +30,63 @@ def _(
     max_seqlen_k: int,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    window_size: Tuple[int, int] = (-1, -1),
+    window_size: Optional[List[int]] = None,
     softcap: float = 0.0,
     alibi_slopes: Optional[List[float]] = None,
     block_table: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    return torch.empty(out_shape,
+    real_window_size: Tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+    return _flash_attn_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=real_window_size,
+        softcap=softcap,
+        alibi_slopes=alibi_slopes,
+        block_table=block_table,
+    )
+
+
+flash_attn_varlen_func = torch.library.custom_op(
+    "vllm::flash_attn_varlen_func", flash_attn_varlen_func, mutates_args=[])
+
+
+@flash_attn_varlen_func.register_fake  # type: ignore
+def _(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Optional[List[int]] = None,
+    softcap: float = 0.0,
+    alibi_slopes: Optional[List[float]] = None,
+    block_table: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    # NOTE: shape can be incorrect.
+    # just annotate the shape to pass Dynamo
+    return torch.empty(q.shape,
                        dtype=q.dtype,
                        layout=q.layout,
                        device=q.device)
 
 
-flash_attn_with_kvcache = torch.library.custom_op(
-    "vllm::flash_attn_with_kvcache",
-    fn=flash_attn_with_kvcache,
-    mutates_args="unknown")
-
-
-@flash_attn_with_kvcache.register_fake
-def _(
-    out_shape: List[int],
+def flash_attn_with_kvcache(
     decode_query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
@@ -65,7 +96,36 @@ def _(
     causal: bool = False,
     alibi_slopes: Optional[List[int]] = None,
 ) -> torch.Tensor:
-    return torch.empty(out_shape,
+    return _flash_attn_with_kvcache(
+        decode_query,
+        key_cache,
+        value_cache,
+        cache_seqlens=cache_seqlens,
+        block_table=block_table,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        alibi_slopes=alibi_slopes,
+    )
+
+
+flash_attn_with_kvcache = torch.library.custom_op(
+    "vllm::flash_attn_with_kvcache", flash_attn_with_kvcache, mutates_args=[])
+
+
+@flash_attn_with_kvcache.register_fake  # type: ignore
+def _(
+    decode_query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    alibi_slopes: Optional[List[int]] = None,
+) -> torch.Tensor:
+    # NOTE: shape can be incorrect.
+    # just annotate the shape to pass Dynamo
+    return torch.empty(decode_query.shape,
                        dtype=decode_query.dtype,
                        layout=decode_query.layout,
                        device=decode_query.device)
@@ -575,7 +635,7 @@ class FlashAttentionImpl(AttentionImpl):
                     max_seqlen_k=prefill_meta.max_prefill_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    window_size=self.sliding_window,
+                    window_size=self.sliding_window,  # type: ignore
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
                 )
@@ -590,12 +650,12 @@ class FlashAttentionImpl(AttentionImpl):
                     k=key_cache,
                     v=value_cache,
                     cu_seqlens_q=prefill_meta.query_start_loc,
-                    max_seqlen_q=prefill_meta.max_query_len,
+                    max_seqlen_q=prefill_meta.max_query_len,  # type: ignore
                     cu_seqlens_k=prefill_meta.seq_start_loc,
                     max_seqlen_k=max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    alibi_slopes=self.alibi_slopes,
+                    alibi_slopes=self.alibi_slopes,  # type: ignore
                     block_table=prefill_meta.block_tables,
                     softcap=self.logits_soft_cap,
                 )
@@ -610,7 +670,7 @@ class FlashAttentionImpl(AttentionImpl):
                 cache_seqlens=decode_meta.seq_lens_tensor,
                 softmax_scale=self.scale,
                 causal=True,
-                alibi_slopes=self.alibi_slopes,
+                alibi_slopes=self.alibi_slopes,  # type: ignore
             ).squeeze(1)
 
         # Reshape the output tensor.
