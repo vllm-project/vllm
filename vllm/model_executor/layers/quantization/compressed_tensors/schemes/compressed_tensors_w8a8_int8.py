@@ -5,7 +5,7 @@ from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from compressed_tensors import QuantizationStrategy
+from compressed_tensors.quantization import QuantizationStrategy
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_int8_linear, convert_to_channelwise)
 from vllm.model_executor.parameter import (BasevLLMParameter,
