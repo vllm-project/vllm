@@ -355,10 +355,17 @@ class _AsyncLLMEngine(LLMEngine):
                 request_id=request_id,
             )
 
-            decoder_task = self._extract_prompt_components_async(
-                inputs["decoder_prompt"],
-                request_id=request_id,
-            )
+            if (decoder_input := inputs["decoder_prompt"]) is None:
+
+                async def dummy_task():
+                    return None, None, None
+
+                decoder_task = dummy_task()
+            else:
+                decoder_task = self._extract_prompt_components_async(
+                    decoder_input,
+                    request_id=request_id,
+                )
 
             (
                 (encoder_prompt, encoder_prompt_token_ids, encoder_mm_data),

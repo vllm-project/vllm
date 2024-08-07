@@ -830,14 +830,21 @@ class LLMEngine:
                 request_id=request_id,
             )
 
-            (
-                decoder_prompt,
-                decoder_prompt_token_ids,
-                decoder_mm_data,
-            ) = self._extract_prompt_components(
-                inputs["decoder_prompt"],
-                request_id=request_id,
-            )
+            if (decoder_input := inputs["decoder_prompt"]) is None:
+                (
+                    decoder_prompt,
+                    decoder_prompt_token_ids,
+                    decoder_mm_data,
+                ) = None, None, None
+            else:
+                (
+                    decoder_prompt,
+                    decoder_prompt_token_ids,
+                    decoder_mm_data,
+                ) = self._extract_prompt_components(
+                    decoder_input,
+                    request_id=request_id,
+                )
         else:
             (
                 encoder_prompt,
