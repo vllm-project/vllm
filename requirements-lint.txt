@@ -1,0 +1,14 @@
+# formatting
+yapf==0.32.0
+toml==0.10.2
+tomli==2.0.1
+ruff==0.1.5
+codespell==2.3.0
+isort==5.13.2
+clang-format==18.1.5
+
+# type checking
+mypy==1.9.0
+types-PyYAML
+types-requests
+types-setuptools

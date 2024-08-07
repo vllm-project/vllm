@@ -1,0 +1,30 @@
+# Needed for Ray accelerated DAG tests
+-r requirements-adag.txt
+
+# testing
+pytest
+tensorizer>=2.9.0
+pytest-forked
+pytest-asyncio
+pytest-rerunfailures
+pytest-shard
+
+# testing utils
+awscli
+einops # required for MPT
+httpx
+peft
+requests
+ray
+sentence-transformers # required for embedding
+compressed-tensors==0.4.0 # required for compressed-tensors
+timm # required for internvl test
+
+# TODO: Add this after fully implementing llava(mantis)
+# git+https://github.com/TIGER-AI-Lab/Mantis.git # required for llava(mantis) test
+
+# Benchmarking
+aiohttp
+
+# quantization
+bitsandbytes==0.42.0

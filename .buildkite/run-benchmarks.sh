@@ -9,10 +9,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 
 # run python-based benchmarks and upload the result to buildkite
-python3 benchmarks/benchmark_latency.py 2>&1 | tee benchmark_latency.txt
+python3 benchmarks/benchmark_latency.py --output-json latency_results.json 2>&1 | tee benchmark_latency.txt
 bench_latency_exit_code=$?
 
-python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 2>&1 | tee benchmark_throughput.txt
+python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --output-json throughput_results.json 2>&1 | tee benchmark_throughput.txt
 bench_throughput_exit_code=$?
 
 # run server-based benchmarks and upload the result to buildkite
@@ -50,16 +50,16 @@ echo "### Serving Benchmarks" >> benchmark_results.md
 sed -n '1p' benchmark_serving.txt >> benchmark_results.md # first line
 echo "" >> benchmark_results.md
 echo '```' >> benchmark_results.md
-tail -n 20 benchmark_serving.txt >> benchmark_results.md # last 20 lines
+tail -n 24 benchmark_serving.txt >> benchmark_results.md # last 24 lines
 echo '```' >> benchmark_results.md
 
 # if the agent binary is not found, skip uploading the results, exit 0
-if [ ! -f /workspace/buildkite-agent ]; then
+if [ ! -f /usr/bin/buildkite-agent ]; then
     exit 0
 fi
 
 # upload the results to buildkite
-/workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
+buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
 
 # exit with the exit code of the benchmarks
 if [ $bench_latency_exit_code -ne 0 ]; then
@@ -74,4 +74,5 @@ if [ $bench_serving_exit_code -ne 0 ]; then
     exit $bench_serving_exit_code
 fi
 
-/workspace/buildkite-agent artifact upload openai-*.json
+rm ShareGPT_V3_unfiltered_cleaned_split.json
+buildkite-agent artifact upload "*.json"

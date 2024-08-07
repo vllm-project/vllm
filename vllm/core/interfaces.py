@@ -35,6 +35,11 @@ class BlockSpaceManager(ABC):
             from vllm.core.block_manager_v2 import BlockSpaceManagerV2
             return BlockSpaceManagerV2
 
+        if version == "embedding":
+            from vllm.core.embedding_model_block_manager import (
+                EmbeddingModelBlockSpaceManager)
+            return EmbeddingModelBlockSpaceManager
+
         raise ValueError(f"Unknown version {version=}")
 
     @abstractmethod
@@ -68,8 +73,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> List[Tuple[int, int]]:
+    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod

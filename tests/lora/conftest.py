@@ -2,6 +2,7 @@ import contextlib
 import gc
 import tempfile
 from collections import OrderedDict
+from typing import Dict, List, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,7 +13,10 @@ from huggingface_hub import snapshot_download
 
 import vllm
 from vllm.config import LoRAConfig
-from vllm.distributed import destroy_model_parallel, initialize_model_parallel
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel,
+                              init_distributed_environment,
+                              initialize_model_parallel)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -22,8 +26,31 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 
 
+class ContextIDInfo(TypedDict):
+    lora_id: int
+    context_length: str
+
+
+class ContextInfo(TypedDict):
+    lora: str
+    context_length: str
+
+
+LONG_LORA_INFOS: List[ContextIDInfo] = [{
+    "lora_id": 1,
+    "context_length": "16k",
+}, {
+    "lora_id": 2,
+    "context_length": "16k",
+}, {
+    "lora_id": 3,
+    "context_length": "32k",
+}]
+
+
 def cleanup():
     destroy_model_parallel()
+    destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
@@ -31,23 +58,36 @@ def cleanup():
     ray.shutdown()
 
 
+@pytest.fixture()
+def should_do_global_cleanup_after_test(request) -> bool:
+    """Allow subdirectories to skip global cleanup by overriding this fixture.
+    This can provide a ~10x speedup for non-GPU unit tests since they don't need
+    to initialize torch.
+    """
+
+    if request.node.get_closest_marker("skip_global_cleanup"):
+        return False
+
+    return True
+
+
 @pytest.fixture(autouse=True)
-def cleanup_fixture():
+def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
-    cleanup()
+    if should_do_global_cleanup_after_test:
+        cleanup()
 
 
 @pytest.fixture
 def dist_init():
-    if not torch.distributed.is_initialized():
-        temp_file = tempfile.mkstemp()[1]
-        torch.distributed.init_process_group(
-            backend="nccl",
-            world_size=1,
-            rank=0,
-            init_method=f"file://{temp_file}",
-        )
-        torch.distributed.all_reduce(torch.zeros(1).cuda())
+    temp_file = tempfile.mkstemp()[1]
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend="nccl",
+    )
     initialize_model_parallel(1, 1)
     yield
     cleanup()
@@ -119,13 +159,21 @@ def dummy_model_gate_up() -> nn.Module:
 
 
 @pytest.fixture(scope="session")
-def sql_lora_files():
-    return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+def sql_lora_huggingface_id():
+    # huggingface repo id is used to test lora runtime downloading.
+    return "yard1/llama-2-7b-sql-lora-test"
+
+
+@pytest.fixture(scope="session")
+def sql_lora_files(sql_lora_huggingface_id):
+    return snapshot_download(repo_id=sql_lora_huggingface_id)
 
 
 @pytest.fixture(scope="session")
 def mixtral_lora_files():
-    return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
+    # Note: this module has incorrect adapter_config.json to test
+    # https://github.com/vllm-project/vllm/pull/5909/files.
+    return snapshot_download(repo_id="SangBinCho/mixtral-lora")
 
 
 @pytest.fixture(scope="session")
@@ -154,8 +202,51 @@ def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
+@pytest.fixture(scope="session")
+def phi2_lora_files():
+    return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_16k_1():
+    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_16k_2():
+    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_32k():
+    return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
+
+
+@pytest.fixture(scope="session")
+def long_context_infos(long_context_lora_files_16k_1,
+                       long_context_lora_files_16k_2,
+                       long_context_lora_files_32k):
+    cleanup()
+    infos: Dict[int, ContextInfo] = {}
+    for lora_checkpoint_info in LONG_LORA_INFOS:
+        lora_id = lora_checkpoint_info["lora_id"]
+        if lora_id == 1:
+            lora = long_context_lora_files_16k_1
+        elif lora_id == 2:
+            lora = long_context_lora_files_16k_2
+        elif lora_id == 3:
+            lora = long_context_lora_files_32k
+        else:
+            raise AssertionError("Unknown lora id")
+        infos[lora_id] = {
+            "context_length": lora_checkpoint_info["context_length"],
+            "lora": lora,
+        }
+    return infos
+
+
 @pytest.fixture
-def llama_2_7b_engine_extra_embeddings() -> nn.Module:
+def llama_2_7b_engine_extra_embeddings():
     cleanup()
     get_model_old = get_model
 
@@ -173,7 +264,6 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
 
 
 @pytest.fixture
-def llama_2_7b_model_extra_embeddings(
-        llama_2_7b_engine_extra_embeddings) -> nn.Module:
+def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
     yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
            model_runner.model)

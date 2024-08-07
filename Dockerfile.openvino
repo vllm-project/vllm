@@ -1,0 +1,29 @@
+# The vLLM Dockerfile is used to construct vLLM image that can be directly used
+# to run the OpenAI compatible server.
+
+FROM ubuntu:22.04 AS dev
+
+RUN apt-get update -y && \
+    apt-get install -y python3-pip git
+WORKDIR /workspace
+
+# copy requirements
+COPY requirements-build.txt /workspace/vllm/
+COPY requirements-common.txt /workspace/vllm/
+COPY requirements-openvino.txt /workspace/vllm/
+
+COPY vllm/ /workspace/vllm/vllm
+COPY csrc/core /workspace/vllm/csrc/core
+COPY cmake/utils.cmake /workspace/vllm/cmake/
+COPY CMakeLists.txt /workspace/vllm/
+COPY setup.py /workspace/vllm/
+
+# install build requirements
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm/requirements-build.txt
+# build vLLM with OpenVINO backend
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/pre-release" VLLM_TARGET_DEVICE="openvino" python3 -m pip install /workspace/vllm/
+
+COPY examples/ /workspace/vllm/examples
+COPY benchmarks/ /workspace/vllm/benchmarks
+
+CMD ["/bin/bash"]

@@ -16,17 +16,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include "../cuda_compat.h"
 
-#include <cub/cub.cuh>
-#include <cub/util_type.cuh>
+#ifndef USE_ROCM
+    #include <cub/util_type.cuh>
+    #include <cub/cub.cuh>
+#else
+    #include <hipcub/util_type.hpp>
+    #include <hipcub/hipcub.hpp>
+#endif
+
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 namespace vllm {
 namespace moe {
-
-static constexpr int WARP_SIZE = 32;
 
 /// Aligned array type
 template <
@@ -265,7 +272,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 #pragma unroll
     for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2)
     {
-        thread_max = max(thread_max, __shfl_xor_sync(0xFFFFFFFF, thread_max, mask, THREADS_PER_ROW));
+        thread_max = max(thread_max, VLLM_SHFL_XOR_SYNC_WIDTH(thread_max, mask, THREADS_PER_ROW));
     }
 
     // From this point, thread max in all the threads have the max within the row.
@@ -282,7 +289,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 #pragma unroll
     for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2)
     {
-        row_sum += __shfl_xor_sync(0xFFFFFFFF, row_sum, mask, THREADS_PER_ROW);
+        row_sum += VLLM_SHFL_XOR_SYNC_WIDTH(row_sum, mask, THREADS_PER_ROW);
     }
 
     // From this point, all threads have the max and the sum for their rows in the thread_max and thread_sum variables
@@ -332,8 +339,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 #pragma unroll
         for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2)
         {
-            float other_max = __shfl_xor_sync(0xFFFFFFFF, max_val, mask, THREADS_PER_ROW);
-            int other_expert = __shfl_xor_sync(0xFFFFFFFF, expert, mask, THREADS_PER_ROW);
+            float other_max = VLLM_SHFL_XOR_SYNC_WIDTH(max_val, mask, THREADS_PER_ROW);
+            int other_expert = VLLM_SHFL_XOR_SYNC_WIDTH(expert, mask, THREADS_PER_ROW);
 
             // We want lower indices to "win" in every thread so we break ties this way
             if (other_max > max_val || (other_max == max_val && other_expert < expert))
@@ -383,7 +390,7 @@ struct TopkConstants
 {
     static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(float);
     static_assert(EXPERTS / (ELTS_PER_LDG * WARP_SIZE) == 0 || EXPERTS % (ELTS_PER_LDG * WARP_SIZE) == 0, "");
-    static constexpr int VECs_PER_THREAD = std::max(1, EXPERTS / (ELTS_PER_LDG * WARP_SIZE));
+    static constexpr int VECs_PER_THREAD = MAX(1, EXPERTS / (ELTS_PER_LDG * WARP_SIZE));
     static constexpr int VPT = VECs_PER_THREAD * ELTS_PER_LDG;
     static constexpr int THREADS_PER_ROW = EXPERTS / VPT;
     static constexpr int ROWS_PER_WARP = WARP_SIZE / THREADS_PER_ROW;
@@ -396,7 +403,7 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
 {
     static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
 
-    static constexpr int BYTES_PER_LDG = std::min(MAX_BYTES_PER_LDG, sizeof(float) * EXPERTS);
+    static constexpr int BYTES_PER_LDG = MIN(MAX_BYTES_PER_LDG, sizeof(float) * EXPERTS);
     using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG>;
     static constexpr int VPT = Constants::VPT;
     static constexpr int ROWS_PER_WARP = Constants::ROWS_PER_WARP;

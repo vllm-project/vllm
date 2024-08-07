@@ -23,6 +23,7 @@ from torch import nn
 from transformers import GPTJConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -37,7 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
 class GPTJAttention(nn.Module):
@@ -45,6 +46,7 @@ class GPTJAttention(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -83,7 +85,11 @@ class GPTJAttention(nn.Module):
             base=rope_theta,
             is_neox_style=False,
         )
-        self.attn = Attention(self.num_heads, self.head_size, scaling)
+        self.attn = Attention(self.num_heads,
+                              self.head_size,
+                              scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -135,13 +141,14 @@ class GPTJBlock(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         inner_dim = (4 * config.n_embd
                      if config.n_inner is None else config.n_inner)
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.attn = GPTJAttention(config, quant_config)
+        self.attn = GPTJAttention(config, cache_config, quant_config)
         self.mlp = GPTJMLP(inner_dim, config, quant_config)
 
     def forward(
@@ -169,6 +176,7 @@ class GPTJModel(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -178,8 +186,10 @@ class GPTJModel(nn.Module):
             config.vocab_size,
             self.embed_dim,
         )
-        self.h = nn.ModuleList(
-            [GPTJBlock(config, quant_config) for _ in range(config.n_layer)])
+        self.h = nn.ModuleList([
+            GPTJBlock(config, cache_config, quant_config)
+            for _ in range(config.n_layer)
+        ])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -207,17 +217,19 @@ class GPTJForCausalLM(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
         assert not config.tie_word_embeddings
-        self.transformer = GPTJModel(config, quant_config)
+        self.transformer = GPTJModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.n_embd,
             bias=True,
+            quant_config=quant_config,
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -228,6 +240,7 @@ class GPTJForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata)
@@ -235,7 +248,7 @@ class GPTJForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata, self.lm_head.bias)
         return logits
 

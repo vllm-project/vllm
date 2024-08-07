@@ -192,7 +192,7 @@ class AQLMConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 70
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -207,8 +207,8 @@ class AQLMConfig(QuantizationConfig):
         return cls(in_group_size, nbits_per_codebook, num_code_books,
                    out_group_size)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["AQLMLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["AQLMLinearMethod"]:
         if isinstance(layer, LinearBase):
             return AQLMLinearMethod(self)
         return None

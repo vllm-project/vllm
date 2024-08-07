@@ -2,4 +2,9 @@
 -r requirements-common.txt
 
 # Dependencies for AMD GPUs
-ray == 2.9.3
+awscli
+boto3
+botocore
+ray >= 2.10.0
+peft
+pytest-asyncio

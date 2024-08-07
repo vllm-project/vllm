@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from shutil import which
 from typing import Dict, List
 
@@ -25,6 +26,34 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
+
+
+def embed_commit_hash():
+    try:
+        if "BUILDKITE_COMMIT" in os.environ:
+            # ci build
+            commit_id = os.environ["BUILDKITE_COMMIT"]
+        else:
+            commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                encoding="utf-8").strip()
+
+        commit_contents = f'__commit__ = "{commit_id}"\n'
+
+        version_file = os.path.join(ROOT_DIR, "vllm", "commit_id.py")
+        with open(version_file, "w", encoding="utf-8") as f:
+            f.write(commit_contents)
+
+    except subprocess.CalledProcessError as e:
+        warnings.warn(f"Failed to get commit hash:\n{e}",
+                      RuntimeWarning,
+                      stacklevel=2)
+    except Exception as e:
+        warnings.warn(f"Failed to embed commit hash:\n{e}",
+                      RuntimeWarning,
+                      stacklevel=2)
+
+
+embed_commit_hash()
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -60,7 +89,7 @@ def remove_prefix(text, prefix):
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
-        super().__init__(name, sources=[], **kwa)
+        super().__init__(name, sources=[], py_limited_api=True, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -140,6 +169,7 @@ class cmake_build_ext(build_ext):
             cmake_args += [
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
+                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
             ]
         elif is_ccache_available():
             cmake_args += [
@@ -150,9 +180,6 @@ class cmake_build_ext(build_ext):
         # Pass the python executable to cmake so it can find an exact
         # match.
         cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
-
-        if _install_punica():
-            cmake_args += ['-DVLLM_INSTALL_PUNICA_KERNELS=ON']
 
         #
         # Setup parallelism and build tool
@@ -171,7 +198,6 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
-
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
@@ -187,25 +213,28 @@ class cmake_build_ext(build_ext):
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
 
+        targets = []
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
+            targets.append(remove_prefix(ext.name, "vllm."))
 
-            ext_target_name = remove_prefix(ext.name, "vllm.")
-            num_jobs, _ = self.compute_num_jobs()
+        num_jobs, _ = self.compute_num_jobs()
 
-            build_args = [
-                '--build', '.', '--target', ext_target_name, '-j',
-                str(num_jobs)
-            ]
+        build_args = [
+            "--build",
+            ".",
+            f"-j={num_jobs}",
+            *[f"--target={name}" for name in targets],
+        ]
 
-            subprocess.check_call(['cmake', *build_args], cwd=self.build_temp)
+        subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
 
 
 def _is_cuda() -> bool:
-    return VLLM_TARGET_DEVICE == "cuda" \
-            and torch.version.cuda is not None \
-            and not _is_neuron()
+    has_cuda = torch.version.cuda is not None
+    return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
+            and not (_is_neuron() or _is_tpu()))
 
 
 def _is_hip() -> bool:
@@ -219,15 +248,31 @@ def _is_neuron() -> bool:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
-    return torch_neuronx_installed or envs.VLLM_BUILD_WITH_NEURON
+    return torch_neuronx_installed or VLLM_TARGET_DEVICE == "neuron"
+
+
+def _is_tpu() -> bool:
+    return VLLM_TARGET_DEVICE == "tpu"
 
 
 def _is_cpu() -> bool:
     return VLLM_TARGET_DEVICE == "cpu"
 
 
-def _install_punica() -> bool:
-    return envs.VLLM_INSTALL_PUNICA_KERNELS
+def _is_openvino() -> bool:
+    return VLLM_TARGET_DEVICE == "openvino"
+
+
+def _is_xpu() -> bool:
+    return VLLM_TARGET_DEVICE == "xpu"
+
+
+def _build_custom_ops() -> bool:
+    return _is_cuda() or _is_hip() or _is_cpu()
+
+
+def _build_core_ext() -> bool:
+    return not _is_neuron() and not _is_tpu()
 
 
 def get_hipcc_rocm_version():
@@ -303,7 +348,7 @@ def find_version(filepath: str) -> str:
 
 
 def get_vllm_version() -> str:
-    version = find_version(get_path("vllm", "__init__.py"))
+    version = find_version(get_path("vllm", "version.py"))
 
     if _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
@@ -322,8 +367,14 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
+    elif _is_openvino():
+        version += "+openvino"
+    elif _is_tpu():
+        version += "+tpu"
     elif _is_cpu():
         version += "+cpu"
+    elif _is_xpu():
+        version += "+xpu"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -358,11 +409,8 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if "vllm-nccl-cu12" in req:
-                req = req.replace("vllm-nccl-cu12",
-                                  f"vllm-nccl-cu{cuda_major}")
-            elif ("vllm-flash-attn" in req
-                  and not (cuda_major == "12" and cuda_minor == "1")):
+            if ("vllm-flash-attn" in req
+                    and not (cuda_major == "12" and cuda_minor == "1")):
                 # vllm-flash-attn is built only for CUDA 12.1.
                 # Skip for other versions.
                 continue
@@ -372,23 +420,30 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
         requirements = _read_requirements("requirements-neuron.txt")
+    elif _is_openvino():
+        requirements = _read_requirements("requirements-openvino.txt")
+    elif _is_tpu():
+        requirements = _read_requirements("requirements-tpu.txt")
     elif _is_cpu():
         requirements = _read_requirements("requirements-cpu.txt")
+    elif _is_xpu():
+        requirements = _read_requirements("requirements-xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, Neuron, "
+            "OpenVINO, or CPU.")
     return requirements
 
 
 ext_modules = []
 
-if _is_cuda():
+if _build_core_ext():
+    ext_modules.append(CMakeExtension(name="vllm._core_C"))
+
+if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
-    if _install_punica():
-        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
-
-if not _is_neuron():
+if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
@@ -417,6 +472,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
@@ -426,8 +482,13 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
-        "tensorizer": ["tensorizer==2.9.0"],
+        "tensorizer": ["tensorizer>=2.9.0"],
     },
-    cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
+    cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     package_data=package_data,
+    entry_points={
+        "console_scripts": [
+            "vllm=vllm.scripts:main",
+        ],
+    },
 )
