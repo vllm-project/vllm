@@ -41,7 +41,7 @@ def retry_until_skip(n: int):
                     gc.collect()
                     torch.cuda.empty_cache()
                     if i == n - 1:
-                        pytest.skip(f"Skipping test after {n} attempts..")
+                        pytest.skip(f"Skipping test after {n} attempts.")
 
             raise AssertionError("Code should not be reached")
 

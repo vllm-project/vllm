@@ -1049,10 +1049,10 @@ except ImportError:
     pynvml = None
 
 
-def with_nvml_context(fn):
+def with_nvml_context(fn: Callable[P, T]) -> Callable[P, T]:
 
     @wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         if pynvml is not None:
             pynvml.nvmlInit()
         try:
@@ -1088,9 +1088,9 @@ def is_full_nvlink(device_ids: List[int]) -> bool:
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
-def run_once(f):
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
-    def wrapper(*args, **kwargs) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         if not wrapper.has_run:  # type: ignore[attr-defined]
             wrapper.has_run = True  # type: ignore[attr-defined]
             return f(*args, **kwargs)
