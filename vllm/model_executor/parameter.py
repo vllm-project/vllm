@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
     "ModelWeightParameter", "ChannelQuantScaleParameter",
-    "GroupQuantScaleParameter"
+    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter"
 ]
 
 logger = init_logger(__name__)
@@ -92,11 +92,13 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_size = kwargs.get("shard_size")
         if isinstance(
                 self,
-                PackedvLLMParameter) and self.packed_dim == self.output_dim:
+            (PackedColumnParameter,
+             PackedvLLMParameter)) and self.packed_dim == self.output_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
         param_data = self.data
+        print(type(self))
 
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param_data.narrow(self.output_dim, shard_offset,
@@ -115,7 +117,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         if isinstance(
                 self,
-                PackedvLLMParameter) and self.output_dim == self.packed_dim:
+            (PackedColumnParameter,
+             PackedvLLMParameter)) and self.output_dim == self.packed_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
@@ -131,13 +134,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data.copy_(loaded_weight)
 
 
-class ModelWeightParameter(_ColumnvLLMParameter):
-    """
-    Parameter class for linear layer weights. Extends the
-    _ColumnvLLMParameter by adding loading functionality
-    for linear layers with row parallel functionality.
-    Requires an input dimension to be defined.
-    """
+class RowvLLMParameter(BasevLLMParameter):
 
     def __init__(self, input_dim: int, **kwargs):
         self._input_dim = input_dim
@@ -160,7 +157,17 @@ class ModelWeightParameter(_ColumnvLLMParameter):
         self.data.copy_(loaded_weight)
 
 
-class GroupQuantScaleParameter(ModelWeightParameter):
+class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
+    """
+    Parameter class for linear layer weights. Extends the
+    _ColumnvLLMParameter by adding loading functionality
+    for linear layers with row parallel functionality.
+    Requires an input dimension to be defined.
+    """
+    pass
+
+
+class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     """
     Parameter class for weight scales loaded for weights with
     grouped quantization. Equivalent to ModelWeightParameter.
@@ -230,6 +237,42 @@ class PerTensorScaleParameter(BasevLLMParameter):
         param_data = param_data[shard_id]
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+
+class PackedColumnParameter(_ColumnvLLMParameter):
+
+    def __init__(self,
+                 packed_factor: int,
+                 packed_dim: int,
+                 marlin_tile_size: Optional[int] = None,
+                 **kwargs):
+        self._packed_factor = packed_factor
+        self._packed_dim = packed_dim
+        self._marlin_tile = marlin_tile_size
+        super().__init__(**kwargs)
+
+    @property
+    def packed_dim(self):
+        return self._packed_dim
+
+    @property
+    def packed_factor(self):
+        return self._packed_factor
+
+    @property
+    def marlin_tile(self):
+        return self._marlin_tile
+
+    def _adjust_shard_indexes_for_marlin(self, shard_size, shard_offset):
+        return shard_size * self.marlin_tile, shard_offset * self.marlin_tile
+
+    def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
+        shard_size = shard_size // self.packed_factor
+        shard_offset = shard_offset // self.packed_factor
+        if self.marlin_tile is not None:
+            return self._adjust_shard_indexes_for_marlin(
+                shard_size, shard_offset)
+        return shard_size, shard_offset
 
 
 class PackedvLLMParameter(ModelWeightParameter):
