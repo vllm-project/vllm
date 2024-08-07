@@ -1,5 +1,5 @@
 import types
-from typing import List, Optional, Type, Tuple
+from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
@@ -225,7 +225,7 @@ def run_awq_test(
         ]
 
     for source_outputs, quant_outputs in zip(source_outputs_per_image,
-                                        quant_outputs_per_image):
+                                             quant_outputs_per_image):
         # TODO: Check whether using original CLIPVisionModel can improve
         # consistency against HF
         check_logprobs_close(
@@ -274,7 +274,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
     )
 
 
-@pytest.mark.parametrize("models", [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")])
+@pytest.mark.parametrize(
+    "models", [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")])
 @pytest.mark.parametrize(
     "size_factors",
     [
@@ -293,7 +294,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 @pytest.mark.parametrize("num_logprobs", [5])
 @torch.inference_mode()
 def test_awq_models(vllm_runner, image_assets, models, size_factors,
-                dtype: str, max_tokens: int, num_logprobs: int) -> None:
+                    dtype: str, max_tokens: int, num_logprobs: int) -> None:
     run_awq_test(
         vllm_runner,
         image_assets,
