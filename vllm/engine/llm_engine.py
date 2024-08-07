@@ -823,23 +823,24 @@ class LLMEngine:
         if is_explicit_encoder_decoder_prompt(inputs):
             (
                 encoder_prompt,
-                encoder_prompt_token_ids,
+                encoder_prompt_ids,
                 encoder_mm_data,
             ) = self._extract_prompt_components(
                 inputs["encoder_prompt"],
                 request_id=request_id,
             )
 
-            if (decoder_input := inputs["decoder_prompt"]) is None:
+            decoder_input = inputs["decoder_prompt"]
+            if decoder_input is None:
                 (
                     decoder_prompt,
-                    decoder_prompt_token_ids,
+                    decoder_prompt_ids,
                     decoder_mm_data,
                 ) = None, None, None
             else:
                 (
                     decoder_prompt,
-                    decoder_prompt_token_ids,
+                    decoder_prompt_ids,
                     decoder_mm_data,
                 ) = self._extract_prompt_components(
                     decoder_input,
@@ -848,14 +849,14 @@ class LLMEngine:
         else:
             (
                 encoder_prompt,
-                encoder_prompt_token_ids,
+                encoder_prompt_ids,
                 encoder_mm_data,
             ) = self._extract_prompt_components(
                 inputs,
                 request_id=request_id,
             )
 
-            decoder_prompt_token_ids = encoder_prompt_token_ids
+            decoder_prompt_ids = encoder_prompt_ids
             decoder_prompt = encoder_prompt
             decoder_mm_data = encoder_mm_data
 
@@ -863,14 +864,13 @@ class LLMEngine:
             raise ValueError("Multi-modal data is not supported for "
                              "(language) encoder-decoder models")
 
-        decoder_prompt_token_ids = (
-            self._prepare_decoder_input_ids_for_generation(
-                decoder_prompt_token_ids))
+        decoder_prompt_ids = (
+            self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids))
 
         return EncoderDecoderLLMInputs(
-            prompt_token_ids=decoder_prompt_token_ids,
+            prompt_token_ids=decoder_prompt_ids,
             prompt=decoder_prompt,
-            encoder_prompt_token_ids=encoder_prompt_token_ids,
+            encoder_prompt_token_ids=encoder_prompt_ids,
             encoder_prompt=encoder_prompt,
         )
 

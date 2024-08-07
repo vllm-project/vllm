@@ -355,33 +355,42 @@ class _AsyncLLMEngine(LLMEngine):
                 request_id=request_id,
             )
 
-            if (decoder_input := inputs["decoder_prompt"]) is None:
+            decoder_input = inputs["decoder_prompt"]
+            if decoder_input is None:
+                (
+                    encoder_prompt,
+                    encoder_prompt_ids,
+                    encoder_mm_data,
+                ) = await encoder_task
 
-                async def dummy_task():
-                    return None, None, None
-
-                decoder_task = dummy_task()
+                (
+                    decoder_prompt,
+                    decoder_prompt_ids,
+                    decoder_mm_data,
+                ) = None, None, None
             else:
                 decoder_task = self._extract_prompt_components_async(
                     decoder_input,
                     request_id=request_id,
                 )
 
-            (
-                (encoder_prompt, encoder_prompt_token_ids, encoder_mm_data),
-                (decoder_prompt, decoder_prompt_token_ids, decoder_mm_data),
-            ) = await asyncio.gather(encoder_task, decoder_task)
+                # NOTE: mypy crashes without the intermediate assignment to
+                # (a, b)
+                (
+                    (encoder_prompt, encoder_prompt_ids, encoder_mm_data),
+                    (decoder_prompt, decoder_prompt_ids, decoder_mm_data),
+                ) = a, b = await asyncio.gather(encoder_task, decoder_task)
         else:
             (
                 encoder_prompt,
-                encoder_prompt_token_ids,
+                encoder_prompt_ids,
                 encoder_mm_data,
             ) = await self._extract_prompt_components_async(
                 inputs,
                 request_id=request_id,
             )
 
-            decoder_prompt_token_ids = encoder_prompt_token_ids
+            decoder_prompt_ids = encoder_prompt_ids
             decoder_prompt = encoder_prompt
             decoder_mm_data = encoder_mm_data
 
@@ -389,14 +398,13 @@ class _AsyncLLMEngine(LLMEngine):
             raise ValueError("Multi-modal data is not supported for "
                              "(language) encoder-decoder models")
 
-        decoder_prompt_token_ids = (
-            self._prepare_decoder_input_ids_for_generation(
-                decoder_prompt_token_ids))
+        decoder_prompt_ids = (
+            self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids))
 
         return EncoderDecoderLLMInputs(
-            prompt_token_ids=decoder_prompt_token_ids,
+            prompt_token_ids=decoder_prompt_ids,
             prompt=decoder_prompt,
-            encoder_prompt_token_ids=encoder_prompt_token_ids,
+            encoder_prompt_token_ids=encoder_prompt_ids,
             encoder_prompt=encoder_prompt,
         )
 
