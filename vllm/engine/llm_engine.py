@@ -533,7 +533,7 @@ class LLMEngine:
 
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
-    def _get_decoder_start_token_id(self, ) -> Optional[int]:
+    def _get_decoder_start_token_id(self) -> Optional[int]:
         '''
         Obtain the decoder start token id employed by an encoder/decoder
         model. Returns None for non-encoder/decoder models or if the
@@ -648,8 +648,7 @@ class LLMEngine:
         * Processed token list
         """
 
-        decoder_start_token_id: Optional[int] = (
-            self._get_decoder_start_token_id())
+        decoder_start_token_id = self._get_decoder_start_token_id()
         assert decoder_start_token_id is not None
 
         if decoder_input_ids is None:
