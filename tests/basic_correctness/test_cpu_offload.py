@@ -22,11 +22,28 @@ def test_cpu_offload_fp8():
                          ["--cpu-offload-gb", "2"])
 
 
-@pytest.mark.skipif(not is_quant_method_supported("awq"),
-                    reason="awq is not supported on this GPU type.")
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
+                    reason="gptq_marlin is not supported on this GPU type.")
+def test_cpu_offload_gptq():
+    # Test GPTQ Marlin
+    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
+                         ["--cpu-offload-gb", "1"])
+    # Test GPTQ
+    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
+                         ["--quantization", "gptq"],
+                         ["--quantization", "gptq", "--cpu-offload-gb", "1"])
+
+
+@pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
+                    reason="awq_marlin is not supported on this GPU type.")
 def test_cpu_offload_awq():
-    compare_two_settings("casperhansen/llama-3-8b-instruct-awq", [],
-                         ["--cpu-offload-gb", "2"])
+    # Test AWQ Marlin
+    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
+                         ["--cpu-offload-gb", "1"])
+    # Test AWQ
+    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ",
+                         ["--quantization", "awq"],
+                         ["--quantization", "awq", "--cpu-offload-gb", "1"])
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
