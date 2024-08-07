@@ -1130,12 +1130,12 @@ __global__ void Marlin(
   };
 
   auto fetch_zp_to_registers = [&](int k, int full_pipe) {
-    if constexpr (has_zp) {
-      // This code does not handle group_blocks == 0,
-      // which signifies act_order.
-      // has_zp implies AWQ, which doesn't have act_order,
-      static_assert(group_blocks != 0);
+    // This code does not handle group_blocks == 0,
+    // which signifies act_order.
+    // has_zp implies AWQ, which doesn't have act_order,
+    static_assert(!has_zp || group_blocks != 0);
 
+    if constexpr (has_zp) {
       int pipe = full_pipe % stages;
 
       if constexpr (group_blocks == -1) {
@@ -1161,7 +1161,13 @@ __global__ void Marlin(
         cur_k += k_iter_size * (k % b_sh_wr_iters);
 
         int k_blocks = cur_k / 16;
-        int cur_group_id = k_blocks / group_blocks;
+        int cur_group_id = 0;
+
+        // Suppress bogus and persistent divide-by-zero warning
+  #pragma nv_diagnostic push
+  #pragma nv_diag_suppress divide_by_zero
+        cur_group_id = k_blocks / group_blocks;
+  #pragma nv_diagnostic pop
 
         int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
