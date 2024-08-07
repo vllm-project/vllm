@@ -276,7 +276,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # required by torch.compile
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
-        layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
 
         # Allocate marlin workspace
         layer.workspace = marlin_make_workspace(
