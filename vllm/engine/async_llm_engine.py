@@ -377,22 +377,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             decoder_comps = None, None, None
 
-        encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
-        decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
-
-        if encoder_mm_data is not None or decoder_mm_data is not None:
-            raise ValueError("Multi-modal data is not supported for "
-                             "(language) encoder-decoder models")
-
-        decoder_prompt_ids = (
-            self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids))
-
-        return EncoderDecoderLLMInputs(
-            prompt_token_ids=decoder_prompt_ids,
-            prompt=decoder_prompt,
-            encoder_prompt_token_ids=encoder_prompt_ids,
-            encoder_prompt=encoder_prompt,
-        )
+        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
 
     async def _process_decoder_only_prompt_async(
         self,
