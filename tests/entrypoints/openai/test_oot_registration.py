@@ -3,12 +3,15 @@ import time
 
 import torch
 from openai import OpenAI, OpenAIError
-
+import os
+import pathlib
 from vllm import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import get_open_port
 
+chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
+    __file__))).parent.parent / "examples/template_chatml.jinja"
 
 class MyOPTForCausalLM(OPTForCausalLM):
 
@@ -26,6 +29,7 @@ def server_function(port):
     ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
     sys.argv = ["placeholder.py"] + \
         ("--model facebook/opt-125m --gpu-memory-utilization 0.10 "
+         f"--chat-template {str(chatml_jinja_path)}"
         f"--dtype float32 --api-key token-abc123 --port {port}").split()
     import runpy
     runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
