@@ -1,6 +1,7 @@
-from typing import TYPE_CHECKING, List, Optional, Tuple, TypedDict, Union
+from typing import (TYPE_CHECKING, Generic, Iterable, List, Optional, Tuple,
+                    Union)
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
@@ -53,8 +54,10 @@ where the decoder-prompt is not specified explicitly, or
 more than one prompt, i.e. :class:`ExplicitEncoderDecoderPrompt`
 """
 
+_T = TypeVar("_T", bound=SingletonPromptInputs, default=SingletonPromptInputs)
 
-class ExplicitEncoderDecoderPrompt(TypedDict):
+
+class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T]):
     """Represents an encoder/decoder model input prompt,
     comprising an explicit encoder prompt and a 
     decoder prompt.
@@ -73,9 +76,9 @@ class ExplicitEncoderDecoderPrompt(TypedDict):
     :class:`SingletonPromptInputs` instances.
     """
 
-    encoder_prompt: SingletonPromptInputs
+    encoder_prompt: _T
 
-    decoder_prompt: SingletonPromptInputs
+    decoder_prompt: Optional[_T]
 
 
 PromptInputs = Union[SingletonPromptInputs, ExplicitEncoderDecoderPrompt]
@@ -130,27 +133,30 @@ class EncoderDecoderLLMInputs(LLMInputs):
 
 
 def build_explicit_enc_dec_prompt(
-    encoder_prompt: SingletonPromptInputs,
-    decoder_prompt: SingletonPromptInputs,
-) -> ExplicitEncoderDecoderPrompt:
+    encoder_prompt: _T,
+    decoder_prompt: Optional[_T],
+) -> ExplicitEncoderDecoderPrompt[_T]:
     return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
                                         decoder_prompt=decoder_prompt)
 
 
-def zip_enc_dec_prompt_lists(
-    enc_prompt_list: List[SingletonPromptInputs],
-    dec_prompt_list: List[SingletonPromptInputs],
-) -> List[ExplicitEncoderDecoderPrompt]:
+def zip_enc_dec_prompts(
+    enc_prompts: Iterable[_T],
+    dec_prompts: Iterable[Optional[_T]],
+) -> List[ExplicitEncoderDecoderPrompt[_T]]:
+    """
+    Zip encoder and decoder prompts together into a list of
+    :class:`ExplicitEncoderDecoderPrompt` instances.
+    """
     return [
         build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
-        for (encoder_prompt,
-             decoder_prompt) in zip(enc_prompt_list, dec_prompt_list)
+        for (encoder_prompt, decoder_prompt) in zip(enc_prompts, dec_prompts)
     ]
 
 
 def to_enc_dec_tuple_list(
-    enc_dec_prompts: List[ExplicitEncoderDecoderPrompt],
-) -> List[Tuple[SingletonPromptInputs, SingletonPromptInputs]]:
-    return [(enc_dec_prompt['encoder_prompt'],
-             enc_dec_prompt['decoder_prompt'])
+    enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T]],
+) -> List[Tuple[_T, Optional[_T]]]:
+    return [(enc_dec_prompt["encoder_prompt"],
+             enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]

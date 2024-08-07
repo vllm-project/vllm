@@ -11,8 +11,7 @@ if not is_cpu():
 
     import pytest
 
-    from tests.models.utils import DecoderPromptType
-
+    from ..conftest import DecoderPromptType
     from .utils import check_logprobs_close
 
     MODELS = ["facebook/bart-base", "facebook/bart-large-cnn"]
