@@ -126,8 +126,7 @@ class AWQMarlinConfig(QuantizationConfig):
 
         return check_marlin_supported(quant_type=cls.TYPE_MAP[num_bits],
                                       group_size=group_size,
-                                      has_zp=has_zp,
-                                      min_capability=cls.get_min_capability())
+                                      has_zp=has_zp)
 
 
 class AWQMarlinLinearMethod(LinearMethodBase):
