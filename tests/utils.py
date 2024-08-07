@@ -266,8 +266,9 @@ def compare_two_settings(model: str,
     arg1_results = results[:n]
     arg2_results = results[n:]
     for arg1_result, arg2_result in zip(arg1_results, arg2_results):
-        assert arg1_result == arg2_result, \
-            f"Results for {model=} are not the same with {arg1=} and {arg2=}"
+        assert arg1_result == arg2_result, (
+            f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
+            f"{arg1_result=} != {arg2_result=}")
 
 
 def init_test_distributed_environment(
