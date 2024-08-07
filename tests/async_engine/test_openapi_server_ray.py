@@ -1,10 +1,12 @@
 import openai  # use the official client for correctness check
 import pytest
 
-from ..utils import RemoteOpenAIServer
+from ..utils import VLLM_PATH, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
+chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
+assert chatml_jinja_path.exists()
 
 
 @pytest.fixture(scope="module")
@@ -16,7 +18,9 @@ def server():
         "--max-model-len",
         "2048",
         "--enforce-eager",
-        "--engine-use-ray"
+        "--engine-use-ray",
+        "--chat-template",
+        str(chatml_jinja_path),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -83,7 +87,7 @@ async def test_single_chat_session(client: openai.AsyncOpenAI):
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=13, total_tokens=23)
+        completion_tokens=10, prompt_tokens=55, total_tokens=65)
 
     message = choice.message
     assert message.content is not None and len(message.content) >= 10

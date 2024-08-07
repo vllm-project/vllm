@@ -50,7 +50,7 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
-    MAX_SERVER_START_WAIT_S = 120  # wait for server to start for 120 seconds
+    MAX_START_WAIT_S = 120  # wait for server to start for 120 seconds
 
     def __init__(
         self,
@@ -85,7 +85,7 @@ class RemoteOpenAIServer:
                                      stdout=sys.stdout,
                                      stderr=sys.stderr)
         self._wait_for_server(url=self.url_for("health"),
-                              timeout=self.MAX_SERVER_START_WAIT_S)
+                              timeout=self.MAX_START_WAIT_S)
 
     def __enter__(self):
         return self
