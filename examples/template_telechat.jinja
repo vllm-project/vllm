@@ -1,0 +1,10 @@
+{{ (messages|selectattr('role', 'equalto', 'system')|list|last).content|trim if (messages|selectattr('role', 'equalto', 'system')|list) else '' }}
+
+{%- for message in messages -%}
+    {%- if message['role'] == 'user' -%}
+        {{- '<_user>' + message['content'] +'<_bot>' -}}
+    {%- elif message['role'] == 'assistant' -%}
+        {{- message['content'] + '<_end>' -}}
+    {%- endif -%}
+{%- endfor -%}
+
