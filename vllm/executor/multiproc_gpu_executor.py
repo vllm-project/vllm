@@ -145,7 +145,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             f"please ensure that world_size ({world_size}) "
             f"is less than than max local gpu count ({cuda_device_count})")
 
-
     def shutdown(self):
         if (worker_monitor := getattr(self, "worker_monitor",
                                       None)) is not None:
