@@ -124,7 +124,9 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
                     break
                 except TimeoutError as e:
                     if not rpc_server_process.is_alive():
-                        raise RuntimeError("Server crashed") from e
+                        raise RuntimeError(
+                            "The server process died before "
+                            "responding to the readiness probe") from e
 
             yield async_engine_client
         finally:
