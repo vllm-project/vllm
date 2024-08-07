@@ -28,7 +28,10 @@ async def handle_request():
         original_request_data = await request.get_json()
 
         prefill_request = original_request_data.copy()
+        # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
+        # avoid sampling overhead by setting detokenize = False
+        prefill_request['detokenize'] = False
 
         # finish prefill
         async for _ in forward_request('http://localhost:8100/v1/completions', prefill_request):
