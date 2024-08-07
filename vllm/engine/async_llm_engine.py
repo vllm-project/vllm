@@ -13,7 +13,8 @@ from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
+                                    PromptComponents)
 from vllm.engine.metrics import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
@@ -22,7 +23,6 @@ from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -314,7 +314,7 @@ class _AsyncLLMEngine(LLMEngine):
         inputs: SingletonPromptInputs,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> Tuple[Optional[str], List[int], Optional[MultiModalDataDict]]:
+    ) -> PromptComponents:
         """Async version of :meth:`_extract_prompt_components`."""
         if isinstance(inputs, str):
             prompt = inputs
@@ -349,50 +349,36 @@ class _AsyncLLMEngine(LLMEngine):
         request_id: str,
     ) -> EncoderDecoderLLMInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
+        encoder_comps: PromptComponents
+        decoder_comps: DecoderPromptComponents
+
         if is_explicit_encoder_decoder_prompt(inputs):
             encoder_task = self._extract_prompt_components_async(
                 inputs["encoder_prompt"],
                 request_id=request_id,
             )
 
-            decoder_input = inputs["decoder_prompt"]
-            if decoder_input is None:
-                (
-                    encoder_prompt,
-                    encoder_prompt_ids,
-                    encoder_mm_data,
-                ) = await encoder_task
-
-                (
-                    decoder_prompt,
-                    decoder_prompt_ids,
-                    decoder_mm_data,
-                ) = None, None, None
+            if (decoder_input := inputs["decoder_prompt"]) is None:
+                encoder_comps = await encoder_task
+                decoder_comps = None, None, None
             else:
                 decoder_task = self._extract_prompt_components_async(
                     decoder_input,
                     request_id=request_id,
                 )
 
-                # NOTE: mypy crashes without the intermediate assignment to
-                # (a, b)
-                (
-                    (encoder_prompt, encoder_prompt_ids, encoder_mm_data),
-                    (decoder_prompt, decoder_prompt_ids, decoder_mm_data),
-                ) = a, b = await asyncio.gather(encoder_task, decoder_task)
+                encoder_comps, decoder_comps = await asyncio.gather(
+                    encoder_task, decoder_task)
         else:
-            (
-                encoder_prompt,
-                encoder_prompt_ids,
-                encoder_mm_data,
-            ) = await self._extract_prompt_components_async(
+            encoder_comps = await self._extract_prompt_components_async(
                 inputs,
                 request_id=request_id,
             )
 
-            decoder_prompt_ids = encoder_prompt_ids
-            decoder_prompt = encoder_prompt
-            decoder_mm_data = encoder_mm_data
+            decoder_comps = encoder_comps
+
+        encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
+        decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
 
         if encoder_mm_data is not None or decoder_mm_data is not None:
             raise ValueError("Multi-modal data is not supported for "

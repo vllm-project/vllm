@@ -70,6 +70,11 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
+PromptComponents = Tuple[Optional[str], List[int],
+                         Optional[MultiModalDataDict]]
+DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
+                                Optional[MultiModalDataDict]]
+
 
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -690,7 +695,7 @@ class LLMEngine:
         inputs: SingletonPromptInputs,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> Tuple[Optional[str], List[int], Optional[MultiModalDataDict]]:
+    ) -> PromptComponents:
         '''
         Extract the components of any single encoder or decoder input prompt.
 
@@ -820,45 +825,32 @@ class LLMEngine:
         * :class:`EncoderDecoderLLMInputs` instance
         '''
 
+        encoder_comps: PromptComponents
+        decoder_comps: DecoderPromptComponents
+
         if is_explicit_encoder_decoder_prompt(inputs):
-            (
-                encoder_prompt,
-                encoder_prompt_ids,
-                encoder_mm_data,
-            ) = self._extract_prompt_components(
+            encoder_comps = self._extract_prompt_components(
                 inputs["encoder_prompt"],
                 request_id=request_id,
             )
 
-            decoder_input = inputs["decoder_prompt"]
-            if decoder_input is None:
-                (
-                    decoder_prompt,
-                    decoder_prompt_ids,
-                    decoder_mm_data,
-                ) = None, None, None
+            if (decoder_input := inputs["decoder_prompt"]) is None:
+                decoder_comps = None, None, None
             else:
-                (
-                    decoder_prompt,
-                    decoder_prompt_ids,
-                    decoder_mm_data,
-                ) = self._extract_prompt_components(
+                decoder_comps = self._extract_prompt_components(
                     decoder_input,
                     request_id=request_id,
                 )
         else:
-            (
-                encoder_prompt,
-                encoder_prompt_ids,
-                encoder_mm_data,
-            ) = self._extract_prompt_components(
+            encoder_comps = self._extract_prompt_components(
                 inputs,
                 request_id=request_id,
             )
 
-            decoder_prompt_ids = encoder_prompt_ids
-            decoder_prompt = encoder_prompt
-            decoder_mm_data = encoder_mm_data
+            decoder_comps = encoder_comps
+
+        encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
+        decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
 
         if encoder_mm_data is not None or decoder_mm_data is not None:
             raise ValueError("Multi-modal data is not supported for "
