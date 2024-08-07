@@ -1,5 +1,9 @@
 steps:
+  - block: "Build wheel"
+    key: block-build-wheel
+  
   - label: "Build wheel - CUDA {{matrix.cuda_version}}"
+    depends_on: block-build-wheel
     agents:
       queue: cpu_queue
     commands:
