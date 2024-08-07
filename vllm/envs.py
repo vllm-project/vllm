@@ -346,8 +346,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, forces FP8 Marlin to be used for FP8 quantization regardless
     # of the hardware support for FP8 compute.
     "VLLM_TEST_FORCE_FP8_MARLIN":
-    lambda: (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
-             ("1", "true")),
+    lambda:
+    (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
+     ("1", "true")),
 }
 
 # end-env-vars-definition
