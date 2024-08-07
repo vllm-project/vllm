@@ -95,7 +95,7 @@ class LLMInputs(TypedDict):
     The inputs in :class:`~vllm.LLMEngine` before they are
     passed to the model executor.
 
-    This includes the data required for decoder-only models.
+    This specifies the data required for decoder-only models.
     """
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
@@ -117,7 +117,7 @@ class EncoderDecoderLLMInputs(LLMInputs):
     The inputs in :class:`~vllm.LLMEngine` before they are
     passed to the model executor.
 
-    This includes the required data for encoder-decoder models.
+    This specifies the required data for encoder-decoder models.
     """
     encoder_prompt_token_ids: List[int]
     """The token IDs of the encoder prompt."""

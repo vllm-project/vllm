@@ -72,8 +72,4 @@ def is_explicit_encoder_decoder_prompt(
 
 def is_valid_encoder_decoder_llm_inputs(
         inputs: LLMInputs) -> TypeIs[EncoderDecoderLLMInputs]:
-    """
-    Return True if the LLMInputs instance has the correct configuration
-    for encoder/decoder.
-    """
     return "encoder_prompt_token_ids" in inputs
