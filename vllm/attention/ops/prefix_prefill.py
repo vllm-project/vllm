@@ -125,7 +125,10 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)  # [D,N]
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
+            if k_load.dtype.is_fp8():  # noqa
+                k = k_load.to(q.dtype)
+            else:
+                k = k_load
             if k_scale != 1.0:
                 k = (k * k_scale).to(k.dtype)
 
@@ -174,7 +177,10 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)  # [N,D]
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(p.dtype) if v_load.dtype.is_fp8() else v_load
+            if v_load.dtype.is_fp8():  # noqa
+                v = v_load.to(p.dtype)
+            else:
+                v = v_load
             if v_scale != 1.0:
                 v = (v * v_scale).to(v.dtype)
 
@@ -204,7 +210,10 @@ if triton.__version__ >= "2.1.0":
                 other=0.0)
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
+            if k_load.dtype.is_fp8():  # noqa
+                k = k_load.to(q.dtype)
+            else:
+                k = k_load
             if k_scale != 1.0:
                 k = (k * k_scale).to(k.dtype)
 
@@ -243,7 +252,10 @@ if triton.__version__ >= "2.1.0":
                 other=0.0)
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(p.dtype) if v_load.dtype.is_fp8() else v_load
+            if v_load.dtype.is_fp8():  # noqa
+                v = v_load.to(p.dtype)
+            else:
+                v = v_load
             if v_scale != 1.0:
                 v = (v * v_scale).to(v.dtype)
 
@@ -564,7 +576,10 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)  # [D,N]
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
+            if k_load.dtype.is_fp8():  # noqa
+                k = k_load.to(q.dtype)
+            else:
+                k = k_load
             if k_scale != 1.0:
                 k = (k * k_scale).to(k.dtype)
 
@@ -605,7 +620,10 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(p.dtype) if v_load.dtype.is_fp8() else v_load
+            if v_load.dtype.is_fp8():  # noqa
+                v = v_load.to(p.dtype)
+            else:
+                v = v_load
             if v_scale != 1.0:
                 v = (v * v_scale).to(v.dtype)
 
@@ -644,7 +662,10 @@ if triton.__version__ >= "2.1.0":
                 other=0.0)
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            k = k_load.to(q.dtype) if k_load.dtype.is_fp8() else k_load
+            if k_load.dtype.is_fp8():  # noqa
+                k = k_load.to(q.dtype)
+            else:
+                k = k_load
             if k_scale != 1.0:
                 k = (k * k_scale).to(k.dtype)
 
@@ -687,7 +708,11 @@ if triton.__version__ >= "2.1.0":
                 other=0.0)
 
             # Only convert if mixed tl.dot is unsupported (e.g. fp8)
-            v = v_load.to(p.dtype) if v_load.dtype.is_fp8() else v_load
+            if v_load.dtype.is_fp8():  # noqa
+                v = v_load.to(p.dtype)
+            else:
+                v = v_load
+
             if v_scale != 1.0:
                 v = (v * v_scale).to(v.dtype)
 

@@ -18,6 +18,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("kv_cache_dtype", [None, "fp8"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -30,6 +31,7 @@ def test_models(
     example_prompts,
     model: str,
     dtype: str,
+    kv_cache_dtype: str,
     max_tokens: int,
     chunked_prefill_token_size: int,
     enforce_eager: bool,
@@ -45,6 +47,8 @@ def test_models(
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
+    extra_kwargs = {"kv_cache_dtype": kv_cache_dtype} if kv_cache_dtype else {}
+
     with vllm_runner(
             model,
             dtype=dtype,
@@ -53,6 +57,7 @@ def test_models(
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             max_num_seqs=max_num_seqs,
+            **extra_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
