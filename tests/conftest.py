@@ -102,11 +102,7 @@ def should_do_global_cleanup_after_test(request) -> bool:
     This can provide a ~10x speedup for non-GPU unit tests since they don't need
     to initialize torch.
     """
-
-    if request.node.get_closest_marker("skip_global_cleanup"):
-        return False
-
-    return True
+    return request.node.get_closest_marker("skip_global_cleanup")
 
 
 @pytest.fixture(autouse=True)
