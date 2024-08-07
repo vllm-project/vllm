@@ -1383,6 +1383,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if (not model_input.is_prompt) and (callback_fn is not None):
             callback_fn()
+
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,

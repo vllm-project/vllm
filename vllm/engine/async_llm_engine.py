@@ -261,23 +261,23 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             output = []
             
-        # hack to avoid callback function for first step
+        # Cache results in engine
         self.previous_output = output
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list
 
-        # HACK: only supports single step
-        if len(output) > 0:
+        if (len(output) > 0) and self.model_config.use_output_proc_callback:
+            assert len(output) == 1, "Multi step decoding does not work with output processor callback"
             self._advance_to_next_step(output[0], seq_group_metadata_list)
 
-        # request_outputs = self._process_model_outputs(
-        #         output, scheduler_outputs.scheduled_seq_groups,
-        #         scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+        if not self.model_config.use_output_proc_callback:
+            self._process_model_outputs()
+
         # Log stats.
-        # self.do_log_stats(scheduler_outputs, output)
+        self.do_log_stats(scheduler_outputs, output)
 
         # Tracing
-        # self.do_tracing(scheduler_outputs)
+        self.do_tracing(scheduler_outputs)
 
         return self.request_outputs
 

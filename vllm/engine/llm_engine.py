@@ -43,7 +43,6 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
-from vllm import utils
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -953,16 +952,17 @@ class LLMEngine:
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list
 
-        if len(output) > 0:
+        if (len(output) > 0) and self.model_config.use_output_proc_callback:
+            assert len(output) == 1, "Multi step decoding does not work with output processor callback"
             self._advance_to_next_step(output[0], seq_group_metadata_list)
 
         if not self.model_config.use_output_proc_callback:
             self._process_model_outputs()
         # Log stats.
-        # self.do_log_stats(scheduler_outputs, output)
+        self.do_log_stats(scheduler_outputs, output)
 
         # Tracing
-        # self.do_tracing(scheduler_outputs)
+        self.do_tracing(scheduler_outputs)
 
         if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are
