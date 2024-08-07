@@ -6,7 +6,6 @@ from typing import Sequence as GenericSequence
 from typing import Type, Union
 
 from fastapi import Request
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig

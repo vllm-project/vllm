@@ -749,7 +749,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # per OpenAI spec this is the default
     finish_reason: Optional[str] = Field(default="stop")
     # not part of the OpenAI spec but included in vLLM for legacy reasons
-    stop_reason: Optional[Union[int,str]] = None
+    stop_reason: Optional[Union[int, str]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
