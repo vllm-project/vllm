@@ -26,7 +26,7 @@ class MyOPTForCausalLM(OPTForCausalLM):
         return logits
 
 
-def server_function(port):
+def server_function(port: int):
     # register our dummy model
     ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
 
@@ -81,8 +81,10 @@ def test_oot_registration_for_api_server():
                     raise RuntimeError("Server did not start in time") from e
             else:
                 raise e
-    server.kill()
+    server.terminate()
+
     generated_text = completion.choices[0].message.content
+    assert generated_text is not None
     # make sure only the first token is generated
     rest = generated_text.replace("<s>", "")
     assert rest == ""
