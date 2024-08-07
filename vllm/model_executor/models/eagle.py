@@ -108,6 +108,12 @@ class EAGLE(nn.Module):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        # This implementation is incompitable with https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B
+        # due to missing lm_head weights and its config being that of a
+        # Llama model. Here's a compatible version with the same weights:
+        # https://huggingface.co/abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm
+        # Also, here's an example script for converting trained EAGLE
+        # checkpoint to vLLM compatible version: https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d
         model_weights = {}
         for name, loaded_weight in weights:
             if name == "token_map":
