@@ -12,7 +12,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
+from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
 from starlette.routing import Mount
 
 import vllm.envs as envs
@@ -148,8 +148,11 @@ router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    
     # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app())
+    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile('^/metrics(?P<path>.*)$')
     app.routes.append(metrics_route)
