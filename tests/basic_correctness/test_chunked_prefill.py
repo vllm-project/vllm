@@ -39,9 +39,10 @@ def test_models(
     enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
-    if (model == "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V"
-            and kv_cache_dtype != "fp8"):
-        pytest.skip("Only test FP8 quantized model with fp8 kv-cache")
+    model_is_fp8 = model == "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V"
+    kv_cache_fp8 = kv_cache_dtype == "fp8"
+    if (model_is_fp8 != kv_cache_fp8):
+        pytest.skip("Test with FP8 quantized model iff fp8 kv-cache")
 
     max_num_seqs = min(chunked_prefill_token_size, 256)
     enable_chunked_prefill = False
