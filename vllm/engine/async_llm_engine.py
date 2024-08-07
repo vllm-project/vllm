@@ -387,22 +387,16 @@ class _AsyncLLMEngine(LLMEngine):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         """Async version of :meth:`_process_decoder_only_prompt`."""
-        (
-            prompt,
-            prompt_token_ids,
-            multi_modal_data,
-        ) = await self._extract_prompt_components_async(
+        prompt_comps = await self._extract_prompt_components_async(
             inputs,
             request_id=request_id,
             lora_request=lora_request,
         )
 
-        prompt_token_ids = self._apply_prompt_adapter(
-            prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
-
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=prompt,
-                         multi_modal_data=multi_modal_data)
+        return self._build_decoder_only_llm_inputs(
+            prompt_comps,
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
     async def process_model_inputs_async(
         self,

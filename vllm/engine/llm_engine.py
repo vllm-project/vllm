@@ -871,6 +871,20 @@ class LLMEngine:
 
         return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
 
+    def _build_decoder_only_llm_inputs(
+        self,
+        prompt_comps: PromptComponents,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> LLMInputs:
+        prompt, prompt_token_ids, multi_modal_data = prompt_comps
+
+        prompt_token_ids = self._apply_prompt_adapter(
+            prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=prompt,
+                         multi_modal_data=multi_modal_data)
+
     def _process_decoder_only_prompt(
         self,
         inputs: SingletonPromptInputs,
@@ -894,22 +908,16 @@ class LLMEngine:
         * :class:`LLMInputs` instance
         '''
 
-        (
-            prompt,
-            prompt_token_ids,
-            multi_modal_data,
-        ) = self._extract_prompt_components(
+        prompt_comps = self._extract_prompt_components(
             inputs,
             request_id=request_id,
             lora_request=lora_request,
         )
 
-        prompt_token_ids = self._apply_prompt_adapter(
-            prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
-
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=prompt,
-                         multi_modal_data=multi_modal_data)
+        return self._build_decoder_only_llm_inputs(
+            prompt_comps,
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
     def process_model_inputs(
         self,
