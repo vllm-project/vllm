@@ -25,7 +25,7 @@ import numpy.typing as npt
 import psutil
 import torch
 import torch.types
-from typing_extensions import ParamSpec, TypeGuard, assert_never
+from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -811,7 +811,7 @@ def is_list_of(
     typ: Type[T],
     *,
     check: Literal["first", "all"] = "first",
-) -> TypeGuard[List[T]]:
+) -> TypeIs[List[T]]:
     if not isinstance(value, list):
         return False
 
