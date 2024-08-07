@@ -24,9 +24,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         ExplicitEncoderDecoderPrompt, LLMInputs, PromptInputs,
-                         SingletonPromptInputs)
+from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs, LLMInputs,
+                         PromptInputs, SingletonPromptInputs)
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -783,18 +782,6 @@ class LLMEngine:
         assert bos_token_id is not None
         return [bos_token_id]
 
-    def _to_explicit_encoder_decoder_prompt(
-        self,
-        inputs: PromptInputs,
-    ) -> ExplicitEncoderDecoderPrompt:
-        if is_explicit_encoder_decoder_prompt(inputs):
-            return inputs
-
-        return ExplicitEncoderDecoderPrompt(
-            encoder_prompt=inputs,
-            decoder_prompt=inputs,
-        )
-
     def _process_encoder_decoder_prompt(
         self,
         inputs: PromptInputs,
@@ -833,40 +820,39 @@ class LLMEngine:
         * :class:`EncoderDecoderLLMInputs` instance
         '''
 
-        explicit_inputs = self._to_explicit_encoder_decoder_prompt(inputs)
-        extracted_encoder_prompt = explicit_inputs["encoder_prompt"]
-        extracted_decoder_prompt = explicit_inputs["decoder_prompt"]
-
-        (
-            encoder_prompt,
-            encoder_prompt_token_ids,
-            encoder_multi_modal_data,
-        ) = self._extract_prompt_components(
-            extracted_encoder_prompt,
-            request_id=request_id,
-        )
-
-        if encoder_multi_modal_data is not None:
-            raise ValueError("Multi-modal data is not supported for "
-                             "(language) encoder-decoder models")
-
-        # Avoid repeated processing if the input was originally in singleton
-        # form, see self._to_explicit_encoder_decoder_prompt
-        if extracted_decoder_prompt is extracted_encoder_prompt:
-            decoder_prompt_token_ids = encoder_prompt_token_ids
-            decoder_prompt = encoder_prompt
-            decoder_multi_modal_data = encoder_multi_modal_data
-        else:
+        if is_explicit_encoder_decoder_prompt(inputs):
             (
-                decoder_prompt,
-                decoder_prompt_token_ids,
-                decoder_multi_modal_data,
+                encoder_prompt,
+                encoder_prompt_token_ids,
+                encoder_mm_data,
             ) = self._extract_prompt_components(
-                extracted_decoder_prompt,
+                inputs["encoder_prompt"],
                 request_id=request_id,
             )
 
-        if decoder_multi_modal_data is not None:
+            (
+                decoder_prompt,
+                decoder_prompt_token_ids,
+                decoder_mm_data,
+            ) = self._extract_prompt_components(
+                inputs["decoder_prompt"],
+                request_id=request_id,
+            )
+        else:
+            (
+                encoder_prompt,
+                encoder_prompt_token_ids,
+                encoder_mm_data,
+            ) = self._extract_prompt_components(
+                inputs,
+                request_id=request_id,
+            )
+
+            decoder_prompt_token_ids = encoder_prompt_token_ids
+            decoder_prompt = encoder_prompt
+            decoder_mm_data = encoder_mm_data
+
+        if encoder_mm_data is not None or decoder_mm_data is not None:
             raise ValueError("Multi-modal data is not supported for "
                              "(language) encoder-decoder models")
 

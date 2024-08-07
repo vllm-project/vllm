@@ -349,40 +349,36 @@ class _AsyncLLMEngine(LLMEngine):
         request_id: str,
     ) -> EncoderDecoderLLMInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
-        explicit_inputs = self._to_explicit_encoder_decoder_prompt(inputs)
-        extracted_encoder_prompt = explicit_inputs["encoder_prompt"]
-        extracted_decoder_prompt = explicit_inputs["decoder_prompt"]
-
-        (
-            encoder_prompt,
-            encoder_prompt_token_ids,
-            encoder_multi_modal_data,
-        ) = await self._extract_prompt_components_async(
-            extracted_encoder_prompt,
-            request_id=request_id,
-        )
-
-        if encoder_multi_modal_data is not None:
-            raise ValueError("Multi-modal data is not supported for "
-                             "(language) encoder-decoder models")
-
-        # Avoid repeated processing if the input was originally in singleton
-        # form, see self._to_explicit_encoder_decoder_prompt
-        if extracted_decoder_prompt is extracted_encoder_prompt:
-            decoder_prompt_token_ids = encoder_prompt_token_ids
-            decoder_prompt = encoder_prompt
-            decoder_multi_modal_data = encoder_multi_modal_data
-        else:
-            (
-                decoder_prompt,
-                decoder_prompt_token_ids,
-                decoder_multi_modal_data,
-            ) = await self._extract_prompt_components_async(
-                extracted_decoder_prompt,
+        if is_explicit_encoder_decoder_prompt(inputs):
+            encoder_task = self._extract_prompt_components_async(
+                inputs["encoder_prompt"],
                 request_id=request_id,
             )
 
-        if decoder_multi_modal_data is not None:
+            decoder_task = self._extract_prompt_components_async(
+                inputs["decoder_prompt"],
+                request_id=request_id,
+            )
+
+            (
+                (encoder_prompt, encoder_prompt_token_ids, encoder_mm_data),
+                (decoder_prompt, decoder_prompt_token_ids, decoder_mm_data),
+            ) = await asyncio.gather(encoder_task, decoder_task)
+        else:
+            (
+                encoder_prompt,
+                encoder_prompt_token_ids,
+                encoder_mm_data,
+            ) = await self._extract_prompt_components_async(
+                inputs,
+                request_id=request_id,
+            )
+
+            decoder_prompt_token_ids = encoder_prompt_token_ids
+            decoder_prompt = encoder_prompt
+            decoder_mm_data = encoder_mm_data
+
+        if encoder_mm_data is not None or decoder_mm_data is not None:
             raise ValueError("Multi-modal data is not supported for "
                              "(language) encoder-decoder models")
 
