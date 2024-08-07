@@ -22,7 +22,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceOutput)
 
-if not envs.VLLM_NO_FLASHINFER_SAMPLER and find_spec("flashinfer"):
+if not envs.VLLM_DISABLE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: disable
     from flashinfer.sampling import (
         top_k_top_p_sampling_from_probs as flashinfer_top_k_top_p_sampling)

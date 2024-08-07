@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
-    VLLM_NO_FLASHINFER_SAMPLER: bool = False
+    VLLM_DISABLE_FLASHINFER_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -252,8 +252,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
     # If set, vllm will not use flashinfer sampler
-    "VLLM_NO_FLASHINFER_SAMPLER":
-    lambda: bool(os.getenv("VLLM_NO_FLASHINFER_SAMPLER", 0)),
+    "VLLM_DISABLE_FLASHINFER_SAMPLER":
+    lambda: bool(os.getenv("VLLM_DISABLE_FLASHINFER_SAMPLER", 0)),
 
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
