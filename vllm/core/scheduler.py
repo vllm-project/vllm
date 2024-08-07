@@ -392,6 +392,19 @@ class Scheduler:
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
 
+                self._free_seq_group_cross_attn_blocks(aborted_group)
+
+    def _free_seq_group_cross_attn_blocks(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        """
+        Free a sequence group from a cross-attention block table.
+        Has no effect on decoder-only models.
+        """
+        if seq_group.is_encoder_decoder():
+            self.block_manager.free_cross(seq_group)
+
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
             self.swapped) != 0
@@ -963,6 +976,17 @@ class Scheduler:
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
 
+            if seq_group.is_encoder_decoder():
+                # Encoder associated with SequenceGroup
+                encoder_seq_data = seq_group.get_encoder_seq().data
+                # Block table for cross-attention
+                # Also managed at SequenceGroup level
+                cross_block_table = self.block_manager.get_cross_block_table(
+                    seq_group)
+            else:
+                encoder_seq_data = None
+                cross_block_table = None
+
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
@@ -1001,6 +1025,8 @@ class Scheduler:
                 token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
+                encoder_seq_data=encoder_seq_data,
+                cross_block_table=cross_block_table,
                 # `multi_modal_data` will only be present for the 1st comm
                 # between engine and worker.
                 # the subsequent comms can still use delta, but
@@ -1032,6 +1058,8 @@ class Scheduler:
         remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.running:
             if seq_group.is_finished():
+                # Free cross-attention block table, if it exists
+                self._free_seq_group_cross_attn_blocks(seq_group)
                 # Add the finished requests to the finished requests list.
                 # This list will be used to update the Mamba cache in the
                 # next step.
