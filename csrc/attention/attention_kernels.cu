@@ -942,10 +942,6 @@ void sequence_block_reducer_launcher(torch::Tensor& out,
   }
 }
 
-#define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T)                            \
-  sequence_block_reducer_launcher<T, 128, 8192>(out, exp_sums, max_logits, \
-                                                tmp_out);
-
 // [num_seqs, num_heads, head_size]
 // [num_seqs, num_heads, float]
 // [num_seqs, num_heads, float]
@@ -955,7 +951,10 @@ void sequence_block_reducer(
     torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
         tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
-){CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(tmp_out.dtype())}
+) {
+  sequence_block_reducer_launcher<tmp_out.dtype()>(out, exp_sums, max_logits,
+                                                   tmp_out);
+}
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
       ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,        \
