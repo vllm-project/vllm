@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Literal, Optional, Union, final
 
 import torch
 from openai.types.chat import ChatCompletionContentPartParam
-from openai.types.chat import (
-    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
-from openai.types.chat import (
-    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
+from openai.types.chat import (ChatCompletionContentPartParam as
+                               OpenAIChatCompletionContentPartParam)
+from openai.types.chat import (ChatCompletionMessageParam as
+                               OpenAIChatCompletionMessageParam)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated, Required, TypedDict
