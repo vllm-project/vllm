@@ -126,7 +126,7 @@ class InternAttention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        qkv, _ = self.qkv_proj(x)
+        qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
         q = q.view(B, N, self.num_heads_per_partition, self.head_dim)
@@ -144,7 +144,6 @@ class InternAttention(nn.Module):
             q,
             k,
             v,
-            p=self.dropout,
             scale=self.scale,
         )
         x = x.view(B, N, -1)
