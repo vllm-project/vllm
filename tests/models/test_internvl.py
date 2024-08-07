@@ -27,7 +27,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
-DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt"]
+DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
 models = [
     snapshot_download("OpenGVLab/InternVL2-1B",
                       allow_patterns=DOWNLOAD_PATTERN),
