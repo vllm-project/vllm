@@ -1,8 +1,6 @@
 from typing import List, Optional
-from typing import Sequence as GenericSequence
 
 import torch
-import torch.types
 
 from vllm.utils import is_pin_memory_available
 
@@ -65,7 +63,7 @@ class LoRALayerWeights:
             output_dim: int,
             rank: int,
             dtype: torch.dtype,
-            device: torch.types.Device,
+            device: torch.device,
             embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         lora_a = torch.zeros([input_dim, rank],
@@ -122,7 +120,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
     @classmethod
     def pack(
-        cls, loras: GenericSequence[Optional["LoRALayerWeights"]]
+            cls, loras: List[Optional["LoRALayerWeights"]]
     ) -> "PackedLoRALayerWeights":
         """Pack a list of LoRAs into a single LoRA.
 

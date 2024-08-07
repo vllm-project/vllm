@@ -1,19 +1,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
-from enum import Enum, auto
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
-                    Tuple, Type, TypeVar)
+from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
+                    TypeVar)
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import ModelRunnerInputBuilderBase
-
-
-class AttentionType(Enum):
-    DECODER = auto()  # Decoder attention between previous layer Q/K/V
-    ENCODER = auto()  # Encoder attention between previous layer Q/K/V
-    ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
 
 
 class AttentionBackend(ABC):
@@ -31,22 +21,8 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
         raise NotImplementedError
-
-    @classmethod
-    def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
-        return cls.get_metadata_cls()(*args, **kwargs)
-
-    @staticmethod
-    @abstractmethod
-    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
-        raise NotImplementedError
-
-    @classmethod
-    def make_metadata_builder(cls, *args,
-                              **kwargs) -> "AttentionMetadataBuilder":
-        return cls.get_builder_cls()(*args, **kwargs)
 
     @staticmethod
     @abstractmethod
@@ -123,20 +99,6 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-class AttentionMetadataBuilder(ABC, Generic[T]):
-    """Abstract class for attention metadata builders."""
-
-    @abstractmethod
-    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int) -> T:
-        """Build attention metadata with on-device tensors."""
-        raise NotImplementedError
-
-
 class AttentionImpl(ABC, Generic[T]):
 
     @abstractmethod
@@ -150,7 +112,6 @@ class AttentionImpl(ABC, Generic[T]):
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -162,8 +123,6 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         raise NotImplementedError

@@ -38,7 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import SamplerOutput
 
 
 class GPTNeoXAttention(nn.Module):
@@ -241,7 +241,6 @@ class GPTNeoXForCausalLM(nn.Module):
         self.embed_out = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
-            quant_config=quant_config,
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -252,7 +251,6 @@ class GPTNeoXForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
                                       attn_metadata)
@@ -260,7 +258,7 @@ class GPTNeoXForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.embed_out, hidden_states,
+        logits = self.logits_processor(self.embed_out.weight, hidden_states,
                                        sampling_metadata)
         return logits
 

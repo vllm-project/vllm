@@ -27,7 +27,7 @@ class SequenceGroupOutputProcessor(ABC):
     def create_output_processor(
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
+        scheduler: Scheduler,
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: "StopChecker",

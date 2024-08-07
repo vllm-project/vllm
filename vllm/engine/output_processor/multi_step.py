@@ -34,7 +34,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def __init__(
         self,
         detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
+        scheduler: Scheduler,
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: StopChecker,
@@ -78,7 +78,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Since there's only one sequence per sequence group, we can take the
         # first sample.
-        samples = [output.samples[0] for output in outputs]
+        samples = [outputs[step].samples[0] for step in range(len(outputs))]
 
         # -1 means the output token is not valid (eg. due to spec decode
         # rejecting tokens).
@@ -141,5 +141,4 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 break
 
         if seq.is_finished():
-            for scheduler in self.scheduler:
-                scheduler.free_seq(seq)
+            self.scheduler.free_seq(seq)

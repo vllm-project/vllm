@@ -1,10 +1,11 @@
+import argparse
+
 from vllm import LLM, SamplingParams
-from vllm.utils import FlexibleArgumentParser
 
 
 def main():
 
-    parser = FlexibleArgumentParser(description='AQLM examples')
+    parser = argparse.ArgumentParser(description='AQLM examples')
 
     parser.add_argument('--model',
                         '-m',
@@ -16,7 +17,7 @@ def main():
                         type=int,
                         default=0,
                         help='known good models by index, [0-4]')
-    parser.add_argument('--tensor-parallel-size',
+    parser.add_argument('--tensor_parallel_size',
                         '-t',
                         type=int,
                         default=1,

@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 from typing import Optional, Union
 
 import huggingface_hub
@@ -12,12 +11,12 @@ from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import BaichuanTokenizer
 from vllm.utils import make_async
 
-from .tokenizer_group import AnyTokenizer
-
 logger = init_logger(__name__)
 
 
-def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
+def get_cached_tokenizer(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Get tokenizer with cached properties.
 
     This will patch the tokenizer object in place.
@@ -56,14 +55,14 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
 
 def get_tokenizer(
-    tokenizer_name: Union[str, Path],
+    tokenizer_name: str,
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     revision: Optional[str] = None,
     download_dir: Optional[str] = None,
     **kwargs,
-) -> AnyTokenizer:
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
     """
     if VLLM_USE_MODELSCOPE:
@@ -88,16 +87,6 @@ def get_tokenizer(
             raise ValueError(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
-
-    if "truncation_side" not in kwargs:
-        kwargs["truncation_side"] = "left"
-
-    # Separate model folder from file path for GGUF models
-    is_gguf = Path(tokenizer_name).is_file() and Path(
-        tokenizer_name).suffix == ".gguf"
-    if is_gguf:
-        kwargs["gguf_file"] = Path(tokenizer_name).name
-        tokenizer_name = Path(tokenizer_name).parent
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(
@@ -145,13 +134,14 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
     if lora_request is None:
         return None
     try:
-        tokenizer = get_tokenizer(lora_request.lora_path, *args, **kwargs)
+        tokenizer = get_tokenizer(lora_request.lora_local_path, *args,
+                                  **kwargs)
     except OSError as e:
         # No tokenizer was found in the LoRA folder,
         # use base model tokenizer
         logger.warning(
             "No tokenizer found in %s, using base model tokenizer instead. "
-            "(Exception: %s)", lora_request.lora_path, e)
+            "(Exception: %s)", lora_request.lora_local_path, e)
         tokenizer = None
     return tokenizer
 

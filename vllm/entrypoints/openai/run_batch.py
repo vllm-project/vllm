@@ -1,28 +1,26 @@
+import argparse
 import asyncio
+import sys
 from io import StringIO
-from typing import Awaitable, List
 
 import aiohttp
 
+import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
-                                              BatchResponseData,
-                                              ChatCompletionResponse,
-                                              ErrorResponse)
+                                              ChatCompletionResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, random_uuid
-from vllm.version import __version__ as VLLM_VERSION
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
 def parse_args():
-    parser = FlexibleArgumentParser(
+    parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible batch runner.")
     parser.add_argument(
         "-i",
@@ -45,17 +43,9 @@ def parse_args():
                         type=nullable_str,
                         default="assistant",
                         help="The role name to return if "
-                        "`request.add_generation_prompt=True`.")
+                        "`request.add_generation_prompt=true`.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
-
-    parser.add_argument('--max-log-len',
-                        type=int,
-                        default=None,
-                        help='Max number of prompt characters or prompt '
-                        'ID numbers being printed in log.'
-                        '\n\nDefault: Unlimited')
-
     return parser.parse_args()
 
 
@@ -65,7 +55,7 @@ async def read_file(path_or_url: str) -> str:
                    session.get(path_or_url) as resp:
             return await resp.text()
     else:
-        with open(path_or_url, "r", encoding="utf-8") as f:
+        with open(path_or_url, "r") as f:
             return f.read()
 
 
@@ -78,7 +68,7 @@ async def write_file(path_or_url: str, data: str) -> None:
         # We should make this async, but as long as this is always run as a
         # standalone program, blocking the event loop won't effect performance
         # in this particular case.
-        with open(path_or_url, "w", encoding="utf-8") as f:
+        with open(path_or_url, "w") as f:
             f.write(data)
 
 
@@ -86,27 +76,20 @@ async def run_request(chat_serving: OpenAIServingChat,
                       request: BatchRequestInput) -> BatchRequestOutput:
     chat_request = request.body
     chat_response = await chat_serving.create_chat_completion(chat_request)
-
     if isinstance(chat_response, ChatCompletionResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=BatchResponseData(
-                body=chat_response, request_id=f"vllm-batch-{random_uuid()}"),
+            response=chat_response,
             error=None,
         )
-    elif isinstance(chat_response, ErrorResponse):
+    else:
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=BatchResponseData(
-                status_code=chat_response.code,
-                request_id=f"vllm-batch-{random_uuid()}"),
+            response=None,
             error=chat_response,
         )
-    else:
-        raise ValueError("Request must not be sent in stream mode")
-
     return batch_output
 
 
@@ -123,24 +106,15 @@ async def main(args):
     # When using single vLLM without engine_use_ray
     model_config = await engine.get_model_config()
 
-    if args.disable_log_requests:
-        request_logger = None
-    else:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
         served_model_names,
         args.response_role,
-        lora_modules=None,
-        prompt_adapters=None,
-        request_logger=request_logger,
-        chat_template=None,
     )
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures: List[Awaitable[BatchRequestOutput]] = []
+    response_futures = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
         request = BatchRequestInput.model_validate_json(request_json)
         response_futures.append(run_request(openai_serving_chat, request))
@@ -154,11 +128,14 @@ async def main(args):
     output_buffer.seek(0)
     await write_file(args.output_file, output_buffer.read().strip())
 
+    # Temporary workaround for https://github.com/vllm-project/vllm/issues/4789
+    sys.exit(0)
+
 
 if __name__ == "__main__":
     args = parse_args()
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.info("vLLM API server version %s", vllm.__version__)
     logger.info("args: %s", args)
 
     asyncio.run(main(args))

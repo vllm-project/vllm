@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
+from typing import FrozenSet, List, Optional, Protocol, Tuple
 
 from vllm.utils import Device
 
@@ -26,13 +26,6 @@ class Block(ABC):
     @property
     @abstractmethod
     def token_ids(self) -> List[int]:
-        pass
-
-    @property
-    @abstractmethod
-    def num_tokens_total(self) -> int:
-        """The number of tokens till the current block (inclusive)
-        """
         pass
 
     @property
@@ -99,18 +92,12 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable_block(self, prev_block: Optional[Block]) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int]) -> Block:
-        pass
-
-    @abstractmethod
-    def allocate_immutable_blocks(
-            self, prev_block: Optional[Block],
-            block_token_ids: List[List[int]]) -> List[Block]:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int]) -> Block:
         pass
 
     @abstractmethod
@@ -127,18 +114,6 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def get_num_free_blocks(self) -> int:
-        pass
-
-    @abstractmethod
-    def get_physical_block_id(self, absolute_id: int) -> int:
-        pass
-
-    @abstractmethod
-    def swap_out(self, blocks: List[Block]) -> None:
-        pass
-
-    @abstractmethod
-    def swap_in(self, blocks: List[Block]) -> None:
         pass
 
     @property
@@ -160,30 +135,18 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int],
-                               skip_last_block_id: bool) -> List[int]:
-        pass
-
-    @abstractmethod
     def get_common_computed_block_ids(
-            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
+            self, seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod
-    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
+    def cow_block_if_not_appendable(self, block: Block) -> Optional["BlockId"]:
         """NOTE: This should not be used besides Block"""
         pass
 
     @abstractmethod
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         """NOTE: This should not be used besides Block"""
-        pass
-
-    @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               num_lookahead_slots: int = 0) -> int:
         pass
 
     class NoFreeBlocksError(ValueError):
@@ -193,20 +156,13 @@ class BlockAllocator(ABC):
 class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable_block(self, prev_block: Optional[Block],
-                               device: Device) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block],
+                         device: Device) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Device) -> Block:
-        pass
-
-    @abstractmethod
-    def allocate_immutable_blocks(self, prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
-                                  device: Device) -> List[Block]:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int], device: Device) -> Block:
         pass
 
     @abstractmethod
@@ -244,30 +200,8 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int],
-                               skip_last_block_id: bool) -> List[int]:
-        pass
-
-    @abstractmethod
     def get_common_computed_block_ids(
-            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
-        pass
-
-    @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               device: Device,
-                               num_lookahead_slots: int = 0) -> int:
-        pass
-
-    @abstractmethod
-    def swap(self, blocks: List[Block], src_device: Device,
-             dst_device: Device) -> Dict[int, int]:
-        pass
-
-    @abstractmethod
-    def get_physical_block_id(self, device: Device, absolute_id: int) -> int:
+            self, seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod

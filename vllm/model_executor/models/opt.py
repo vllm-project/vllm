@@ -39,7 +39,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import SamplerOutput
 
 
 class OPTLearnedPositionalEmbedding(nn.Embedding):
@@ -237,19 +237,14 @@ class OPTDecoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
             inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -277,22 +272,14 @@ class OPTModel(nn.Module):
         super().__init__()
         self.decoder = OPTDecoder(config, cache_config, quant_config)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.decoder.get_input_embeddings(input_ids)
-
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.decoder(input_ids,
-                            positions,
-                            kv_caches,
-                            attn_metadata,
-                            inputs_embeds=inputs_embeds)
+        return self.decoder(input_ids, positions, kv_caches, attn_metadata)
 
 
 class OPTForCausalLM(nn.Module):
@@ -307,7 +294,7 @@ class OPTForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = OPTModel(config, cache_config, quant_config)
-        self.lm_head = self.model.decoder.embed_tokens
+        self.lm_head_weight = self.model.decoder.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -317,7 +304,6 @@ class OPTForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -325,7 +311,7 @@ class OPTForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
+        logits = self.logits_processor(self.lm_head_weight, hidden_states,
                                        sampling_metadata)
         return logits
 

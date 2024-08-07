@@ -69,8 +69,9 @@ class DeepSpeedFPConfig(QuantizationConfig):
             "quantize_config.json",
         ]
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["DeepSpeedFPLinearMethod"]:
+    def get_quant_method(
+            self,
+            layer: torch.nn.Module) -> Optional["DeepSpeedFPLinearMethod"]:
         if isinstance(layer, LinearBase):
             return DeepSpeedFPLinearMethod(self)
         return None

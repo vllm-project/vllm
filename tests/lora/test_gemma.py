@@ -1,12 +1,10 @@
-from typing import List
-
 import vllm
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "google/gemma-7b"
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
+def do_sample(llm, lora_path: str, lora_id: int) -> str:
     prompts = [
         "Quote: Imagination is",
         "Quote: Be yourself;",
@@ -19,7 +17,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts: List[str] = []
+    generated_texts = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
@@ -37,7 +35,7 @@ def test_gemma_lora(gemma_lora_files):
     expected_lora_output = [
         "more important than knowledge.\nAuthor: Albert Einstein\n",
         "everyone else is already taken.\nAuthor: Oscar Wilde\n",
-        "so little time.\nAuthor: Frank Zappa\n",
+        "so little time\nAuthor: Frank Zappa\n",
     ]
 
     output1 = do_sample(llm, gemma_lora_files, lora_id=1)

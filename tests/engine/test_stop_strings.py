@@ -10,8 +10,7 @@ MAX_TOKENS = 200
 
 @pytest.fixture(scope="session")
 def vllm_model(vllm_runner):
-    with vllm_runner(MODEL) as vllm_model:
-        yield vllm_model
+    return vllm_runner(MODEL)
 
 
 @pytest.mark.skip_global_cleanup

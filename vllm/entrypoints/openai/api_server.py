@@ -6,15 +6,20 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from multiprocessing import Process
-from typing import AsyncIterator, Set
+from typing import Optional, AsyncIterator, Set
+import traceback
+import os
 
+import fastapi
 from fastapi import APIRouter, FastAPI, Request
+import uvicorn
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
+import vllm
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -42,6 +47,7 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
+# from loguru import logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
 from vllm.version import __version__ as VLLM_VERSION
@@ -146,11 +152,24 @@ def mount_metrics(app: FastAPI):
     app.routes.append(metrics_route)
 
 
+def log_message(message, error=False):
+    # adding prints in addition to logs to make sure gcp dashboard captures the outputs
+    if not error:
+        # logger.info(message,)
+        logger.info(message)
+    else:
+        # logger.error(message)
+        logger.error(message)
+
+
 @router.get("/health")
 async def health() -> Response:
     """Health check."""
-    await async_engine_client.check_health()
-    return Response(status_code=200)
+    try:
+        await openai_serving_chat.engine.check_health()
+        return Response(status_code=200)
+    except RuntimeError as e:
+        return Response(status_code=501)
 
 
 @router.post("/tokenize")
@@ -163,6 +182,11 @@ async def tokenize(request: TokenizeRequest):
         assert isinstance(generator, TokenizeResponse)
         return JSONResponse(content=generator.model_dump())
 
+
+@router.get("/lora-health")
+async def lora_health() -> Response:
+    """Health check."""
+    return Response(status_code=200) if openai_serving_chat.is_lora_healthy else Response(status_code=501)
 
 @router.post("/detokenize")
 async def detokenize(request: DetokenizeRequest):
@@ -190,42 +214,70 @@ async def show_version():
 @router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
-    generator = await openai_serving_chat.create_chat_completion(
-        request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        assert isinstance(generator, ChatCompletionResponse)
-        return JSONResponse(content=generator.model_dump())
-
+    try:
+        log_message(f"now entering a chat completion endpoint with {request}")
+        if request.lora_request is not None:
+            log_message(f"current adapters in folder /data/adapters: {os.listdir('/data/adapters/')}")
+            log_message(f"contents of {request.lora_request.lora_local_path} "
+                        f": {os.listdir(request.lora_request.lora_local_path)}")
+        generator = await openai_serving_chat.create_chat_completion(
+            request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        if request.stream:
+            return StreamingResponse(content=generator,
+                                     media_type="text/event-stream")
+        else:
+            assert isinstance(generator, ChatCompletionResponse)
+            return JSONResponse(content=generator.model_dump())
+    except Exception as e:
+        response = JSONResponse(content=f"Error in create_chat_completion. \ntraceback: {traceback.format_exc()}",
+                                status_code=500)
+        log_message(f"Error in create_chat_completion. \ntraceback: {traceback.format_exc()}", error=True)
+        return response
 
 @router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
-    generator = await openai_serving_completion.create_completion(
-        request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        return JSONResponse(content=generator.model_dump())
+    try:
+        log_message(f"now entering a completion endpoint with {request}")
+        if request.lora_request is not None:
+            log_message(f"current adapters in folder /data/adapters: {os.listdir('/data/adapters/')}")
+            log_message(f"contents of {request.lora_request.lora_local_path} "
+                        f": {os.listdir(request.lora_request.lora_local_path)}")
+        generator = await openai_serving_completion.create_completion(
+            request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        if request.stream:
+            return StreamingResponse(content=generator,
+                                     media_type="text/event-stream")
+        else:
+            return JSONResponse(content=generator.model_dump())
+    except Exception as e:
+        response = JSONResponse(content=f"Error in create_completion \ntraceback: {traceback.format_exc()}",
+                                status_code=500)
+        log_message(f"Error in create_completion \ntraceback: {traceback.format_exc()}", error=True)
+        return response
 
 
 @router.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
-    generator = await openai_serving_embedding.create_embedding(
-        request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    else:
-        return JSONResponse(content=generator.model_dump())
+    try:
+        log_message(f"now entering an embedding endpoint with {request}")
+        generator = await openai_serving_embedding.create_embedding(
+            request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        else:
+            return JSONResponse(content=generator.model_dump())
+    except Exception as e:
+        response = JSONResponse(content=f"Error in create_embedding \ntraceback: {traceback.format_exc()}",
+                                status_code=500)
+        log_message(f"Error in create_embedding \ntraceback: {traceback.format_exc()}", error=True)
+        return response
 
 
 def build_app(args: Namespace) -> FastAPI:

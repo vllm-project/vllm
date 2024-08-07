@@ -4,13 +4,10 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import aiohttp
-import huggingface_hub.constants
 from tqdm.asyncio import tqdm
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -71,13 +68,9 @@ async def async_request_tgi(
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-                        chunk_bytes = chunk_bytes.decode("utf-8")
 
-                        #NOTE: Sometimes TGI returns a ping response without
-                        # any data, we should skip it.
-                        if chunk_bytes.startswith(":"):
-                            continue
-                        chunk = remove_prefix(chunk_bytes, "data:")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
+                                              "data:")
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
@@ -225,8 +218,8 @@ async def async_request_openai_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "completions"
-    ), "OpenAI Completions API URL must end with 'completions'."
+        "v1/completions"
+    ), "OpenAI Completions API URL must end with 'v1/completions'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -265,9 +258,6 @@ async def async_request_openai_completions(
                         else:
                             data = json.loads(chunk)
 
-                            # NOTE: Some completion API might have a last
-                            # usage summary response without a token so we
-                            # want to check a token was generated
                             if data["choices"][0]["text"]:
                                 timestamp = time.perf_counter()
                                 # First token
@@ -276,8 +266,12 @@ async def async_request_openai_completions(
                                     output.ttft = ttft
 
                                 # Decoding phase
-                                output.itl.append(timestamp -
-                                                  most_recent_timestamp)
+                                # NOTE: Some completion API might have a last
+                                # usage summary response without a token so we
+                                # do not want to include as inter-token-latency
+                                elif data.get("usage", None) is None:
+                                    output.itl.append(timestamp -
+                                                      most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]
@@ -304,8 +298,8 @@ async def async_request_openai_chat_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "chat/completions"
-    ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
+        "v1/chat/completions"
+    ), "OpenAI Chat Completions API URL must end with 'v1/chat/completions'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -390,30 +384,6 @@ def remove_prefix(text: str, prefix: str) -> str:
     return text
 
 
-def get_model(pretrained_model_name_or_path: str) -> str:
-    if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
-        from modelscope import snapshot_download
-
-        model_path = snapshot_download(
-            model_id=pretrained_model_name_or_path,
-            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-            ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
-
-        return model_path
-    return pretrained_model_name_or_path
-
-
-def get_tokenizer(
-    pretrained_model_name_or_path: str, trust_remote_code: bool
-) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-    if pretrained_model_name_or_path is not None and not os.path.exists(
-            pretrained_model_name_or_path):
-        pretrained_model_name_or_path = get_model(
-            pretrained_model_name_or_path)
-    return AutoTokenizer.from_pretrained(pretrained_model_name_or_path,
-                                         trust_remote_code=trust_remote_code)
-
-
 ASYNC_REQUEST_FUNCS = {
     "tgi": async_request_tgi,
     "vllm": async_request_openai_completions,
@@ -422,5 +392,4 @@ ASYNC_REQUEST_FUNCS = {
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
     "tensorrt-llm": async_request_trt_llm,
-    "scalellm": async_request_openai_completions,
 }
