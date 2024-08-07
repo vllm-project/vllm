@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -28,14 +29,16 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
+                                              CompletionResponse,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
-                                              EmbeddingRequest, ErrorResponse,
+                                              EmbeddingRequest,
+                                              EmbeddingResponse, ErrorResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
-# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -155,9 +158,10 @@ async def tokenize(request: TokenizeRequest):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
-        assert isinstance(generator, TokenizeResponse)
+    elif isinstance(generator, TokenizeResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
 
 
 @router.post("/detokenize")
@@ -166,9 +170,10 @@ async def detokenize(request: DetokenizeRequest):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
-        assert isinstance(generator, DetokenizeResponse)
+    elif isinstance(generator, DetokenizeResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
 
 
 @router.get("/v1/models")
@@ -191,12 +196,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        assert isinstance(generator, ChatCompletionResponse)
+    elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 @router.post("/v1/completions")
@@ -206,11 +209,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
+    elif isinstance(generator, CompletionResponse):
         return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 @router.post("/v1/embeddings")
@@ -220,8 +222,10 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
+    elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
 
 
 def build_app(args: Namespace) -> FastAPI:
