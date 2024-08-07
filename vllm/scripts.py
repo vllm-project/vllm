@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import FlexibleArgumentParser
 
 
-def registrer_signal_handlers():
+def register_signal_handlers():
 
     def signal_handler(sig, frame):
         sys.exit(0)
@@ -31,7 +31,7 @@ def serve(args: argparse.Namespace) -> None:
 
 
 def interactive_cli(args: argparse.Namespace) -> None:
-    registrer_signal_handlers()
+    register_signal_handlers()
 
     base_url = args.url
     api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
