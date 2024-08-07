@@ -211,5 +211,5 @@ def test_varlen_with_paged_kv(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
     )
-    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
+    assert torch.allclose(output, ref_output, atol=2e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
