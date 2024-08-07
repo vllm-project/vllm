@@ -10,10 +10,10 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import (fused_marlin_moe, fused_moe,
-                                                  single_marlin_moe)
+from vllm.model_executor.layers.fused_moe import fused_moe, single_marlin_moe
+from vllm.model_executor.layers.fused_moe.fused_moe_gptq import fused_moe_gptq
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    marlin_quantize)
+    marlin_quantize, )
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
@@ -62,11 +62,11 @@ def test_fused_moe(
     topk: int,
     dtype: torch.dtype,
 ):
-    a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device='cuda', dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
-    score = torch.randn((m, e), device='cuda', dtype=dtype)
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
@@ -114,10 +114,12 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    assert torch.allclose(hf_states.flatten(0, 1),
-                          vllm_states,
-                          rtol=mixtral_moe_tol[dtype],
-                          atol=mixtral_moe_tol[dtype])
+    assert torch.allclose(
+        hf_states.flatten(0, 1),
+        vllm_states,
+        rtol=mixtral_moe_tol[dtype],
+        atol=mixtral_moe_tol[dtype],
+    )
 
 
 def stack_and_dev(tensors: List[torch.Tensor]):
@@ -165,11 +167,11 @@ def test_fused_marlin_moe(
 
     num_bits = 4
     dtype = torch.float16
-    a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device='cuda', dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
     for i in range(w2.shape[0]):
-        w2[0] = torch.eye(k, n, device='cuda', dtype=dtype)
+        w2[0] = torch.eye(k, n, device="cuda", dtype=dtype)
 
     w_ref1_l = []
     qweight1_l = []
@@ -215,27 +217,31 @@ def test_fused_marlin_moe(
     g_idx2 = stack_and_dev(g_idx2_l)
     sort_indices2 = stack_and_dev(sort_indices2_l)
 
-    score = torch.randn((m, e), device='cuda', dtype=dtype)
-    triton_output = fused_moe(a,
-                              w_ref1.transpose(1, 2).contiguous(),
-                              w_ref2.transpose(1, 2).contiguous(),
-                              score,
-                              topk,
-                              renormalize=False)
-    marlin_output = fused_marlin_moe(a,
-                                     qweight1,
-                                     qweight2,
-                                     score,
-                                     g_idx1,
-                                     g_idx2,
-                                     sort_indices1,
-                                     sort_indices2,
-                                     topk,
-                                     renormalize=False,
-                                     w1_scale=scales1,
-                                     w2_scale=scales2)
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    triton_output = fused_moe(
+        a,
+        w_ref1.transpose(1, 2).contiguous(),
+        w_ref2.transpose(1, 2).contiguous(),
+        score,
+        topk,
+        renormalize=False,
+    )
+    marlin_output = fused_moe_gptq(
+        a,
+        qweight1,
+        qweight2,
+        score,
+        g_idx1,
+        g_idx2,
+        sort_indices1,
+        sort_indices2,
+        topk,
+        renormalize=False,
+        w1_scale=scales1,
+        w2_scale=scales2,
+    )
 
-    assert (compute_max_diff(marlin_output, triton_output) < 4e-2)
+    assert compute_max_diff(marlin_output, triton_output) < 4e-2
 
 
 # TODO: make sure this test works
@@ -272,8 +278,8 @@ def test_single_marlin_moe(
 
     num_bits = 4
     dtype = torch.float16
-    a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
-    w = torch.randn((e, n, k), device='cuda', dtype=dtype) / 10
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
 
     w_ref_l = []
     qweights_l = []
@@ -297,7 +303,7 @@ def test_single_marlin_moe(
     g_idx = stack_and_dev(g_idx_l)
     sort_indices = stack_and_dev(sort_indices_l)
 
-    score = torch.randn((m, e), device='cuda', dtype=dtype)
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
     marlin_output = single_marlin_moe(a,
                                       qweight,
                                       scales,
@@ -308,4 +314,4 @@ def test_single_marlin_moe(
                                       renormalize=False)
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 
-    assert (compute_max_diff(marlin_output, torch_output) < 1e-2)
+    assert compute_max_diff(marlin_output, torch_output) < 1e-2
