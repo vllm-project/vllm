@@ -5,6 +5,7 @@ import pytest
 import torch
 from huggingface_hub import snapshot_download
 from PIL.Image import Image
+from transformers import AutoConfig
 
 from vllm.model_executor.models.internvl import (IMG_CONTEXT, IMG_END,
                                                  IMG_START,
@@ -26,10 +27,15 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
+DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
 models = [
-    snapshot_download("OpenGVLab/InternVL2-1B"),
-    snapshot_download("OpenGVLab/InternVL2-2B"),
-    # snapshot_download("OpenGVLab/InternVL2-4B"),  # broken
+    snapshot_download("OpenGVLab/InternVL2-1B",
+                      allow_patterns=DOWNLOAD_PATTERN),
+    snapshot_download("OpenGVLab/InternVL2-2B",
+                      allow_patterns=DOWNLOAD_PATTERN),
+    # Broken due to outdated implementation of Phi-3
+    # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
+    # snapshot_download("OpenGVLab/InternVL2-4B"),
 ]
 
 
@@ -41,8 +47,17 @@ class InternVLProcessor:
         self.tokenizer = hf_runner.tokenizer
         self.dtype = hf_runner.model.dtype
 
+        self.config = AutoConfig.from_pretrained(hf_runner.model_name)
+        self.vision_config = self.config.vision_config
+        self.use_thumbnail = self.config.use_thumbnail
+        self.min_num = self.config.min_dynamic_patch
+        self.max_num = self.config.max_dynamic_patch
+        self.image_size = self.vision_config.image_size
+
     def __call__(self, text: str, images: Image, **kwargs):
-        pixel_values = image_to_pixel_values(images).to(self.dtype)
+        pixel_values = image_to_pixel_values(images, self.image_size,
+                                             self.min_num, self.max_num,
+                                             self.use_thumbnail).to(self.dtype)
         num_patches_list = [pixel_values.shape[0]]
         for num_patches in num_patches_list:
             context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
