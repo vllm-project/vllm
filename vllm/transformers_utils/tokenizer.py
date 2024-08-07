@@ -12,12 +12,12 @@ from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import BaichuanTokenizer
 from vllm.utils import make_async
 
+from .tokenizer_group import AnyTokenizer
+
 logger = init_logger(__name__)
 
 
-def get_cached_tokenizer(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     """Get tokenizer with cached properties.
 
     This will patch the tokenizer object in place.
@@ -63,7 +63,7 @@ def get_tokenizer(
     revision: Optional[str] = None,
     download_dir: Optional[str] = None,
     **kwargs,
-) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
     """
     if VLLM_USE_MODELSCOPE:
