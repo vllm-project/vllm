@@ -65,7 +65,14 @@ class AsyncEngineRPCClient:
             yield socket
         finally:
             # linger == 0 means discard unsent messages
-            # when the socket is closed
+            # when the socket is closed. This is necessary
+            # because otherwise self.context.destroy() will
+            # wait for 30 seconds until unsent messages are
+            # received, which is impossible if the server
+            # crashed. In the absence of a server crash we
+            # always expect a response before closing the
+            # socket anyway.
+            # Reference: http://api.zeromq.org/4-2:zmq-setsockopt#toc24
             socket.close(linger=0)
 
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
