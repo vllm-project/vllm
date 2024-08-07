@@ -13,6 +13,8 @@ from ..models.utils import check_outputs_equal
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
+    # AutoFP8 format using separate .k_scale and .v_scale
+    "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
 ]
 
 
@@ -37,6 +39,10 @@ def test_models(
     enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
+    if (model == "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V"
+            and kv_cache_dtype != "fp8"):
+        pytest.skip("Only test FP8 quantized model with fp8 kv-cache")
+
     max_num_seqs = min(chunked_prefill_token_size, 256)
     enable_chunked_prefill = False
     max_num_batched_tokens = None
