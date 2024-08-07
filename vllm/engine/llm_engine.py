@@ -666,8 +666,7 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
     ) -> List[int]:
         '''
-        Wrapper around application of the model's
-        tokenizer.
+        Wrapper around application of the model's tokenizer.
 
         Arguments:
 
@@ -831,7 +830,7 @@ class LLMEngine:
 
         Returns:
 
-        * `EncoderDecoderLLMInputs` instance
+        * :class:`EncoderDecoderLLMInputs` instance
         '''
 
         explicit_inputs = self._to_explicit_encoder_decoder_prompt(inputs)
@@ -882,8 +881,7 @@ class LLMEngine:
     ) -> LLMInputs:
         '''
         For decoder-only models:
-        Process an input prompt
-        into an `LLMInputs` instance.
+        Process an input prompt into an :class:`LLMInputs` instance.
 
         Arguments:
 
@@ -894,7 +892,7 @@ class LLMEngine:
 
         Returns:
 
-        * `LLMInputs` instance
+        * :class:`LLMInputs` instance
         '''
 
         (
