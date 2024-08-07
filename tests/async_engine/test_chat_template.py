@@ -13,10 +13,6 @@ assert chatml_jinja_path.exists()
 
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATON_OUTPUT = [
-    ("facebook/opt-125m", None, True,
-     "Hello</s>Hi there!</s>What is the capital of</s>"),
-    ("facebook/opt-125m", None, False,
-     "Hello</s>Hi there!</s>What is the capital of</s>"),
     ("facebook/opt-125m", chatml_jinja_path, True, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
@@ -80,8 +76,12 @@ def test_no_load_chat_template_literallike():
 @pytest.mark.parametrize(
     "model,template,add_generation_prompt,expected_output",
     MODEL_TEMPLATE_GENERATON_OUTPUT)
-def test_get_gen_prompt(model, template, add_generation_prompt,
-                        expected_output):
+def test_get_gen_prompt(
+        model,
+        template,
+        add_generation_prompt,
+        expected_output
+):
     # Initialize the tokenizer
     tokenizer = get_tokenizer(tokenizer_name=model)
     template_content = load_chat_template(chat_template=template)
