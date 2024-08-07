@@ -927,9 +927,12 @@ class LLMEngine:
         prompt = inputs.get("prompt")
         prompt_embeds = inputs.get("prompt_embeds")
         driver_worker = self.model_executor.driver_worker
-        model_runner = driver_worker.worker.model_runner if isinstance(
-            driver_worker, WorkerWrapperBase) else driver_worker.model_runner
         if prompt_embeds is not None:
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "Speculative decoding does not support prompt_embeds.")
+            model_runner = driver_worker.worker.model_runner if isinstance(
+                driver_worker, WorkerWrapperBase) else driver_worker.model_runner
             if not model_runner.model_supports_input_embeds:
                 raise ValueError(
                     f"Model {self.model_config.model} does not support input "
