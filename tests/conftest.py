@@ -21,13 +21,13 @@ from vllm.config import TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
-from vllm.inputs import TextPrompt
+from vllm.inputs import (TextPrompt, to_enc_dec_tuple_list,
+                         zip_enc_dec_prompt_lists)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        is_cpu, to_enc_dec_tuple_list,
-                        zip_enc_dec_prompt_lists)
+                        is_cpu)
 
 logger = init_logger(__name__)
 

@@ -29,8 +29,6 @@ from typing_extensions import ParamSpec, TypeGuard, assert_never
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, PromptInputs,
-                         SingletonPromptInputs)
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -1164,30 +1162,3 @@ def is_embedding_model_config(model_config) -> bool:
     '''
     return model_config is not None and \
                 model_config.embedding_mode
-
-
-def build_explicit_enc_dec_prompt(
-    encoder_prompt: SingletonPromptInputs,
-    decoder_prompt: SingletonPromptInputs,
-) -> ExplicitEncoderDecoderPrompt:
-    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
-                                        decoder_prompt=decoder_prompt)
-
-
-def zip_enc_dec_prompt_lists(
-    enc_prompt_list: List[SingletonPromptInputs],
-    dec_prompt_list: List[SingletonPromptInputs],
-) -> List[ExplicitEncoderDecoderPrompt]:
-    return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
-        for (encoder_prompt,
-             decoder_prompt) in zip(enc_prompt_list, dec_prompt_list)
-    ]
-
-
-def to_enc_dec_tuple_list(
-    enc_dec_prompts: List[ExplicitEncoderDecoderPrompt],
-) -> List[Tuple[PromptInputs, PromptInputs]]:
-    return [(enc_dec_prompt['encoder_prompt'],
-             enc_dec_prompt['decoder_prompt'])
-            for enc_dec_prompt in enc_dec_prompts]

@@ -4,8 +4,8 @@ encoder/decoder models, specifically BART
 '''
 
 from vllm import LLM, SamplingParams
-from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
-from vllm.utils import zip_enc_dec_prompt_lists
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
+                         TokensPrompt, zip_enc_dec_prompt_lists)
 
 dtype = "float"
 

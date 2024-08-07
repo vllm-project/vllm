@@ -1,69 +1,9 @@
-from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
-                    TypedDict, Union, overload)
+from typing import TYPE_CHECKING, List, Optional, Tuple, TypedDict, Union
 
 from typing_extensions import NotRequired
 
-from vllm.utils import is_list_of
-
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
-
-
-class ParsedText(TypedDict):
-    content: str
-    is_tokens: Literal[False]
-
-
-class ParsedTokens(TypedDict):
-    content: List[int]
-    is_tokens: Literal[True]
-
-
-# https://github.com/vllm-project/vllm/pull/4028
-@overload
-def parse_and_batch_prompt(
-        prompt: Union[str, List[str]]) -> Sequence[ParsedText]:
-    ...
-
-
-@overload
-def parse_and_batch_prompt(
-        prompt: Union[List[int], List[List[int]]]) -> Sequence[ParsedTokens]:
-    ...
-
-
-def parse_and_batch_prompt(
-    prompt: Union[str, List[str], List[int], List[List[int]]],
-) -> Union[Sequence[ParsedText], Sequence[ParsedTokens]]:
-    if isinstance(prompt, str):
-        # case 1: a string
-        return [ParsedText(content=prompt, is_tokens=False)]
-
-    if isinstance(prompt, list):
-        if len(prompt) == 0:
-            raise ValueError("please provide at least one prompt")
-
-        if is_list_of(prompt, str):
-            # case 2: array of strings
-            return [
-                ParsedText(content=elem, is_tokens=False) for elem in prompt
-            ]
-        if is_list_of(prompt, int):
-            # case 3: array of tokens
-            return [ParsedTokens(content=prompt, is_tokens=True)]
-        if is_list_of(prompt, list):
-            if len(prompt[0]) == 0:
-                raise ValueError("please provide at least one prompt")
-
-            if is_list_of(prompt[0], int):
-                # case 4: array of token arrays
-                return [
-                    ParsedTokens(content=elem, is_tokens=True)
-                    for elem in prompt
-                ]
-
-    raise ValueError("prompt must be a string, array of strings, "
-                     "array of tokens, or array of token arrays")
 
 
 class TextPrompt(TypedDict):
@@ -150,56 +90,6 @@ both decoder-only and encoder/decoder input types:
 """
 
 
-def _has_required_keys(
-    d: dict,
-    required_keys: set,
-) -> bool:
-    return required_keys.issubset(d.keys())
-
-
-def get_prompt_type(prompt: Optional[PromptInputs]) -> Optional[str]:
-    """
-    Get the type-name of the prompt argument instance, given that
-    isinstance() cannot apply to TypedDict subclasses directly.
-    If the prompt is None, return 'None' as the type name.
-
-    Arguments:
-
-    * prompt: LLM input prompt or None
-
-    Returns:
-
-    * String representation of prompt type
-    """
-
-    if prompt is None:
-        return 'None'
-
-    required_keys_dict = {
-        'TextPrompt': {'prompt'},
-        'TokensPrompt': {'prompt_token_ids'},
-        'ExplicitEncoderDecoder': {'encoder_prompt', 'decoder_prompt'},
-    }
-
-    if isinstance(prompt, dict):
-        for (ptype, required_keys) in required_keys_dict.items():
-            # Ignore type checking in the conditional below because type
-            # checker does not understand that is_dict(prompt) narrows
-            # down the possible types
-            if _has_required_keys(
-                    prompt,  # type: ignore
-                    required_keys):
-                return ptype
-
-        raise ValueError(f"Invalid prompt {prompt}, valid types are "
-                         "required_keys_dict={required_keys_dict}")
-
-    if isinstance(prompt, str):
-        return "str"
-
-    raise ValueError(f"Invalid prompt {prompt}")
-
-
 class LLMInputs(TypedDict):
     """
     The inputs in :class:`~vllm.LLMEngine` before they are
@@ -229,13 +119,28 @@ class LLMInputs(TypedDict):
     """
 
 
-def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs) -> bool:
-    """
-    Return True if the LLMInputs instance has the correct configuration
-    for encoder/decoder.
-    """
+def build_explicit_enc_dec_prompt(
+    encoder_prompt: SingletonPromptInputs,
+    decoder_prompt: SingletonPromptInputs,
+) -> ExplicitEncoderDecoderPrompt:
+    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
+                                        decoder_prompt=decoder_prompt)
 
-    # True if encoder prompt token ids field exists &
-    # is not None
-    return ('encoder_prompt_token_ids' in inputs
-            and inputs['encoder_prompt_token_ids'] is not None)
+
+def zip_enc_dec_prompt_lists(
+    enc_prompt_list: List[SingletonPromptInputs],
+    dec_prompt_list: List[SingletonPromptInputs],
+) -> List[ExplicitEncoderDecoderPrompt]:
+    return [
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
+        for (encoder_prompt,
+             decoder_prompt) in zip(enc_prompt_list, dec_prompt_list)
+    ]
+
+
+def to_enc_dec_tuple_list(
+    enc_dec_prompts: List[ExplicitEncoderDecoderPrompt],
+) -> List[Tuple[PromptInputs, PromptInputs]]:
+    return [(enc_dec_prompt['encoder_prompt'],
+             enc_dec_prompt['decoder_prompt'])
+            for enc_dec_prompt in enc_dec_prompts]
