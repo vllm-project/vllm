@@ -9,6 +9,11 @@ from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import get_open_port
 
+from ...utils import VLLM_PATH
+
+chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
+assert chatml_jinja_path.exists()
+
 
 class MyOPTForCausalLM(OPTForCausalLM):
 
@@ -24,9 +29,22 @@ class MyOPTForCausalLM(OPTForCausalLM):
 def server_function(port):
     # register our dummy model
     ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
-    sys.argv = ["placeholder.py"] + \
-        ("--model facebook/opt-125m --gpu-memory-utilization 0.10 "
-        f"--dtype float32 --api-key token-abc123 --port {port}").split()
+
+    sys.argv = ["placeholder.py"] + [
+        "--model",
+        "facebook/opt-125m",
+        "--gpu-memory-utilization",
+        "0.10",
+        "--dtype",
+        "float32",
+        "--api-key",
+        "token-abc123",
+        "--port",
+        str(port),
+        "--chat-template",
+        str(chatml_jinja_path),
+    ]
+
     import runpy
     runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
 
