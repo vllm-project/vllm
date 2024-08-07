@@ -18,6 +18,58 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
+flash_attn_varlen_func = torch.library.custom_op(
+    "vllm::flash_attn_varlen_func",
+    fn=flash_attn_varlen_func,
+    mutates_args="unknown")
+
+
+@flash_attn_varlen_func.register_fake
+def _(
+    out_shape: List[int],
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Tuple[int, int] = (-1, -1),
+    softcap: float = 0.0,
+    alibi_slopes: Optional[List[float]] = None,
+    block_table: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    return torch.empty(out_shape,
+                       dtype=q.dtype,
+                       layout=q.layout,
+                       device=q.device)
+
+
+flash_attn_with_kvcache = torch.library.custom_op(
+    "vllm::flash_attn_with_kvcache",
+    fn=flash_attn_with_kvcache,
+    mutates_args="unknown")
+
+
+@flash_attn_with_kvcache.register_fake
+def _(
+    out_shape: List[int],
+    decode_query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    alibi_slopes: Optional[List[int]] = None,
+) -> torch.Tensor:
+    return torch.empty(out_shape,
+                       dtype=decode_query.dtype,
+                       layout=decode_query.layout,
+                       device=decode_query.device)
+
 
 class FlashAttentionBackend(AttentionBackend):
 
