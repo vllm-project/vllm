@@ -126,6 +126,7 @@ def test_mixed_requests(
             **extra_kwargs,
     ) as vllm_model:
         # Run the first prompt so the cache is populated
+        print(example_prompts, cached_prompt)
         vllm_outputs = vllm_model.generate_greedy([cached_prompt], max_tokens)
 
         # Run all the promopts
