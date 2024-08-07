@@ -4,19 +4,19 @@ import time
 from typing import Any, Dict, List, Literal, Optional, Union, final
 
 import torch
+from openai.types.chat import ChatCompletionContentPartParam
+from openai.types.chat import (
+    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
+from openai.types.chat import (
+    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer
-from typing_extensions import Annotated, TypedDict, Required
+from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.utils import random_uuid
-from openai.types.chat import (ChatCompletionContentPartParam,
-                               ChatCompletionMessageParam as
-                               OpenAIChatCompletionMessageParam,
-                               ChatCompletionContentPartParam as
-                               OpenAIChatCompletionContentPartParam)
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):

@@ -1,25 +1,23 @@
 import codecs
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Awaitable, Iterable, List, Optional, cast, Union
+from typing import Awaitable, Iterable, List, Optional, Union, cast
 
 # yapf conflicts with isort for this block
 # yapf: disable
-from openai.types.chat import ChatCompletionContentPartImageParam
-
-from openai.types.chat import ChatCompletionContentPartTextParam
-
+from openai.types.chat import (ChatCompletionContentPartImageParam,
+                               ChatCompletionContentPartTextParam)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.protocol import (ChatCompletionContentPartParam,
+                                              ChatCompletionMessageParam,
+                                              ConversationMessage)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import async_get_and_parse_image
-from vllm.entrypoints.openai.protocol import (ChatCompletionMessageParam,
-                                              ChatCompletionContentPartParam,
-                                              ConversationMessage)
 
 logger = init_logger(__name__)
 

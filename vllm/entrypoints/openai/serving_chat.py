@@ -1,28 +1,33 @@
-import time
 import json
-from typing import Type
+import time
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, List,
-                    Optional, Sequence as GenericSequence)
-from typing import Union
+                    Optional)
+from typing import Sequence as GenericSequence
+from typing import Type, Union
+
 from fastapi import Request
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
-from vllm.entrypoints.chat_utils import (load_chat_template,
-                                         parse_chat_message_content,
-                                         ConversationMessage)
+from vllm.entrypoints.chat_utils import (ConversationMessage,
+                                         load_chat_template,
+                                         parse_chat_message_content)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
     ChatCompletionLogProbsContent, ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    FunctionCall, ToolCall, UsageInfo, DeltaToolCall, DeltaFunctionCall)
+    ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
+    DeltaToolCall, ErrorResponse, FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
+from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
+                                                  MistralToolParser,
+                                                  ToolParser)
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
@@ -31,12 +36,6 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.utils import random_uuid
-
-from vllm.entrypoints.openai.tool_parsers import (ToolParser,
-                                                  MistralToolParser,
-                                                  Hermes2ProToolParser)
-
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 env = Environment(loader=FileSystemLoader('./'),
                   autoescape=select_autoescape())

@@ -1,10 +1,10 @@
-from typing import Optional, Union, List, Dict
+from typing import Dict, List, Optional, Union
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, \
-    AutoTokenizer
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
-from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation, \
-    DeltaMessage
+from vllm.entrypoints.openai.protocol import (DeltaMessage,
+                                              ExtractedToolCallInformation)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

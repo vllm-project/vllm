@@ -1,5 +1,6 @@
-from openai import OpenAI
 import json
+
+from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"

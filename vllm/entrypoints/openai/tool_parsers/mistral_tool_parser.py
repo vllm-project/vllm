@@ -1,17 +1,21 @@
 import json
 import re
-from typing import List, Optional, Union, Dict
+from typing import Dict, List, Optional, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, \
-    AutoTokenizer
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
-from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation, \
-    ToolCall, FunctionCall, DeltaMessage, DeltaToolCall, DeltaFunctionCall, \
-    InitialDeltaToolCall
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
+from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall,
+                                              InitialDeltaToolCall, ToolCall)
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    ToolParser)
+from vllm.entrypoints.openai.tool_parsers.utils import (
+    extract_intermediate_diff)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -138,11 +142,11 @@ class MistralToolParser(ToolParser):
 
             # handle if we detected the BOT token which means the start of tool
             # calling
-            if self.bot_token_id in delta_token_ids:
+            if (self.bot_token_id in delta_token_ids
+                    and len(delta_token_ids) == 1):
                 # if it's the only token, return None, so we don't send a chat
                 # completion any don't send a control token
-                if len(delta_token_ids) == 1:
-                    return None
+                return None
 
             # bit mask flags for partial JSON parsing. If the name hasn't been
             # sent yet, don't allow sending
@@ -170,12 +174,14 @@ class MistralToolParser(ToolParser):
                 current_tool_call: Dict = tool_call_arr[self.current_tool_id]
 
                 # case: we are starting a new tool in the array
-                #   -> array has nonzero length AND length has moved past curscor
+                #   -> array has > 0 length AND length has moved past cursor
                 if len(tool_call_arr) > 0 and len(
                         tool_call_arr) > self.current_tool_id + 1:
 
-                    # if we're moving on to a new call, first make sure we haven't missed anything in the previous
-                    # one that was auto-generated due to JSON completions, but wasn't streamed to the client yet.
+                    # if we're moving on to a new call, first make sure we
+                    # haven't missed anything in the previous one that was
+                    # auto-generated due to JSON completions, but wasn't
+                    # streamed to the client yet.
                     if self.current_tool_id >= 0:
                         diff: Union[str,
                                     None] = current_tool_call.get('arguments')
@@ -234,8 +240,8 @@ class MistralToolParser(ToolParser):
                     function_name = current_tool_call.get('name')
                     if function_name:
                         logger.debug(
-                            f'Sending DeltaToolCall with function name '
-                            f'{function_name}!')
+                            'Sending DeltaToolCall with function name %s',
+                            function_name)
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
@@ -266,14 +272,15 @@ class MistralToolParser(ToolParser):
                         delta = None
                     elif cur_arguments and not prev_arguments:
                         cur_arguments_json = json.dumps(cur_arguments)
-                        logger.debug(
-                            f'Finding {new_text} in |{cur_arguments_json}|')
+                        logger.debug('finding %s in |%s|', new_text,
+                                     cur_arguments_json)
+
                         arguments_delta = cur_arguments_json[:
                                                              cur_arguments_json
                                                              .index(new_text) +
                                                              len(new_text)]
-                        logger.debug(f'First tokens in arguments received: '
-                                     f'{arguments_delta}')
+                        logger.debug('First tokens in arguments received: %s',
+                                     arguments_delta)
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
@@ -286,12 +293,12 @@ class MistralToolParser(ToolParser):
                     elif cur_arguments and prev_arguments:
                         cur_args_json = json.dumps(cur_arguments)
                         prev_args_json = json.dumps(prev_arguments)
-                        logger.debug(
-                            f'Searching for diff between \n{cur_args_json}\n'
-                            f'{prev_args_json}')
+                        logger.debug('Searching for diff between \n%s\n%s',
+                                     cur_args_json, prev_args_json)
+
                         argument_diff = extract_intermediate_diff(
                             cur_args_json, prev_args_json)
-                        logger.debug(f'got arguments diff: {argument_diff}')
+                        logger.debug('got arguments diff: %s', argument_diff)
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
@@ -313,8 +320,8 @@ class MistralToolParser(ToolParser):
                 return delta
 
             except Exception as e:
-                logger.error(
-                    f'Error trying to handle streaming tool call: {e}')
+                logger.error('Error trying to handle streaming tool call: %s',
+                             e)
                 logger.debug(
                     'Skipping chunk as a result of tool streaming extraction '
                     'error')

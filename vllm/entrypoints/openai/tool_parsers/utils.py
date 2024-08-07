@@ -60,7 +60,7 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     suffix = find_common_suffix(curr, old)
 
     # prevent double-counting
-    s2_old = old
+    #s2_old = old
     old = old[::-1].replace(suffix[::-1], '', 1)[::-1]
     prefix = find_common_prefix(curr, old)
     diff = curr

@@ -1,17 +1,21 @@
 import json
 import re
-from typing import Optional, Union, List, Dict
+from typing import Dict, List, Optional, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, \
-    AutoTokenizer
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
-from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation, \
-    ToolCall, FunctionCall, DeltaMessage, DeltaToolCall, DeltaFunctionCall, \
-    InitialDeltaToolCall
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
+from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall,
+                                              InitialDeltaToolCall, ToolCall)
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    ToolParser)
+from vllm.entrypoints.openai.tool_parsers.utils import (
+    extract_intermediate_diff)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
