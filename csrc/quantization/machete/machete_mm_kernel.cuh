@@ -19,7 +19,6 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 // clang-format on
 
-#include "cutlass_extensions/gemm/kernel/vllm_tile_schedulers.cuh"
 #include "cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/vllm_numeric_conversion.cuh"
 #include "machete_collective_builder.cuh"

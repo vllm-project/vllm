@@ -8,10 +8,6 @@ from cutlass_library import *
 #
 
 
-class VLLMTileSchedulerType(enum.Enum):
-    StreamK = enum_auto()
-
-
 class VLLMDataType(enum.Enum):
     u4b8 = enum_auto()
     u8b128 = enum_auto()
@@ -22,15 +18,6 @@ class MixedInputKernelScheduleType(enum.Enum):
     TmaWarpSpecializedPingpongMixedInput = enum_auto()
     TmaWarpSpecializedCooperativeMixedInput = enum_auto()
 
-
-VLLMTileSchedulerTag: Dict[Union[VLLMTileSchedulerType, TileSchedulerType],
-                           str] = {
-                               **TileSchedulerTag,  # type: ignore
-                               **{
-                                   VLLMTileSchedulerType.StreamK:
-                                   "cutlass::gemm::VLLMStreamKScheduler",
-                               }
-                           }
 
 VLLMDataTypeNames: Dict[Union[VLLMDataType, DataType], str] = {
     **DataTypeNames,  # type: ignore
