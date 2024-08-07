@@ -1,9 +1,11 @@
-from typing import (List, Literal, Optional, Sequence, TypedDict, Union,
-                    overload)
+from typing import List, Literal, Sequence, TypedDict, Union, overload
+
+from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import LLMInputs, PromptInputs
+from .data import (EncoderDecoderLLMInputs, ExplicitEncoderDecoderPrompt,
+                   LLMInputs, PromptInputs)
 
 
 class ParsedText(TypedDict):
@@ -63,63 +65,15 @@ def parse_and_batch_prompt(
                      "array of tokens, or array of token arrays")
 
 
-def _has_required_keys(
-    d: dict,
-    required_keys: set,
-) -> bool:
-    return required_keys.issubset(d.keys())
+def is_explicit_encoder_decoder_prompt(
+        inputs: PromptInputs) -> TypeIs[ExplicitEncoderDecoderPrompt]:
+    return isinstance(inputs, dict) and "encoder_prompt" in inputs
 
 
-def get_prompt_type(prompt: Optional[PromptInputs]) -> Optional[str]:
-    """
-    Get the type-name of the prompt argument instance, given that
-    isinstance() cannot apply to TypedDict subclasses directly.
-    If the prompt is None, return 'None' as the type name.
-
-    Arguments:
-
-    * prompt: LLM input prompt or None
-
-    Returns:
-
-    * String representation of prompt type
-    """
-
-    if prompt is None:
-        return 'None'
-
-    required_keys_dict = {
-        'TextPrompt': {'prompt'},
-        'TokensPrompt': {'prompt_token_ids'},
-        'ExplicitEncoderDecoder': {'encoder_prompt', 'decoder_prompt'},
-    }
-
-    if isinstance(prompt, dict):
-        for (ptype, required_keys) in required_keys_dict.items():
-            # Ignore type checking in the conditional below because type
-            # checker does not understand that is_dict(prompt) narrows
-            # down the possible types
-            if _has_required_keys(
-                    prompt,  # type: ignore
-                    required_keys):
-                return ptype
-
-        raise ValueError(f"Invalid prompt {prompt}, valid types are "
-                         f"required_keys_dict={required_keys_dict}")
-
-    if isinstance(prompt, str):
-        return "str"
-
-    raise ValueError(f"Invalid prompt {prompt}")
-
-
-def is_valid_encoder_decoder_llm_inputs(inputs: LLMInputs) -> bool:
+def is_valid_encoder_decoder_llm_inputs(
+        inputs: LLMInputs) -> TypeIs[EncoderDecoderLLMInputs]:
     """
     Return True if the LLMInputs instance has the correct configuration
     for encoder/decoder.
     """
-
-    # True if encoder prompt token ids field exists &
-    # is not None
-    return ('encoder_prompt_token_ids' in inputs
-            and inputs['encoder_prompt_token_ids'] is not None)
+    return "encoder_prompt_token_ids" in inputs

@@ -5,6 +5,7 @@ from typing import (AsyncGenerator, Callable, Dict, Iterable, List, Mapping,
                     Optional, Set, Tuple, Type, Union)
 
 from transformers import PreTrainedTokenizer
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
@@ -16,9 +17,12 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.metrics import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
-from vllm.inputs import LLMInputs, PromptInputs
+from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
+                         SingletonPromptInputs)
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -291,38 +295,140 @@ class _AsyncLLMEngine(LLMEngine):
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
 
-    async def process_model_inputs_async(
+    async def _tokenize_prompt_async(
         self,
+        prompt: str,
         request_id: str,
-        inputs: PromptInputs,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> List[int]:
+        '''
+        Wrapper around application of the model's
+        tokenizer.
+
+        Arguments:
+
+        * prompt
+        * request_id
+        * lora_request
+
+        Returns:
+
+        * prompt token ids
+        '''
+
+        tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                             "skip_tokenizer_init is True")
+
+        return await tokenizer.encode_async(request_id=request_id,
+                                            prompt=prompt,
+                                            lora_request=lora_request)
+
+    async def _extract_prompt_components_async(
+        self,
+        inputs: SingletonPromptInputs,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> Tuple[Optional[str], List[int], Optional[MultiModalDataDict]]:
+        '''
+        Extract the components of any single encoder or decoder input prompt.
+
+        Arguments:
+
+        * request_id
+        * inputs: single encoder or decoder input prompt
+        * lora_request: this is only valid for decoder prompts
+
+        Returns:
+
+        * prompt
+        * prompt_token_ids
+        * multi_modal_data
+        '''
+
+        if isinstance(inputs, str):
+            prompt = inputs
+            prompt_token_ids = await self._tokenize_prompt_async(
+                prompt,
+                request_id=request_id,
+                lora_request=lora_request,
+            )
+            multi_modal_data = None
+        elif isinstance(inputs, dict):
+            if "prompt_token_ids" in inputs:
+                prompt = None
+                prompt_token_ids = inputs["prompt_token_ids"]
+            else:
+                # NOTE: This extra assignment is required to pass mypy
+                prompt = parsed_prompt = inputs["prompt"]
+                prompt_token_ids = await self._tokenize_prompt_async(
+                    parsed_prompt,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                )
+
+            multi_modal_data = inputs.get("multi_modal_data")
+        else:
+            assert_never(inputs)
+
+        return prompt, prompt_token_ids, multi_modal_data
+
+    async def _process_decoder_only_prompt_async(
+        self,
+        inputs: SingletonPromptInputs,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
-        if isinstance(inputs, str):
-            inputs = {"prompt": inputs}
 
-        if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
-
-            prompt_token_ids = await tokenizer.encode_async(
-                request_id=request_id,
-                prompt=inputs["prompt"],
-                lora_request=lora_request)
-        else:
-            prompt_token_ids = inputs["prompt_token_ids"]
+        (
+            prompt,
+            prompt_token_ids,
+            multi_modal_data,
+        ) = await self._extract_prompt_components_async(
+            inputs,
+            request_id=request_id,
+            lora_request=lora_request,
+        )
 
         if prompt_adapter_request:
-            prompt_token_ids = [
-                0
-            ] * prompt_adapter_request.prompt_adapter_num_virtual_tokens + \
-                prompt_token_ids
+            prompt_token_ids = (
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
+                + prompt_token_ids)
 
-        llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
-                               prompt=inputs.get("prompt"),
-                               multi_modal_data=inputs.get("multi_modal_data"))
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=prompt,
+                         multi_modal_data=multi_modal_data)
 
-        return self.input_processor(llm_inputs)
+    async def process_model_inputs_async(
+        self,
+        inputs: PromptInputs,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+        if self.is_encoder_decoder_model():
+            # TODO: Make this async
+            # Encoder-decoder model requires special mapping of
+            # input prompts to encoder & decoder
+
+            model_inputs = self._process_encoder_decoder_prompt(
+                inputs,
+                request_id=request_id,
+            )
+        else:
+            if is_explicit_encoder_decoder_prompt(inputs):
+                raise ValueError("Cannot pass encoder-decoder prompt "
+                                 "to decoder-only models")
+
+            # Decoder-only operation
+            model_inputs = await self._process_decoder_only_prompt_async(
+                inputs,
+                request_id=request_id,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+            )
+
+        return self.input_processor(model_inputs)
 
     async def add_request_async(
         self,
@@ -341,10 +447,11 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time = time.time()
 
         processed_inputs = await self.process_model_inputs_async(
+            inputs,
             request_id=request_id,
-            inputs=inputs,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
         self._add_processed_request(
             request_id=request_id,

@@ -103,19 +103,21 @@ class LLMInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    encoder_prompt_token_ids: NotRequired[List[int]]
+    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
+
+
+class EncoderDecoderLLMInputs(LLMInputs):
+    encoder_prompt_token_ids: List[int]
     """The token IDs of the encoder prompt."""
 
     encoder_prompt: NotRequired[Optional[str]]
     """
     The original encoder prompt text corresponding to the token IDs, if
     available.
-    """
-
-    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
-    """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
     """
 
 
