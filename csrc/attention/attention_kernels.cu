@@ -952,8 +952,8 @@ void sequence_block_reducer(
     torch::Tensor&
         tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
 ) {
-  sequence_block_reducer_launcher<tmp_out.dtype()>(out, exp_sums, max_logits,
-                                                   tmp_out);
+  sequence_block_reducer_launcher<tmp_out.dtype(), 128, 8192>(
+      out, exp_sums, max_logits, tmp_out);
 }
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
