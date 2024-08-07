@@ -66,7 +66,7 @@ chat_completion = client.chat.completions.create(messages=messages,
 
 print("Chat completion results:")
 print(chat_completion)
-print('\n\n')
+print("\n\n")
 
 tool_calls_stream = client.chat.completions.create(messages=messages,
                                                    model=model,
@@ -89,25 +89,25 @@ for chunk in chunks:
         if chunk.choices[0].delta.tool_calls[0].index != tool_call_idx:
             if tool_call_idx >= 0:
                 print(
-                    f'streamed tool call arguments: {arguments[tool_call_idx]}'
+                    f"streamed tool call arguments: {arguments[tool_call_idx]}"
                 )
             tool_call_idx = chunk.choices[0].delta.tool_calls[0].index
-            arguments.append('')
+            arguments.append("")
         if chunk.choices[0].delta.tool_calls[0].id:
-            print(f'streamed tool call id: '
-                  f'{chunk.choices[0].delta.tool_calls[0].id}')
+            print(f"streamed tool call id: "
+                  f"{chunk.choices[0].delta.tool_calls[0].id}")
         if chunk.choices[0].delta.tool_calls[0].function:
             if chunk.choices[0].delta.tool_calls[0].function.name:
-                print(f'streamed tool call name: '
-                      f'{chunk.choices[0].delta.tool_calls[0].function.name}')
+                print(f"streamed tool call name: "
+                      f"{chunk.choices[0].delta.tool_calls[0].function.name}")
             if chunk.choices[0].delta.tool_calls[0].function.arguments:
                 arguments[tool_call_idx] += chunk.choices[0].delta.tool_calls[
                     0].function.arguments
 
 if len(arguments):
-    print(f'streamed tool call arguments: {arguments[-1]}')
+    print(f"streamed tool call arguments: {arguments[-1]}")
 
-print('\n\n')
+print("\n\n")
 
 messages.append({
     "role": "assistant",
@@ -140,5 +140,5 @@ chat_completion_2 = client.chat.completions.create(messages=messages,
                                                    model=model,
                                                    tools=tools,
                                                    stream=False)
-print('\n\n')
+print("\n\n")
 print(chat_completion_2)
