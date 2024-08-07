@@ -96,14 +96,17 @@ class AsyncEngineRPCServer:
 
     async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
-        # Abort the request in the llm engine.
-        await self.engine.abort(request.request_id)
-
-        # Send confirmation to the client.
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        try:
+            # Abort the request in the llm engine.
+            await self.engine.abort(request.request_id)
+        except Exception as e:
+            logger.warning(f"Failed to abort request {request.request_id}")
+        finally:
+            # Send confirmation to the client.
+            await self.socket.send_multipart([
+                identity,
+                cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+            ])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
