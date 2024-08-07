@@ -104,15 +104,14 @@ class LRUEvictor(Evictor):
             self._cleanup()
 
     def _cleanup(self):
-        new_priority_queue: List[Tuple[int, int, int]] = []
-        for last_accessed, neg_num_hashed_tokens, block_hash in (
-                self.priority_queue):
-            if (block_hash in self.free_table
-                    and self.free_table[block_hash].last_accessed
-                    == last_accessed):
-                heapq.heappush(
-                    new_priority_queue,
-                    (last_accessed, neg_num_hashed_tokens, block_hash))
+        new_priority_queue: List[Tuple[float, int, int]] = []
+
+        for block_hash, block in self.free_table.items():
+            new_priority_queue.append(
+                (block.last_accessed, -block.num_hashed_tokens,
+                 block.block_hash))
+        heapq.heapify(new_priority_queue)
+
         self.priority_queue = new_priority_queue
 
     @property
