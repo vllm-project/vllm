@@ -42,10 +42,12 @@ def hint_on_error(fn):
 
 # activation ops
 def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+    #torch.library.opcheck(torch.ops._C.silu_and_mul, (out, x))
     torch.ops._C.silu_and_mul(out, x)
 
 
 def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+    #torch.library.opcheck(torch.ops._C.gelu_and_mul, (out, x))
     torch.ops._C.gelu_and_mul(out, x)
 
 
@@ -204,6 +206,16 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_g_idx, use_exllama, bit)
 
 
+@torch.library.register_fake("_C::gptq_gemm")
+def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
+                    b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
+                    b_g_idx: torch.Tensor, use_exllama: bool,
+                    bit: int) -> torch.Tensor:
+    return torch.empty((a.size(0), b_q_weight.size(1)),
+                       dtype=a.dtype,
+                       device=a.device)
+
+
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
@@ -237,6 +249,120 @@ try:
                                   b_q_type: ScalarType, size_m: int,
                                   size_n: int, size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
+
+    @torch.library.register_fake("_C::gptq_marlin_gemm")
+    def _gptq_marlin_gemm_fake(a: torch.Tensor,
+                               b_q_weight: torch.Tensor,
+                               b_scales: torch.Tensor,
+                               b_zeros: torch.Tensor,
+                               g_idx: torch.Tensor,
+                               perm: torch.Tensor,
+                               workspace: torch.Tensor,
+                               b_q_type: ScalarType,
+                               size_m: int,
+                               size_n: int,
+                               size_k: int,
+                               is_k_full: bool,
+                               has_zp: bool = False,
+                               use_fp32_reduce: bool = False) -> torch.Tensor:
+        return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
+
+    @torch.library.register_fake("_C::ggml_dequantize")
+    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int, m: int,
+                              n: int) -> torch.Tensor:
+        return torch.empty((m, n), dtype=torch.float16, device=W.device)
+
+    @torch.library.register_fake("_C::ggml_mul_mat_vec_a8")
+    def _ggml_mul_mat_vec_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: int,
+    ) -> torch.Tensor:
+        return torch.empty((1, row), dtype=torch.float16, device=W.device)
+
+    @torch.library.register_fake("_C::ggml_mul_mat_a8")
+    def _ggml_mul_mat_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: int,
+    ) -> torch.Tensor:
+        batch = X.size(0)
+        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
+
+    @torch.library.register_fake("_C::marlin_qqq_gemm")
+    def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
+                              s_tok: torch.Tensor, s_ch: torch.Tensor,
+                              s_group: torch.Tensor, workspace: torch.Tensor,
+                              size_m: int, size_n: int,
+                              size_k: int) -> torch.Tensor:
+        return torch.empty((size_m, size_n),
+                           dtype=torch.float16,
+                           device=a.device)
+
+    @torch.library.register_fake("_C::marlin_gemm")
+    def _marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
+                          b_scales: torch.Tensor, workspace: torch.Tensor,
+                          size_m: int, size_n: int,
+                          size_k: int) -> torch.Tensor:
+        return torch.empty((size_m, size_n),
+                           dtype=torch.float16,
+                           device=a.device)
+
+    @torch.library.register_fake("_C::awq_dequantize")
+    def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
+                             zeros: torch.Tensor, split_k_iters: int, thx: int,
+                             thy: int) -> torch.Tensor:
+        in_c = qweight.size(0)
+        qout_c = qweight.size(1)
+        out_c = qout_c * 8
+        return torch.empty((in_c, out_c),
+                           dtype=scales.dtype,
+                           device=scales.device)
+
+    @torch.library.register_fake("_C::awq_gemm")
+    def _awq_gemm_fake(input: torch.Tensor, qweight: torch.Tensor,
+                       qzeros: torch.Tensor, scales: torch.Tensor,
+                       split_k_iters: int) -> torch.Tensor:
+        num_in_feats = input.size(0)
+        return torch.empty((split_k_iters, num_in_feats, qweight.size(1) * 8),
+                           dtype=input.dtype,
+                           device=input.device).sum(0)
+
+    @torch.library.register_fake("_C::aqlm_gemm")
+    def _aqlm_gemm_fake(input: torch.Tensor, codes: torch.Tensor,
+                        codebooks: torch.Tensor, scales: torch.Tensor,
+                        codebook_partition_sizes: torch.Tensor,
+                        bias: Optional[torch.Tensor]) -> torch.Tensor:
+        out_features = codes.size(0) * codebooks.size(2)
+        flat_input = input.reshape((-1, input.size(-1)))
+        flat_output = torch.empty((flat_input.size(0), out_features),
+                                  dtype=input.dtype,
+                                  device=input.device)
+
+        output_sizes = list(input.shape)
+        output_sizes.pop()
+        output_sizes.append(-1)
+        return flat_output.reshape(tuple(output_sizes))
+
+    @torch.library.register_fake("_C::aqlm_dequant")
+    def _aqlm_dequant_fake(
+            codes: torch.Tensor, codebooks: torch.Tensor,
+            codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
+        in_features = codes.size(1) * 8
+        out_features = codes.size(0)
+        return torch.empty((out_features, in_features),
+                           dtype=codebooks.dtype,
+                           device=codebooks.device)
+
+    @torch.library.register_fake("_C::fp8_marlin_gemm")
+    def _fp8_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
+                              b_scales: torch.Tensor, workspace: torch.Tensor,
+                              num_bits: int, size_m: int, size_n: int,
+                              size_k: int) -> torch.Tensor:
+        return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
+
 except Exception:
     pass
 
