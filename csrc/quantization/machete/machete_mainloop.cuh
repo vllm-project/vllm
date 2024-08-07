@@ -353,15 +353,10 @@ struct MacheteCollectiveMma {
 
   // These methods use some the public members of the class. For that reason, we
   // define them after the public section.
-  static constexpr uint32_t compute_tma_transaction_bytes() {
-    constexpr uint32_t a_bytes =
-        (size(SmemLayoutA{}(_, _, cute::Int<0>{})) *
-         static_cast<uint32_t>(cute::sizeof_bits_v<InternalElementA>) / 8);
-    constexpr uint32_t b_bytes =
-        (size(SmemLayoutB{}(_, _, cute::Int<0>{})) *
-         static_cast<uint32_t>(cute::sizeof_bits_v<InternalElementB>) / 8);
-
-    constexpr uint32_t baseline_bytes = a_bytes + b_bytes;
+  static constexpr uint32_t compute_tma_transaction_bytes_mk() {
+    constexpr uint32_t baseline_bytes = cutlass::bits_to_bytes(
+        size<0>(SmemLayoutA{}) * size<1>(SmemLayoutA{}) *
+        static_cast<uint32_t>(cute::sizeof_bits_v<InternalElementA>));
 
     if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
       return baseline_bytes;
@@ -392,6 +387,12 @@ struct MacheteCollectiveMma {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>,
                     "Type not handled in tma transaction bytes computation.");
     }
+  }
+
+  static constexpr uint32_t compute_tma_transaction_bytes_nk() {
+    return cutlass::bits_to_bytes(
+        size<0>(SmemLayoutB{}) * size<1>(SmemLayoutB{}) *
+        static_cast<uint32_t>(cute::sizeof_bits_v<InternalElementB>));
   }
 
   // ((athrid, val), (BlocksM, BlockK), L) -> (storage_idx)
@@ -508,6 +509,9 @@ struct MacheteCollectiveMma {
     TMA_Zero tma_load_zero;
     int64_t scale_k;
     int group_size;
+    uint32_t tma_transaction_bytes = TmaTransactionBytes;
+    uint32_t tma_transaction_bytes_mk = TmaTransactionBytesMK;
+    uint32_t tma_transaction_bytes_nk = TmaTransactionBytesNK;
   };
 
   //
@@ -637,8 +641,12 @@ struct MacheteCollectiveMma {
   }
 
   static constexpr int K_PIPE_MAX = DispatchPolicy::Stages;
+  static constexpr uint32_t TmaTransactionBytesMK =
+      compute_tma_transaction_bytes_mk();
+  static constexpr uint32_t TmaTransactionBytesNK =
+      compute_tma_transaction_bytes_nk();
   static constexpr uint32_t TmaTransactionBytes =
-      compute_tma_transaction_bytes();
+      TmaTransactionBytesMK + TmaTransactionBytesNK;
 
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best
   /// performance

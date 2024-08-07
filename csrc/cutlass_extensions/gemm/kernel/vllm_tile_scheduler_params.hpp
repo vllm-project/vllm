@@ -20,6 +20,7 @@ namespace cutlass {
 namespace gemm {
 namespace kernel {
 namespace detail {
+
 struct VLLMPersistentTileSchedulerSm90StreamKParams {
 
   // Strategies for computing reductions between CTAs computing portions of a given output tile
@@ -91,7 +92,7 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
   // The splitting factor to be used in a split-K decomposition of the problem.
   // If this is set to a value greater than 1, stream-K decomposition logic
   // is bypassed in favor of a split-K decomposition.
-  uint32_t splits_ = 1;
+  FastDivmod divmod_splits_{};
 
   // Number of stream-K or split-K work units that compute an extra k iteration.
   // This is done to handle residuals in dividing up the k iteration space.
@@ -113,7 +114,10 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
 
   // Number of tiled k iterations computed by each stream-K work unit. This
   // can potentially cover more than one output tile.
-  uint32_t k_tiles_per_sk_unit_ = 0;
+  FastDivmod divmod_k_tiles_per_sk_unit_{};
+  // Number of tiled k iterations computed by each "big" stream-K units, which
+  // processes one more K chunk than a "normal" stream-K unit.
+  FastDivmod divmod_k_tiles_per_sk_big_unit_{};
 
   // Strategy to use when reducing between collaborating CTAs
   ReductionMode reduction_mode_ = ReductionMode::Deterministic;
@@ -130,18 +134,21 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
   // Maximum number of groups of stream-K units
   static constexpr uint32_t max_sk_groups_ = 8u;
 
+  // ktile start from even for each cta
+  uint32_t ktile_start_alignment_count { 1u };
+
   void
   print() {
     printf("VLLMPersistentTileSchedulerSm90StreamKParams\n");
     printf("  units_per_problem_ = %ju\n", units_per_problem_);
     printf("  log_swizzle_size_ = %u\n", log_swizzle_size_);
     printf("  raster_order_ = %d\n", int(raster_order_));
-    printf("  splits_ = %u\n", splits_);
+    printf("  splits_ = %u\n", divmod_splits_.divisor);
     printf("  big_units_ = %u\n", big_units_);
     printf("  big_groups_ = %u\n", big_groups_);
     printf("  sk_tiles_ = %u\n", sk_tiles_);
     printf("  sk_units_ = %u\n", sk_units_);
-    printf("  k_tiles_per_sk_unit_ = %u\n", k_tiles_per_sk_unit_);
+    printf("  k_tiles_per_sk_unit_ = %u\n", divmod_k_tiles_per_sk_unit_.divisor);
     printf("  reduction_mode_ = %d\n", int(reduction_mode_));
     printf("  separate_reduction_units_ = %u\n", separate_reduction_units_);
   }
@@ -272,6 +279,14 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
         splits = k_tiles_per_output_tile;
       }
 
+      // If splits == k_tiles_per_output_tiles, there will be one k_tile per cta
+      //   and this violate k_tile start from even requirements. Thus we need to
+      //   reduce the number of splits.
+      if (ktile_start_alignment_count > 1u &&
+           static_cast<decltype(k_tiles_per_output_tile)>(splits) == k_tiles_per_output_tile) { 
+        splits = k_tiles_per_output_tile / ktile_start_alignment_count;
+      }
+
       set_params_basic(
         underlying_params,
         problem_blocks_m,
@@ -373,7 +388,8 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     auto sk_splits_too_small = [&](uint32_t g) {
       // Check whether the number of K tiles computed per stream-K unit is less
       // than min_iters_per_sk_unit_
-      auto total_sk_k_tiles = (sk_tiles / g) * k_tiles_per_output_tile;
+      auto total_sk_cluster_tiles = (sk_cluster_tiles / g) * cluster_size;
+      auto total_sk_k_tiles = total_sk_cluster_tiles * k_tiles_per_output_tile;
       auto k_tiles_per_sk_unit = total_sk_k_tiles / (sk_units / g);
       return k_tiles_per_sk_unit < min_iters_per_sk_unit_;
     };
@@ -412,13 +428,12 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     //    sk_tiles = (waves <= 2) ? total_tiles : (sm_count + (total_tiles % sm_count))
     // Both total_tiles and sm_count are multiples of cluster size due to padding added
     // prior to kernel launch.
-    uint64_t sk_clustered_tiles = sk_tiles / cluster_size;
-    uint64_t sk_clustered_tiles_per_group = sk_clustered_tiles / groups;
-    uint64_t sk_tiles_per_group = sk_clustered_tiles_per_group * cluster_size;
+    uint64_t sk_cluster_tiles_per_group = sk_cluster_tiles / groups;
+    uint64_t sk_tiles_per_group = sk_cluster_tiles_per_group * cluster_size;
 
     // Groups that will process an extra stream-K tile cluster. These differ from "big_units," which
     // are stream-K units within a group that process an extra K chunk.
-    uint64_t sk_big_groups = sk_clustered_tiles % groups;
+    uint64_t sk_big_groups = sk_cluster_tiles % groups;
 
     uint64_t k_tiles_per_group = k_tiles_per_output_tile * sk_tiles_per_group;
 
@@ -464,7 +479,7 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     // This setting ensures that the use of this divmod for stream-K decompositions
     // is essentially a no-op.
     divmod_clusters_mnl_ = FastDivmodU64(sk_units / cluster_size);
-    splits_ = 1;
+    divmod_splits_ = FastDivmod(1);
     log_swizzle_size_ = underlying_params.log_swizzle_size_;
     units_per_problem_ = static_cast<uint32_t>(dp_units + sk_units);
     raster_order_ = underlying_params.raster_order_;
@@ -477,7 +492,8 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     reduction_workspace_ = reduction_workspace;
     sk_tiles_ = sk_tiles;
     sk_units_ = static_cast<uint32_t>(sk_units);
-    k_tiles_per_sk_unit_ = static_cast<uint32_t>(k_tiles_per_sk_unit);
+    divmod_k_tiles_per_sk_unit_ = FastDivmod(static_cast<uint32_t>(k_tiles_per_sk_unit));
+    divmod_k_tiles_per_sk_big_unit_ = FastDivmod(static_cast<uint32_t>(k_tiles_per_sk_unit + 1));
     reduction_mode_ = reduction_mode;
     divmod_epilogue_subtile_ = FastDivmodU64(epilogue_subtile);
     separate_reduction_units_ = reduction_units;
@@ -610,19 +626,19 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
 
   // Calculates the size of the workspace needed for holding reduction barriers
   CUTLASS_HOST_DEVICE
-  static int
+  static size_t
   get_barrier_workspace_size(uint64_t num_tiles, uint32_t mma_warp_groups, uint32_t barrier_bits) {
-    auto workspace_bits = num_tiles * mma_warp_groups * barrier_bits;
-    return round_up_to_l2_alignment(bits_to_bytes(static_cast<int>(workspace_bits)));
+    size_t workspace_bits = num_tiles * static_cast<size_t>(mma_warp_groups) * static_cast<size_t>(barrier_bits);
+    return round_up_to_l2_alignment(bits_to_bytes<size_t>(workspace_bits));
   }
 
   // Calculates the size of the workspace needed for holding partial outputs from splits
   CUTLASS_HOST_DEVICE
-  static int
+  static size_t
   get_reduction_workspace_size(uint64_t num_tiles, GemmCoord tile_shape, uint32_t accumulator_bits, uint32_t num_accumulator_mtxs = 1) {
-    auto output_tile_size = tile_shape.m() * tile_shape.n();
-    auto workspace_bits = accumulator_bits * output_tile_size * num_tiles * num_accumulator_mtxs;
-    return round_up_to_l2_alignment(bits_to_bytes(static_cast<int>(workspace_bits)));
+    size_t output_tile_size = tile_shape.m() * tile_shape.n();
+    size_t workspace_bits = accumulator_bits * output_tile_size * num_tiles * num_accumulator_mtxs;
+    return round_up_to_l2_alignment(bits_to_bytes<size_t>(workspace_bits));
   }
 
   #if !defined(__CUDACC_RTC__)
@@ -632,8 +648,8 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     uint32_t k_tiles_per_output_tile,
     GemmCoord tile_shape,
     GemmCoord cluster_shape,
-    int& barrier_workspace_size,
-    int& reduction_workspace_size,
+    size_t& barrier_workspace_size,
+    size_t& reduction_workspace_size,
     KernelHardwareInfo const& hw_info,
     int splits,
     int max_swizzle,
@@ -657,8 +673,8 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
       barrier_workspace_size = 0;
       reduction_workspace_size = 0;
     }
-    else if (decomposition_mode == DecompositionMode::SplitK ||
-        (decomposition_mode == DecompositionMode::Heuristic && splits > 1)) {
+    else if (splits > 1 &&
+             (decomposition_mode == DecompositionMode::SplitK || decomposition_mode == DecompositionMode::Heuristic)) {
       // Basic split-K variant requires workspace for all output tiles
       barrier_workspace_size = get_barrier_workspace_size(output_tiles, mma_warp_groups, barrier_bits);
       reduction_workspace_size = get_reduction_workspace_size(output_tiles, tile_shape, accumulator_bits, num_accumulator_mtxs);
@@ -781,8 +797,8 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     uint32_t epilogue_subtile = 1,
     uint32_t num_accumulator_mtxs = 1) {
 
-    int barrier_workspace_size = 0;
-    int reduction_workspace_size = 0;
+    size_t barrier_workspace_size = 0;
+    size_t reduction_workspace_size = 0;
 
     #if !defined(__CUDACC_RTC__)
       get_workspace_component_sizes(
@@ -825,7 +841,8 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     uint32_t mma_warp_groups,
     uint32_t barrier_bits,
     uint32_t element_accumulator_bits,
-    uint32_t epilogue_subtile) {
+    uint32_t epilogue_subtile,
+    CudaHostAdapter* cuda_adapter = nullptr) {
 
     dim3 problem_blocks = UnderlyingParams::get_tiled_cta_shape_mnl(problem_shape, tile_shape, cluster_shape);
     uint32_t k_tiles_per_output_tile = (problem_shape.k() + tile_shape.k() - 1) / tile_shape.k();
@@ -845,7 +862,9 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
       mma_warp_groups,
       barrier_bits,
       element_accumulator_bits,
-      epilogue_subtile
+      epilogue_subtile,
+      1,
+      cuda_adapter
     );
   }
 
@@ -869,11 +888,12 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     uint32_t barrier_bits,
     uint32_t element_accumulator_bits,
     uint32_t epilogue_subtile = 1,
-    uint32_t num_accumulator_mtxs = 1) {
+    uint32_t num_accumulator_mtxs = 1,
+    CudaHostAdapter* cuda_adapter = nullptr) {
 
     #if !defined(__CUDACC_RTC__)
-      int barrier_workspace_size = 0;
-      int reduction_workspace_size = 0;
+      uint64_t barrier_workspace_size = 0;
+      uint64_t reduction_workspace_size = 0;
 
       get_workspace_component_sizes(
         problem_blocks,
@@ -902,7 +922,7 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
         // Only the barrier workspace needs to be cleared for stream-K.
         // Barrier workspace follows reduction workspace.
         uint8_t* barrier_workspace = reinterpret_cast<uint8_t*>(workspace) + reduction_workspace_size;
-        return zero_workspace(static_cast<void*>(barrier_workspace), barrier_workspace_size, stream);
+        return zero_workspace(static_cast<void*>(barrier_workspace), barrier_workspace_size, stream, cuda_adapter);
       }
     #endif // !defined(__CUDACC_RTC__)
 
@@ -927,7 +947,7 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     divmod_sk_groups_ = FastDivmodU64(1u);
     auto cluster_size = underlying_params.divmod_cluster_shape_major_.divisor * underlying_params.divmod_cluster_shape_minor_.divisor;
     divmod_clusters_mnl_ = FastDivmodU64((blocks_m * blocks_n * blocks_l) / cluster_size);
-    splits_ = splits;
+    divmod_splits_ = FastDivmod(splits);
     divmod_cluster_blk_major_ = underlying_params.divmod_cluster_blk_major_;
     log_swizzle_size_ = underlying_params.log_swizzle_size_;
     units_per_problem_ = blocks_m * blocks_n * blocks_l;
@@ -935,7 +955,8 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
     big_units_ = k_tiles_per_output_tile % splits;
     reduction_workspace_ = reduction_workspace;
     reduction_mode_ = reduction_mode;
-    k_tiles_per_sk_unit_ = k_tiles_per_output_tile / splits;
+    divmod_k_tiles_per_sk_unit_ = FastDivmod(k_tiles_per_output_tile / splits);
+    divmod_k_tiles_per_sk_big_unit_ = FastDivmod(k_tiles_per_output_tile / splits + 1);
 
     // No stream-K work is performed for "basic" data-parallel and split-K decompositions
     sk_tiles_ = 0;
@@ -947,9 +968,9 @@ struct VLLMPersistentTileSchedulerSm90StreamKParams {
   private:
   // Round up number of bytes to the nearest multiple of L2 cache line alignment
   CUTLASS_HOST_DEVICE
-  static int
-  round_up_to_l2_alignment(int bytes) {
-    constexpr static uint32_t L2CacheLineSizeBytes = 128;
+  static size_t
+  round_up_to_l2_alignment(size_t bytes) {
+    constexpr size_t L2CacheLineSizeBytes = 128u;
     return (bytes + L2CacheLineSizeBytes - 1) / L2CacheLineSizeBytes * L2CacheLineSizeBytes;
   }
 };
