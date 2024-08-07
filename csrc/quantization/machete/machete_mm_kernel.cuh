@@ -19,8 +19,6 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 // clang-format on
 
-#include "cutlass/util/device_memory.h"
-
 #include "cutlass_extensions/gemm/kernel/vllm_tile_schedulers.cuh"
 #include "cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/vllm_numeric_conversion.cuh"
