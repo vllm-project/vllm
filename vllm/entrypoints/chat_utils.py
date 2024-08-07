@@ -1,6 +1,7 @@
 import codecs
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import (Any, Awaitable, Iterable, List, Optional, Tuple, Union,
                     cast, final)
 
@@ -70,13 +71,17 @@ class ChatMessageParseResult:
     mm_futures: List[Awaitable[MultiModalDataDict]]
 
 
-def load_chat_template(chat_template: Optional[str]) -> Optional[str]:
+def load_chat_template(
+        chat_template: Optional[Union[Path, str]]) -> Optional[str]:
     if chat_template is None:
         return None
     try:
         with open(chat_template, "r") as f:
             resolved_chat_template = f.read()
     except OSError as e:
+        if isinstance(chat_template, Path):
+            raise
+
         JINJA_CHARS = "{}\n"
         if not any(c in chat_template for c in JINJA_CHARS):
             msg = (f"The supplied chat template ({chat_template}) "
