@@ -87,9 +87,6 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             self._raise_if_incorrect_input(target_probs, bonus_token_ids,
                                            draft_probs, draft_token_ids)
 
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
         if chain_speculative_sampling:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
@@ -112,9 +109,6 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                 draft_token_ids,
                 bonus_token_ids,
             )
-        end.record()
-        torch.cuda.synchronize()
-        print("---------", start.elapsed_time(end))
 
         return output_token_ids
 
