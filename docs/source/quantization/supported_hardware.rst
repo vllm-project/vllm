@@ -5,18 +5,20 @@ Supported Hardware for Quantization Kernels
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 
-==============  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
-Implementation  Volta   Turing   Ampere   Ada    Hopper  AMD GPU  Intel GPU  x86 CPU  AWS Inferentia  Google TPU
-==============  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
-AQLM            ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-AWQ             ❌      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-DeepSpeedFP     ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-FP8             ❌      ❌       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-Marlin          ❌      ❌       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-GPTQ            ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-SqueezeLLM      ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-bitsandbytes    ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-==============  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
+=====================  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
+Implementation         Volta   Turing   Ampere   Ada    Hopper  AMD GPU  Intel GPU  x86 CPU  AWS Inferentia  Google TPU
+=====================  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
+AWQ                    ❌      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+GPTQ                   ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+Marlin (GPTQ/AWQ/FP8)  ❌      ❌       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+INT8 (W8A8)            ❌      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+FP8 (W8A8)             ❌      ❌       ❌       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+AQLM                   ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+bitsandbytes           ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+DeepSpeedFP            ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+GGUF                   ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+SqueezeLLM             ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+=====================  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
 
 Notes:
 ^^^^^^
