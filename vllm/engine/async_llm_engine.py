@@ -362,7 +362,7 @@ class _AsyncLLMEngine(LLMEngine):
             request_id=request_id,
         )
 
-        # Avoid repeated processing if the inputs was originally in singleton
+        # Avoid repeated processing if the input was originally in singleton
         # form, see self._to_explicit_encoder_decoder_prompt
         if extracted_decoder_prompt is extracted_encoder_prompt:
             decoder_prompt_token_ids = encoder_prompt_token_ids
