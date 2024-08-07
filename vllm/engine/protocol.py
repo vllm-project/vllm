@@ -1,4 +1,4 @@
-from typing import (AsyncIterator, List, Mapping, Optional, Protocol,
+from typing import (AsyncGenerator, List, Mapping, Optional, Protocol,
                     runtime_checkable)
 
 from vllm.config import DecodingConfig, ModelConfig
@@ -29,7 +29,7 @@ class AsyncEngineClient(Protocol):
     def errored(self) -> bool:
         ...
 
-    async def generate(
+    def generate(
         self,
         inputs: PromptInputs,
         sampling_params: SamplingParams,
@@ -37,18 +37,18 @@ class AsyncEngineClient(Protocol):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
-    ) -> AsyncIterator[RequestOutput]:
+    ) -> AsyncGenerator[RequestOutput, None]:
         """Generates outputs for a request"""
         ...
 
-    async def encode(
+    def encode(
         self,
         inputs: PromptInputs,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> AsyncIterator[EmbeddingRequestOutput]:
+    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         """Generate outputs for a request from an embedding model."""
         ...
 
