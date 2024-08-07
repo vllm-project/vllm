@@ -144,7 +144,7 @@ def test_multiple_sampling_params(llm: LLM):
 
 def test_chat():
 
-    llm = LLM(model=MODEL_NAME)
+    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
 
     prompt1 = "Explain the concept of entropy."
     messages = [
@@ -179,5 +179,5 @@ def test_chat():
         SamplingParams(temperature=0.3, top_p=0.95),
     ]
 
-    outputs = llm.chat(messages, sampling_params=sampling_params)
+    outputs = llm.chat(multiple_messages, sampling_params=sampling_params)
     assert len(outputs) == len(messages)

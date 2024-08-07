@@ -352,7 +352,10 @@ class LLM:
 
     def chat(
         self,
-        messages: Union[List[Dict[str, str]], List[List[Dict[str, str]]]],
+        messages: Union[
+            List[ChatCompletionMessageParam], 
+            List[List[ChatCompletionMessageParam]]
+        ],
         sampling_params: Optional[
             Union[SamplingParams, List[SamplingParams]]
         ] = None,
@@ -386,35 +389,41 @@ class LLM:
         """
 
         tokenizer = self.get_tokenizer()
-
+        model_config = self.llm_engine.get_model_config()
+            
         if isinstance(messages[0], dict):
-            # Apply chat templates for chat inputs.
-            prompts = tokenizer.apply_chat_template(
+            conversations, _ = parse_chat_messages(
                 messages,
+                model_config,
+                tokenizer
+            )
+            
+            prompts = tokenizer.apply_chat_template(
+                conversations,
                 tokenize=False,
                 add_generation_template=add_generation_template,
                 chat_template=chat_template,
             )
 
         elif isinstance(messages[0], list):
-            tokenizer = self.get_tokenizer()
+
             prompts = [
                 tokenizer.apply_chat_template(
-                    message,
+                    parse_chat_messages(message, model_config, tokenizer)[0],
                     tokenize=False,
                     add_generation_template=add_generation_template,
                     chat_template=chat_template,
                 )
                 for message in messages
             ]
-
+            
         return self.generate(
             prompts,
             sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
-        
+
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
         self,
