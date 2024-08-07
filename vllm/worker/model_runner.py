@@ -1392,7 +1392,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        if (self.observability_config.collect_model_forward_time
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time
                 and output is not None):
             model_forward_end.synchronize()
             model_forward_time = model_forward_start.elapsed_time(
@@ -1559,8 +1560,9 @@ class CUDAGraphRunner:
                                                       **kwargs)
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
-                self.input_buffers[key].copy_(intermediate_tensors[key],
-                                              non_blocking=True)
+                if key != "model_execute_time":
+                    self.input_buffers[key].copy_(intermediate_tensors[key],
+                                                  non_blocking=True)
         # Run the graph.
         self.graph.replay()
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:

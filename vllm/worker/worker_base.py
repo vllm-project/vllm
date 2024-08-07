@@ -267,25 +267,31 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return []
 
         intermediate_tensors = None
+        orig_model_execute_time = 0.0
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
+            orig_model_execute_time = intermediate_tensors.tensors.get(
+                "model_execute_time", torch.tensor(0)).item()
 
         output = self.model_runner.execute_model(
             model_input, self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None, intermediate_tensors,
             num_steps)
-        end_time = time.perf_counter()
-        if output is not None:
-            for o in output:
-                if o is not None:
-                    o.model_execute_time = end_time - start_time
+        model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
+            output.tensors["model_execute_time"] = torch.tensor(
+                model_execute_time + orig_model_execute_time)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
             return [None]
+
+        if output is not None:
+            for o in output:
+                o.model_execute_time = (orig_model_execute_time +
+                                        model_execute_time)
 
         # output is List[SamplerOutput]
         return output
