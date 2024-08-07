@@ -22,7 +22,7 @@ def server():
         "--enforce-eager",
         "--engine-use-ray",
         "--chat-template",
-        chatml_jinja_path
+        str(chatml_jinja_path)
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
