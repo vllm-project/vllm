@@ -1,12 +1,11 @@
 import re
 from typing import Iterable, Optional
 
+from compressed_tensors import CompressionFormat
 from torch.nn import Module
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FUSED_LAYER_NAME_MAPPING)
-
-from compressed_tensors import CompressionFormat
 
 
 def is_activation_quantization_format(format: str) -> bool:
