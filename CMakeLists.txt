@@ -193,10 +193,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        # CUTLASS 3.5.0
-        GIT_TAG 7d49e6c7e2f8896c47f586706e67e1fb215529dc
-        # Shallow clone with depth 1
-        GIT_SHALLOW TRUE
+        # CUTLASS 3.5.1
+        GIT_TAG 06b21349bcf6ddf6a1686a47a137ad1446579db9 
         GIT_PROGRESS TRUE
   )
   FetchContent_MakeAvailable(cutlass)
@@ -210,6 +208,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
     "csrc/quantization/gptq_marlin/awq_marlin_repack.cu"
+    "csrc/quantization/gguf/gguf_kernel.cu"
     "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
@@ -237,7 +236,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
