@@ -148,8 +148,9 @@ steps:
     - python3 cpu_offload.py
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
-    - python3 llava_example.py
+    - python3 offline_inference_vision_language.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 offline_inference_encoder_decoder.py
 
 - label: Models Test # 1hr10min
   source_file_dependencies:
@@ -289,6 +290,7 @@ steps:
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py
+  - pytest -v -s distributed/test_basic_distributed_correctness_enc_dec.py
   - pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s distributed/test_multimodal_broadcast.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
