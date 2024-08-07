@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import contextlib
 import datetime
 import enum
 import gc
@@ -17,7 +16,7 @@ from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
-                    Union)
+                    Union, overload)
 
 import numpy as np
 import numpy.typing as npt
@@ -53,6 +52,7 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 P = ParamSpec('P')
 K = TypeVar("K")
 T = TypeVar("T")
+U = TypeVar("U")
 
 
 class _Sentinel:
@@ -94,8 +94,10 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> Optional[T]:
-        return self.get(key)
+    def __getitem__(self, key: Hashable) -> T:
+        value = self.cache[key]  # Raise KeyError if not exists
+        self.cache.move_to_end(key)
+        return value
 
     def __setitem__(self, key: Hashable, value: T) -> None:
         self.put(key, value)
@@ -109,8 +111,9 @@ class LRUCache(Generic[T]):
     def get(self,
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
+        value: Optional[T]
         if key in self.cache:
-            value: Optional[T] = self.cache[key]
+            value = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -287,6 +290,10 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     return _async_wrapper
 
 
+class ProducerFinished:
+    pass
+
+
 def merge_async_iterators(
         *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
     """Merge multiple asynchronous iterators into a single iterator.
@@ -295,9 +302,10 @@ def merge_async_iterators(
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
     """
-    queue: asyncio.Queue[Union[Tuple[int, T], Exception]] = asyncio.Queue()
+    queue: asyncio.Queue[Union[Tuple[int, T], ProducerFinished,
+                               Exception]] = asyncio.Queue()
 
-    finished = [False] * len(iterators)
+    producers = len(iterators)
 
     async def producer(i: int, iterator: AsyncIterator[T]):
         try:
@@ -305,7 +313,8 @@ def merge_async_iterators(
                 await queue.put((i, item))
         except Exception as e:
             await queue.put(e)
-        finished[i] = True
+        # Signal to the consumer that we've finished
+        await queue.put(ProducerFinished())
 
     _tasks = [
         asyncio.create_task(producer(i, iterator))
@@ -313,9 +322,17 @@ def merge_async_iterators(
     ]
 
     async def consumer():
+        remaining = producers
         try:
-            while not all(finished) or not queue.empty():
+            while remaining or not queue.empty():
+                # we think there is a race condition here
                 item = await queue.get()
+
+                if isinstance(item, ProducerFinished):
+                    # Signal that a producer finished- not a real item
+                    remaining -= 1
+                    continue
+
                 if isinstance(item, Exception):
                     raise item
                 yield item
@@ -371,8 +388,10 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
-def get_open_port() -> int:
-    port = envs.VLLM_PORT
+def get_open_port(port: Optional[int] = None) -> int:
+    if port is None:
+        # Default behavior here is to return a port for multi-gpu communication
+        port = envs.VLLM_PORT
     if port is not None:
         while True:
             try:
@@ -402,27 +421,6 @@ def update_environment_variables(envs: Dict[str, str]):
                 "Overwriting environment variable %s "
                 "from '%s' to '%s'", k, os.environ[k], v)
         os.environ[k] = v
-
-
-def init_kmp_env():
-    if not is_cpu():
-        return
-
-    ld_prealod_str = os.getenv("LD_PRELOAD", "")
-    if "libiomp5.so" not in ld_prealod_str:
-        return
-
-    # The time(milliseconds) that a thread should wait after completing the
-    # execution of a parallel region, before sleeping.
-    os.environ['KMP_BLOCKTIME'] = "1"
-    # dump settings on start up
-    os.environ['KMP_SETTINGS'] = "1"
-    # Prevents the CPU to run into low performance state
-    os.environ['KMP_TPAUSE'] = "0"
-    # Provides fine granularity parallelism
-    os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
-    os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
-    os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
 
 
 def chunk_list(lst: List[T], chunk_size: int):
@@ -491,7 +489,6 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -507,7 +504,13 @@ def create_kv_caches_with_random_flash(
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
                                       device=device)
-        key_value_cache.uniform_(-scale, scale)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -524,6 +527,12 @@ def create_kv_caches_with_random(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -600,8 +609,8 @@ class CudaMemoryProfiler:
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)
-            mem = torch.xpu.max_memory_allocated(self.device)
+            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):
@@ -717,6 +726,54 @@ def merge_dicts(dict1: Dict[K, List[T]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
+                 Tuple["JSONTree[T]", ...], T]
+"""A nested JSON structure where the leaves need not be JSON-serializable."""
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Dict[str, JSONTree[T]],
+) -> Dict[str, JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: List[JSONTree[T]],
+) -> List[JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Tuple[JSONTree[T], ...],
+) -> Tuple[JSONTree[U], ...]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: JSONTree[T],
+) -> JSONTree[U]:
+    ...
+
+
+def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
+    if isinstance(value, dict):
+        return {k: json_map_leaves(func, v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [json_map_leaves(func, v) for v in value]
+    elif isinstance(value, tuple):
+        return tuple(json_map_leaves(func, v) for v in value)
+    else:
+        return func(value)
 
 
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
@@ -879,27 +936,6 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
-def error_on_invalid_device_count_status():
-    cache_entries = 0
-    with contextlib.suppress(Exception):
-        # future pytorch will fix the issue, device_count will not be cached
-        # at that time, `.cache_info().currsize` will error out
-        cache_entries = torch.cuda.device_count.cache_info().currsize
-    if cache_entries != 0:
-        # the function is already called, and the result is cached
-        remembered = torch.cuda.device_count()
-        current = cuda_device_count_stateless()
-        if remembered > current:
-            raise RuntimeError(
-                "The number of CUDA devices has changed since the first "
-                "call to torch.cuda.device_count(). This is not allowed "
-                "and may result in undefined behavior. Please check out "
-                "https://github.com/vllm-project/vllm/issues/6056 to "
-                "find the first call to torch.cuda.device_count() "
-                "and defer it until the engine is up. Or you can set "
-                "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
 
 
 # NVML utils

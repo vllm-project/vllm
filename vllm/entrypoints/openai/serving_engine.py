@@ -5,11 +5,10 @@ from http import HTTPStatus
 from typing import Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
 
 from pydantic import Field
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -26,10 +25,13 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.inputs import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.sequence import Logprob
+from vllm.transformers_utils.tokenizer_group import AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -49,8 +51,6 @@ class LoRAModulePath:
 AnyRequest = Union[ChatCompletionRequest, CompletionRequest, DetokenizeRequest,
                    EmbeddingRequest, TokenizeRequest]
 
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-
 
 class TextTokensPrompt(TypedDict):
     prompt: str
@@ -61,17 +61,18 @@ class OpenAIServing:
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
+        async_engine_client: AsyncEngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
+        return_tokens_as_token_ids: bool = False,
     ):
         super().__init__()
 
-        self.engine = engine
+        self.async_engine_client = async_engine_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
@@ -102,6 +103,7 @@ class OpenAIServing:
                         prompt_adapter_num_virtual_tokens=num_virtual_tokens))
 
         self.request_logger = request_logger
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -149,6 +151,15 @@ class OpenAIServing:
                                        status_code=status_code).model_dump()
         })
         return json_str
+
+    async def _guided_decode_logits_processor(
+            self, request: Union[ChatCompletionRequest, CompletionRequest],
+            tokenizer: AnyTokenizer) -> Optional[LogitsProcessor]:
+        decoding_config = await self.async_engine_client.get_decoding_config()
+        guided_decoding_backend = request.guided_decoding_backend \
+            or decoding_config.guided_decoding_backend
+        return await get_guided_decoding_logits_processor(
+            guided_decoding_backend, request, tokenizer)
 
     async def _check_model(
         self,
@@ -254,9 +265,7 @@ class OpenAIServing:
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the messages, "
                     f"Please reduce the length of the messages.")
-            request.max_tokens = self.max_model_len - token_num
-
-        if token_num + request.max_tokens > self.max_model_len:
+        elif token_num + request.max_tokens > self.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "
@@ -384,11 +393,13 @@ class OpenAIServing:
         )
 
     @staticmethod
-    def _get_decoded_token(
-        logprob: Logprob,
-        token_id: int,
-        tokenizer: AnyTokenizer,
-    ) -> str:
+    def _get_decoded_token(logprob: Logprob,
+                           token_id: int,
+                           tokenizer: AnyTokenizer,
+                           return_as_token_id: bool = False) -> str:
+        if return_as_token_id:
+            return f"token_id:{token_id}"
+
         if logprob.decoded_token is not None:
             return logprob.decoded_token
         return tokenizer.decode(token_id)

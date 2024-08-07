@@ -7,6 +7,8 @@ vLLM supports a variety of generative Transformer models in `HuggingFace Transfo
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
+----
+
 Decoder-only Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .. list-table::
@@ -113,6 +115,10 @@ Decoder-only Language Models
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
     -
+  * - :code:`NemotronForCausalLM`
+    - Nemotron-3, Nemotron-4, Minitron
+    - :code:`nvidia/Minitron-8B-Base`, :code:`mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.
+    - ✅︎
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
@@ -182,6 +188,10 @@ Vision Language Models
     - Models
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
+  * - :code:`Blip2ForConditionalGeneration`
+    - BLIP-2
+    - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
+    -
   * - :code:`ChameleonForConditionalGeneration`
     - Chameleon
     - :code:`facebook/chameleon-7b` etc.
@@ -189,6 +199,10 @@ Vision Language Models
   * - :code:`FuyuForCausalLM`
     - Fuyu
     - :code:`adept/fuyu-8b` etc.
+    - 
+  * - :code:`InternVLChatModel`
+    - InternVL2
+    - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
@@ -206,6 +220,16 @@ Vision Language Models
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
     -
+  * - :code:`MiniCPMV`
+    - MiniCPM-V
+    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
+    -
+
+.. note::
+  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+
+----
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 

@@ -1,16 +1,36 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from argparse import Namespace
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.utils import random_uuid
+
+# torch is mocked during docs generation,
+# so we have to provide the values as literals
+_MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
+
+try:
+    from sphinx.ext.autodoc.mock import _MockModule
+
+    if isinstance(torch, _MockModule):
+        _LONG_INFO = _MOCK_LONG_INFO
+    else:
+        _LONG_INFO = torch.iinfo(torch.long)
+except ModuleNotFoundError:
+    _LONG_INFO = torch.iinfo(torch.long)
+
+assert _LONG_INFO.min == _MOCK_LONG_INFO.min
+assert _LONG_INFO.max == _MOCK_LONG_INFO.max
 
 
 class OpenAIBaseModel(BaseModel):
@@ -106,9 +126,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
-    seed: Optional[int] = Field(None,
-                                ge=torch.iinfo(torch.long).min,
-                                le=torch.iinfo(torch.long).max)
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
@@ -213,30 +231,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: end-chat-completion-extra-params
 
-    def to_sampling_params(self) -> SamplingParams:
+    def to_sampling_params(
+            self, tokenizer: PreTrainedTokenizer,
+            guided_decode_logits_processor: Optional[LogitsProcessor],
+            default_max_tokens: int) -> SamplingParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
         # We now allow logprobs being true without top_logrobs.
-
-        logits_processors = None
-        if self.logit_bias:
-            logit_bias: Dict[int, float] = {}
-            try:
-                for token_id, bias in self.logit_bias.items():
-                    # Convert token_id to integer before we add to LLMEngine
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    logit_bias[int(token_id)] = min(100, max(-100, bias))
-            except ValueError as exc:
-                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
-                                 f"but token_id must be an integer or string "
-                                 f"representing an integer") from exc
-
-            def logit_bias_logits_processor(
-                    token_ids: List[int],
-                    logits: torch.Tensor) -> torch.Tensor:
-                for token_id, bias in logit_bias.items():
-                    logits[token_id] += bias
-                return logits
-
-            logits_processors = [logit_bias_logits_processor]
+        logits_processors = get_logits_processors(
+            logit_bias=self.logit_bias,
+            allowed_token_ids=None,
+            tokenizer=tokenizer,
+        )
+        if guided_decode_logits_processor:
+            logits_processors.append(guided_decode_logits_processor)
 
         return SamplingParams(
             n=self.n,
@@ -254,7 +264,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=self.top_logprobs if self.echo else None,
             ignore_eos=self.ignore_eos,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens,
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
@@ -333,9 +343,7 @@ class CompletionRequest(OpenAIBaseModel):
     max_tokens: Optional[int] = 16
     n: int = 1
     presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = Field(None,
-                                ge=torch.iinfo(torch.long).min,
-                                le=torch.iinfo(torch.long).max)
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
@@ -358,6 +366,7 @@ class CompletionRequest(OpenAIBaseModel):
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    allowed_token_ids: Optional[List[int]] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -407,30 +416,23 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
-    def to_sampling_params(self):
+    def to_sampling_params(
+            self, tokenizer: PreTrainedTokenizer,
+            guided_decode_logits_processor: Optional[LogitsProcessor],
+            default_max_tokens: int) -> SamplingParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        logits_processors = None
-        if self.logit_bias:
-            logit_bias: Dict[int, float] = {}
-            try:
-                for token_id, bias in self.logit_bias.items():
-                    # Convert token_id to integer
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    logit_bias[int(token_id)] = min(100, max(-100, bias))
-            except ValueError as exc:
-                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
-                                 f"but token_id must be an integer or string "
-                                 f"representing an integer") from exc
-
-            def logit_bias_logits_processor(
-                    token_ids: List[int],
-                    logits: torch.Tensor) -> torch.Tensor:
-                for token_id, bias in logit_bias.items():
-                    logits[token_id] += bias
-                return logits
-
-            logits_processors = [logit_bias_logits_processor]
+        logits_processors = get_logits_processors(
+            logit_bias=self.logit_bias,
+            allowed_token_ids=self.allowed_token_ids,
+            tokenizer=tokenizer,
+        )
+        if guided_decode_logits_processor:
+            logits_processors.append(guided_decode_logits_processor)
 
         return SamplingParams(
             n=self.n,
@@ -447,7 +449,7 @@ class CompletionRequest(OpenAIBaseModel):
             stop_token_ids=self.stop_token_ids,
             logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
-            max_tokens=self.max_tokens if not echo_without_generation else 1,
+            max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,

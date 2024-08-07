@@ -3,7 +3,7 @@ import gc
 import os
 import sys
 from collections import UserList
-from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar, Union
 
 import pytest
 import torch
@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding, BatchFeature)
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -133,7 +133,7 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class HfRunner:
@@ -152,7 +152,6 @@ class HfRunner:
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
-        is_sparseml_model: bool = False,
     ) -> None:
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
@@ -169,9 +168,6 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
-            elif is_sparseml_model:
-                from sparseml.transformers import SparseAutoModelForCausalLM
-                auto_cls = SparseAutoModelForCausalLM
             else:
                 auto_cls = AutoModelForCausalLM
 
@@ -339,7 +335,6 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            input_ids = inputs.input_ids
 
             output = self.model.generate(
                 **self.wrap_device(inputs),
@@ -381,7 +376,7 @@ class HfRunner:
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
-            output_len = seq_ids.shape[0] - input_ids.shape[1]
+            output_len = len(seq_logprobs_lst)
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
@@ -513,11 +508,14 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[Union[List[Image.Image],
+                               List[List[Image.Image]]]] = None,
+        stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
                                                 max_tokens=max_tokens,
-                                                logprobs=num_logprobs)
+                                                logprobs=num_logprobs,
+                                                stop_token_ids=stop_token_ids)
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images)
