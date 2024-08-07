@@ -1,17 +1,15 @@
 import time
 import json
+from typing import Type
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, List,
-                    Optional, Type)
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, List,
-                    Optional, Union, Sequence as GenericSequence)
+                    Optional, Sequence as GenericSequence)
 from typing import Union
 from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
-from vllm.entrypoints.chat_utils import (ConversationMessage,
-                                         load_chat_template,
+from vllm.entrypoints.chat_utils import (load_chat_template,
                                          parse_chat_message_content,
                                          ConversationMessage)
 from vllm.entrypoints.logger import RequestLogger
@@ -77,9 +75,9 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_auto_tools: bool = enable_auto_tools or False
         if self.enable_auto_tools:
             logger.info(
-                '"Auto" tool choice has been enabled please note that while the '
-                'parallel_tool_calls client option is preset for compatibility '
-                'reasons, it will be ignored.')
+                '"Auto" tool choice has been enabled please note that while'
+                ' the parallel_tool_calls client option is preset for '
+                'compatibility reasons, it will be ignored.')
 
         self.tool_parser: Optional[Type[ToolParser]] = None
         if self.enable_auto_tools:
@@ -166,12 +164,12 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(
                 'tool_choice = "required" is not supported!')
 
-            # "auto" tools requires --enable-api-tools --enable-auto-tool-choice and --tool-parser
+            # "auto" tools requires --enable-auto-tool-choice and --tool-parser
         if request.tool_choice == 'auto' and not (
                 self.enable_auto_tools and self.tool_parser is not None):
             return self.create_error_response(
-                '"auto" tool choice requires --enable-auto-tool-choice and --tool-parser to be set'
-            )
+                '"auto" tool choice requires '
+                '--enable-auto-tool-choice and --tool-parser to be set')
 
         request_id = f"chat-{random_uuid()}"
         try:
@@ -237,9 +235,8 @@ class OpenAIServingChat(OpenAIServing):
                     conversation, tokenizer)
 
                 if not isinstance(generator, ChatCompletionResponse):
-                    raise ValueError(
-                        'Expected generator to be instance of ChatCompletionResponse'
-                    )
+                    raise ValueError('Expected generator to be instance of '
+                                     'ChatCompletionResponse')
                 return generator
 
             except ValueError as e:
@@ -297,7 +294,7 @@ class OpenAIServingChat(OpenAIServing):
                             model=model_name)
                         if (request.stream_options
                                 and request.stream_options.include_usage):
-                            if (request.stream_options.continuous_usage_stats):
+                            if request.stream_options.continuous_usage_stats:
                                 prompt_tokens = len(res.prompt_token_ids)
                                 usage = UsageInfo(prompt_tokens=prompt_tokens,
                                                   completion_tokens=0,
@@ -379,17 +376,13 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: Optional[DeltaMessage] = None
 
                     # handle streaming deltas for tools with tool_choice
-                    if request.tool_choice and type(
-                            request.tool_choice
-                    ) is ChatCompletionNamedToolChoiceParam:
+                    if (request.tool_choice and type(request.tool_choice) is
+                            ChatCompletionNamedToolChoiceParam):
                         delta_message = DeltaMessage(tool_calls=[
-                            DeltaToolCall(
-                                function=DeltaFunctionCall(
-                                    name=request.tool_choice.function.name,
-                                    arguments=delta_text),
-                                index=
-                                i  # note: ok to hard-code to 0 since named tool calling doesn't support arrays
-                            )
+                            DeltaToolCall(function=DeltaFunctionCall(
+                                name=request.tool_choice.function.name,
+                                arguments=delta_text),
+                                          index=i)
                         ])
 
                     # handle streaming deltas for tools with tool_choice
@@ -398,14 +391,15 @@ class OpenAIServingChat(OpenAIServing):
                                or request.tool_choice == 'auto')
                           and self.enable_auto_tools):
 
-                        delta_message = tool_parser.extract_tool_calls_streaming(
-                            previous_text=previous_texts[i],
-                            current_text=output.text,
-                            delta_text=delta_text,
-                            previous_token_ids=output.
-                            token_ids[:-1 * len(delta_token_ids)],
-                            current_token_ids=output.token_ids,
-                            delta_token_ids=delta_token_ids)
+                        delta_message = (
+                            tool_parser.extract_tool_calls_streaming(
+                                previous_text=previous_texts[i],
+                                current_text=output.text,
+                                delta_text=delta_text,
+                                previous_token_ids=output.
+                                token_ids[:-1 * len(delta_token_ids)],
+                                current_token_ids=output.token_ids,
+                                delta_token_ids=delta_token_ids))
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
@@ -413,7 +407,9 @@ class OpenAIServingChat(OpenAIServing):
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
 
-                    # if the message delta is None (e.g. because it was a "control token" for tool calls, then
+                    # if the message delta is None (e.g. because it was a
+                    # "control token" for tool calls or the parser otherwise
+                    # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
                     if delta_message is None:
                         continue
@@ -518,7 +514,8 @@ class OpenAIServingChat(OpenAIServing):
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
 
-            # once the final token is handled, if stream_options.include_usage is sent, send the usage
+            # once the final token is handled, if stream_options.include_usage
+            # is sent, send the usage
             if (request.stream_options
                     and request.stream_options.include_usage):
                 final_usage = UsageInfo(
@@ -611,7 +608,8 @@ class OpenAIServingChat(OpenAIServing):
                     ])
                 tools_called = True
 
-            # if the request doesn't use tool choice OR specifies to not use a tool
+            # if the request doesn't use tool choice
+            # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
 
                 message = ChatMessage(role=role, content=output.text)
@@ -631,14 +629,16 @@ class OpenAIServingChat(OpenAIServing):
                                           tool_calls=tool_call_info.tool_calls)
 
                 else:
-                    # FOR NOW make it a chat message; we will have to detect the type to make it later.
+                    # FOR NOW make it a chat message; we will have to detect
+                    # the type to make it later.
                     message = ChatMessage(role=role, content=output.text)
 
             # undetermined case that is still important to handle
             else:
                 logger.error(
-                    'Error in chat_completion_full_generator - cannot determine if tools should '
-                    'be extracted. Returning a standard chat completion.')
+                    'Error in chat_completion_full_generator - cannot determine'
+                    ' if tools should be extracted. Returning a standard chat '
+                    'completion.')
                 message = ChatMessage(role=role, content=output.text)
 
             choice_data = ChatCompletionResponseChoice(
