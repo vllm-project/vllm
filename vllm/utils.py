@@ -666,8 +666,8 @@ def make_tensor_with_pad(
     pad: T,
     dtype: torch.dtype,
     *,
-    device: Optional[Union[str, torch.device]] = None,
     max_len: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
