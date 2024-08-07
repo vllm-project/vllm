@@ -1,10 +1,11 @@
 import os
+import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: Optional[int] = None
-    VLLM_RPC_PORT: int = 5570
+    VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_INSTANCE_ID: Optional[str] = None
@@ -142,10 +143,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv('VLLM_PORT', '0'))
     if 'VLLM_PORT' in os.environ else None,
 
-    # used when the frontend api server is running in multi-processing mode,
-    # to communicate with the backend engine process over ZMQ.
-    'VLLM_RPC_PORT':
-    lambda: int(os.getenv('VLLM_RPC_PORT', '5570')),
+    # path used for ipc when the frontend api server is running in
+    # multi-processing mode to communicate with the backend engine process.
+    'VLLM_RPC_BASE_PATH':
+    lambda: os.getenv('VLLM_RPC_BASE_PATH', tempfile.gettempdir()),
 
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers

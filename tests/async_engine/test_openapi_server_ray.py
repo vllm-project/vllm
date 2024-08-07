@@ -1,16 +1,12 @@
-import os
-import pathlib
-
 import openai  # use the official client for correctness check
 import pytest
 
-from ..utils import RemoteOpenAIServer
+from ..utils import VLLM_PATH, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
-
-chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
-    __file__))).parent.parent / "examples/template_chatml.jinja"
+chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
+assert chatml_jinja_path.exists()
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +20,7 @@ def server():
         "--enforce-eager",
         "--engine-use-ray",
         "--chat-template",
-        str(chatml_jinja_path)
+        str(chatml_jinja_path),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
