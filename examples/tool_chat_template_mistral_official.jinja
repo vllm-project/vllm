@@ -57,10 +57,10 @@
         {%- for tool_call in tool_calls %}
             {%- set out = tool_call.function|tojson %}
             {{- out[:-1] }}
-            {%- if not tool_call.id is defined or tool_call.id|length != 9 %}
-                {{- raise_exception("Tool call IDs should be alphanumeric strings with length 9!") }}
+            {%- if not tool_call.id is defined or tool_call.id|length < 9 %}
+                {{- raise_exception("Tool call IDs should be alphanumeric strings with length >= 9! (1)" + tool_call.id) }}
             {%- endif %}
-            {{- ', "id": "' + tool_call.id + '"}' }}
+            {{- ', "id": "' + tool_call.id[-9:] + '"}' }}
             {%- if not loop.last %}
                 {{- ", " }}
             {%- else %}
@@ -76,10 +76,10 @@
             {%- set content = message.content %}
         {%- endif %}
         {{- '[TOOL_RESULTS] {"content": ' + content|string + ", " }}
-        {%- if not message.tool_call_id is defined or message.tool_call_id|length != 9 %}
-            {{- raise_exception("Tool call IDs should be alphanumeric strings with length 9!") }}
+        {%- if not message.tool_call_id is defined or message.tool_call_id|length < 9 %}
+            {{- raise_exception("Tool call IDs should be alphanumeric strings with length >= 9! (2)" + message.tool_call_id) }}
         {%- endif %}
-        {{- '"call_id": "' + message.tool_call_id + '"}[/TOOL_RESULTS]' }}
+        {{- '"call_id": "' + message.tool_call_id[-9:] + '"}[/TOOL_RESULTS]' }}
     {%- else %}
         {{- raise_exception("Only user and assistant roles are supported, with the exception of an initial optional system message!") }}
     {%- endif %}
