@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import jinja2
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm_cutlass_library_extension import (DataType, EpilogueScheduleTag,
                                             EpilogueScheduleType,
                                             MixedInputKernelScheduleType,
@@ -14,6 +16,8 @@ from vllm_cutlass_library_extension import (DataType, EpilogueScheduleTag,
                                             TileSchedulerType, VLLMDataType,
                                             VLLMDataTypeNames, VLLMDataTypeTag,
                                             VLLMKernelScheduleTag)
+
+# yapf: enable
 
 #
 #   Generator templating
