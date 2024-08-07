@@ -228,9 +228,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   #
-  # For the CUTLASS-Marlin (machete, mixed precision cutlass kernels) we 
-  # automatically generate sources for various preselected input type pairs
-  # and schedules.
+  # For the Machete kernels we automatically generate sources for various 
+  # preselected input type pairs and schedules.
   # Generate sources:
   execute_process(
     COMMAND ${CMAKE_COMMAND} -E env 
