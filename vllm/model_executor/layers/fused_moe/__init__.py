@@ -1,21 +1,23 @@
-from vllm.model_executor.layers.fused_moe.fused_moe import (fused_marlin_moe,
-                                                            single_marlin_moe)
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe.fused_moe_gptq import fused_moe_gptq
+from vllm.model_executor.layers.fused_moe.fused_moe import single_marlin_moe
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
 from vllm.triton_utils import HAS_TRITON
 
 __all__ = [
     "FusedMoE",
     "FusedMoEMethodBase",
-    "fused_marlin_moe",
+    "fused_moe_gptq",
     "single_marlin_moe",
 ]
 
 if HAS_TRITON:
-
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        fused_experts, fused_moe, fused_topk, get_config_file_name,
-        grouped_topk)
+        fused_experts,
+        fused_moe,
+        fused_topk,
+        get_config_file_name,
+        grouped_topk,
+    )
 
     __all__ += [
         "fused_moe",
