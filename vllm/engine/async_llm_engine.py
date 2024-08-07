@@ -356,26 +356,35 @@ class _AsyncLLMEngine(LLMEngine):
         (
             encoder_prompt,
             encoder_prompt_token_ids,
-            _,
+            encoder_multi_modal_data,
         ) = await self._extract_prompt_components_async(
             extracted_encoder_prompt,
             request_id=request_id,
         )
+
+        if encoder_multi_modal_data is not None:
+            raise ValueError("Multi-modal data is not supported for "
+                             "(language) encoder-decoder models")
 
         # Avoid repeated processing if the input was originally in singleton
         # form, see self._to_explicit_encoder_decoder_prompt
         if extracted_decoder_prompt is extracted_encoder_prompt:
             decoder_prompt_token_ids = encoder_prompt_token_ids
             decoder_prompt = encoder_prompt
+            decoder_multi_modal_data = encoder_multi_modal_data
         else:
             (
                 decoder_prompt,
                 decoder_prompt_token_ids,
-                _,
+                decoder_multi_modal_data,
             ) = await self._extract_prompt_components_async(
                 extracted_decoder_prompt,
                 request_id=request_id,
             )
+
+        if decoder_multi_modal_data is not None:
+            raise ValueError("Multi-modal data is not supported for "
+                             "(language) encoder-decoder models")
 
         decoder_prompt_token_ids = (
             self._prepare_decoder_input_ids_for_generation(
