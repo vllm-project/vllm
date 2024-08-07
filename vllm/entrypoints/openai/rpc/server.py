@@ -21,10 +21,6 @@ class AsyncEngineRPCServer:
 
     def __init__(self, async_engine_args: AsyncEngineArgs,
                  usage_context: UsageContext, port: int):
-        # Initialize engine first.
-        self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
-                                                      usage_context)
-
         # Initialize context.
         self.context = zmq.asyncio.Context()
 
@@ -34,10 +30,30 @@ class AsyncEngineRPCServer:
         # see https://stackoverflow.com/a/8958414
         self.socket.bind(f"tcp://127.0.0.1:{port}")
 
+        self.async_engine_args = async_engine_args
+        self.usage_context = usage_context
+
     def cleanup(self):
         """Cleanup all resources."""
         self.socket.close()
         self.context.destroy()
+
+    async def startup_engine(self, identity):
+        """Notify the client that we are ready."""
+        try:
+            # Initialize engine first.
+            self.engine = AsyncLLMEngine.from_engine_args(
+                self.async_engine_args, self.usage_context)
+
+            await self.socket.send_multipart([
+                identity,
+                cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+            ])
+        except Exception as e:
+            await self.socket.send_multipart([
+                identity, 
+                cloudpickle.dumps(e)
+            ])
 
     async def get_model_config(self, identity):
         """Send the ModelConfig"""
@@ -84,13 +100,6 @@ class AsyncEngineRPCServer:
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
 
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
-
-    async def is_server_ready(self, identity):
-        """Notify the client that we are ready."""
         await self.socket.send_multipart([
             identity,
             cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
@@ -158,8 +167,8 @@ class AsyncEngineRPCServer:
                 return self.get_lora_config(identity)
             elif request == RPCUtilityRequest.DO_LOG_STATS:
                 return self.do_log_stats(identity)
-            elif request == RPCUtilityRequest.IS_SERVER_READY:
-                return self.is_server_ready(identity)
+            elif request == RPCUtilityRequest.STARTUP_ENGINE:
+                return self.startup_engine(identity)
             elif request == RPCUtilityRequest.CHECK_HEALTH:
                 return self.check_health(identity)
             elif request == RPCUtilityRequest.IS_TRACING_ENABLED:

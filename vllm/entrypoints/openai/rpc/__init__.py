@@ -27,7 +27,7 @@ class RPCAbortRequest:
 
 
 class RPCUtilityRequest(Enum):
-    IS_SERVER_READY = 1
+    STARTUP_ENGINE = 1
     GET_MODEL_CONFIG = 2
     GET_DECODING_CONFIG = 3
     GET_PARALLEL_CONFIG = 4

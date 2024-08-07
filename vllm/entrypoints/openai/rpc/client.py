@@ -116,7 +116,7 @@ class AsyncEngineRPCClient:
         """Wait for the RPCServer to start up."""
 
         await self._send_one_way_rpc_request(
-            request=RPCUtilityRequest.IS_SERVER_READY,
+            request=RPCUtilityRequest.STARTUP_ENGINE,
             error_message="Unable to start RPC Server.")
 
     async def _get_model_config_rpc(self) -> ModelConfig:
