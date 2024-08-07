@@ -1003,11 +1003,18 @@ class MiniCPMV(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        version = str(config.version).split(".")
-        version = tuple([int(x) for x in version])
+        if not hasattr(config, "version"):
+            if config.hidden_size == 2304 and config.query_num == 64:
+                version = (2, 0)
+            else:
+                version = (2, 5)
+        else:
+            version = str(config.version).split(".")
+            version = tuple([int(x) for x in version])
         # Dispatch class based on version
         instance_class = _SUPPORT_VERSION.get(version, None)
         if instance_class is None:
-            raise NotImplementedError
+            raise ValueError(
+                "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
         return instance_class(config, multimodal_config, cache_config,
                               quant_config)
