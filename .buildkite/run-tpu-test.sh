@@ -9,6 +9,7 @@ trap remove_docker_container EXIT
 # Remove the container that might not be cleaned up in the previous run.
 remove_docker_container
 
+echo $HF_TOKEN
 # For HF_TOKEN.
 source /etc/environment
 # Run a simple end-to-end example.
