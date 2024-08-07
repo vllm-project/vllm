@@ -127,7 +127,7 @@ def quantize_weights(w: torch.Tensor,
     w_q = torch.clamp(w_q, min_q_val, max_q_val)
 
     # Compute ref (dequantized)
-    # For some kernels (namely MarlinV2) the scales are applied after the scales
+    # For some kernels (namely Machete) the scales are applied after the scales
     # are applied, for this case computing the reference in similar way allows
     # us to use tighter error tolerances in our unit tests.
     if ref_zero_points_after_scales and zero_points:
