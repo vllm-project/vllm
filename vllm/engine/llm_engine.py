@@ -24,8 +24,9 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs, LLMInputs,
-                         PromptInputs, SingletonPromptInputs)
+from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
+                         ExplicitEncoderDecoderPrompt, LLMInputs, PromptInputs,
+                         SingletonPromptInputs)
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -735,6 +736,18 @@ class LLMEngine:
 
         return prompt, prompt_token_ids, multi_modal_data
 
+    def _apply_prompt_adapter(
+        self,
+        prompt_token_ids: List[int],
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> List[int]:
+        if prompt_adapter_request:
+            prompt_token_ids = (
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
+                + prompt_token_ids)
+
+        return prompt_token_ids
+
     def _get_default_enc_dec_decoder_prompt(self) -> List[int]:
         '''
         Specifically for encoder/decoder models:
@@ -769,8 +782,19 @@ class LLMEngine:
 
         bos_token_id = self._get_bos_token_id()
         assert bos_token_id is not None
-        prompt_token_ids: List[int] = [bos_token_id]
-        return prompt_token_ids
+        return [bos_token_id]
+
+    def _to_explicit_encoder_decoder_prompt(
+        self,
+        inputs: PromptInputs,
+    ) -> ExplicitEncoderDecoderPrompt:
+        if is_explicit_encoder_decoder_prompt(inputs):
+            return inputs
+
+        return ExplicitEncoderDecoderPrompt(
+            encoder_prompt=inputs,
+            decoder_prompt=inputs,
+        )
 
     def _process_encoder_decoder_prompt(
         self,
@@ -779,8 +803,8 @@ class LLMEngine:
     ) -> EncoderDecoderLLMInputs:
         '''
         For encoder/decoder models only:
-        Process an input prompt
-        into an `LLMInputs` instance.
+        Process an input prompt into an
+        :class:`EncoderDecoderLLMInputs` instance.
 
         There are two types of input prompts:
         singleton prompts which carry only the
@@ -810,24 +834,9 @@ class LLMEngine:
         * `EncoderDecoderLLMInputs` instance
         '''
 
-        # Obtain encoder and decoder prompt tokens. Note
-        # that, no matter what, the decoder
-        # prompt type is unknown.
-        if is_explicit_encoder_decoder_prompt(inputs):
-            # If input is explicit encoder/decoder prompt,
-            # then it remains to be determined what type
-            # of encoder prompt we have
-            extracted_encoder_prompt = inputs.get('encoder_prompt')
-            # Extract decoder prompt from explicit
-            # encoder/decoder prompt
-            extracted_decoder_prompt = inputs.get('decoder_prompt')
-        else:
-            # If input is singleton encoder prompt, then
-            # we know the encoder prompt type
-            extracted_encoder_prompt = inputs
-            # Decoder prompt is always unknown if
-            # encoder/decoder prompt is not explicit
-            extracted_decoder_prompt = None
+        explicit_inputs = self._to_explicit_encoder_decoder_prompt(inputs)
+        extracted_encoder_prompt = explicit_inputs["encoder_prompt"]
+        extracted_decoder_prompt = explicit_inputs["decoder_prompt"]
 
         (
             encoder_prompt,
@@ -838,7 +847,9 @@ class LLMEngine:
             request_id=request_id,
         )
 
-        if extracted_decoder_prompt is None:
+        # Avoid repeated processing if the inputs was originally in singleton
+        # form, see self._to_explicit_encoder_decoder_prompt
+        if extracted_decoder_prompt is extracted_encoder_prompt:
             decoder_prompt_token_ids = encoder_prompt_token_ids
             decoder_prompt = encoder_prompt
         else:
@@ -896,10 +907,8 @@ class LLMEngine:
             lora_request=lora_request,
         )
 
-        if prompt_adapter_request:
-            prompt_token_ids = (
-                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
-                + prompt_token_ids)
+        prompt_token_ids = self._apply_prompt_adapter(
+            prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
@@ -916,7 +925,6 @@ class LLMEngine:
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-
             model_inputs = self._process_encoder_decoder_prompt(
                 inputs,
                 request_id=request_id,

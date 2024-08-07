@@ -301,21 +301,7 @@ class _AsyncLLMEngine(LLMEngine):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
     ) -> List[int]:
-        '''
-        Wrapper around application of the model's
-        tokenizer.
-
-        Arguments:
-
-        * prompt
-        * request_id
-        * lora_request
-
-        Returns:
-
-        * prompt token ids
-        '''
-
+        """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group("prompts must be None if "
                                              "skip_tokenizer_init is True")
 
@@ -329,22 +315,7 @@ class _AsyncLLMEngine(LLMEngine):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
     ) -> Tuple[Optional[str], List[int], Optional[MultiModalDataDict]]:
-        '''
-        Extract the components of any single encoder or decoder input prompt.
-
-        Arguments:
-
-        * request_id
-        * inputs: single encoder or decoder input prompt
-        * lora_request: this is only valid for decoder prompts
-
-        Returns:
-
-        * prompt
-        * prompt_token_ids
-        * multi_modal_data
-        '''
-
+        """Async version of :meth:`_extract_prompt_components`."""
         if isinstance(inputs, str):
             prompt = inputs
             prompt_token_ids = await self._tokenize_prompt_async(
@@ -372,6 +343,51 @@ class _AsyncLLMEngine(LLMEngine):
 
         return prompt, prompt_token_ids, multi_modal_data
 
+    async def _process_encoder_decoder_prompt_async(
+        self,
+        inputs: PromptInputs,
+        request_id: str,
+    ) -> EncoderDecoderLLMInputs:
+        """Async version of :meth:`_process_encoder_decoder_prompt`."""
+        explicit_inputs = self._to_explicit_encoder_decoder_prompt(inputs)
+        extracted_encoder_prompt = explicit_inputs["encoder_prompt"]
+        extracted_decoder_prompt = explicit_inputs["decoder_prompt"]
+
+        (
+            encoder_prompt,
+            encoder_prompt_token_ids,
+            _,
+        ) = await self._extract_prompt_components_async(
+            extracted_encoder_prompt,
+            request_id=request_id,
+        )
+
+        # Avoid repeated processing if the inputs was originally in singleton
+        # form, see self._to_explicit_encoder_decoder_prompt
+        if extracted_decoder_prompt is extracted_encoder_prompt:
+            decoder_prompt_token_ids = encoder_prompt_token_ids
+            decoder_prompt = encoder_prompt
+        else:
+            (
+                decoder_prompt,
+                decoder_prompt_token_ids,
+                _,
+            ) = await self._extract_prompt_components_async(
+                extracted_decoder_prompt,
+                request_id=request_id,
+            )
+
+        decoder_prompt_token_ids = (
+            self._prepare_decoder_input_ids_for_generation(
+                decoder_prompt_token_ids))
+
+        return EncoderDecoderLLMInputs(
+            prompt_token_ids=decoder_prompt_token_ids,
+            prompt=decoder_prompt,
+            encoder_prompt_token_ids=encoder_prompt_token_ids,
+            encoder_prompt=encoder_prompt,
+        )
+
     async def _process_decoder_only_prompt_async(
         self,
         inputs: SingletonPromptInputs,
@@ -379,7 +395,7 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
-
+        """Async version of :meth:`_process_decoder_only_prompt`."""
         (
             prompt,
             prompt_token_ids,
@@ -390,10 +406,8 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
         )
 
-        if prompt_adapter_request:
-            prompt_token_ids = (
-                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
-                + prompt_token_ids)
+        prompt_token_ids = self._apply_prompt_adapter(
+            prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
@@ -406,12 +420,11 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+        """Async version of :meth:`process_model_inputs`."""
         if self.is_encoder_decoder_model():
-            # TODO: Make this async
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-
-            model_inputs = self._process_encoder_decoder_prompt(
+            model_inputs = await self._process_encoder_decoder_prompt_async(
                 inputs,
                 request_id=request_id,
             )
@@ -440,6 +453,7 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
+        """Async version of :meth:`add_request`."""
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
