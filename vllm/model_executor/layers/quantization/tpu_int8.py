@@ -67,14 +67,6 @@ class TPUInt8LinearMethod(LinearMethodBase):
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        try:
-            import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
-        except ImportError as err:
-            raise ImportError(
-                "Please install torch_xla by following the instructions at "
-                "https://docs.vllm.ai/en/latest/getting_started/tpu-installation.html "  # noqa: E501
-                "to run vLLM on TPU.") from err
-
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=params_dtype),
@@ -114,6 +106,13 @@ class TPUInt8LinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        try:
+            import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
+        except ImportError as err:
+            raise ImportError(
+                "Please install torch_xla by following the instructions at "
+                "https://docs.vllm.ai/en/latest/getting_started/tpu-installation.html "  # noqa: E501
+                "to run vLLM on TPU.") from err
         weight = layer.weight
         scale = layer.scale
         return torch.ops.xla.quantized_matmul(x, weight, scale)
