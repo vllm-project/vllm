@@ -688,8 +688,8 @@ class LLMEngine:
         * prompt token ids
         '''
 
-        tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                             "skip_tokenizer_init is True")
+        tokenizer = self.get_tokenizer_group(
+            missing_msg="prompts must be None if skip_tokenizer_init is True")
 
         prompt_token_ids = tokenizer.encode(request_id=request_id,
                                             prompt=prompt,
