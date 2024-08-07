@@ -942,9 +942,8 @@ void sequence_block_reducer_launcher(torch::Tensor& out,
   }
 }
 
-#define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T)                          \
-  sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out, \
-                                     seq_lens);
+#define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T) \
+  sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out);
 
 // [num_seqs, num_heads, head_size]
 // [num_seqs, num_heads, float]
@@ -1421,11 +1420,11 @@ void paged_attention_v3_launcher(
   }
 
 void paged_attention_v3(
-    torch::Tensor& out,            // [num_seqs, num_heads, head_size]
-    torch::Tensor& out_exm_sums,   // [num_seqs, num_heads, float]
-    torch::Tensor& out_max_logit,  //[num_seqs, num_heads, float]
-    torch::Tensor& exp_sums,       // [num_seqs, num_heads, max_num_partitions]
-    torch::Tensor& max_logits,     // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& out,             // [num_seqs, num_heads, head_size]
+    torch::Tensor& out_exp_sums,    // [num_seqs, num_heads, float]
+    torch::Tensor& out_max_logits,  //[num_seqs, num_heads, float]
+    torch::Tensor& exp_sums,        // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& max_logits,      // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
         tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
     torch::Tensor& query,  // [num_seqs, num_heads, head_size]
@@ -1473,8 +1472,8 @@ void paged_attention_remote_launcher(
   int kv_head_stride = key_cache.stride(2);
   int out_tp_stride = out.stride(0);
   int out_exp_sums_tp_stride = out_exp_sums.stride(0);
-  int out_max_logits_tp_stride = exp_sums_tp_stride;
-  int temp_out_tp_stride = temp_out.stride(0);
+  int out_max_logits_tp_stride = out_exp_sums_tp_stride;
+  int temp_out_tp_stride = tmp_out.stride(0);
   int exp_sums_tp_stride = exp_sums.stride(0);
   int max_logits_tp_stride = exp_sums_tp_stride;
 
@@ -1504,7 +1503,7 @@ void paged_attention_remote_launcher(
     T* query_ptr =
         reinterpret_cast<T*>(query.data_ptr()) + tp_rank * q_tp_stride;
     CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr()) +
-                             tp_rank * kv_tp_stripe;
+                             tp_rank * kv_tp_stride;
     CACHE_T* value_cache_ptr =
         reinterpret_cast<CACHE_T*>(value_cache.data_ptr()) +
         tp_rank * kv_tp_stride;
@@ -1587,9 +1586,9 @@ void paged_attention_remote_launcher(
   }
 
 void paged_attention_remote(
-    torch::Tensor& out,            // [tp_size, num_seqs, num_heads, head_size]
-    torch::Tensor& out_exm_sums,   // [tp_size, num_seqs, num_heads, float]
-    torch::Tensor& out_max_logit,  // [tp_size, num_seqs, num_heads, float]
+    torch::Tensor& out,             // [tp_size, num_seqs, num_heads, head_size]
+    torch::Tensor& out_exp_sums,    // [tp_size, num_seqs, num_heads, float]
+    torch::Tensor& out_max_logits,  // [tp_size, num_seqs, num_heads, float]
     torch::Tensor&
         exp_sums,  // [tp_size, num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
