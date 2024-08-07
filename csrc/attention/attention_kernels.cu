@@ -681,6 +681,9 @@ __global__ void paged_attention_v3_reduce_kernel(
   }
 }
 
+// Grid: (num_heads, num_seqs).
+template <typename scalar_t, int HEAD_SIZE, int NUM_THREADS,
+          int PARTITION_SIZE>
 __global__ void paged_attention_v2_reduce_kernel(
     scalar_t* __restrict__ out,            // [num_seqs, num_heads, head_size]
     const float* __restrict__ exp_sums,    // [num_seqs, num_heads,
