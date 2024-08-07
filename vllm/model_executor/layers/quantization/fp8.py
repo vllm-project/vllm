@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
     create_per_tensor_scale_param, cutlass_fp8_supported,
-    per_tensor_dequantize, requantize_with_max_scale)
+    per_tensor_dequantize, requantize_with_max_scale, convert_to_e4m3fnuz)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_hip, print_warning_once
@@ -118,7 +118,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # kernel for fast weight-only FP8 quantization
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89
+        self.use_marlin = (not is_hip()) and capability < 89
 
     def create_weights(
         self,
@@ -167,6 +167,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 scale = create_per_tensor_scale_param(output_partition_sizes,
                                                       **extra_weight_attrs)
                 layer.register_parameter("input_scale", scale)
+            else:
+                layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # If checkpoint not serialized fp8, quantize the weights.
@@ -182,17 +184,6 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
-            # If rocm, use float8_e4m3fnuz.
-            if is_hip():
-                # The bits pattern 10000000(-128) represents zero in e4m3fn
-                # but NaN in e4m3fnuz. So here we set it to 0.
-                # https://onnx.ai/onnx/technical/float8.html
-                weight_as_int8 = layer.weight.view(torch.int8)
-                ROCM_FP8_NAN_AS_INT = -128
-                weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
-                layer.weight = Parameter(layer.weight.view(
-                    torch.float8_e4m3fnuz),
-                                         requires_grad=False)
             # If using marlin (w8a16), kernel uses channelwise weights,
             # so extend the weight scales to be channelwise.
             if self.use_marlin:
@@ -204,9 +195,22 @@ class Fp8LinearMethod(LinearMethodBase):
             # requantize the logical shards as a single weight.
             else:
                 # Dequant -> Quant with max scale so we can run per tensor.
+                weight = layer.weight
+                weight_scale = layer.weight_scale
+
+                # If rocm, use float8_e4m3fnuz.
+                if is_hip():
+                    weight, weight_scale, input_scale = convert_to_e4m3fnuz(
+                        weight=weight,
+                        weight_scale=weight_scale,
+                        input_scale=layer.input_scale)
+                    if input_scale is not None:
+                        layer.input_scale = Parameter(input_scale,
+                                                      requires_grad=False)
+
                 weight_scale, weight = requantize_with_max_scale(
-                    weight=layer.weight,
-                    weight_scale=layer.weight_scale,
+                    weight=weight,
+                    weight_scale=weight_scale,
                     logical_widths=layer.logical_widths,
                 )
 
@@ -216,20 +220,6 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.quant_config.activation_scheme == "static":
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
-            else:
-                layer.input_scale = None
-
-            # If rocm, adjust the scaling factor.
-            # For the same bits representation, e4m3fnuz value is half of
-            # the e4m3fn value, so we should double the scaling factor to
-            # get the same dequantized value.
-            # https://onnx.ai/onnx/technical/float8.html
-            if is_hip():
-                layer.weight_scale = Parameter(layer.weight_scale * 2,
-                                               requires_grad=False)
-                if layer.input_scale is not None:
-                    layer.input_scale = Parameter(layer.input_scale * 2,
-                                                  requires_grad=False)
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
