@@ -66,9 +66,9 @@ class OpenAIServingChat(OpenAIServing):
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
-        raw_request: Optional[Request] = None
-    ) -> Union[ErrorResponse, AsyncGenerator[str, None],
-               ChatCompletionResponse]:
+        raw_request: Optional[Request] = None,
+    ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
+               ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create

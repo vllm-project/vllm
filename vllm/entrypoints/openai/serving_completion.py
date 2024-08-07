@@ -3,7 +3,7 @@ import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
                     Optional)
 from typing import Sequence as GenericSequence
-from typing import Tuple, cast
+from typing import Tuple, Union, cast
 
 from fastapi import Request
 
@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              UsageInfo)
+                                              ErrorResponse, UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
@@ -60,8 +60,11 @@ class OpenAIServingCompletion(OpenAIServing):
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
-    async def create_completion(self, request: CompletionRequest,
-                                raw_request: Request):
+    async def create_completion(
+        self,
+        request: CompletionRequest,
+        raw_request: Request,
+    ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create

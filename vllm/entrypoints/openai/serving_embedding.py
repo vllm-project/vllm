@@ -12,7 +12,8 @@ from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
-                                              EmbeddingResponseData, UsageInfo)
+                                              EmbeddingResponseData,
+                                              ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
@@ -82,8 +83,11 @@ class OpenAIServingEmbedding(OpenAIServing):
                          request_logger=request_logger)
         self._check_embedding_mode(model_config.embedding_mode)
 
-    async def create_embedding(self, request: EmbeddingRequest,
-                               raw_request: Request):
+    async def create_embedding(
+        self,
+        request: EmbeddingRequest,
+        raw_request: Request,
+    ) -> Union[EmbeddingResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/embeddings/create
