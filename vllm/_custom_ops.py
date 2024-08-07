@@ -42,32 +42,32 @@ def hint_on_error(fn):
 
 # activation ops
 def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.silu_and_mul, (out, x))
+    #torch.library.opcheck(torch.ops._C.silu_and_mul, (out, x))
     torch.ops._C.silu_and_mul(out, x)
 
 
 def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.gelu_and_mul, (out, x))
+    #torch.library.opcheck(torch.ops._C.gelu_and_mul, (out, x))
     torch.ops._C.gelu_and_mul(out, x)
 
 
 def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.gelu_tanh_and_mul, (out, x))
+    #torch.library.opcheck(torch.ops._C.gelu_tanh_and_mul, (out, x))
     torch.ops._C.gelu_tanh_and_mul(out, x)
 
 
 def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.gelu_fast, (out, x))
+    #torch.library.opcheck(torch.ops._C.gelu_fast, (out, x))
     torch.ops._C.gelu_fast(out, x)
 
 
 def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.gelu_new, (out, x))
+    #torch.library.opcheck(torch.ops._C.gelu_new, (out, x))
     torch.ops._C.gelu_new(out, x)
 
 
 def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.gelu_quick, (out, x))
+    #torch.library.opcheck(torch.ops._C.gelu_quick, (out, x))
     torch.ops._C.gelu_quick(out, x)
 
 
@@ -93,13 +93,13 @@ def paged_attention_v1(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    torch.library.opcheck(
-        torch.ops._C.paged_attention_v1,
-        (out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
-         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
-         k_scale, v_scale, tp_rank, blocksparse_local_blocks,
-         blocksparse_vert_stride, blocksparse_block_size,
-         blocksparse_head_sliding_step))
+    # torch.library.opcheck(
+    #     torch.ops._C.paged_attention_v1,
+    #     (out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
+    #      seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
+    #      k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+    #      blocksparse_vert_stride, blocksparse_block_size,
+    #      blocksparse_head_sliding_step))
     torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
@@ -132,13 +132,13 @@ def paged_attention_v2(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    torch.library.opcheck(
-        torch.ops._C.paged_attention_v2,
-        (out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
-         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
-         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
-         blocksparse_local_blocks, blocksparse_vert_stride,
-         blocksparse_block_size, blocksparse_head_sliding_step))
+    # torch.library.opcheck(
+    #     torch.ops._C.paged_attention_v2,
+    #     (out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
+    #      num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
+    #      alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
+    #      blocksparse_local_blocks, blocksparse_vert_stride,
+    #      blocksparse_block_size, blocksparse_head_sliding_step))
     torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
@@ -156,9 +156,9 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    torch.library.opcheck(
-        torch.ops._C.rotary_embedding,
-        (positions, query, key, head_size, cos_sin_cache, is_neox))
+    # torch.library.opcheck(
+    #     torch.ops._C.rotary_embedding,
+    #     (positions, query, key, head_size, cos_sin_cache, is_neox))
     torch.ops._C.rotary_embedding(positions, query, key, head_size,
                                   cos_sin_cache, is_neox)
 
@@ -168,9 +168,9 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.batched_rotary_embedding,
-                          (positions, query, key, head_size, cos_sin_cache,
-                           is_neox, rot_dim, cos_sin_cache_offsets))
+    # torch.library.opcheck(torch.ops._C.batched_rotary_embedding,
+    #                       (positions, query, key, head_size, cos_sin_cache,
+    #                        is_neox, rot_dim, cos_sin_cache_offsets))
     torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
@@ -179,12 +179,13 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
-    torch.library.opcheck(torch.ops._C.rms_norm, (out, input, weight, epsilon))
+    # torch.library.opcheck(torch.ops._C.rms_norm, (out, input, weight, epsilon))
     torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
+    # torch.library.opcheck(torch.ops._C.fused_add_rms_norm, (input, residual, weight, epsilon))
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
@@ -194,10 +195,10 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
                  slot_mapping: torch.Tensor,
                  block_tables: torch.Tensor) -> None:
     """Advance a step on GPU for existing inputs for a multi-step runner"""
-    torch.library.opcheck(
-        torch.ops._C.advance_step,
-        (num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
-         input_positions, seq_lens, slot_mapping, block_tables))
+    # torch.library.opcheck(
+    #     torch.ops._C.advance_step,
+    #     (num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
+    #      input_positions, seq_lens, slot_mapping, block_tables))
     return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
                                      input_tokens, sampled_token_ids,
                                      input_positions, seq_lens, slot_mapping,
@@ -231,9 +232,9 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
               b_g_idx: torch.Tensor, use_exllama: bool,
               bit: int) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.gptq_gemm,
-                          (a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
-                           b_g_idx, use_exllama, bit))
+    # torch.library.opcheck(torch.ops._C.gptq_gemm,
+    #                       (a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
+    #                        b_g_idx, use_exllama, bit))
     return torch.ops._C.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
                                   b_g_idx, use_exllama, bit)
 
@@ -250,7 +251,7 @@ def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
-    torch.library.opcheck(torch.ops._C.gptq_shuffle, (q_weight, q_perm, bit))
+    # torch.library.opcheck(torch.ops._C.gptq_shuffle, (q_weight, q_perm, bit))
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
@@ -258,9 +259,9 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
                 size_n: int, size_k: int) -> torch.Tensor:
-    torch.library.opcheck(
-        torch.ops._C.marlin_gemm,
-        (a, b_q_weight, b_scales, workspace, size_m, size_n, size_k))
+    # torch.library.opcheck(
+    #     torch.ops._C.marlin_gemm,
+    #     (a, b_q_weight, b_scales, workspace, size_m, size_n, size_k))
     return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                     size_n, size_k)
 
@@ -270,9 +271,9 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
                         workspace: torch.Tensor, b_q_type: ScalarType,
                         size_m: int, size_n: int, size_k: int) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.gptq_marlin_24_gemm,
-                          (a, b_q_weight, b_meta, b_scales, workspace,
-                           b_q_type, size_m, size_n, size_k))
+    # torch.library.opcheck(torch.ops._C.gptq_marlin_24_gemm,
+    #                       (a, b_q_weight, b_meta, b_scales, workspace,
+    #                        b_q_type, size_m, size_n, size_k))
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
                                             workspace, b_q_type, size_m,
                                             size_n, size_k)
@@ -427,8 +428,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.library.opcheck(torch.ops._C.cutlass_scaled_mm,
-                          (out, a, b, scale_a, scale_b, bias))
+    # torch.library.opcheck(torch.ops._C.cutlass_scaled_mm,
+    #                       (out, a, b, scale_a, scale_b, bias))
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out
@@ -451,8 +452,8 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.library.opcheck(torch.ops._C.cutlass_scaled_mm_azp,
-                          (out, a, b, scale_a, scale_b, azp_adj, azp, bias))
+    # torch.library.opcheck(torch.ops._C.cutlass_scaled_mm_azp,
+    #                       (out, a, b, scale_a, scale_b, azp_adj, azp, bias))
     torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
                                        azp, bias)
     return out
@@ -463,9 +464,9 @@ def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
               codebook_partition_sizes: List[int],
               bias: Optional[torch.Tensor]) -> torch.Tensor:
-    torch.library.opcheck(
-        torch.ops._C.aqlm_gemm,
-        (input, codes, codebooks, scales, codebook_partition_sizes, bias))
+    # torch.library.opcheck(
+    #     torch.ops._C.aqlm_gemm,
+    #     (input, codes, codebooks, scales, codebook_partition_sizes, bias))
     return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
                                   codebook_partition_sizes, bias)
 
@@ -480,8 +481,8 @@ def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
 def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        size_k: int, size_n: int,
                        num_bits: int) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.gptq_marlin_repack,
-                          (b_q_weight, perm, size_k, size_n, num_bits))
+    # torch.library.opcheck(torch.ops._C.gptq_marlin_repack,
+    #                       (b_q_weight, perm, size_k, size_n, num_bits))
     return torch.ops._C.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
                                            num_bits)
 
@@ -489,8 +490,8 @@ def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
 # gptq_marlin
 def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
                       num_bits: int) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.awq_marlin_repack,
-                          (b_q_weight, size_k, size_n, num_bits))
+    # torch.library.opcheck(torch.ops._C.awq_marlin_repack,
+    #                       (b_q_weight, size_k, size_n, num_bits))
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
@@ -522,10 +523,10 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      is_k_full: bool,
                      has_zp: bool = False,
                      use_fp32_reduce: bool = False) -> torch.Tensor:
-    torch.library.opcheck(
-        torch.ops._C.gptq_marlin_gemm,
-        (a, b_q_weight, b_scales, b_zeros, g_idx, perm, workspace, b_q_type,
-         size_m, size_n, size_k, is_k_full, has_zp, use_fp32_reduce))
+    # torch.library.opcheck(
+    #     torch.ops._C.gptq_marlin_gemm,
+    #     (a, b_q_weight, b_scales, b_zeros, g_idx, perm, workspace, b_q_type,
+    #      size_m, size_n, size_k, is_k_full, has_zp, use_fp32_reduce))
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type,
                                          size_m, size_n, size_k, is_k_full,
@@ -537,9 +538,9 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                     b_scales: torch.Tensor, workspace: torch.Tensor,
                     num_bits: int, size_m: int, size_n: int,
                     size_k: int) -> torch.Tensor:
-    torch.library.opcheck(
-        torch.ops._C.fp8_marlin_gemm,
-        (a, b_q_weight, b_scales, workspace, num_bits, size_m, size_n, size_k))
+    # torch.library.opcheck(
+    #     torch.ops._C.fp8_marlin_gemm,
+    #     (a, b_q_weight, b_scales, workspace, num_bits, size_m, size_n, size_k))
     return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, workspace,
                                         num_bits, size_m, size_n, size_k)
 
@@ -616,21 +617,21 @@ def scaled_fp8_quant(
             scale = torch.empty((shape[0], 1),
                                 device=input.device,
                                 dtype=torch.float32)
-            torch.library.opcheck(
-                torch.ops._C.dynamic_per_token_scaled_fp8_quant,
-                (output, input, scale, scale_ub))
+            # torch.library.opcheck(
+            #     torch.ops._C.dynamic_per_token_scaled_fp8_quant,
+            #     (output, input, scale, scale_ub))
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
                 output, input, scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.library.opcheck(torch.ops._C.dynamic_scaled_fp8_quant,
-                                  (output, input, scale))
+            # torch.library.opcheck(torch.ops._C.dynamic_scaled_fp8_quant,
+            #                       (output, input, scale))
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         # num_token_padding not implemented for this case
         assert (scale.numel() == 1 or num_token_padding is None)
-        torch.library.opcheck(torch.ops._C.static_scaled_fp8_quant,
-                              (output, input, scale))
+        # torch.library.opcheck(torch.ops._C.static_scaled_fp8_quant,
+        #                       (output, input, scale))
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
@@ -655,8 +656,8 @@ def scaled_int8_quant(
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
-        torch.library.opcheck(torch.ops._C.static_scaled_int8_quant,
-                              (output, input, scale))
+        # torch.library.opcheck(torch.ops._C.static_scaled_int8_quant,
+        #                       (output, input, scale))
         torch.ops._C.static_scaled_int8_quant(output, input, scale)
         return output, scale
 
@@ -664,8 +665,8 @@ def scaled_int8_quant(
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
                                device=input.device,
                                dtype=torch.float32)
-    torch.library.opcheck(torch.ops._C.dynamic_scaled_int8_quant,
-                          (output, input, input_scales))
+    # torch.library.opcheck(torch.ops._C.dynamic_scaled_int8_quant,
+    #                       (output, input, input_scales))
     torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
     return output, input_scales
 
@@ -675,9 +676,9 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                     s_tok: torch.Tensor, s_ch: torch.Tensor,
                     s_group: torch.Tensor, workspace: torch.Tensor,
                     size_m: int, size_n: int, size_k: int) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.marlin_qqq_gemm,
-                          (a, b_q_weight, s_tok, s_ch, s_group, workspace,
-                           size_m, size_n, size_k))
+    # torch.library.opcheck(torch.ops._C.marlin_qqq_gemm,
+    #                       (a, b_q_weight, s_tok, s_ch, s_group, workspace,
+    #                        size_m, size_n, size_k))
     return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
                                         workspace, size_m, size_n, size_k)
 
@@ -685,7 +686,7 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 # gguf
 def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int,
                     n: int) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.ggml_dequantize, (W, quant_type, m, n))
+    # torch.library.opcheck(torch.ops._C.ggml_dequantize, (W, quant_type, m, n))
     return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
 
 
@@ -695,8 +696,8 @@ def ggml_mul_mat_vec_a8(
     quant_type: int,
     row: int,
 ) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.ggml_mul_mat_vec_a8,
-                          (W, X, quant_type, row))
+    # torch.library.opcheck(torch.ops._C.ggml_mul_mat_vec_a8,
+    #                       (W, X, quant_type, row))
     return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
 
 
@@ -706,8 +707,8 @@ def ggml_mul_mat_a8(
     quant_type: int,
     row: int,
 ) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.ggml_mul_mat_a8,
-                          (W, X, quant_type, row))
+    # torch.library.opcheck(torch.ops._C.ggml_mul_mat_a8,
+    #                       (W, X, quant_type, row))
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
@@ -746,9 +747,9 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C.moe_align_block_size,
-                          (topk_ids, num_experts, block_size, sorted_token_ids,
-                           experts_ids, num_tokens_post_pad))
+    # torch.library.opcheck(torch.ops._C.moe_align_block_size,
+    #                       (topk_ids, num_experts, block_size, sorted_token_ids,
+    #                        experts_ids, num_tokens_post_pad))
     torch.ops._C.moe_align_block_size(topk_ids, num_experts, block_size,
                                       sorted_token_ids, experts_ids,
                                       num_tokens_post_pad)
@@ -757,9 +758,9 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indicies: torch.Tensor,
                  gating_output: float) -> None:
-    torch.library.opcheck(
-        torch.ops._moe_C.topk_softmax,
-        (topk_weights, topk_ids, token_expert_indicies, gating_output))
+    # torch.library.opcheck(
+    #     torch.ops._moe_C.topk_softmax,
+    #     (topk_weights, topk_ids, token_expert_indicies, gating_output))
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
                                   token_expert_indicies, gating_output)
 
@@ -774,9 +775,9 @@ def reshape_and_cache(
     k_scale: float,
     v_scale: float,
 ) -> None:
-    torch.library.opcheck(torch.ops._C_cache_ops.reshape_and_cache,
-                          (key, value, key_cache, value_cache, slot_mapping,
-                           kv_cache_dtype, k_scale, v_scale))
+    # torch.library.opcheck(torch.ops._C_cache_ops.reshape_and_cache,
+    #                       (key, value, key_cache, value_cache, slot_mapping,
+    #                        kv_cache_dtype, k_scale, v_scale))
     torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
                                              value_cache, slot_mapping,
                                              kv_cache_dtype, k_scale, v_scale)
@@ -792,9 +793,9 @@ def reshape_and_cache_flash(
     k_scale: float,
     v_scale: float,
 ) -> None:
-    torch.library.opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash,
-                          (key, value, key_cache, value_cache, slot_mapping,
-                           kv_cache_dtype, k_scale, v_scale))
+    # torch.library.opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash,
+    #                       (key, value, key_cache, value_cache, slot_mapping,
+    #                        kv_cache_dtype, k_scale, v_scale))
     torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
                                                    kv_cache_dtype, k_scale,
@@ -804,15 +805,15 @@ def reshape_and_cache_flash(
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C_cache_ops.copy_blocks,
-                          (key_caches, value_caches, block_mapping))
+    # torch.library.opcheck(torch.ops._C_cache_ops.copy_blocks,
+    #                       (key_caches, value_caches, block_mapping))
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    torch.library.opcheck(torch.ops._C_cache_ops.swap_blocks,
-                          (src, dst, block_mapping))
+    # torch.library.opcheck(torch.ops._C_cache_ops.swap_blocks,
+    #                       (src, dst, block_mapping))
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
@@ -820,8 +821,8 @@ def convert_fp8(output: torch.Tensor,
                 input: torch.Tensor,
                 scale: float = 1.0,
                 kv_dtype: str = "fp8") -> None:
-    torch.library.opcheck(torch.ops._C_cache_ops.convert_fp8,
-                          (output, input, scale, kv_dtype))
+    # torch.library.opcheck(torch.ops._C_cache_ops.convert_fp8,
+    #                       (output, input, scale, kv_dtype))
     torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
@@ -848,8 +849,8 @@ def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
 
 def should_custom_ar(inp: torch.Tensor, max_size: int, world_size: int,
                      full_nvlink: bool) -> bool:
-    torch.library.opcheck(torch.ops._C_custom_ar.should_custom_ar,
-                          (inp, max_size, world_size, full_nvlink))
+    # torch.library.opcheck(torch.ops._C_custom_ar.should_custom_ar,
+    #                       (inp, max_size, world_size, full_nvlink))
     return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size,
                                                    full_nvlink)
 
@@ -871,7 +872,7 @@ def dispose(fa: int) -> None:
 
 
 def meta_size() -> int:
-    torch.library.opcheck(torch.ops._C_custom_ar.meta_size, ())
+    # torch.library.opcheck(torch.ops._C_custom_ar.meta_size, ())
     return torch.ops._C_custom_ar.meta_size()
 
 
