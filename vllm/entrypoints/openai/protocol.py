@@ -413,8 +413,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     return ValueError(
                         "The tool specified in `tool_choice` does not match any"
                         " of the specified `tools`")
-
-        # TODO validate tools
         return data
 
     @model_validator(mode="before")
