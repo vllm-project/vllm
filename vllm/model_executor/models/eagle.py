@@ -7,8 +7,8 @@ from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
+from vllm.model_executor.model_loader.utils import get_model_architecture
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
@@ -20,11 +20,7 @@ class EAGLE(nn.Module):
         super().__init__()
         self.config = config
 
-        architectures = getattr(self.config.model, "architectures", [])
-        for arch in architectures:
-            model_cls = ModelRegistry.load_model_cls(arch)
-            if model_cls is not None:
-                break
+        model_cls, _ = get_model_architecture(self.config.model)
 
         self.model = model_cls(self.config.model, *args, **kwargs)
         self.fc = nn.Linear(config.model.hidden_size * 2,
