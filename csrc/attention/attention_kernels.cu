@@ -952,7 +952,9 @@ void sequence_block_reducer(
     torch::Tensor&
         tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
 ) {
-  sequence_block_reducer_launcher<tmp_out.dtype(), 128, 8192>(
+  const int NUM_THREADS = 128;
+  const int PARTITION_SIZE = 8192;
+  sequence_block_reducer_launcher<tmp_out.dtype(), NUM_THREADS, PARTITION_SIZE>(
       out, exp_sums, max_logits, tmp_out);
 }
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
