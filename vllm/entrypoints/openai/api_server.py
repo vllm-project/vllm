@@ -120,9 +120,18 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         async_engine_client = AsyncEngineRPCClient(rpc_path)
-        await async_engine_client.setup()
 
         try:
+            while True:
+                try:
+                    await async_engine_client.setup()
+                    break
+                except TimeoutError as e:
+                    if not rpc_server_process.is_alive():
+                        raise RuntimeError(
+                            "The server process died before "
+                            "responding to the readiness probe") from e
+
             yield async_engine_client
         finally:
             # Ensure rpc server process was terminated
