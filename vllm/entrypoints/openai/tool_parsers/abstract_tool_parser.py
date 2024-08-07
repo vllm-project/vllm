@@ -41,7 +41,7 @@ class ToolParser:
         Static because it's stateless.
         """
         raise NotImplementedError(
-            'AbstractToolParser.extract_tool_calls has not been implemented!')
+            "AbstractToolParser.extract_tool_calls has not been implemented!")
 
     def extract_tool_calls_streaming(
         self,
@@ -60,5 +60,5 @@ class ToolParser:
         previously been  parsed and extracted (see constructor)
         """
         raise NotImplementedError(
-            'AbstractToolParser.extract_tool_calls_streaming has not been '
-            'implemented!')
+            "AbstractToolParser.extract_tool_calls_streaming has not been "
+            "implemented!")
