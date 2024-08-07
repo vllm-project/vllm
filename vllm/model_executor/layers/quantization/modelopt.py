@@ -158,10 +158,10 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
             weight_amax = Parameter(
-                torch.empty(len(output_partition_sizes), dtype=params_dtype),
+                torch.empty(len(output_partition_sizes), dtype=torch.float32),
                 requires_grad=False,
             )
-            weight_amax[:] = torch.finfo(params_dtype).min
+            weight_amax[:] = torch.finfo(torch.float32).min
             layer.add_module(
                 "weight_quantizer",
                 ModelOptQuantizer(weight_amax, **extra_weight_attrs),
@@ -172,10 +172,10 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             if self.quant_config.activation_scheme == "static":
                 input_amax = Parameter(
                     torch.empty(len(output_partition_sizes),
-                                dtype=params_dtype),
+                                dtype=torch.float32),
                     requires_grad=False,
                 )
-                input_amax[:] = torch.finfo(params_dtype).min
+                input_amax[:] = torch.finfo(torch.float32).min
                 layer.add_module(
                     "input_quantizer",
                     ModelOptQuantizer(input_amax, **extra_weight_attrs),
@@ -196,18 +196,19 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             return
 
         else:
-            weight_scale = (layer.weight_quantizer._amax.to(torch.float32)) / 448.0
-            weight = layer.weight.view(torch.float8_e4m3fn)
-            max_w_scale = weight_scale.max()
-            # max_w_scale, weight = requantize_with_max_scale(
-            #     weight=restored_fp8_tensor,
-            #     weight_scale=weight_scale,
-            #     logical_widths=layer.logical_widths,
-            # )
+            weight_dtype = torch.float8_e4m3fn
+            max_bound  = torch.finfo(weight_dtype).max
+            weight_scale = (layer.weight_quantizer._amax/max_bound).to(torch.float32)
+            weight = layer.weight.view(weight_dtype)
+           
+            max_w_scale, weight = requantize_with_max_scale(weight, 
+                                                            weight_scale, 
+                                                            layer.logical_widths) 
+           
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
             layer.input_scale = Parameter(
-                (layer.input_quantizer._amax.max().to(torch.float32))/448.0, requires_grad=False) 
+                (layer.input_quantizer._amax.max()/max_bound).to(torch.float32), requires_grad=False) 
             
     def apply(
         self,
@@ -215,12 +216,6 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if not torch.cuda.is_current_stream_capturing(): 
-            logger.info(f"fp8_linear: \n cutlass: {self.cutlass_fp8_supported} "
-                     f"\nweight: {layer.weight}, "
-                     f"\nx: {x},"
-                     f"\nweight.scale={layer.weight_scale}, "
-                     f"\ninput_scale: {layer.input_scale}")
         return apply_fp8_linear(
             input=x,
             weight=layer.weight,
