@@ -99,7 +99,8 @@ class LRUEvictor(Evictor):
         return block
 
     def _cleanup_if_necessary(self):
-        if len(self.priority_queue) > LRUEvictor.CLEANUP_THRESHOLD * len(self.free_table):
+        if len(self.priority_queue) > LRUEvictor.CLEANUP_THRESHOLD * len(
+                self.free_table):
             self._cleanup()
 
     def _cleanup(self):
