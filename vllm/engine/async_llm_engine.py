@@ -375,7 +375,7 @@ class _AsyncLLMEngine(LLMEngine):
                 request_id=request_id,
             )
 
-            decoder_comps = encoder_comps
+            decoder_comps = None, None, None
 
         encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
         decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps

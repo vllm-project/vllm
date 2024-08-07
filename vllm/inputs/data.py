@@ -69,7 +69,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T]):
 
     Only the encoder prompt may have multi-modal data.
 
-    Note that an ExplicitEncoderDecoderPrompt may not
+    Note that an :class:`ExplicitEncoderDecoderPrompt` may not
     be used as an input to a decoder-only model,
     and that the `encoder_prompt` and `decoder_prompt`
     fields of this data structure themselves must be
