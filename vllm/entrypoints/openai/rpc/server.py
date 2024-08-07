@@ -100,7 +100,7 @@ class AsyncEngineRPCServer:
             # Abort the request in the llm engine.
             await self.engine.abort(request.request_id)
         except Exception:
-            logger.warning("Failed to abort request {}", request.request_id)
+            logger.warning("Failed to abort request %s", request.request_id)
         finally:
             # Send confirmation to the client.
             await self.socket.send_multipart([
