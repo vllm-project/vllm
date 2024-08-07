@@ -18,7 +18,6 @@ class ParsedTokens(TypedDict):
     is_tokens: Literal[True]
 
 
-# https://github.com/vllm-project/vllm/pull/4028
 @overload
 def parse_and_batch_prompt(
         prompt: Union[str, List[str]]) -> Sequence[ParsedText]:
