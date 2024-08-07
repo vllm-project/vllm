@@ -942,8 +942,9 @@ void sequence_block_reducer_launcher(torch::Tensor& out,
   }
 }
 
-#define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T) \
-  sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out);
+#define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T)                            \
+  sequence_block_reducer_launcher<T, 128, 8192>(out, exp_sums, max_logits, \
+                                                tmp_out);
 
 // [num_seqs, num_heads, head_size]
 // [num_seqs, num_heads, float]
