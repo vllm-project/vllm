@@ -12,43 +12,43 @@ them locally with
 
 .. code-block:: python
 
-    from huggingface_hub import snapshot_download
+   from huggingface_hub import snapshot_download
 
-    sql_lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+   sql_lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 
 
-Then we instantiate the base model and pass in the ``enable_lora=True`` flag:
+Then, we instantiate the base model and specify the ``enable_lora=True`` flag:
 
 .. code-block:: python
 
-    from vllm import LLM, SamplingParams
-    from vllm.lora.request import LoRARequest
+   from vllm import LLM, SamplingParams
+   from vllm.lora.request import LoRARequest
 
-    llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_lora=True)
+   llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_lora=True)
 
 
-We can now submit the prompts and call ``llm.generate`` with the ``lora_request`` parameter. The first parameter
+Finally, we can submit the prompts and call ``llm.generate`` with the ``lora_request`` parameter. The first parameter
 of ``LoRARequest`` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
 the third parameter is the path to the LoRA adapter.
 
 .. code-block:: python
 
-    sampling_params = SamplingParams(
-        temperature=0,
-        max_tokens=256,
-        stop=["[/assistant]"]
-    )
+   sampling_params = SamplingParams(
+       temperature=0,
+       max_tokens=256,
+       stop=["[/assistant]"]
+   )
 
-    prompts = [
-         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",
-         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",
-    ]
+   prompts = [
+        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",
+        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",
+   ]
 
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-        lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
-    )
+   outputs = llm.generate(
+       prompts,
+       sampling_params,
+       lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
+   )
 
 
 Check out `examples/multilora_inference.py <https://github.com/vllm-project/vllm/blob/main/examples/multilora_inference.py>`_
@@ -57,7 +57,7 @@ for an example of how to use LoRA adapters with the async engine and how to use 
 Serving LoRA Adapters
 ---------------------
 LoRA adapted models can also be served with the Open-AI compatible vLLM server. To do so, we use
-``--lora-modules {name}={path} {name}={path}`` to specify each LoRA module when we kickoff the server:
+``--lora-modules {name}={path} {name}={path}`` to specify each LoRA module when we start the server:
 
 .. code-block:: bash
 
@@ -66,7 +66,9 @@ LoRA adapted models can also be served with the Open-AI compatible vLLM server. 
         --lora-modules sql-lora=$HOME/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/
 
 .. note::
-   The commit ID `0dfa347e8877a4d4ed19ee56c140fa518470028c` may change over time. Please check the latest commit ID in your environment to ensure you are using the correct one.
+
+   The commit ID `0dfa347e8877a4d4ed19ee56c140fa518470028c` may change over time.
+   Check the latest commit ID in your environment to ensure you are using the correct one.
 
 The server entrypoint accepts all other LoRA configuration parameters (``max_loras``, ``max_lora_rank``, ``max_cpu_loras``,
 etc.), which will apply to all forthcoming requests. Upon querying the ``/models`` endpoint, we should see our LoRA along
@@ -74,36 +76,36 @@ with its base model:
 
 .. code-block:: bash
 
-    curl localhost:8000/v1/models | jq .
-    {
-        "object": "list",
-        "data": [
-            {
-                "id": "meta-llama/Llama-2-7b-hf",
-                "object": "model",
-                ...
-            },
-            {
-                "id": "sql-lora",
-                "object": "model",
-                ...
-            }
-        ]
-    }
+   curl localhost:8000/v1/models | jq .
+   {
+       "object": "list",
+       "data": [
+           {
+               "id": "meta-llama/Llama-2-7b-hf",
+               "object": "model",
+               ...
+           },
+           {
+               "id": "sql-lora",
+               "object": "model",
+               ...
+           }
+       ]
+   }
 
 Requests can specify the LoRA adapter as if it were any other model via the ``model`` request parameter. The requests will be
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
 LoRA adapter requests if they were provided and ``max_loras`` is set high enough).
 
-The following is an example request
+Below is an example of a request:
 
 .. code-block:: bash
 
-    curl http://localhost:8000/v1/completions \
-        -H "Content-Type: application/json" \
-        -d '{
-            "model": "sql-lora",
-            "prompt": "San Francisco is a",
-            "max_tokens": 7,
-            "temperature": 0
-        }' | jq
+   curl http://localhost:8000/v1/completions \
+       -H "Content-Type: application/json" \
+       -d '{
+           "model": "sql-lora",
+           "prompt": "San Francisco is a",
+           "max_tokens": 7,
+           "temperature": 0
+       }' | jq

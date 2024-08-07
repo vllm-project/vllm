@@ -3,7 +3,7 @@
 vLLM Meetups
 ============
 
-We host regular meetups in San Francisco Bay Area every 2 months. We will share the project updates from the vLLM team and have guest speakers from the industry to share their experience and insights. Please find the materials of our previous meetups below:
+We host regular meetups in San Francisco Bay Area every 2 months. We share the project updates from the vLLM team and have guest speakers from the industry to share their experience and insights. You will find the materials of our previous meetups below:
 
 - `The fifth vLLM meetup <https://lu.ma/lp0gyjqr>`__, with AWS, July 24th 2024. `[Slides] <https://docs.google.com/presentation/d/1RgUD8aCfcHocghoP3zmXzck9vX3RCI9yfUAB2Bbcl4Y/edit?usp=sharing>`__
 - `The fourth vLLM meetup <https://lu.ma/agivllm>`__, with Cloudflare and BentoML, June 11th 2024. `[Slides] <https://docs.google.com/presentation/d/1iJ8o7V2bQEi0BFEljLTwc5G1S10_Rhv3beed5oB0NJ4/edit?usp=sharing>`__

@@ -46,14 +46,14 @@ Install from source
       $ sudo apt-get update  -y
       $ sudo apt-get install python3
 
-- Second, install prerequisites vLLM OpenVINO backend installation:
+- Then, install the prerequisites for vLLM OpenVINO backend installation:
 
   .. code-block:: console
 
       $ pip install --upgrade pip
       $ pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
-- Finally, install vLLM with OpenVINO backend: 
+- Finally, install vLLM OpenVINO backend:
 
   .. code-block:: console
 
@@ -64,17 +64,17 @@ Install from source
 Performance tips
 ----------------
 
-vLLM OpenVINO backend uses the following environment variables to control behavior:
+To control behavior in vLLM OpenVINO backend, use the following environment variables:
 
-- ``VLLM_OPENVINO_KVCACHE_SPACE`` to specify the KV Cache size (e.g, ``VLLM_OPENVINO_KVCACHE_SPACE=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
+- ``VLLM_OPENVINO_KVCACHE_SPACE`` specifies the KV Cache size (for example,  ``VLLM_OPENVINO_KVCACHE_SPACE=40`` means 40 GB space for KV cache). Higher setting will enable vLLM to run more requests in parallel. This parameter should be set based on the hardware configuration and user-defined memory management pattern.
 
-- ``VLLM_OPENVINO_CPU_KV_CACHE_PRECISION=u8`` to control KV cache precision. By default, FP16 / BF16 is used depending on platform.
+- ``VLLM_OPENVINO_CPU_KV_CACHE_PRECISION=u8`` controls KV cache precision.  By default, ``FP16`` / ``BF16`` is used depending on platform.
 
-- ``VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON`` to enable U8 weights compression during model loading stage. By default, compression is turned off.
+- ``VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON`` enables U8 weights compression during a model loading stage. By default, the compression is turned off.
 
 To enable better TPOT / TTFT latency, you can use vLLM's chunked prefill feature (``--enable-chunked-prefill``). Based on the experiments, the recommended batch size is ``256`` (``--max-num-batched-tokens``)
 
-OpenVINO best known configuration is:
+Best known configuration in OpenVINO is as follows:
 
 .. code-block:: console
 
@@ -88,7 +88,7 @@ Limitations
 
 - LoRA serving is not supported.
 
-- Only LLM models are currently supported. LLaVa and encoder-decoder models are not currently enabled in vLLM OpenVINO integration.
+- Only LLM models are currently supported. LLaVa and encoder-decoder models are not currently enabled for vLLM OpenVINO integration.
 
 - Tensor and pipeline parallelism are not currently enabled in vLLM integration.
 

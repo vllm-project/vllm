@@ -1,6 +1,6 @@
 # Usage Stats Collection
 
-vLLM collects anonymous usage data by default to help the engineering team better understand which hardware and model configurations are widely used. This data allows them to prioritize their efforts on the most common workloads. The collected data is transparent, does not contain any sensitive information, and will be publicly released for the community's benefit.
+vLLM collects anonymous usage data by default. It helps the engineering team understand better which hardware and model configurations are widely used. This data allows them to prioritize their efforts on the most common workloads. The collected data is transparent, does not contain any sensitive information, and will be publicly released for the community's benefit.
 
 ## What data is collected?
 
@@ -47,10 +47,10 @@ tail ~/.config/vllm/usage_stats.json
 
 ## Opt-out of Usage Stats Collection
 
-You can opt-out of usage stats collection by setting the VLLM_NO_USAGE_STATS or DO_NOT_TRACK environment variable, or by creating a ~/.config/vllm/do_not_track file:
+You can opt-out usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
 
 ```bash
-# Any of the following methods can disable usage stats collection
+# Any of the following methods can disable usage stats collection.
 export VLLM_NO_USAGE_STATS=1
 export DO_NOT_TRACK=1
 mkdir -p ~/.config/vllm && touch ~/.config/vllm/do_not_track

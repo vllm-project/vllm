@@ -3,7 +3,9 @@
 Deploying and scaling up with SkyPilot
 ================================================
 
-.. raw:: html
+.. image:: https://imgur.com/yxtzPEu.png
+   :alt: vLLM
+   :align: center
 
   <p align="center">
     <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>
@@ -61,7 +63,7 @@ See the vLLM SkyPilot YAML for serving, `serving.yaml <https://github.com/skypil
       --trust-remote-code \
       --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
       2>&1 | tee api_server.log &
-    
+
     echo 'Waiting for vllm api server to start...'
     while ! `cat api_server.log | grep -q 'Uvicorn running on'`; do sleep 1; done
 
@@ -73,7 +75,7 @@ See the vLLM SkyPilot YAML for serving, `serving.yaml <https://github.com/skypil
       --model-url http://localhost:8081/v1 \
       --stop-token-ids 128009,128001
 
-Start the serving the Llama-3 8B model on any of the candidate GPUs listed (L4, A10g, ...): 
+Start the serving the Llama-3 8B model on any of the candidate GPUs listed (L4, A10g, ...):
 
 .. code-block:: console
 
@@ -95,7 +97,7 @@ Check the output of the command. There will be a shareable gradio link (like the
 Scale up to multiple replicas
 -----------------------------
 
-SkyPilot can scale up the service to multiple service replicas with built-in autoscaling, load-balancing and fault-tolerance. You can do it by adding a services section to the YAML file.
+SkyPilot can scale up the service to multiple service replicas with built-in autoscaling, load-balancing and fault-tolerance. You can do it by adding a services section to the YAML file:
 
 .. code-block:: yaml
 
@@ -110,7 +112,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
         - role: user
           content: Hello! What is your name?
     max_tokens: 1
-    
+
 .. raw:: html
 
   <details>
@@ -165,7 +167,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
 
   </details>
 
-Start the serving the Llama-3 8B model on multiple replicas:
+Start the serving of the Llama-3 8B model on multiple replicas:
 
 .. code-block:: console
 
@@ -196,10 +198,12 @@ Wait until the service is ready:
   vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
 
 .. raw:: html
-  
+
   </details>
 
-After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
+   </details>
+
+Once the service is ready, you can find a single endpoint for the service and access the service with the endpoint:
 
 .. code-block:: console
 
@@ -233,7 +237,7 @@ To enable autoscaling, you could replace the `replicas` with the following confi
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 
-    
+
 .. raw:: html
 
   <details>
@@ -289,7 +293,7 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
 
 
 .. raw:: html
-  
+
   </details>
 
 To update the service with the new config:
@@ -310,7 +314,7 @@ To stop the service:
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
-It is also possible to access the Llama-3 service with a separate GUI frontend, so the user requests send to the GUI will be load-balanced across replicas.
+It is also possible to access the Llama-3 service with a separate GUI frontend, so the user requests sent to the GUI will be load-balanced across replicas.
 
 .. raw:: html
 
@@ -321,7 +325,7 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
 
   envs:
     MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-    ENDPOINT: x.x.x.x:3031 # Address of the API server running vllm. 
+    ENDPOINT: x.x.x.x:3031 # Address of the API server running vllm.
 
   resources:
     cpus: 2
@@ -347,19 +351,19 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
 
 
 .. raw:: html
-  
+
   </details>
 
 1. Start the chat web UI:
 
-.. code-block:: console
+   .. code-block:: console
 
   sky launch -c gui ./gui.yaml --env ENDPOINT=$(sky serve status --endpoint vllm)
 
 
 2. Then, we can access the GUI at the returned gradio link:
 
-.. code-block:: console
+   .. code-block:: console
 
   | INFO | stdout | Running on public URL: https://6141e84201ce0bb4ed.gradio.live
 
