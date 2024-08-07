@@ -14,6 +14,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.utils import make_tensor_with_pad
+import debug_print
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
@@ -254,8 +255,7 @@ class FlashAttentionMetadataBuilder(
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
             block_tables = torch.tensor(input_block_tables, device=device)
-            seq_lens.extend([1] * cuda_graph_pad_size)
-            query_lens.extend([1] * cuda_graph_pad_size) 
+            # print("block_tables", block_tables.shape, block_tables.data_ptr())
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -266,15 +266,14 @@ class FlashAttentionMetadataBuilder(
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         context_lens_tensor = None
+        query_start_loc = torch.tensor([0] + query_lens,
+                                       dtype=torch.int32,
+                                       device=device).cumsum(dim=0,
+                                                             dtype=torch.int32)
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
                                        device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=device)
+        # print("seq_lens_tensor", seq_lens_tensor)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
@@ -282,10 +281,12 @@ class FlashAttentionMetadataBuilder(
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
+        # print("seq_lens_tensor", seq_lens_tensor)
+        # print("query_start_loc", query_start_loc)
+        # print("seq_start_loc", seq_start_loc)
+        # print("slot_mapping", self.slot_mapping)
+        # print("max_seq_lens", max(seq_lens))
+        # print("max_query_len", max_query_len)
 
         slot_mapping_tensor = torch.tensor(self.slot_mapping,
                                            dtype=torch.long,
@@ -430,20 +431,46 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         # This is used during the profiling or prefill phase.
-        print("num_prefills", attn_metadata.num_prefills, attn_metadata.num_decode_tokens, kv_cache is None)
-        if kv_cache is None:
-            print("1-----------------")
+        if kv_cache is None or (attn_metadata.block_tables is not None
+                                and attn_metadata.block_tables.numel()) == 0:
+            # print("1-----------------")
             k = key
             v = value
             block_tables = None
         else:
-            print("2-----------------")
+            # print("2-----------------")
             k = kv_cache[0]
             v = kv_cache[1]
             block_tables = attn_metadata.block_tables
-            print(block_tables.shape, kv_cache is None, attn_metadata.slot_mapping.shape, key.shape, value.shape)
 
         max_seq_len = max(attn_metadata.seq_lens)
+        max_k = torch.max(k).reshape(1)
+        max_v = torch.max(v).reshape(1)
+        if attn_metadata.use_cuda_graph:
+            pass
+            # # block_tables.zero_()
+            # debug_print.print_tensor(query)
+            # debug_print.print_tensor(max_k)
+            # debug_print.print_tensor(max_v)
+            # debug_print.print_tensor(attn_metadata.query_start_loc)
+            # debug_print.print_tensor(attn_metadata.seq_start_loc)
+            # debug_print.print_tensor(attn_metadata.block_tables)
+            # debug_print.print_tensor(attn_metadata.seq_lens_tensor)
+        else:
+            pass
+            # print("query", query.shape, query[0, 0])
+            # print("max_k", k.shape, max_k)
+            # print("max_v", v.shape, max_v)
+            # print("query_start_loc", attn_metadata.query_start_loc)
+            # print("seq_start_loc", attn_metadata.seq_start_loc)
+            # print("block_tables", block_tables)
+            # print("seq_lens", attn_metadata.seq_lens)
+            # print("max_query_len", attn_metadata.max_query_len)
+            # print("max_seqlen_k", max_seq_len)
+            # print("scale", self.scale)
+            # print("sliding_window", self.sliding_window)
+            # print("alibi_slopes", self.alibi_slopes)
+
         output = flash_attn_varlen_func(
             q=query,
             k=k,
@@ -452,11 +479,16 @@ class FlashAttentionImpl(AttentionImpl):
             cu_seqlens_k=attn_metadata.seq_start_loc,
             max_seqlen_q=attn_metadata.max_query_len,
             max_seqlen_k=max_seq_len,
-            softmax_scale=self.scale,
+            softmax_scale=0.125,
             causal=True,
-            window_size=self.sliding_window,
-            alibi_slopes=self.alibi_slopes,
+            window_size=(-1, -1),
+            alibi_slopes=None,
             block_table=block_tables)
+        # if attn_metadata.use_cuda_graph:
+        #     pass
+        #     # debug_print.print_tensor(output[0,0])
+        # else:
+        #     print(output[0,0])
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
