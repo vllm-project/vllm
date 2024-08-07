@@ -105,8 +105,8 @@ def test_fp8_kv_cache(
             max_num_seqs=max_num_seqs,
             kv_cache_dtype=kv_cache_dtype,
     ) as vllm_model:
-        decode_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
-                                                    max_tokens, NUM_LOG_PROBS)
+        decode_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, NUM_LOG_PROBS)
 
     with vllm_runner(
             model,
